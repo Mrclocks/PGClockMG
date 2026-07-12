@@ -9,7 +9,7 @@
 sudo bash install.sh
 
 # یا با curl (بعد از آپلود به GitHub):
-curl -fsSL https://raw.githubusercontent.com/YOUR_USER/pg-migrator/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh | sudo bash
 ```
 
 بعد از نصب، مرورگر را باز کنید:
