@@ -9,7 +9,7 @@
 #
 set -eo pipefail
 
-readonly SCRIPT_VERSION="1.0.1"
+readonly SCRIPT_VERSION="1.0.2"
 readonly INSTALL_DIR="/opt/pg-migrator"
 readonly SERVICE_NAME="pg-migrator"
 readonly WEB_PORT=7000
@@ -56,25 +56,72 @@ check_ubuntu() {
   fi
 }
 
+docker_available() {
+  command -v docker >/dev/null 2>&1
+}
+
+docker_running() {
+  docker info >/dev/null 2>&1
+}
+
+compose_available() {
+  docker compose version >/dev/null 2>&1 || command -v docker-compose >/dev/null 2>&1
+}
+
 install_packages() {
   info "نصب پیش‌نیازهای سیستم..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
+
+  # Base packages (no Docker — avoids containerd.io vs containerd conflict)
   apt-get install -y -qq \
     python3 python3-pip python3-venv \
     curl wget git unzip zip \
-    docker.io docker-compose-v2 \
-    sqlite3 \
-    ca-certificates \
-    > /dev/null 2>&1 || apt-get install -y \
+    sqlite3 ca-certificates \
+    || apt-get install -y \
     python3 python3-pip python3-venv \
     curl wget git unzip zip \
-    docker.io docker-compose \
     sqlite3 ca-certificates
 
-  systemctl enable docker >/dev/null 2>&1 || true
-  systemctl start docker >/dev/null 2>&1 || true
-  ok "پیش‌نیازها نصب شدند"
+  ok "پکیج‌های پایه نصب شدند"
+
+  # Docker: skip install if binary exists (avoids containerd.io vs containerd conflict)
+  if docker_available; then
+    ok "Docker از قبل نصب است"
+    systemctl enable docker >/dev/null 2>&1 || true
+    systemctl start docker >/dev/null 2>&1 || true
+    if docker_running; then
+      ok "Docker daemon فعال است"
+    else
+      warn "Docker نصب است ولی daemon اجرا نمی‌شود — systemctl start docker را بررسی کنید"
+    fi
+  else
+    info "تلاش برای نصب Docker..."
+    if apt-get install -y -qq docker.io 2>/dev/null; then
+      ok "docker.io نصب شد"
+    elif apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin 2>/dev/null; then
+      ok "Docker CE نصب شد"
+    else
+      warn "نصب Docker ناموفق — اگر Marzban/PasarGuard از قبل دارید، ادامه می‌دهیم"
+    fi
+    systemctl enable docker >/dev/null 2>&1 || true
+    systemctl start docker >/dev/null 2>&1 || true
+  fi
+
+  if compose_available; then
+    ok "Docker Compose در دسترس است"
+  else
+    info "تلاش برای نصب Docker Compose..."
+    apt-get install -y -qq docker-compose-v2 2>/dev/null \
+      || apt-get install -y -qq docker-compose 2>/dev/null \
+      || warn "Docker Compose نصب نشد — بعداً دستی نصب کنید"
+  fi
+
+  if ! docker_available; then
+    warn "Docker نصب نیست — مهاجرت Marzban/PasarGuard نیاز به Docker دارد"
+  elif ! docker_running; then
+    warn "Docker daemon غیرفعال است"
+  fi
 }
 
 install_uv() {
