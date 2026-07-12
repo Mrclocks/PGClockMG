@@ -5,10 +5,10 @@
 ## نصب با یک دستور (Ubuntu)
 
 ```bash
-# از مسیر پروژه:
-sudo bash install.sh
+# روش ۱ (پیشنهادی):
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh)"
 
-# یا با curl (بعد از آپلود به GitHub):
+# روش ۲:
 curl -fsSL https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh | sudo bash
 ```
 
