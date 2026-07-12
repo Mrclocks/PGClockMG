@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PG-Migrator — مهاجرت به PasarGuard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <div class="bg-grid"></div>
+  <div class="app">
+
+    <!-- Header -->
+    <header class="header">
+      <div class="header-brand">
+        <div class="logo">🛡️</div>
+        <div>
+          <h1>PG-Migrator</h1>
+          <p class="subtitle">مهاجرت آسان به PasarGuard</p>
+        </div>
+      </div>
+      <div class="header-meta">
+        <span class="badge" id="serverIp">—</span>
+        <span class="version">v1.0.0</span>
+      </div>
+    </header>
+
+    <!-- Progress Steps -->
+    <nav class="steps" id="stepsNav">
+      <div class="step active" data-step="0"><span class="step-num">۰</span><span class="step-label">پیش‌نیازها</span></div>
+      <div class="step" data-step="1"><span class="step-num">۱</span><span class="step-label">پنل مبدأ</span></div>
+      <div class="step" data-step="2"><span class="step-num">۲</span><span class="step-label">دیتابیس مبدأ</span></div>
+      <div class="step" data-step="3"><span class="step-num">۳</span><span class="step-label">دیتابیس مقصد</span></div>
+      <div class="step" data-step="4"><span class="step-num">۴</span><span class="step-label">بکاپ</span></div>
+      <div class="step" data-step="5"><span class="step-num">۵</span><span class="step-label">مهاجرت</span></div>
+      <div class="step" data-step="6"><span class="step-num">۶</span><span class="step-label">نتیجه</span></div>
+    </nav>
+
+    <main class="main">
+
+      <!-- Step 0: Prerequisites -->
+      <section class="panel active" id="step0">
+        <h2>بررسی پیش‌نیازها</h2>
+        <p class="desc">قبل از شروع، وضعیت سرور بررسی می‌شود.</p>
+        <div class="info-box">
+          <p>این ابزار روی سرور Ubuntu اجرا می‌شود و به دسترسی <strong>root</strong> نیاز دارد.</p>
+        </div>
+        <div id="globalChecks" class="checks-list"></div>
+        <div class="actions">
+          <button class="btn btn-primary" onclick="goStep(1)">شروع مهاجرت ←</button>
+        </div>
+      </section>
+
+      <!-- Step 1: Source Panel -->
+      <section class="panel" id="step1">
+        <h2>انتخاب پنل مبدأ</h2>
+        <p class="desc">از کدام پنل می‌خواهید به PasarGuard مهاجرت کنید؟</p>
+        <div class="panel-grid" id="panelGrid"></div>
+        <div id="panelWarnings" class="warnings-box hidden"></div>
+        <div id="panelPrereqs" class="checks-list hidden"></div>
+        <div class="actions">
+          <button class="btn btn-ghost" onclick="goStep(0)">→ بازگشت</button>
+          <button class="btn btn-primary" id="btnStep1" disabled onclick="goStep(2)">ادامه ←</button>
+        </div>
+      </section>
+
+      <!-- Step 2: Source Database -->
+      <section class="panel" id="step2">
+        <h2>دیتابیس مبدأ</h2>
+        <p class="desc">نوع دیتابیس پنل فعلی شما چیست؟</p>
+        <div class="db-grid" id="sourceDbGrid"></div>
+
+        <div id="dbCredentials" class="form-group hidden">
+          <label>رمز عبور دیتابیس</label>
+          <input type="password" id="sourcePassword" placeholder="رمز MySQL / MariaDB / PostgreSQL" autocomplete="off">
+        </div>
+
+        <div class="upload-section">
+          <h3>یا فایل بکاپ آپلود کنید</h3>
+          <p class="desc-sm">فایل zip، sql یا sqlite — بکاپ Marzban، x-ui.db یا dump MySQL</p>
+          <div class="upload-zone" id="uploadZone">
+            <input type="file" id="fileInput" accept=".zip,.sql,.sqlite3,.db" hidden>
+            <div class="upload-icon">📁</div>
+            <p>فایل را اینجا بکشید یا <span class="link" onclick="document.getElementById('fileInput').click()">انتخاب کنید</span></p>
+          </div>
+          <div id="uploadStatus" class="upload-status hidden"></div>
+        </div>
+
+        <div class="actions">
+          <button class="btn btn-ghost" onclick="goStep(1)">→ بازگشت</button>
+          <button class="btn btn-primary" id="btnStep2" onclick="goStep(3)">ادامه ←</button>
+        </div>
+      </section>
+
+      <!-- Step 3: Target Database -->
+      <section class="panel" id="step3">
+        <h2>دیتابیس مقصد PasarGuard</h2>
+        <p class="desc">می‌خواهید PasarGuard روی کدام دیتابیس اجرا شود؟</p>
+        <div class="db-grid" id="targetDbGrid"></div>
+        <div id="targetRecommendation" class="info-box hidden"></div>
+
+        <div id="targetCredentials" class="form-group hidden">
+          <label>رمز عبور دیتابیس مقصد</label>
+          <input type="password" id="targetPassword" placeholder="رمز جدید یا موجود" autocomplete="off">
+        </div>
+
+        <div id="installPgSection" class="warning-card hidden">
+          <h4>⚠️ PasarGuard نصب نیست</h4>
+          <p>برای این نوع مهاجرت، PasarGuard باید نصب باشد.</p>
+          <button class="btn btn-secondary" onclick="installPasarguard()">نصب PasarGuard</button>
+          <div id="installPgLog" class="log-box hidden"></div>
+        </div>
+
+        <div class="actions">
+          <button class="btn btn-ghost" onclick="goStep(2)">→ بازگشت</button>
+          <button class="btn btn-primary" id="btnStep3" onclick="goStep(4)">ادامه ←</button>
+        </div>
+      </section>
+
+      <!-- Step 4: Backup & Options -->
+      <section class="panel" id="step4">
+        <h2>تأیید و گزینه‌ها</h2>
+        <p class="desc">خلاصه مهاجرت را بررسی کنید.</p>
+
+        <div class="summary-card" id="migrationSummary"></div>
+
+        <div id="redirectOption" class="option-card hidden">
+          <label class="checkbox-label">
+            <input type="checkbox" id="installRedirect">
+            <span>نصب سرور ریدایرکت برای لینک‌های اشتراک قدیمی (توصیه‌شده)</span>
+          </label>
+        </div>
+
+        <div class="warning-card" id="finalWarnings"></div>
+
+        <div class="actions">
+          <button class="btn btn-ghost" onclick="goStep(3)">→ بازگشت</button>
+          <button class="btn btn-primary btn-lg" onclick="startMigration()">🚀 شروع مهاجرت</button>
+        </div>
+      </section>
+
+      <!-- Step 5: Migration Progress -->
+      <section class="panel" id="step5">
+        <h2>در حال مهاجرت...</h2>
+        <div class="progress-wrap">
+          <div class="progress-bar">
+            <div class="progress-fill" id="progressFill" style="width:0%"></div>
+          </div>
+          <span class="progress-text" id="progressText">۰٪</span>
+        </div>
+        <p class="status-msg" id="statusMsg">آماده‌سازی...</p>
+        <div class="log-terminal" id="logTerminal"></div>
+      </section>
+
+      <!-- Step 6: Result -->
+      <section class="panel" id="step6">
+        <div id="resultSuccess" class="result-card success hidden">
+          <div class="result-icon">✅</div>
+          <h2>مهاجرت با موفقیت انجام شد!</h2>
+          <p id="resultMessage"></p>
+          <a class="btn btn-primary btn-lg" id="panelLink" href="#" target="_blank">ورود به پنل PasarGuard</a>
+          <div id="resultDetails" class="result-details"></div>
+        </div>
+        <div id="resultError" class="result-card error hidden">
+          <div class="result-icon">❌</div>
+          <h2>خطا در مهاجرت</h2>
+          <p id="errorMessage"></p>
+          <div class="log-terminal" id="errorLog"></div>
+          <button class="btn btn-secondary" onclick="goStep(4)">تلاش مجدد</button>
+        </div>
+      </section>
+
+    </main>
+
+    <footer class="footer">
+      <span>PG-Migrator</span>
+      <span>·</span>
+      <a href="https://docs.pasarguard.org/en/migration/marzban/" target="_blank">مستندات PasarGuard</a>
+      <span>·</span>
+      <a href="https://github.com/PasarGuard/panel" target="_blank">GitHub</a>
+    </footer>
+  </div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
