@@ -318,7 +318,16 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
   gap: 4px;
 }
 
-.check-item.check-live {
+.block-msg {
+  margin: 12px 0;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--error-bg);
+  color: var(--error);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 10px 12px;

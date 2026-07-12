@@ -53,6 +53,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('footerGithub').textContent = t('footer.github');
   document.getElementById('statusMsg').textContent = t('step5.preparing');
   setupUpload();
+  updateStepButtons();
 });
 
 function applySystemCheck(sys) {
@@ -88,6 +89,7 @@ async function loadSystemCheck() {
     const data = await res.json();
     applySystemCheck(data);
     renderGlobalChecks();
+    updateStepButtons();
   } catch (e) {
     console.error(e);
     const el = document.getElementById('globalChecks');
@@ -97,7 +99,104 @@ async function loadSystemCheck() {
   }
 }
 
-function goStep(n) {
+function showStepBlock(step, msg) {
+  const el = document.getElementById(`step${step}Block`);
+  if (!el) return;
+  if (msg) {
+    el.textContent = msg;
+    el.classList.remove('hidden');
+  } else {
+    el.textContent = '';
+    el.classList.add('hidden');
+  }
+}
+
+function canProceedStep0() {
+  const s = state.systemCheck;
+  if (!s) return t('step0.checking');
+  if (!s.root) return t('block.noRoot');
+  if (!s.docker) return t('block.noDocker');
+  return null;
+}
+
+function canProceedStep1() {
+  if (!state.selectedPanel) return t('block.noPanel');
+  if (state.selectedPanel.id === 'marzban' && !state.marzbanMode) return t('block.noMarzbanMode');
+  if (!state.prereqData?.ok) return t('block.prereqFailed');
+  return null;
+}
+
+function canProceedStep2() {
+  if (!state.sourceDb) return t('block.noSourceDb');
+  const panel = state.selectedPanel;
+  if (panel?.id === 'remnawave') {
+    const url = document.getElementById('remnawaveUrl')?.value?.trim();
+    const token = document.getElementById('remnawaveToken')?.value?.trim();
+    if (!url || !token) return t('block.remnawaveCreds');
+  }
+  const needsPwd = ['mysql', 'mariadb', 'postgresql', 'timescaledb'].includes(state.sourceDb);
+  if (needsPwd && panel?.id !== 'remnawave' && !document.getElementById('sourcePassword')?.value) {
+    return t('block.sourcePassword');
+  }
+  if (panel?.id === 'marzban' && state.marzbanMode === 'fresh' && !state.detected?.marzban && !state.uploadId) {
+    return t('block.marzbanBackup');
+  }
+  if (panel?.id === '3x-ui' && !state.detected?.xui_db && !state.uploadId) {
+    return t('block.xuiDb');
+  }
+  return null;
+}
+
+function canProceedStep3() {
+  if (!state.targetDb) return t('block.noTargetDb');
+  if (needsPasarguardInstall()) return t('block.pasarguardMissing');
+  const needsPwd = ['mysql', 'mariadb', 'postgresql', 'timescaledb'].includes(state.targetDb);
+  if (needsPwd && !document.getElementById('targetPassword')?.value) {
+    return t('block.targetPassword');
+  }
+  return null;
+}
+
+function updateStepButtons() {
+  const b0 = document.getElementById('btnStep0');
+  const b1 = document.getElementById('btnStep1');
+  const b2 = document.getElementById('btnStep2');
+  const b3 = document.getElementById('btnStep3');
+  const b4 = document.getElementById('btnStep4');
+  if (b0) b0.disabled = !!canProceedStep0();
+  if (b1) b1.disabled = !!canProceedStep1();
+  if (b2) b2.disabled = !!canProceedStep2();
+  if (b3) b3.disabled = !!canProceedStep3();
+  if (state.currentStep === 0) showStepBlock(0, canProceedStep0());
+  if (state.currentStep === 1) showStepBlock(1, canProceedStep1());
+  if (state.currentStep === 2) showStepBlock(2, canProceedStep2());
+  if (state.currentStep === 3) showStepBlock(3, canProceedStep3());
+}
+
+async function goStep(n) {
+  if (n > state.currentStep) {
+    let block = null;
+    if (n >= 1) block = canProceedStep0();
+    if (!block && n >= 2) block = canProceedStep1();
+    if (!block && n >= 3) {
+      state.sourcePassword = document.getElementById('sourcePassword')?.value || '';
+      block = canProceedStep2();
+    }
+    if (!block && n >= 4) {
+      state.sourcePassword = document.getElementById('sourcePassword')?.value || '';
+      block = canProceedStep2() || canProceedStep3();
+    }
+    if (!block && n >= 5) {
+      const v = await validateMigrationRequest();
+      if (!v.ok) block = tr(v.errors[0], state.lang) || t('block.validationFailed');
+    }
+    if (block) {
+      showStepBlock(state.currentStep, block);
+      updateStepButtons();
+      return;
+    }
+  }
+
   if (n === 0) loadSystemCheck();
   if (n === 1) renderPanels();
   if (n === 2) renderSourceDbs();
@@ -112,6 +211,37 @@ function goStep(n) {
     s.classList.toggle('active', sn === n);
     s.classList.toggle('done', sn < n);
   });
+  showStepBlock(n, null);
+  updateStepButtons();
+}
+
+async function validateMigrationRequest() {
+  const body = buildMigrationBody();
+  try {
+    const res = await fetch('/api/validate-migration', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, errors: [{ en: e.message, fa: e.message, ru: e.message }] };
+  }
+}
+
+function buildMigrationBody() {
+  return {
+    source_panel: state.selectedPanel?.id,
+    source_db: state.sourceDb,
+    target_db: state.targetDb,
+    source_db_password: state.sourcePassword || document.getElementById('sourcePassword')?.value || null,
+    target_db_password: state.targetPassword || document.getElementById('targetPassword')?.value || null,
+    upload_id: state.uploadId,
+    install_redirect: document.getElementById('installRedirect')?.checked ?? true,
+    remnawave_url: document.getElementById('remnawaveUrl')?.value || null,
+    remnawave_token: document.getElementById('remnawaveToken')?.value || null,
+    marzban_mode: state.marzbanMode || 'auto',
+  };
 }
 
 function renderPanels() {
@@ -176,7 +306,8 @@ async function renderPanelPrereqs(id) {
   prereqEl.innerHTML = '<div style="text-align:center;padding:12px;color:var(--text-dim)">...</div>';
 
   try {
-    const res = await fetch(`/api/prerequisites/${id}`);
+    const modeQ = state.marzbanMode ? `?marzban_mode=${encodeURIComponent(state.marzbanMode)}` : '';
+    const res = await fetch(`/api/prerequisites/${id}${modeQ}`);
     const data = await res.json();
     state.prereqData = data;
     state.detected = data.detected || {};
@@ -199,7 +330,8 @@ async function renderPanelPrereqs(id) {
       renderMarzbanModes();
     }
 
-    document.getElementById('btnStep1').disabled = id === 'marzban' && !state.marzbanMode;
+    document.getElementById('btnStep1').disabled = !!canProceedStep1();
+    updateStepButtons();
   } catch (e) {
     prereqEl.innerHTML = `<div class="check-item"><span class="check-icon">❌</span><div>Error</div></div>`;
   }
@@ -238,7 +370,8 @@ function selectMarzbanMode(mode) {
   document.querySelectorAll('.mode-card').forEach(c => {
     c.classList.toggle('selected', c.dataset.mode === mode);
   });
-  document.getElementById('btnStep1').disabled = false;
+  if (state.selectedPanel) renderPanelPrereqs(state.selectedPanel.id);
+  updateStepButtons();
 }
 
 function renderSourceDbs() {
@@ -271,6 +404,7 @@ function selectSourceDb(db) {
   });
   const needsPwd = ['mysql', 'mariadb', 'postgresql', 'timescaledb'].includes(db);
   document.getElementById('dbCredentials').classList.toggle('hidden', !needsPwd || state.selectedPanel?.id === 'remnawave');
+  updateStepButtons();
 }
 
 async function renderTargetDbs() {
@@ -310,12 +444,7 @@ async function renderTargetDbs() {
     const cmdEl = document.getElementById('installPgCmd');
     if (cmdEl) cmdEl.textContent = getPgInstallCmd();
   }
-  updateStep3Continue();
-}
-
-function updateStep3Continue() {
-  const btn = document.getElementById('btnStep3');
-  if (btn) btn.disabled = needsPasarguardInstall();
+  updateStepButtons();
 }
 
 function selectTargetDb(db) {
@@ -325,6 +454,7 @@ function selectTargetDb(db) {
   });
   const needsPwd = ['mysql', 'mariadb', 'postgresql', 'timescaledb'].includes(db);
   document.getElementById('targetCredentials').classList.toggle('hidden', !needsPwd);
+  updateStepButtons();
 }
 
 async function recheckPasarguard() {
@@ -337,7 +467,7 @@ async function recheckPasarguard() {
   if (state.currentStep === 3) {
     await renderTargetDbs();
   } else {
-    updateStep3Continue();
+    updateStepButtons();
   }
   if (btn) btn.disabled = false;
 }
@@ -377,25 +507,26 @@ function renderSummary() {
 }
 
 async function startMigration() {
-  goStep(5);
+  const v = await validateMigrationRequest();
+  if (!v.ok) {
+    showStepBlock(4, tr(v.errors[0], state.lang) || t('block.validationFailed'));
+    return;
+  }
+
+  await goStep(5);
   const terminal = document.getElementById('logTerminal');
   terminal.textContent = '';
 
-  const body = {
-    source_panel: state.selectedPanel.id,
-    source_db: state.sourceDb,
-    target_db: state.targetDb,
-    source_db_password: state.sourcePassword || null,
-    target_db_password: state.targetPassword || null,
-    upload_id: state.uploadId,
-    install_redirect: document.getElementById('installRedirect')?.checked ?? true,
-    remnawave_url: document.getElementById('remnawaveUrl')?.value || null,
-    remnawave_token: document.getElementById('remnawaveToken')?.value || null,
-    marzban_mode: state.marzbanMode || 'auto',
-  };
+  const body = buildMigrationBody();
 
   try {
     const res = await fetch('/api/migrate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!res.ok) {
+      const err = await res.json();
+      const msg = err.detail?.errors?.[0] ? tr(err.detail.errors[0], state.lang) : (err.detail || res.statusText);
+      showError(msg);
+      return;
+    }
     const data = await res.json();
     state.jobId = data.job_id;
     connectWebSocket(data.job_id);

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from app.config import PASARGUARD_DIR, PASARGUARD_DATA, PASARGUARD_ENV, BACKUP_DIR
 from app.services.migrators.base import BaseMigrator
+from app.services.env_migration import transform_pasarguard_env_for_target
 from app.services.db_migration import run_db_migration
 
 
@@ -56,27 +57,12 @@ class PasarguardDbMigrator(BaseMigrator):
                 self._backup_file(p, BACKUP_DIR)
 
     async def _update_pasarguard_env(self, target_db: str, password: str | None):
-        import re
         if not PASARGUARD_ENV.exists():
             return
         self._backup_file(PASARGUARD_ENV, BACKUP_DIR)
         text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
-        pwd = password or "password"
-
-        if target_db == "sqlite":
-            new_url = 'SQLALCHEMY_DATABASE_URL = "sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3"'
-        elif target_db in ("mysql", "mariadb"):
-            new_url = f'SQLALCHEMY_DATABASE_URL = "mysql+asyncmy://root:{pwd}@127.0.0.1/pasarguard"'
-        else:
-            new_url = f'SQLALCHEMY_DATABASE_URL = "postgresql+asyncpg://postgres:{pwd}@localhost:5432/pasarguard"'
-
-        if "SQLALCHEMY_DATABASE_URL" in text:
-            text = re.sub(r'#?\s*SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"', new_url, text)
-        else:
-            text += f"\n{new_url}\n"
-
-        PASARGUARD_ENV.write_text(text, encoding="utf-8")
-        self.job.log(".env updated")
+        PASARGUARD_ENV.write_text(transform_pasarguard_env_for_target(text, target_db, password), encoding="utf-8")
+        self.job.log(".env updated for target database")
 
     def _get_panel_url(self) -> str:
         import socket

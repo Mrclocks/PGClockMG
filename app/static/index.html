@@ -6,7 +6,7 @@
   <title>PG-Migrator</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/css/style.css?v=1.2.4">
+  <link rel="stylesheet" href="/static/css/style.css?v=1.3.0">
 </head>
 <body>
   <div class="bg-grid"></div>
@@ -27,7 +27,7 @@
           <button class="lang-btn" data-lang="ru" onclick="setLang('ru')">RU</button>
         </div>
         <span class="badge" id="serverIp">—</span>
-        <span class="version" id="appVersion">v1.2.4</span>
+        <span class="version" id="appVersion">v1.3.0</span>
       </div>
     </header>
 
@@ -48,8 +48,9 @@
         <p class="desc"></p>
         <div class="info-box"><p></p></div>
         <div id="globalChecks" class="checks-list"></div>
+        <div id="step0Block" class="block-msg hidden"></div>
         <div class="actions">
-          <button class="btn btn-primary" onclick="goStep(1)"></button>
+          <button class="btn btn-primary" id="btnStep0" onclick="goStep(1)"></button>
         </div>
       </section>
 
@@ -65,6 +66,7 @@
         <div id="panelInstallNotes" class="info-box hidden"></div>
         <div id="panelWarnings" class="warnings-box hidden"></div>
         <div id="panelPrereqs" class="checks-list hidden"></div>
+        <div id="step1Block" class="block-msg hidden"></div>
         <div class="actions">
           <button class="btn btn-ghost" onclick="goStep(0)"></button>
           <button class="btn btn-primary" id="btnStep1" disabled onclick="goStep(2)"></button>
@@ -103,6 +105,7 @@
           <div id="uploadStatus" class="upload-status hidden"></div>
         </div>
 
+        <div id="step2Block" class="block-msg hidden"></div>
         <div class="actions">
           <button class="btn btn-ghost" onclick="goStep(1)"></button>
           <button class="btn btn-primary" id="btnStep2" onclick="goStep(3)"></button>
@@ -128,6 +131,7 @@
           <button class="btn btn-secondary" id="btnRecheckPg" onclick="recheckPasarguard()"></button>
         </div>
 
+        <div id="step3Block" class="block-msg hidden"></div>
         <div class="actions">
           <button class="btn btn-ghost" onclick="goStep(2)"></button>
           <button class="btn btn-primary" id="btnStep3" onclick="goStep(4)"></button>
@@ -145,9 +149,10 @@
           </label>
         </div>
         <div class="warning-card" id="finalWarnings"></div>
+        <div id="step4Block" class="block-msg hidden"></div>
         <div class="actions">
           <button class="btn btn-ghost" onclick="goStep(3)"></button>
-          <button class="btn btn-primary btn-lg" onclick="startMigration()"></button>
+          <button class="btn btn-primary btn-lg" id="btnStep4" onclick="startMigration()"></button>
         </div>
       </section>
 
@@ -189,7 +194,7 @@
     </footer>
   </div>
 
-  <script src="/static/js/i18n.js?v=1.2.4"></script>
-  <script src="/static/js/app.js?v=1.2.4"></script>
+  <script src="/static/js/i18n.js?v=1.3.0"></script>
+  <script src="/static/js/app.js?v=1.3.0"></script>
 </body>
 </html>

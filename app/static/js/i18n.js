@@ -107,6 +107,22 @@ const I18N = {
     uploaded: 'uploaded',
     uploadErr: 'Upload error',
     detected: 'Detected',
+    block: {
+      noRoot: 'Root access is required — run wizard as root',
+      noDocker: 'Docker must be running',
+      noPanel: 'Select a source panel',
+      noMarzbanMode: 'Select Marzban migration method',
+      prereqFailed: 'Fix all required prerequisites above before continuing',
+      noSourceDb: 'Select source database type',
+      noTargetDb: 'Select target database type',
+      sourcePassword: 'Enter source database password',
+      targetPassword: 'Enter target database password',
+      pasarguardMissing: 'Install PasarGuard manually, then click Recheck',
+      marzbanBackup: 'Upload Marzban backup or use server with Marzban data',
+      xuiDb: 'Upload x-ui.db or install 3x-ui on this server',
+      remnawaveCreds: 'Enter Remnawave URL and API token',
+      validationFailed: 'Pre-migration validation failed',
+    },
   },
   fa: {
     title: 'PG-Migrator',
@@ -211,6 +227,22 @@ const I18N = {
     uploaded: 'آپلود شد',
     uploadErr: 'خطا',
     detected: 'تشخیص',
+    block: {
+      noRoot: 'دسترسی root لازم است',
+      noDocker: 'Docker باید در حال اجرا باشد',
+      noPanel: 'پنل مبدأ را انتخاب کنید',
+      noMarzbanMode: 'روش مهاجرت Marzban را انتخاب کنید',
+      prereqFailed: 'ابتدا همه پیش‌نیازهای اجباری را برطرف کنید',
+      noSourceDb: 'نوع دیتابیس مبدأ را انتخاب کنید',
+      noTargetDb: 'نوع دیتابیس مقصد را انتخاب کنید',
+      sourcePassword: 'رمز دیتابیس مبدأ را وارد کنید',
+      targetPassword: 'رمز دیتابیس مقصد را وارد کنید',
+      pasarguardMissing: 'PasarGuard را دستی نصب کنید و بررسی مجدد بزنید',
+      marzbanBackup: 'بکاپ Marzban آپلود کنید یا Marzban روی سرور باشد',
+      xuiDb: 'x-ui.db را آپلود کنید',
+      remnawaveCreds: 'URL و Token رمناوی را وارد کنید',
+      validationFailed: 'اعتبارسنجی پیش از مهاجرت ناموفق بود',
+    },
   },
   ru: {
     title: 'PG-Migrator',
@@ -315,6 +347,22 @@ const I18N = {
     uploaded: 'загружено',
     uploadErr: 'Ошибка',
     detected: 'Определено',
+    block: {
+      noRoot: 'Требуется root доступ',
+      noDocker: 'Docker должен работать',
+      noPanel: 'Выберите исходную панель',
+      noMarzbanMode: 'Выберите метод миграции Marzban',
+      prereqFailed: 'Исправьте все обязательные условия выше',
+      noSourceDb: 'Выберите БД источника',
+      noTargetDb: 'Выберите целевую БД',
+      sourcePassword: 'Введите пароль БД источника',
+      targetPassword: 'Введите пароль целевой БД',
+      pasarguardMissing: 'Установите PasarGuard вручную и нажмите Проверить',
+      marzbanBackup: 'Загрузите копию Marzban или используйте сервер с Marzban',
+      xuiDb: 'Загрузите x-ui.db',
+      remnawaveCreds: 'Введите URL и токен Remnawave',
+      validationFailed: 'Проверка перед миграцией не пройдена',
+    },
   },
 };
 
@@ -352,7 +400,7 @@ function applyI18n() {
   const map = {
     subtitle: '.subtitle',
     'step0.h2': '#step0 h2', 'step0.desc': '#step0 .desc', 'step0.info': '#step0 .info-box p',
-    'step0.start': '#step0 .btn-primary',
+    'step0.start': '#btnStep0',
     'step1.h2': '#step1 h2', 'step1.desc': '#step1 .desc', 'step1.back': '#step1 .btn-ghost',
     'step1.next': '#btnStep1',
     'step2.h2': '#step2 h2', 'step2.desc': '#step2 .desc', 'step2.password': '#dbCredentials label',
@@ -379,6 +427,7 @@ function applyI18n() {
   document.title = `${t('title')} — ${t('subtitle')}`;
   renderSteps();
   renderGlobalChecks();
+  updateStepButtons();
 }
 
 function renderSteps() {

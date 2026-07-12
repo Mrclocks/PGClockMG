@@ -11,6 +11,7 @@ from app.models import MigrationRequest
 from app.panels import PANELS, DATABASE_TYPES, SUBSCRIPTION_LABELS
 from app.services.prerequisites import check_prerequisites, get_recommended_target_dbs, get_system_status
 from app.services.orchestrator import start_migration, get_job
+from app.services.validation import validate_migration
 from app.services.upload import save_upload, get_upload_path
 from app.config import WEB_PORT
 
@@ -34,7 +35,7 @@ def _server_ip() -> str:
 @app.get("/api/info")
 async def api_info():
     return {
-        "version": "1.2.4",
+        "version": "1.3.0",
         "server_ip": _server_ip(),
         "web_port": WEB_PORT,
         "panels": [p.model_dump() for p in PANELS.values()],
@@ -63,10 +64,10 @@ async def api_system_check():
 
 
 @app.get("/api/prerequisites/{panel_id}")
-async def api_prerequisites(panel_id: str):
+async def api_prerequisites(panel_id: str, marzban_mode: str | None = None):
     if panel_id not in PANELS:
         raise HTTPException(404, "پنل یافت نشد")
-    return check_prerequisites(panel_id)
+    return check_prerequisites(panel_id, marzban_mode=marzban_mode)
 
 
 @app.get("/api/recommendations/{panel_id}/{source_db}")
@@ -83,6 +84,16 @@ async def api_upload(file: UploadFile = File(...)):
     return result
 
 
+@app.post("/api/validate-migration")
+async def api_validate_migration(req: MigrationRequest):
+    params = req.model_dump()
+    if req.upload_id:
+        path = get_upload_path(req.upload_id)
+        if path:
+            params["upload_path"] = path
+    return validate_migration(params)
+
+
 @app.post("/api/migrate")
 async def api_migrate(req: MigrationRequest):
     params = req.model_dump()
@@ -90,6 +101,10 @@ async def api_migrate(req: MigrationRequest):
         path = get_upload_path(req.upload_id)
         if path:
             params["upload_path"] = path
+
+    validation = validate_migration(params)
+    if not validation["ok"]:
+        raise HTTPException(400, {"errors": validation["errors"]})
 
     job = await start_migration(params)
     return {"job_id": job.job_id, "status": job.status}

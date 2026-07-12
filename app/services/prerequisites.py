@@ -101,7 +101,7 @@ def _suggest_marzban_mode(marzban_installed: bool, pg_installed: bool) -> str:
     return "fresh"
 
 
-def check_prerequisites(panel_id: str) -> dict:
+def check_prerequisites(panel_id: str, marzban_mode: str | None = None) -> dict:
     panel = PANELS.get(panel_id)
     if not panel:
         return {"ok": False, "checks": [], "message": {"en": "Invalid panel", "fa": "پنل نامعتبر", "ru": "Неверная панель"}}
@@ -151,19 +151,64 @@ def check_prerequisites(panel_id: str) -> dict:
                 "ru": "Сначала установите PasarGuard" if not pg_installed else f"Найден в {PASARGUARD_DIR}",
             },
         })
-    elif pg_installed and panel_id == "marzban" and marzban_installed:
+    elif pg_installed and panel_id == "marzban" and marzban_installed and marzban_mode == "inplace":
         checks.append({
             "id": "conflict",
             "label": {"en": "Install conflict", "fa": "تداخل نصب", "ru": "Конфликт установки"},
             "ok": False,
             "detail": {
-                "en": "Both Marzban and PasarGuard found — use backup upload method",
-                "fa": "هر دو نصب هستند — از آپلود بکاپ استفاده کنید",
-                "ru": "Оба установлены — загрузите резервную копию",
+                "en": "Both Marzban and PasarGuard found — in-place mode requires ONLY Marzban. Choose Fresh method.",
+                "fa": "هر دو نصب هستند — روش درجا فقط Marzban می‌خواهد. روش تازه را انتخاب کنید.",
+                "ru": "Оба установлены — для на месте нужен только Marzban. Выберите чистую установку.",
             },
         })
 
-    if not prereq.pasarguard_required and panel_id == "marzban":
+    if panel_id == "marzban" and marzban_mode == "inplace":
+        checks.append({
+            "id": "marzban_inplace",
+            "label": {"en": "Marzban installed (in-place)", "fa": "Marzban نصب شده (درجا)", "ru": "Marzban установлен (на месте)"},
+            "ok": marzban_installed and not pg_installed,
+            "detail": {
+                "en": f"Marzban at {MARZBAN_DIR}, no PasarGuard" if marzban_installed and not pg_installed else "Need Marzban only — remove PasarGuard or use Fresh mode",
+                "fa": "فقط Marzban باید باشد" if marzban_installed and not pg_installed else "فقط Marzban لازم است — یا روش تازه",
+                "ru": "Только Marzban" if marzban_installed and not pg_installed else "Нужен только Marzban",
+            },
+        })
+        env_ok = (MARZBAN_DIR / ".env").exists() or (MARZBAN_DATA / "db.sqlite3").exists()
+        checks.append({
+            "id": "marzban_env",
+            "label": {"en": "Marzban .env / database", "fa": "فایل .env یا دیتابیس Marzban", "ru": "Marzban .env / БД"},
+            "ok": env_ok,
+            "detail": {
+                "en": "Found" if env_ok else "Missing .env and db.sqlite3",
+                "fa": "یافت شد" if env_ok else ".env یا db.sqlite3 نیست",
+                "ru": "Найдено" if env_ok else "Нет .env и db.sqlite3",
+            },
+        })
+    elif panel_id == "marzban" and marzban_mode == "fresh":
+        checks.append({
+            "id": "pasarguard_fresh",
+            "label": {"en": "PasarGuard installed (fresh)", "fa": "PasarGuard نصب شده (تازه)", "ru": "PasarGuard установлен (чистый)"},
+            "ok": pg_installed,
+            "detail": {
+                "en": f"Found at {PASARGUARD_DIR}" if pg_installed else "Install PasarGuard manually first",
+                "fa": "نصب شده" if pg_installed else "ابتدا PasarGuard را دستی نصب کنید",
+                "ru": "Установлен" if pg_installed else "Установите PasarGuard вручную",
+            },
+        })
+        has_marzban_data = marzban_installed or (MARZBAN_DATA / "db.sqlite3").exists()
+        checks.append({
+            "id": "marzban_source",
+            "label": {"en": "Marzban data or backup", "fa": "داده Marzban یا بکاپ", "ru": "Данные Marzban или копия"},
+            "ok": has_marzban_data,
+            "optional": True,
+            "detail": {
+                "en": "Live Marzban found" if has_marzban_data else "Upload backup in step 2 if Marzban not on server",
+                "fa": "Marzban روی سرور" if has_marzban_data else "در مرحله ۲ بکاپ آپلود کنید",
+                "ru": "Marzban на сервере" if has_marzban_data else "Загрузите копию на шаге 2",
+            },
+        })
+    elif not prereq.pasarguard_required and panel_id == "marzban":
         checks.append({
             "id": "marzban_or_backup",
             "label": {"en": "Marzban or backup", "fa": "Marzban یا بکاپ", "ru": "Marzban или копия"},
@@ -181,11 +226,11 @@ def check_prerequisites(panel_id: str) -> dict:
             "id": "xui_db",
             "label": {"en": "3x-ui database", "fa": "دیتابیس 3x-ui", "ru": "База 3x-ui"},
             "ok": xui_db is not None,
-            "optional": xui_db is None,
+            "optional": True,
             "detail": {
-                "en": f"Found: {xui_db}" if xui_db else "Upload x-ui.db in next step",
-                "fa": f"یافت شد: {xui_db}" if xui_db else "x-ui.db را آپلود کنید",
-                "ru": f"Найден: {xui_db}" if xui_db else "Загрузите x-ui.db",
+                "en": f"Found: {xui_db}" if xui_db else "Upload x-ui.db in step 2 (required before migration)",
+                "fa": f"یافت شد: {xui_db}" if xui_db else "x-ui.db را در مرحله ۲ آپلود کنید",
+                "ru": f"Найден: {xui_db}" if xui_db else "Загрузите x-ui.db на шаге 2",
             },
         })
 
