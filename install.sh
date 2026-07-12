@@ -1,35 +1,39 @@
 #!/usr/bin/env bash
 #
 # PG-Migrator — PasarGuard Panel Migration Wizard
-# One-command installer for Ubuntu server
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh | sudo bash
-#   # or locally:
-#   sudo bash install.sh
+#   # or (recommended):
+#   sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh)"
 #
-set -euo pipefail
+set -eo pipefail
 
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.0.1"
 readonly INSTALL_DIR="/opt/pg-migrator"
 readonly SERVICE_NAME="pg-migrator"
 readonly WEB_PORT=7000
 readonly TOOLS_DIR="${INSTALL_DIR}/tools"
 readonly DEFAULT_REPO="https://github.com/Mrclocks/PGClockMG.git"
 readonly DEFAULT_INSTALL_URL="https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh"
+readonly REEXEC_MARKER="/tmp/.pg-migrator-reexec"
 
-# Re-exec from temp file when piped via curl (stdin is not a tty)
-if [[ ! -t 0 ]] && [[ -z "${PG_MIGRATOR_REEXEC:-}" ]]; then
+# When piped via curl, stdin is not a tty — re-exec from a real file on disk.
+if [[ ! -t 0 ]] && [[ ! -f "$REEXEC_MARKER" ]]; then
   tmpfile="$(mktemp /tmp/pg-migrator-install-XXXXXX.sh)"
-  cleanup() { rm -f "$tmpfile"; }
+  cleanup() { rm -f "$tmpfile" "$REEXEC_MARKER"; }
   trap cleanup EXIT
   install_url="${PG_MIGRATOR_INSTALL_URL:-$DEFAULT_INSTALL_URL}"
   curl -fsSL "$install_url" -o "$tmpfile"
   chmod 700 "$tmpfile"
-  export PG_MIGRATOR_REEXEC=1
+  touch "$REEXEC_MARKER"
   export PG_MIGRATOR_REPO="${PG_MIGRATOR_REPO:-$DEFAULT_REPO}"
+  export PG_MIGRATOR_FROM_PIPE=1
   exec bash "$tmpfile" "$@"
 fi
+
+# Safe to enable nounset after re-exec guard
+set -u
 
 C_RESET='\033[0m'; C_BOLD='\033[1m'; C_DIM='\033[2m'; C_GREEN='\033[32m'
 C_YELLOW='\033[33m'; C_CYAN='\033[36m'; C_RED='\033[31m'; C_WHITE='\033[97m'
@@ -46,6 +50,7 @@ require_root() {
 
 check_ubuntu() {
   if [[ -f /etc/os-release ]]; then
+    # shellcheck disable=SC1091
     . /etc/os-release
     [[ "${ID:-}" == "ubuntu" || "${ID_LIKE:-}" == *"debian"* ]] || warn "سیستم‌عامل Ubuntu/Debian نیست — ممکن است مشکلاتی پیش بیاید"
   fi
@@ -79,10 +84,9 @@ install_uv() {
   fi
   info "نصب uv (مدیر پکیج Python)..."
   curl -LsSf https://astral.sh/uv/install.sh | sh
-  export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-  # Symlink for system-wide access
-  if [[ -f "$HOME/.local/bin/uv" ]]; then
-    ln -sf "$HOME/.local/bin/uv" /usr/local/bin/uv 2>/dev/null || cp "$HOME/.local/bin/uv" /usr/local/bin/uv
+  export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
+  if [[ -f "${HOME}/.local/bin/uv" ]]; then
+    ln -sf "${HOME}/.local/bin/uv" /usr/local/bin/uv 2>/dev/null || cp "${HOME}/.local/bin/uv" /usr/local/bin/uv
   fi
   ok "uv نصب شد"
 }
@@ -91,18 +95,18 @@ copy_app_files() {
   info "کپی فایل‌های برنامه..."
   mkdir -p "$INSTALL_DIR" "$TOOLS_DIR" "${INSTALL_DIR}/uploads" "${INSTALL_DIR}/backups" "${INSTALL_DIR}/logs"
 
-  local script_dir=""
-  if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+  # Local install: copy from script directory (only when run as a real file, not pipe)
+  if [[ -z "${PG_MIGRATOR_FROM_PIPE:-}" ]] && [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+    local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [[ -d "${script_dir}/app" ]]; then
+      mkdir -p "${INSTALL_DIR}/app"
+      cp -r "${script_dir}/app/." "${INSTALL_DIR}/app/"
+      cp -f "${script_dir}/requirements.txt" "${INSTALL_DIR}/" 2>/dev/null || true
+    fi
   fi
 
-  if [[ -n "$script_dir" && -d "${script_dir}/app" ]]; then
-    mkdir -p "${INSTALL_DIR}/app"
-    cp -r "${script_dir}/app/." "${INSTALL_DIR}/app/"
-    cp -f "${script_dir}/requirements.txt" "${INSTALL_DIR}/" 2>/dev/null || true
-  fi
-
-  # Clone from GitHub when installed via curl or when local app/ is missing
+  # curl install or missing app: clone from GitHub
   if [[ ! -f "${INSTALL_DIR}/app/main.py" ]]; then
     local repo="${PG_MIGRATOR_REPO:-$DEFAULT_REPO}"
     info "دریافت سورس از GitHub..."
@@ -129,12 +133,10 @@ clone_migration_tools() {
       warn "کلون migrations ناموفق — بعداً دوباره تلاش می‌شود"
   fi
 
-  # Install db-migrations dependencies
   if [[ -d "${TOOLS_DIR}/db-migrations" ]] && command -v uv >/dev/null 2>&1; then
     (cd "${TOOLS_DIR}/db-migrations" && uv sync 2>/dev/null) || true
   fi
 
-  # Install x-ui migration dependencies
   if [[ -d "${TOOLS_DIR}/migrations/x-ui" ]] && command -v uv >/dev/null 2>&1; then
     (cd "${TOOLS_DIR}/migrations/x-ui" && uv sync 2>/dev/null) || true
   fi
@@ -147,6 +149,7 @@ setup_python_env() {
   cd "$INSTALL_DIR"
 
   python3 -m venv venv
+  # shellcheck disable=SC1091
   source venv/bin/activate
   pip install --upgrade pip -q
   pip install -r requirements.txt -q
@@ -193,6 +196,7 @@ open_firewall() {
 print_success() {
   local ip
   ip="$(hostname -I 2>/dev/null | awk '{print $1}' || echo "SERVER_IP")"
+  rm -f "$REEXEC_MARKER"
   log ""
   log "${C_CYAN}${C_BOLD}════════════════════════════════════════════════════${C_RESET}"
   log "${C_WHITE}${C_BOLD}  PG-Migrator با موفقیت نصب شد!${C_RESET}"
