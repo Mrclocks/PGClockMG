@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from app.config import (
-    MARZBAN_DIR, MARZBAN_DATA, PASARGUARD_DIR, PASARGUARD_DATA, TOOLS_DIR,
+    MARZBAN_DIR, MARZBAN_DATA, PASARGUARD_DIR, PASARGUARD_DATA,
 )
 from app.panels import PANELS
 from app.services.db_credentials import validate_db_credentials
@@ -69,11 +69,8 @@ def validate_migration(params: dict) -> dict:
             errors.append(_msg("PasarGuard database or backup upload required", "دیتابیس یا بکاپ PasarGuard لازم است", "Нужна БД или копия PasarGuard"))
 
     if source_db != target_db:
-        db_migrations = TOOLS_DIR / "db-migrations"
-        if not db_migrations.exists():
-            errors.append(_msg("db-migrations tool missing — re-run install.sh", "ابزار db-migrations نیست — install.sh را اجرا کنید", "Нет db-migrations — переустановите"))
+        errors.extend(validate_db_credentials(params, "source"))
 
-    errors.extend(validate_db_credentials(params, "source"))
     errors.extend(validate_db_credentials(params, "target"))
 
     return {"ok": len(errors) == 0, "errors": errors}

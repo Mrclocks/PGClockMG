@@ -126,8 +126,6 @@ class MarzbanMigrator(BaseMigrator):
                 migration_source = str(source_sql)
             else:
                 raise RuntimeError(f"Unsupported Marzban source database: {source_db}")
-
-            await self._ensure_target_database_stack(target_db)
             await self._update_env_paths(source_db, target_db)
             self.job.set_progress(55, f"Cross-DB: {source_db} → {target_db}...")
             await run_cross_db_migration(

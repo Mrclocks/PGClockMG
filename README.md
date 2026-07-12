@@ -1,6 +1,6 @@
 # PG-Migrator
 
-**نسخه 1.7.1** — سیستم مهاجرت از پنل‌های مختلف به [PasarGuard](https://github.com/PasarGuard/panel) با ویزارد وب گرافیکی.
+**نسخه 1.8.0** — سیستم مهاجرت از پنل‌های مختلف به [PasarGuard](https://github.com/PasarGuard/panel) با ویزارد وب گرافیکی.
 
 **Languages:** Web UI — English · فارسی · Русский | Installer script — English only
 
@@ -66,7 +66,7 @@ http://SERVER_IP:7000
 1. **ابتدا PasarGuard را دستی نصب کنید** (دیتابیس را در نصب انتخاب کنید)
 2. در ویزارد بکاپ Marzban را آپلود کنید — **نوع DB مبدأ** (SQLite / MySQL) خودکار تشخیص داده می‌شود
 3. در مرحله دیتابیس مقصد بپرسید: **با چه دیتابیسی PasarGuard را نصب کردید؟**
-4. اگر DB مبدأ و مقصد متفاوت باشند (مثلاً Marzban SQLite → PasarGuard TimescaleDB)، تبدیل با `db-migrations` رسمی انجام می‌شود
+4. اگر DB مبدأ و مقصد متفاوت باشند (مثلاً Marzban SQLite → PasarGuard PostgreSQL)، **موتور Universal** داده را بدون از دست رفتن اطلاعات کپی می‌کند — نیازی به `db-migrations` یا `alembic stamp` دستی نیست
 
 - روش **درجا (in-place)** حذف شده — PasarGuard باید قبل از اجرای ویزارد نصب باشد
 - Marzban می‌تواند روی همین سرور باشد؛ داده از بکاپ یا SQLite زنده خوانده می‌شود
@@ -205,6 +205,11 @@ systemctl disable pg-migrator
 ---
 
 ## Changelog
+
+### v1.8.0
+- موتور **Universal**: هر مبدأ (SQLite/MySQL/PostgreSQL/TimescaleDB) → هر مقصد
+- Reader/Writer بومی برای همه engineها — بدون وابستگی به db-migrations در cross-DB
+- Import خودکار فایل `.sql` به staging DB قبل از کپی
 
 ### v1.7.1
 - Router یکپارچه cross-DB برای همه ترکیب‌های SQLite/MySQL/PostgreSQL/TimescaleDB

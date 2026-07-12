@@ -54,11 +54,12 @@ def test_sqlite_column_intersection():
 def test_migration_strategy_matrix():
     from app.services.native_migration import migration_strategy
 
-    assert migration_strategy("sqlite", "postgresql") == "native_sqlite"
-    assert migration_strategy("sqlite", "timescaledb") == "native_sqlite"
-    assert migration_strategy("sqlite", "mysql") == "native_sqlite"
-    assert migration_strategy("mysql", "postgresql") == "hybrid"
-    assert migration_strategy("postgresql", "timescaledb") == "hybrid"
+    assert migration_strategy("sqlite", "postgresql") == "universal"
+    assert migration_strategy("sqlite", "timescaledb") == "universal"
+    assert migration_strategy("sqlite", "mysql") == "universal"
+    assert migration_strategy("mysql", "postgresql") == "universal"
+    assert migration_strategy("postgresql", "timescaledb") == "universal"
+    assert migration_strategy("postgresql", "sqlite") == "universal"
     assert migration_strategy("sqlite", "sqlite") == "same_db"
     assert migration_strategy("unknown", "postgresql") == "unsupported"
     print("OK: migration strategy matrix")

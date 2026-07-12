@@ -109,6 +109,14 @@ def validate_db_credentials(params: dict, role: Role) -> list[dict]:
     if not db_needs_credentials(db_type):
         return []
 
+    if role == "source":
+        source_db = params.get("source_db")
+        target_db = params.get("target_db")
+        if source_db == target_db:
+            return []
+        if source_db == "sqlite":
+            return []
+
     conn = connection_from_params(params, role)
     label = "Source" if role == "source" else "Target"
     label_fa = "مبدأ" if role == "source" else "مقصد"

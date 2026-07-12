@@ -1,11 +1,11 @@
-"""Unified cross-DB migration router for all source/target database pairs."""
+"""Unified cross-DB migration — any source engine to any target engine."""
 
 from __future__ import annotations
 
-import asyncio
+from pathlib import Path
 
-from app.config import PASARGUARD_DIR
-from app.services.db_credentials import get_target_connection, migration_port
+from app.config import PASARGUARD_DIR, PASARGUARD_DATA
+from app.services.db_credentials import get_source_connection, get_target_connection
 from app.services.pasarguard_ops import (
     docker_compose_up,
     resolve_db_service,
@@ -16,59 +16,25 @@ from app.services.pasarguard_ops import (
 )
 from app.services.native_migration.host_alembic import run_host_alembic
 from app.services.native_migration.source_version import resolve_source_alembic_version
-from app.services.native_migration.sqlite_pg import copy_sqlite_to_postgres
-from app.services.native_migration.sqlite_mysql import copy_sqlite_to_mysql
+from app.services.native_migration.sql_staging import import_sql_dump_to_live_db
+from app.services.native_migration.universal_copy import copy_database_universal
 
-# Native engine: direct Python copy (no db-migrations subprocess).
-NATIVE_SQLITE_TARGETS = frozenset({"postgresql", "timescaledb", "mysql", "mariadb"})
-
-# Hybrid: host-network schema + db-migrations data import.
-HYBRID_SUPPORTED = frozenset({
-    ("mysql", "postgresql"),
-    ("mysql", "timescaledb"),
-    ("mariadb", "postgresql"),
-    ("mariadb", "timescaledb"),
-    ("mysql", "mysql"),
-    ("mysql", "mariadb"),
-    ("mariadb", "mysql"),
-    ("mariadb", "mariadb"),
-    ("postgresql", "postgresql"),
-    ("postgresql", "timescaledb"),
-    ("postgresql", "mysql"),
-    ("postgresql", "mariadb"),
-    ("timescaledb", "postgresql"),
-    ("timescaledb", "timescaledb"),
-    ("timescaledb", "mysql"),
-    ("timescaledb", "mariadb"),
-    ("sqlite", "sqlite"),
+SUPPORTED_ENGINES = frozenset({
+    "sqlite", "mysql", "mariadb", "postgresql", "timescaledb",
 })
 
 
 def migration_strategy(source_db: str, target_db: str) -> str:
     if source_db == target_db:
         return "same_db"
-    if source_db == "sqlite" and target_db in NATIVE_SQLITE_TARGETS:
-        return "native_sqlite"
-    if (source_db, target_db) in HYBRID_SUPPORTED:
-        return "hybrid"
-    return "unsupported"
-
-
-def _target_dsn(params: dict) -> dict:
-    conn = get_target_connection(params)
-    target_db = params["target_db"]
-    default_user = "postgres" if target_db in ("postgresql", "timescaledb") else "root"
-    return {
-        "host": conn.get("host") or "127.0.0.1",
-        "port": migration_port(conn, target_db),
-        "database": conn.get("database") or "pasarguard",
-        "user": conn.get("user") or default_user,
-        "password": conn.get("password") or "",
-    }
+    if source_db not in SUPPORTED_ENGINES or target_db not in SUPPORTED_ENGINES:
+        return "unsupported"
+    return "universal"
 
 
 async def _ensure_target_db_running(migrator, target_db: str) -> None:
     if target_db == "sqlite":
+        PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
         return
     service = resolve_db_service(target_db)
     if service:
@@ -115,34 +81,22 @@ async def _upgrade_to_head(migrator, target_db: str) -> None:
     )
 
 
-async def _copy_data_native(
-    migrator, source_path: str, source_db: str, target_db: str, source_version: str,
-) -> dict:
-    dsn = _target_dsn(migrator.params)
-    migrator.job.log(
-        f"Native copy: {source_db} → {target_db} "
-        f"({dsn['user']}@{dsn['host']}:{dsn['port']}/{dsn['database']})"
-    )
-    if target_db in ("postgresql", "timescaledb"):
-        return await asyncio.to_thread(
-            copy_sqlite_to_postgres, source_path, dsn, migrator.job.log, source_version,
-        )
-    if target_db in ("mysql", "mariadb"):
-        return await asyncio.to_thread(
-            copy_sqlite_to_mysql, source_path, dsn, migrator.job.log, source_version,
-        )
-    raise RuntimeError(f"Native SQLite copy not implemented for target {target_db}")
-
-
-async def _copy_data_hybrid(
-    migrator, source_path: str, source_db: str, target_db: str,
-) -> None:
-    from app.services.db_migration import run_db_migration
-    migrator.job.log(
-        f"Hybrid migration: schema ready — importing data via db-migrations "
-        f"({source_db} → {target_db})"
-    )
-    await run_db_migration(migrator, source_path, source_db, target_db)
+async def _prepare_source_connection(
+    migrator, source_db: str, source_path: str,
+) -> dict | None:
+    """If source is a .sql dump, import into live staging DB and return its DSN."""
+    path = Path(source_path)
+    if path.suffix.lower() != ".sql":
+        return None
+    if source_db == "sqlite":
+        raise RuntimeError("SQLite source cannot be a .sql dump — upload db.sqlite3")
+    conn = get_source_connection(migrator.params)
+    if not conn.get("password"):
+        tgt = get_target_connection(migrator.params)
+        conn["password"] = tgt.get("password")
+        conn["user"] = conn.get("user") or tgt.get("user")
+        conn["database"] = conn.get("database") or tgt.get("database")
+    return await import_sql_dump_to_live_db(migrator, source_path, source_db, conn)
 
 
 async def run_cross_db_migration(
@@ -151,17 +105,16 @@ async def run_cross_db_migration(
     source_db: str,
     target_db: str,
 ) -> None:
-    """Route cross-DB migration to native or hybrid engine."""
+    """Migrate data from any supported source DB to any supported target DB."""
     strategy = migration_strategy(source_db, target_db)
     if strategy == "unsupported":
         raise RuntimeError(
-            f"Unsupported cross-DB migration: {source_db} → {target_db}. "
-            "Choose a supported target database in the wizard."
+            f"Unsupported cross-DB migration: {source_db} → {target_db}"
         )
     if strategy == "same_db":
         raise RuntimeError("same_db should not use cross-DB migrator")
 
-    migrator.job.log(f"Cross-DB strategy: {strategy} ({source_db} → {target_db})")
+    migrator.job.log(f"Universal cross-DB: {source_db} → {target_db}")
 
     source_version = await resolve_source_alembic_version(migrator, source_db, source_path)
     if not source_version:
@@ -171,23 +124,37 @@ async def run_cross_db_migration(
         )
     migrator.job.log(f"Source alembic version: {source_version}")
 
-    await _ensure_target_db_running(migrator, target_db)
-    await _stop_panel(migrator)
-    await _bootstrap_schema(migrator, source_version, target_db)
+    staging_conn = await _prepare_source_connection(migrator, source_db, source_path)
 
-    if strategy == "native_sqlite":
-        stats = await _copy_data_native(
-            migrator, source_path, source_db, target_db, source_version,
+    try:
+        await _ensure_target_db_running(migrator, target_db)
+        await _stop_panel(migrator)
+        await _bootstrap_schema(migrator, source_version, target_db)
+
+        stats = await copy_database_universal(
+            migrator,
+            source_path,
+            source_db,
+            target_db,
+            source_version,
+            staging_conn=staging_conn,
         )
-        total = sum(stats.values())
-        migrator.job.log(f"Native data copy: {total} rows / {len(stats)} tables")
-    else:
-        await _copy_data_hybrid(migrator, source_path, source_db, target_db)
 
-    await _upgrade_to_head(migrator, target_db)
-    final = await read_target_alembic_version(migrator, target_db)
-    migrator.job.log(f"Target alembic after migration: {final or '(unknown)'}")
+        await _upgrade_to_head(migrator, target_db)
+        final = await read_target_alembic_version(migrator, target_db)
+        migrator.job.log(f"Target alembic after migration: {final or '(unknown)'}")
+
+        users = stats.get("users", 0)
+        admins = stats.get("admins", 0)
+        if users == 0 and admins == 0:
+            migrator.job.log(
+                "Warning: no users/admins copied — check source backup and credentials"
+            )
+    finally:
+        container = (staging_conn or {}).get("_ephemeral_container")
+        if container:
+            migrator.job.log(f"Removing staging container {container}...")
+            await migrator._run_cmd(["docker", "rm", "-f", container], timeout=30)
 
 
-# Backward-compatible alias
 run_native_cross_db_migration = run_cross_db_migration
