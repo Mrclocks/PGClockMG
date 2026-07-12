@@ -1,4 +1,4 @@
-"""Marzban → PasarGuard migration (official docs — two methods)."""
+"""Marzban → PasarGuard migration (fresh install only — PasarGuard must be pre-installed)."""
 
 import asyncio
 import shutil
@@ -22,122 +22,28 @@ from app.services.pasarguard_ops import (
     ensure_schema_initialized,
     restart_pasarguard,
 )
+from app.services.backup_analyzer import resolve_extract_root, find_file_in_upload
 
 
 class MarzbanMigrator(BaseMigrator):
-    """
-    Methods (per https://docs.pasarguard.org/en/migration/marzban/):
-    - inplace: Marzban installed on THIS server → rename dirs in-place
-    - fresh: Fresh PasarGuard on THIS server → import backup / live db
-    """
+    """Marzban → PasarGuard (fresh install only — PasarGuard must be pre-installed)."""
 
     async def run(self, params: dict) -> dict:
-        mode = params.get("marzban_mode") or "auto"
         source_db = params["source_db"]
         target_db = params["target_db"]
         password = params.get("target_db_password") or params.get("source_db_password")
         upload_path = params.get("upload_path")
         upload_work_dir = params.get("upload_work_dir")
-
         marzban_exists = MARZBAN_DIR.exists() or MARZBAN_DATA.exists()
-        pg_exists = PASARGUARD_DIR.exists()
 
-        if mode == "auto":
-            if upload_path or upload_work_dir:
-                mode = "fresh"
-            elif marzban_exists and not pg_exists:
-                mode = "inplace"
-            elif marzban_exists and pg_exists:
-                mode = "fresh"
-            else:
-                mode = "fresh"
+        self.job.log("Marzban migration (fresh PasarGuard install)")
+        self.job.set_progress(5, "Starting Marzban → PasarGuard migration...")
 
-        self.job.log(f"Marzban migration mode: {mode}")
-        self.job.set_progress(5, f"Marzban migration ({mode})...")
-
-        if mode == "inplace":
-            return await self._migrate_inplace(source_db, target_db, password)
-        return await self._migrate_fresh(
+        return await self._migrate(
             source_db, target_db, password, upload_path, marzban_exists, upload_work_dir,
         )
 
-    # ─── Method 1: In-place (Marzban on this server) ─────────────────
-
-    async def _migrate_inplace(self, source_db: str, target_db: str, password: str | None) -> dict:
-        if not MARZBAN_DIR.exists() and not MARZBAN_DATA.exists():
-            raise RuntimeError(
-                "In-place mode requires Marzban on this server (/opt/marzban). "
-                "Use 'Fresh PasarGuard' mode or upload a backup."
-            )
-        if PASARGUARD_DIR.exists():
-            raise RuntimeError(
-                "PasarGuard is already installed. In-place mode requires ONLY Marzban. "
-                "Choose 'Fresh PasarGuard' method instead."
-            )
-
-        self.job.set_progress(10, "Stopping Marzban...")
-        if MARZBAN_DIR.exists():
-            await self._run_cmd(["docker", "compose", "down"], cwd=str(MARZBAN_DIR))
-
-        self.job.set_progress(15, "Removing old PasarGuard paths if any...")
-        for p in [PASARGUARD_DIR, PASARGUARD_DATA, Path("/var/lib/mysql/pasarguard")]:
-            if p.exists():
-                shutil.rmtree(p)
-
-        self.job.set_progress(25, "Renaming Marzban → PasarGuard directories...")
-        if MARZBAN_DIR.exists():
-            MARZBAN_DIR.rename(PASARGUARD_DIR)
-            self.job.log(f"Renamed {MARZBAN_DIR} → {PASARGUARD_DIR}")
-
-        if MARZBAN_DATA.exists():
-            MARZBAN_DATA.rename(PASARGUARD_DATA)
-            self.job.log(f"Renamed {MARZBAN_DATA} → {PASARGUARD_DATA}")
-
-        mysql_marzban = Path("/var/lib/mysql/marzban")
-        if mysql_marzban.exists():
-            mysql_marzban.rename(Path("/var/lib/mysql/pasarguard"))
-            self.job.log("Renamed MySQL data directory")
-        else:
-            await self._relocate_mysql_from_data_dir()
-
-        self.job.set_progress(40, "Updating .env and docker-compose (official mapping)...")
-        await self._update_env_paths(source_db, source_db)  # keep source driver first
-        await self._update_compose()
-        await self._update_xray_paths()
-
-        sqlite_backup = None
-        if source_db in ("mysql", "mariadb"):
-            self.job.set_progress(50, "Migrating MySQL/MariaDB database marzban → pasarguard...")
-            await self._rename_mysql_database(password, source_db)
-        elif source_db == "sqlite":
-            sqlite_backup = PASARGUARD_DATA / "db.sqlite3"
-            if sqlite_backup.exists():
-                self._backup_file(sqlite_backup, BACKUP_DIR)
-
-        # Cross-DB migration (e.g. sqlite → timescaledb)
-        if source_db != target_db:
-            self.job.set_progress(60, f"Cross-database migration: {source_db} → {target_db}...")
-            await self._ensure_target_database_stack(target_db, password)
-            await self._update_env_paths(source_db, target_db, password)
-            await ensure_schema_initialized(self)
-            source_path = await self._resolve_source_for_db_migration(source_db, sqlite_backup)
-            await run_db_migration(self, source_path, source_db, target_db, password)
-            await self._update_compose_for_target_db(target_db)
-        else:
-            await self._update_env_paths(source_db, target_db, password)
-
-        self.job.set_progress(85, "Installing PasarGuard management script...")
-        await self._install_pasarguard_script()
-
-        self.job.set_progress(92, "Starting PasarGuard...")
-        await restart_pasarguard(self)
-
-        self.job.set_progress(100, "In-place Marzban migration completed")
-        return self._result("inplace", target_db)
-
-    # ─── Method 2: Fresh PasarGuard (new installation) ───────────────
-
-    async def _migrate_fresh(
+    async def _migrate(
         self, source_db: str, target_db: str, password: str | None,
         upload_path: str | None, marzban_exists: bool, upload_work_dir: str | None = None,
     ) -> dict:
@@ -172,15 +78,17 @@ class MarzbanMigrator(BaseMigrator):
             source_sql = await self._dump_marzban_mysql(work_dir, password)
         else:
             raise RuntimeError(
-                "Fresh mode: install PasarGuard first OR provide Marzban backup upload."
+                "Marzban backup required — upload ZIP or separate files in the wizard."
             )
 
-        self.job.set_progress(25, "Preparing fresh PasarGuard migration...")
         if not PASARGUARD_DIR.exists():
             raise RuntimeError(
-                "Fresh mode: PasarGuard must be installed manually on this server first. "
-                "Run the PasarGuard installer, then return to this wizard."
+                "PasarGuard must be installed manually before migration. "
+                "Run the PasarGuard installer first."
             )
+
+        if source_db != target_db:
+            self.job.log(f"Cross-database migration: Marzban {source_db} → PasarGuard {target_db}")
 
         if source_db == target_db and source_db == "sqlite" and source_sqlite:
             self.job.set_progress(45, "Importing SQLite database...")
@@ -225,25 +133,10 @@ class MarzbanMigrator(BaseMigrator):
             self.job.set_progress(90, "Starting PasarGuard...")
             await restart_pasarguard(self)
 
-        self.job.set_progress(100, "Fresh PasarGuard migration completed")
+        self.job.set_progress(100, "Marzban migration completed")
         return self._result("fresh", target_db)
 
     # ─── Helpers ─────────────────────────────────────────────────────
-
-    async def _relocate_mysql_from_data_dir(self):
-        """Docs: mv /var/lib/pasarguard/mysql/* -> /var/lib/mysql/pasarguard"""
-        src = PASARGUARD_DATA / "mysql"
-        dst = Path("/var/lib/mysql/pasarguard")
-        if not src.exists():
-            return
-        dst.mkdir(parents=True, exist_ok=True)
-        for item in src.iterdir():
-            target = dst / item.name
-            if target.exists():
-                continue
-            shutil.move(str(item), str(target))
-        shutil.rmtree(src, ignore_errors=True)
-        self.job.log("Relocated MySQL data from /var/lib/pasarguard/mysql")
 
     def _parse_work_dir(self, work_dir: Path, source_db: str):
         source_sqlite = None
@@ -417,14 +310,6 @@ class MarzbanMigrator(BaseMigrator):
         await self._run_cmd(["docker", "compose", "up", "-d", svc], cwd=str(PASARGUARD_DIR))
         await asyncio.sleep(10)
 
-    async def _resolve_source_for_db_migration(self, source_db: str, sqlite_path: Path | None) -> str:
-        if source_db == "sqlite":
-            p = sqlite_path or (PASARGUARD_DATA / "db.sqlite3")
-            if not p.exists():
-                raise RuntimeError("SQLite source missing after in-place rename")
-            return str(p)
-        raise RuntimeError(f"In-place cross-DB from {source_db} requires manual SQL export")
-
     async def _copy_marzban_assets(self, source_data: Path):
         """Copy certs, templates, xray_config from Marzban data dir."""
         PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
@@ -452,53 +337,6 @@ class MarzbanMigrator(BaseMigrator):
             dst.write_text(text, encoding="utf-8")
             self.job.log("Copied xray_config.json → /var/lib/pasarguard/")
             break
-
-    async def _rename_mysql_database(self, password: str | None, db_engine: str = "mysql"):
-        env_path = PASARGUARD_DIR / ".env"
-        env_text = env_path.read_text(encoding="utf-8", errors="ignore") if env_path.exists() else ""
-        pwd = password or read_env_var(env_text, "MYSQL_ROOT_PASSWORD") or read_env_var(env_text, "MYSQL_PASSWORD") or ""
-        if not pwd:
-            raise RuntimeError("MYSQL_ROOT_PASSWORD not found in .env — enter it in the wizard")
-
-        svc = "mariadb" if db_engine == "mariadb" else "mysql"
-        dump_cmd = "mariadb-dump" if db_engine == "mariadb" else "mysqldump"
-        compose_dir = str(PASARGUARD_DIR)
-        dump_path = PASARGUARD_DIR / "marzban_export.sql"
-
-        await self._run_cmd(["docker", "compose", "up", "-d", svc], cwd=compose_dir)
-        await asyncio.sleep(8)
-
-        for user in ("root", "marzban"):
-            proc = await asyncio.create_subprocess_shell(
-                f'cd "{compose_dir}" && docker compose exec -T {svc} '
-                f'{dump_cmd} -u {user} -p"{pwd}" -h 127.0.0.1 --databases marzban > "{dump_path}"',
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-            )
-            await proc.wait()
-            if dump_path.exists() and dump_path.stat().st_size > 100:
-                self.job.log(f"MySQL dump OK (user={user})")
-                break
-
-        if not dump_path.exists() or dump_path.stat().st_size < 100:
-            raise RuntimeError("MySQL export failed — verify MYSQL_ROOT_PASSWORD in .env")
-
-        text = fix_mysql_dump_for_pasarguard(dump_path.read_text(encoding="utf-8", errors="ignore"))
-        dump_path.write_text(text, encoding="utf-8")
-
-        import_cmd = "mariadb" if db_engine == "mariadb" else "mysql"
-        proc2 = await asyncio.create_subprocess_shell(
-            f'cd "{compose_dir}" && docker compose exec -T {svc} '
-            f'{import_cmd} -u root -p"{pwd}" -h 127.0.0.1 < "{dump_path}"',
-        )
-        await proc2.wait()
-
-        await self._run_cmd([
-            "docker", "compose", "exec", "-T", svc,
-            import_cmd, "-u", "root", f"-p{pwd}", "-h", "127.0.0.1",
-            "-e", "DROP DATABASE IF EXISTS marzban;",
-        ], cwd=compose_dir)
-        dump_path.unlink(missing_ok=True)
-        self.job.log("MySQL database migrated marzban → pasarguard")
 
     async def _dump_marzban_mysql(self, work_dir: Path, password: str | None) -> Path:
         pwd = password or ""
@@ -536,37 +374,7 @@ class MarzbanMigrator(BaseMigrator):
         original = env_path.read_text(encoding="utf-8", errors="ignore")
         text = transform_marzban_env(original, target_db, password)
         env_path.write_text(text, encoding="utf-8")
-        self.job.log(".env migrated (paths, drivers, subscription template)")
-
-    async def _update_compose(self):
-        compose_path = PASARGUARD_DIR / "docker-compose.yml"
-        if not compose_path.exists():
-            return
-        self._backup_file(compose_path, BACKUP_DIR)
-        text = compose_path.read_text(encoding="utf-8", errors="ignore")
-        compose_path.write_text(transform_compose_marzban_to_pasarguard(text), encoding="utf-8")
-        self.job.log("docker-compose.yml updated")
-
-    async def _update_compose_for_target_db(self, target_db: str):
-        """Ensure compose uses correct DB service — user may need manual review."""
-        self.job.log(f"Target DB stack: {target_db} — verify docker-compose.yml if needed")
-
-    async def _update_xray_paths(self):
-        v2 = PASARGUARD_DATA / "templates" / "v2ray"
-        xray = PASARGUARD_DATA / "templates" / "xray"
-        if v2.exists() and not xray.exists():
-            v2.rename(xray)
-        cfg = PASARGUARD_DATA / "xray_config.json"
-        if cfg.exists():
-            self._backup_file(cfg, BACKUP_DIR)
-            t = transform_xray_config(cfg.read_text(encoding="utf-8", errors="ignore"))
-            cfg.write_text(t, encoding="utf-8")
-
-    async def _install_pasarguard_script(self):
-        await self._run_cmd([
-            "bash", "-c",
-            "curl -sL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh | bash -s -- @ install-script"
-        ])
+        self.job.log(".env updated for target database")
 
     def _result(self, method: str, target_db: str) -> dict:
         return {

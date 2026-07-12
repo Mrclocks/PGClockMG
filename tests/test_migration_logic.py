@@ -53,7 +53,7 @@ def test_build_target_urls():
 
 def test_suggest_marzban_mode():
     from app.services.prerequisites import _suggest_marzban_mode
-    assert _suggest_marzban_mode(True, False) == "inplace"
+    assert _suggest_marzban_mode(True, False) == "fresh"
     assert _suggest_marzban_mode(True, True) == "fresh"
     assert _suggest_marzban_mode(False, False) == "fresh"
     print("OK: marzban mode suggestion")
@@ -61,9 +61,16 @@ def test_suggest_marzban_mode():
 
 def test_migration_request_marzban_mode():
     from app.models import MigrationRequest
-    req = MigrationRequest(source_panel="marzban", source_db="sqlite", target_db="timescaledb", marzban_mode="inplace")
-    assert req.marzban_mode == "inplace"
+    req = MigrationRequest(source_panel="marzban", source_db="sqlite", target_db="timescaledb")
+    assert req.marzban_mode == "fresh"
     print("OK: MigrationRequest marzban_mode")
+
+
+def test_pasarguard_install_dbs():
+    from app.panels import PASARGUARD_INSTALL_DBS
+    assert "sqlite" in PASARGUARD_INSTALL_DBS
+    assert "timescaledb" in PASARGUARD_INSTALL_DBS
+    print("OK: PASARGUARD_INSTALL_DBS")
 
 
 def test_import_migrators():
@@ -91,6 +98,7 @@ if __name__ == "__main__":
     test_build_target_urls()
     test_suggest_marzban_mode()
     test_migration_request_marzban_mode()
+    test_pasarguard_install_dbs()
     test_import_migrators()
     test_system_status()
     print("\nAll validation tests passed.")

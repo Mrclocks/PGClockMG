@@ -33,7 +33,7 @@ def validate_migration(params: dict) -> dict:
     if not is_docker_running():
         errors.append(_msg("Docker must be running", "Docker باید در حال اجرا باشد", "Docker должен работать"))
 
-    marzban_mode = params.get("marzban_mode") or "auto"
+    marzban_mode = params.get("marzban_mode") or "fresh"
     bundle_id = params.get("upload_bundle_id")
     prereq = check_prerequisites(panel_id, marzban_mode=marzban_mode, upload_bundle_id=bundle_id)
     if not prereq["ok"]:
@@ -57,7 +57,7 @@ def validate_migration(params: dict) -> dict:
     errors.extend(_validate_uploads(panel_id, source_db, marzban_mode, upload_path, bundle_status, upload_analysis))
 
     if panel_id == "marzban":
-        errors.extend(_validate_marzban(params, marzban_mode, source_db, target_db, upload_path, upload_analysis, bundle_status))
+        errors.extend(_validate_marzban(source_db, target_db, upload_path, upload_analysis, bundle_status))
     elif panel_id == "3x-ui":
         errors.extend(_validate_xui(upload_path, bundle_status))
     elif panel_id == "remnawave":
@@ -74,18 +74,13 @@ def validate_migration(params: dict) -> dict:
 
     if source_db in ("mysql", "mariadb", "postgresql", "timescaledb"):
         pwd = params.get("source_db_password") or params.get("target_db_password")
-        if not pwd and panel_id == "marzban" and marzban_mode == "inplace":
-            env_path = (PASARGUARD_DIR if PASARGUARD_DIR.exists() else MARZBAN_DIR) / ".env"
-            if env_path.exists():
-                from app.services.env_migration import read_env_var
-                text = env_path.read_text(encoding="utf-8", errors="ignore")
-                pwd = read_env_var(text, "MYSQL_ROOT_PASSWORD") or read_env_var(text, "MYSQL_PASSWORD")
-        if not pwd and upload_analysis and upload_analysis.get("mysql_password_found"):
-            pwd = "from-env"
-        if not pwd and bundle_status:
-            for s in bundle_status.get("slots", []):
-                if s.get("id") == "env" and s.get("ok"):
-                    pwd = "from-env"
+        if not pwd and panel_id == "marzban":
+            if upload_analysis and upload_analysis.get("mysql_password_found"):
+                pwd = "from-env"
+            if not pwd and bundle_status:
+                for s in bundle_status.get("slots", []):
+                    if s.get("id") == "env" and s.get("ok"):
+                        pwd = "from-env"
         if not pwd:
             errors.append(_msg("Database password required", "رمز دیتابیس لازم است", "Нужен пароль БД"))
 
@@ -107,7 +102,7 @@ def _validate_uploads(panel_id, source_db, marzban_mode, upload_path, bundle_sta
             return errors
         if upload_path and upload_analysis and upload_analysis.get("backup_ok"):
             return errors
-        if panel_id == "marzban" and marzban_mode == "fresh" and is_marzban_installed():
+        if panel_id == "marzban" and is_marzban_installed():
             return errors
         if panel_id == "3x-ui" and find_xui_db():
             return errors
@@ -125,54 +120,44 @@ def _validate_uploads(panel_id, source_db, marzban_mode, upload_path, bundle_sta
     return errors
 
 
-def _validate_marzban(params, mode, source_db, target_db, upload_path, upload_analysis=None, bundle_status=None) -> list:
+def _validate_marzban(source_db, target_db, upload_path, upload_analysis=None, bundle_status=None) -> list:
     errors = []
-    if mode == "auto":
-        if upload_path or bundle_status:
-            mode = "fresh"
-        elif is_marzban_installed() and not is_pasarguard_installed():
-            mode = "inplace"
-        else:
-            mode = "fresh"
+    if not is_pasarguard_installed():
+        errors.append(_msg(
+            "Install PasarGuard manually before migration",
+            "ابتدا PasarGuard را دستی نصب کنید",
+            "Установите PasarGuard вручную",
+        ))
 
-    if mode == "inplace":
-        if not is_marzban_installed():
-            errors.append(_msg("Marzban must be installed for in-place migration", "Marzban باید نصب باشد (روش درجا)", "Marzban должен быть установлен"))
-        if is_pasarguard_installed():
-            errors.append(_msg("PasarGuard must NOT exist for in-place mode", "PasarGuard نباید نصب باشد (روش درجا)", "PasarGuard НЕ должен быть установлен"))
-        if not MARZBAN_DIR.exists() and not (MARZBAN_DATA / "db.sqlite3").exists():
-            errors.append(_msg("Marzban data not found at /opt/marzban or /var/lib/marzban", "داده Marzban یافت نشد", "Данные Marzban не найдены"))
+    has_source = bool(upload_path) or (bundle_status and bundle_status.get("complete"))
+    has_source = has_source or (
+        is_marzban_installed() and source_db == "sqlite" and (MARZBAN_DATA / "db.sqlite3").exists()
+    )
+    if source_db in ("mysql", "mariadb"):
+        has_source = has_source or is_marzban_installed()
+
+    detected = upload_analysis.get("detected_source_db") if upload_analysis else None
+    if not detected and is_marzban_installed():
         detected = get_marzban_db_type()
-        if detected and source_db and detected != source_db:
-            errors.append(_msg(
-                f"Source DB mismatch: server has {detected}, you selected {source_db}",
-                f"نوع DB سرور ({detected}) با انتخاب شما ({source_db}) فرق دارد",
-                f"Несовпадение БД: на сервере {detected}, выбрано {source_db}",
-            ))
-        if source_db == "sqlite" and not (MARZBAN_DATA / "db.sqlite3").exists() and not (PASARGUARD_DATA / "db.sqlite3").exists():
-            errors.append(_msg("db.sqlite3 not found", "فایل db.sqlite3 یافت نشد", "db.sqlite3 не найден"))
 
-    elif mode == "fresh":
-        if not is_pasarguard_installed():
-            errors.append(_msg("Install PasarGuard manually before fresh migration", "ابتدا PasarGuard را دستی نصب کنید", "Установите PasarGuard вручную"))
-        has_source = bool(upload_path) or (bundle_status and bundle_status.get("complete"))
-        has_source = has_source or (is_marzban_installed() and source_db == "sqlite" and (MARZBAN_DATA / "db.sqlite3").exists())
-        if source_db in ("mysql", "mariadb"):
-            has_source = has_source or is_marzban_installed()
-        if upload_analysis:
-            if not upload_analysis.get("backup_ok") and not (bundle_status and bundle_status.get("complete")):
-                for m in upload_analysis.get("missing", []):
-                    if isinstance(m, dict):
-                        errors.append(m)
-            elif upload_analysis.get("detected_source_db") and source_db:
-                if upload_analysis["detected_source_db"] != source_db:
-                    errors.append(_msg(
-                        f"Backup contains {upload_analysis['detected_source_db']} but you selected {source_db}",
-                        f"بکاپ {upload_analysis['detected_source_db']} است ولی شما {source_db} انتخاب کردید",
-                        f"В копии {upload_analysis['detected_source_db']}, выбрано {source_db}",
-                    ))
-        elif not has_source:
-            errors.append(_msg("Marzban backup or live database required", "بکاپ یا دیتابیس Marzban لازم است", "Нужна копия или БД Marzban"))
+    if detected and source_db and detected != source_db:
+        errors.append(_msg(
+            f"Backup/source is {detected} but detected type is {source_db}",
+            f"بکاپ/مبدأ {detected} است ولی نوع تشخیص‌داده‌شده {source_db}",
+            f"Источник {detected}, указано {source_db}",
+        ))
+
+    if upload_analysis:
+        if not upload_analysis.get("backup_ok") and not (bundle_status and bundle_status.get("complete")):
+            for m in upload_analysis.get("missing", []):
+                if isinstance(m, dict):
+                    errors.append(m)
+    elif not has_source:
+        errors.append(_msg(
+            "Marzban backup or live database required",
+            "بکاپ یا دیتابیس Marzban لازم است",
+            "Нужна копия или БД Marzban",
+        ))
 
     return errors
 

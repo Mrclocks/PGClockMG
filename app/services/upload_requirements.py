@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from app.config import MARZBAN_DATA, MARZBAN_DIR
+from app.config import MARZBAN_DATA
 from app.services.prerequisites import (
     find_xui_db,
     is_hiddify_installed,
     is_marzban_installed,
-    is_pasarguard_installed,
 )
 
 SLOT_DEFS: dict[str, dict] = {
@@ -107,35 +106,28 @@ def get_upload_requirements(
     marzban_live = is_marzban_installed()
     xui_live = find_xui_db() is not None
     hiddify_live = is_hiddify_installed()
-    pg_live = is_pasarguard_installed()
-
-    mode = marzban_mode or "auto"
-    if panel_id == "marzban" and mode == "auto":
-        mode = "inplace" if marzban_live and not pg_live else "fresh"
 
     upload_mode = "none"
     slots: list[dict] = []
     reason = {"en": "Data found on server — upload optional", "fa": "داده روی سرور است — آپلود اختیاری", "ru": "Данные на сервере — загрузка опциональна"}
 
     if panel_id == "marzban":
-        if mode == "inplace":
-            upload_mode = "none" if marzban_live else "required"
+        has_live_sqlite = marzban_live and (MARZBAN_DATA / "db.sqlite3").exists()
+        if has_live_sqlite:
+            upload_mode = "optional"
             reason = {
-                "en": "In-place: Marzban must be on this server" if marzban_live else "In-place: Marzban not found — upload backup",
-                "fa": "درجا: Marzban روی سرور" if marzban_live else "درجا: Marzban نیست — بکاپ لازم",
-                "ru": "На месте: Marzban на сервере" if marzban_live else "На месте: нужна копия",
+                "en": "Live Marzban SQLite found — upload backup recommended for .env/certs",
+                "fa": "SQLite مرزبان روی سرور یافت شد — آپلود بکاپ برای .env و گواهی‌ها توصیه می‌شود",
+                "ru": "SQLite Marzban на сервере — рекомендуется копия для .env/certs",
             }
         else:
-            if marzban_live and (MARZBAN_DATA / "db.sqlite3").exists():
-                upload_mode = "optional"
-            else:
-                upload_mode = "required"
-                reason = {
-                    "en": "Upload Marzban backup — full ZIP or separate files below",
-                    "fa": "بکاپ Marzban را آپلود کنید — zip کامل یا فایل‌های جدا",
-                    "ru": "Загрузите копию Marzban — zip или отдельные файлы",
-                }
-            slots = _marzban_slots(source_db)
+            upload_mode = "required"
+            reason = {
+                "en": "Upload Marzban backup — source DB will be detected automatically",
+                "fa": "بکاپ Marzban را آپلود کنید — نوع DB مبدأ خودکار تشخیص داده می‌شود",
+                "ru": "Загрузите копию Marzban — БД источника определится автоматически",
+            }
+        slots = _marzban_slots(source_db)
 
     elif panel_id == "3x-ui":
         if xui_live:

@@ -6,7 +6,7 @@
   <title>PG-Migrator</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/css/style.css?v=1.4.1">
+  <link rel="stylesheet" href="/static/css/style.css?v=1.5.0">
 </head>
 <body>
   <div class="bg-grid"></div>
@@ -27,7 +27,7 @@
           <button class="lang-btn" data-lang="ru" onclick="setLang('ru')">RU</button>
         </div>
         <span class="badge" id="serverIp">—</span>
-        <span class="version" id="appVersion">v1.4.1</span>
+        <span class="version" id="appVersion">v1.5.0</span>
       </div>
     </header>
 
@@ -58,11 +58,7 @@
         <h2></h2>
         <p class="desc"></p>
         <div class="panel-grid" id="panelGrid"></div>
-        <div id="marzbanModeSection" class="hidden">
-          <h3 class="mode-title"></h3>
-          <p class="desc-sm mode-desc"></p>
-          <div class="mode-grid" id="marzbanModeGrid"></div>
-        </div>
+        <div id="marzbanModeSection" class="hidden" style="display:none"></div>
         <div id="panelInstallNotes" class="info-box hidden"></div>
         <div id="panelWarnings" class="warnings-box hidden"></div>
         <div id="panelPrereqs" class="checks-list hidden"></div>
@@ -76,6 +72,13 @@
       <section class="panel" id="step2">
         <h2></h2>
         <p class="desc"></p>
+
+        <div id="marzbanSourceSection" class="info-box hidden">
+          <strong id="marzbanDetectedDbLabel"></strong>
+          <p style="margin-top:8px;font-size:1.1rem"><span id="marzbanDetectedDbValue">—</span></p>
+          <p class="desc-sm" id="marzbanDetectedDbHint"></p>
+        </div>
+
         <div class="db-grid" id="sourceDbGrid"></div>
 
         <div id="remnawaveFields" class="hidden">
@@ -134,6 +137,7 @@
         <p class="desc"></p>
         <div class="db-grid" id="targetDbGrid"></div>
         <div id="targetRecommendation" class="info-box hidden"></div>
+        <div id="crossDbWarning" class="warning-card hidden"></div>
 
         <div id="targetCredentials" class="form-group hidden">
           <label></label>
@@ -211,7 +215,7 @@
     </footer>
   </div>
 
-  <script src="/static/js/i18n.js?v=1.4.1"></script>
-  <script src="/static/js/app.js?v=1.4.1"></script>
+  <script src="/static/js/i18n.js?v=1.5.0"></script>
+  <script src="/static/js/app.js?v=1.5.0"></script>
 </body>
 </html>

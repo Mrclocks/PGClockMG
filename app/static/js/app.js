@@ -20,7 +20,7 @@ const state = {
   serverIp: '',
   detected: {},
   prereqData: null,
-  marzbanMode: null,
+  pasarguardInstallDbs: [],
   systemCheck: null,
 };
 
@@ -36,11 +36,26 @@ function getPgInstallCmd() {
 function needsPasarguardInstall() {
   const panel = state.selectedPanel;
   if (!panel) return false;
-  if (panel.id === 'marzban' && state.marzbanMode === 'inplace') return false;
+  if (panel.id === 'marzban') return false;
   if (panel.id === 'pasarguard') return !state.detected?.pasarguard;
   if (panel.prerequisites?.pasarguard_required) return !state.detected?.pasarguard;
-  if (panel.id === 'marzban' && state.marzbanMode === 'fresh') return !state.detected?.pasarguard;
   return false;
+}
+
+function dbDisplayName(db) {
+  const names = { sqlite: 'SQLite', mysql: 'MySQL', mariadb: 'MariaDB', postgresql: 'PostgreSQL', timescaledb: 'TimescaleDB' };
+  return names[db] || db;
+}
+
+function detectMarzbanSourceDb() {
+  const analysis = state.bundleStatus?.analysis || state.uploadInfo?.analysis;
+  if (analysis?.detected_source_db) return analysis.detected_source_db;
+  if (state.prereqData?.detected?.upload_source_db) return state.prereqData.detected.upload_source_db;
+  if (state.detected?.marzban_db) return state.detected.marzban_db;
+  if (state.detected?.marzban && (state.systemCheck?.marzban_db || state.detected.marzban_db)) {
+    return state.systemCheck?.marzban_db || state.detected.marzban_db;
+  }
+  return null;
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -81,6 +96,7 @@ async function loadInfo() {
     state.serverIp = data.server_ip;
     document.getElementById('serverIp').textContent = `${data.server_ip}:${data.web_port}`;
     if (data.version) document.getElementById('appVersion').textContent = `v${data.version}`;
+    if (data.pasarguard_install_dbs) state.pasarguardInstallDbs = data.pasarguard_install_dbs;
     if (data.system) applySystemCheck(data.system);
   } catch (e) {
     console.error(e);
@@ -125,14 +141,19 @@ function canProceedStep0() {
 
 function canProceedStep1() {
   if (!state.selectedPanel) return t('block.noPanel');
-  if (state.selectedPanel.id === 'marzban' && !state.marzbanMode) return t('block.noMarzbanMode');
   if (!state.prereqData?.ok) return t('block.prereqFailed');
   return null;
 }
 
 function canProceedStep2() {
-  if (!state.sourceDb) return t('block.noSourceDb');
   const panel = state.selectedPanel;
+  if (panel?.id === 'marzban') {
+    const db = detectMarzbanSourceDb();
+    if (!db) return t('block.detectSourceDb');
+    state.sourceDb = db;
+  } else if (!state.sourceDb) {
+    return t('block.noSourceDb');
+  }
   if (panel?.id === 'remnawave') {
     const url = document.getElementById('remnawaveUrl')?.value?.trim();
     const token = document.getElementById('remnawaveToken')?.value?.trim();
@@ -168,6 +189,9 @@ function bundleHasEnvPassword() {
 
 function canProceedStep3() {
   if (!state.targetDb) return t('block.noTargetDb');
+  if (state.selectedPanel?.id === 'marzban' && !state.detected?.pasarguard) {
+    return t('block.pasarguardMissing');
+  }
   if (needsPasarguardInstall()) return t('block.pasarguardMissing');
   const needsPwd = ['mysql', 'mariadb', 'postgresql', 'timescaledb'].includes(state.targetDb);
   if (needsPwd && !document.getElementById('targetPassword')?.value) {
@@ -260,7 +284,7 @@ function buildMigrationBody() {
     install_redirect: document.getElementById('installRedirect')?.checked ?? true,
     remnawave_url: document.getElementById('remnawaveUrl')?.value || null,
     remnawave_token: document.getElementById('remnawaveToken')?.value || null,
-    marzban_mode: state.marzbanMode || 'auto',
+    marzban_mode: 'fresh',
   };
 }
 
@@ -286,23 +310,12 @@ function renderPanels() {
 
 async function selectPanel(id) {
   state.selectedPanel = state.panels.find(p => p.id === id);
-  state.marzbanMode = null;
   document.querySelectorAll('.panel-card').forEach(c => {
     c.classList.toggle('selected', c.dataset.id === id);
   });
 
   const panel = state.selectedPanel;
   const lang = state.lang;
-
-  const modeSection = document.getElementById('marzbanModeSection');
-  if (panel.id === 'marzban') {
-    modeSection.classList.remove('hidden');
-    modeSection.querySelector('.mode-title').textContent = t('step1.marzbanModeTitle');
-    modeSection.querySelector('.mode-desc').textContent = t('step1.marzbanModeDesc');
-    renderMarzbanModes();
-  } else {
-    modeSection.classList.add('hidden');
-  }
 
   const notesEl = document.getElementById('panelInstallNotes');
   if (panel.prerequisites?.install_notes) {
@@ -327,7 +340,6 @@ async function renderPanelPrereqs(id) {
 
   try {
     const params = new URLSearchParams();
-    if (state.marzbanMode) params.set('marzban_mode', state.marzbanMode);
     if (state.uploadId) params.set('upload_id', state.uploadId);
     if (state.uploadBundleId) params.set('upload_bundle_id', state.uploadBundleId);
     const qs = params.toString() ? `?${params}` : '';
@@ -350,10 +362,6 @@ async function renderPanelPrereqs(id) {
       prereqEl.innerHTML += `<div class="info-box" style="margin-top:12px">💡 ${t('step1.uploadHint')}</div>`;
     }
 
-    if (id === 'marzban') {
-      renderMarzbanModes();
-    }
-
     document.getElementById('btnStep1').disabled = !!canProceedStep1();
     updateStepButtons();
   } catch (e) {
@@ -361,58 +369,59 @@ async function renderPanelPrereqs(id) {
   }
 }
 
-function suggestMarzbanMode() {
-  const d = state.detected || {};
-  if (d.marzban && !d.pasarguard) return 'inplace';
-  if (d.pasarguard || state.uploadId) return 'fresh';
-  if (d.marzban && d.pasarguard) return 'fresh';
-  return 'fresh';
-}
+function renderMarzbanDetectedSource() {
+  const section = document.getElementById('marzbanSourceSection');
+  const grid = document.getElementById('sourceDbGrid');
+  if (!section || !grid) return;
 
-function renderMarzbanModes() {
-  const grid = document.getElementById('marzbanModeGrid');
-  if (!grid) return;
-  const suggested = state.prereqData?.detected?.suggested_marzban_mode || suggestMarzbanMode();
-  const modes = [
-    { id: 'inplace', icon: '🔄', title: t('step1.marzbanInplace'), desc: t('step1.marzbanInplaceDesc') },
-    { id: 'fresh', icon: '🆕', title: t('step1.marzbanFresh'), desc: t('step1.marzbanFreshDesc') },
-  ];
-  grid.innerHTML = modes.map(m => `
-    <div class="mode-card ${state.marzbanMode === m.id ? 'selected' : ''}" data-mode="${m.id}" onclick="selectMarzbanMode('${m.id}')">
-      <div class="mode-icon">${m.icon}</div>
-      <h4>${m.title}</h4>
-      <p>${m.desc}</p>
-      <span class="mode-badge ${m.id === suggested ? 'mode-badge-suggested' : 'mode-badge-alt'}">
-        ${m.id === suggested ? t('step1.suggested') : t('step1.alternative')}
-      </span>
-    </div>`).join('');
-  if (!state.marzbanMode) selectMarzbanMode(suggested);
-}
+  section.classList.remove('hidden');
+  grid.classList.add('hidden');
 
-function selectMarzbanMode(mode) {
-  state.marzbanMode = mode;
-  document.querySelectorAll('.mode-card').forEach(c => {
-    c.classList.toggle('selected', c.dataset.mode === mode);
-  });
-  if (state.selectedPanel) renderPanelPrereqs(state.selectedPanel.id);
-  if (state.currentStep === 2) renderUploadSection();
-  updateStepButtons();
+  const labelEl = document.getElementById('marzbanDetectedDbLabel');
+  if (labelEl) labelEl.textContent = t('step2.marzbanDetectedLabel');
+
+  const db = detectMarzbanSourceDb();
+  const valueEl = document.getElementById('marzbanDetectedDbValue');
+  const hintEl = document.getElementById('marzbanDetectedDbHint');
+  if (valueEl) {
+    valueEl.textContent = db ? dbDisplayName(db) : '—';
+    valueEl.classList.toggle('pending', !db);
+  }
+  if (hintEl) {
+    hintEl.textContent = db ? t('step2.marzbanDetectedOk') : t('step2.marzbanDetectedWait');
+  }
+  if (db) state.sourceDb = db;
+
+  const needsPwd = ['mysql', 'mariadb', 'postgresql', 'timescaledb'].includes(db);
+  document.getElementById('dbCredentials')?.classList.toggle('hidden', !needsPwd);
 }
 
 function renderSourceDbs() {
   const panel = state.selectedPanel;
   if (!panel) return goStep(1);
-  const lang = state.lang;
 
   document.getElementById('remnawaveFields').classList.toggle('hidden', panel.id !== 'remnawave');
 
+  if (panel.id === 'marzban') {
+    const h2 = document.querySelector('#step2 h2');
+    const desc = document.querySelector('#step2 .desc');
+    if (h2) h2.textContent = t('step2.marzbanH2');
+    if (desc) desc.textContent = t('step2.marzbanDesc');
+    renderMarzbanDetectedSource();
+    renderUploadSection();
+    return;
+  }
+
+  document.getElementById('marzbanSourceSection')?.classList.add('hidden');
   const grid = document.getElementById('sourceDbGrid');
+  grid.classList.remove('hidden');
+
+  const lang = state.lang;
   grid.innerHTML = panel.supported_source_dbs.map(db => {
-    const names = { sqlite: 'SQLite', mysql: 'MySQL', mariadb: 'MariaDB', postgresql: 'PostgreSQL', timescaledb: 'TimescaleDB' };
     const auto = state.detected?.marzban_db === db || state.detected?.pasarguard_db === db;
     return `
       <div class="db-card ${auto ? 'recommended' : ''}" data-db="${db}" onclick="selectSourceDb('${db}')">
-        <h4>${names[db] || db}</h4>
+        <h4>${dbDisplayName(db)}</h4>
         ${auto ? `<p>${lang === 'fa' ? 'شناسایی‌شده' : lang === 'ru' ? 'Обнаружено' : 'Detected'}</p>` : ''}
       </div>`;
   }).join('');
@@ -440,7 +449,44 @@ async function renderTargetDbs() {
   state.sourcePassword = document.getElementById('sourcePassword').value;
 
   const grid = document.getElementById('targetDbGrid');
+  const crossEl = document.getElementById('crossDbWarning');
+  const recEl = document.getElementById('targetRecommendation');
   grid.innerHTML = '...';
+
+  if (panel.id === 'marzban') {
+    const h2 = document.querySelector('#step3 h2');
+    const desc = document.querySelector('#step3 .desc');
+    if (h2) h2.textContent = t('step3.marzbanH2');
+    if (desc) desc.textContent = t('step3.marzbanDesc');
+
+    const dbs = state.pasarguardInstallDbs.length
+      ? state.pasarguardInstallDbs
+      : ['sqlite', 'mysql', 'mariadb', 'postgresql', 'timescaledb'];
+
+    grid.innerHTML = dbs.map(db => `
+      <div class="db-card ${state.detected?.pasarguard_db === db ? 'recommended' : ''}" data-db="${db}" onclick="selectTargetDb('${db}')">
+        <h4>${dbDisplayName(db)}</h4>
+        ${state.detected?.pasarguard_db === db ? `<p>${t('detected')}</p>` : ''}
+      </div>`).join('');
+
+    if (state.detected?.pasarguard_db && dbs.includes(state.detected.pasarguard_db)) {
+      selectTargetDb(state.detected.pasarguard_db);
+    } else if (dbs.length) {
+      selectTargetDb(dbs[0]);
+    }
+
+    recEl?.classList.add('hidden');
+    document.getElementById('installPgSection')?.classList.add('hidden');
+    updateCrossDbWarning();
+    updateStepButtons();
+    return;
+  }
+
+  const h2 = document.querySelector('#step3 h2');
+  const desc = document.querySelector('#step3 .desc');
+  if (h2) h2.textContent = t('step3.h2');
+  if (desc) desc.textContent = t('step3.desc');
+  crossEl?.classList.add('hidden');
 
   try {
     const res = await fetch(`/api/recommendations/${panel.id}/${state.sourceDb}`);
@@ -455,7 +501,6 @@ async function renderTargetDbs() {
 
     if (recs.length) selectTargetDb(recs[0].id);
 
-    const recEl = document.getElementById('targetRecommendation');
     if (recs[0]?.recommended) {
       recEl.classList.remove('hidden');
       recEl.innerHTML = `💡 ${tr(recs[0].reason, lang)}`;
@@ -474,6 +519,20 @@ async function renderTargetDbs() {
   updateStepButtons();
 }
 
+function updateCrossDbWarning() {
+  const crossEl = document.getElementById('crossDbWarning');
+  if (!crossEl || state.selectedPanel?.id !== 'marzban') return;
+  if (state.sourceDb && state.targetDb && state.sourceDb !== state.targetDb) {
+    crossEl.classList.remove('hidden');
+    const msg = t('step3.crossDbWarning')
+      .replace('{source}', dbDisplayName(state.sourceDb))
+      .replace('{target}', dbDisplayName(state.targetDb));
+    crossEl.innerHTML = `⚠️ ${msg}`;
+  } else {
+    crossEl.classList.add('hidden');
+  }
+}
+
 function selectTargetDb(db) {
   state.targetDb = db;
   document.querySelectorAll('#targetDbGrid .db-card').forEach(c => {
@@ -481,6 +540,7 @@ function selectTargetDb(db) {
   });
   const needsPwd = ['mysql', 'mariadb', 'postgresql', 'timescaledb'].includes(db);
   document.getElementById('targetCredentials').classList.toggle('hidden', !needsPwd);
+  updateCrossDbWarning();
   updateStepButtons();
 }
 
@@ -507,19 +567,11 @@ function renderSummary() {
   const names = { sqlite: 'SQLite', mysql: 'MySQL', mariadb: 'MariaDB', postgresql: 'PostgreSQL', timescaledb: 'TimescaleDB' };
 
   const linkLabel = t(`sub.${panel.subscription_mode}`);
-  const methodNames = {
-    inplace: t('step1.marzbanInplace'),
-    fresh: t('step1.marzbanFresh'),
-  };
-  const methodRow = panel.id === 'marzban' && state.marzbanMode
-    ? `<div class="summary-row"><span class="summary-label">${s.method}</span><span>${methodNames[state.marzbanMode] || state.marzbanMode}</span></div>`
-    : '';
 
   document.getElementById('migrationSummary').innerHTML = `
     <div class="summary-row"><span class="summary-label">${s.source}</span><span>${panelLatinName(panel)}</span></div>
-    ${methodRow}
     <div class="summary-row"><span class="summary-label">${s.sourceDb}</span><span>${names[state.sourceDb] || '—'}</span></div>
-    <div class="summary-row"><span class="summary-label">${s.targetDb}</span><span>${names[state.targetDb] || '—'}</span></div>
+    <div class="summary-row"><span class="summary-label">${panel.id === 'marzban' ? s.pgInstallDb : s.targetDb}</span><span>${names[state.targetDb] || '—'}</span></div>
     <div class="summary-row"><span class="summary-label">${s.links}</span><span>${linkLabel}</span></div>
     <div class="summary-row"><span class="summary-label">${s.backup}</span><span>${state.uploadInfo?.filename || state.bundleStatus?.mode === 'zip' ? t('upload.fullZip') : state.bundleStatus?.mode === 'separate' ? t('upload.separateFiles') : s.server}</span></div>`;
 
@@ -691,7 +743,7 @@ async function renderUploadSection() {
   const params = new URLSearchParams({
     panel_id: panel.id,
     source_db: state.sourceDb || '',
-    marzban_mode: state.marzbanMode || 'auto',
+    marzban_mode: 'fresh',
   });
   try {
     const res = await fetch(`/api/upload-requirements?${params}`);
@@ -777,7 +829,7 @@ async function uploadSlotFile(slot, file) {
   if (state.uploadBundleId) form.append('bundle_id', state.uploadBundleId);
   if (state.selectedPanel) form.append('panel_id', state.selectedPanel.id);
   if (state.sourceDb) form.append('source_db', state.sourceDb);
-  if (state.marzbanMode) form.append('marzban_mode', state.marzbanMode);
+  form.append('marzban_mode', 'fresh');
 
   try {
     const res = await fetch('/api/upload', { method: 'POST', body: form });
@@ -817,7 +869,10 @@ async function uploadSlotFile(slot, file) {
 function applyBundleAnalysis(bs) {
   const a = bs?.analysis;
   if (!a) return;
-  if (a.detected_source_db && document.querySelector('#sourceDbGrid .db-card')) {
+  if (state.selectedPanel?.id === 'marzban') {
+    renderMarzbanDetectedSource();
+    if (a.detected_source_db) state.sourceDb = a.detected_source_db;
+  } else if (a.detected_source_db && document.querySelector('#sourceDbGrid .db-card')) {
     selectSourceDb(a.detected_source_db);
   }
   if (a.mysql_password_found) {

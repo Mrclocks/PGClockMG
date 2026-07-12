@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
 
 from app.models import MigrationRequest
-from app.panels import PANELS, DATABASE_TYPES, SUBSCRIPTION_LABELS
+from app.panels import PANELS, DATABASE_TYPES, SUBSCRIPTION_LABELS, PASARGUARD_INSTALL_DBS
 from app.services.prerequisites import check_prerequisites, get_recommended_target_dbs, get_system_status
 from app.services.orchestrator import start_migration, get_job
 from app.services.validation import validate_migration
@@ -39,11 +39,12 @@ def _server_ip() -> str:
 @app.get("/api/info")
 async def api_info():
     return {
-        "version": "1.4.1",
+        "version": "1.5.0",
         "server_ip": _server_ip(),
         "web_port": WEB_PORT,
         "panels": [p.model_dump() for p in PANELS.values()],
         "database_types": DATABASE_TYPES,
+        "pasarguard_install_dbs": PASARGUARD_INSTALL_DBS,
         "subscription_labels": SUBSCRIPTION_LABELS,
         "system": get_system_status(),
     }

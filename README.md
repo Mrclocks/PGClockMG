@@ -37,7 +37,7 @@ http://SERVER_IP:7000
 
 | پنل مبدأ | سطح | لینک اشتراک | دیتابیس مبدأ |
 |----------|-----|-------------|--------------|
-| **Marzban** | کامل | حفظ می‌شود | SQLite, MySQL, MariaDB — **دو روش مهاجرت** |
+| **Marzban** | کامل | حفظ می‌شود | SQLite, MySQL, MariaDB — PasarGuard باید از قبل نصب باشد |
 | **3x-ui** | جزئی | با redirect server حفظ می‌شود* | SQLite |
 | **Remnawave** | آزمایشی | تغییر می‌کند | PostgreSQL (API) |
 | **Hiddify** | آزمایشی | تغییر می‌کند | MySQL, MariaDB |
@@ -51,7 +51,7 @@ http://SERVER_IP:7000
 
 | پنل مبدأ | PasarGuard قبل از مهاجرت؟ | پنل مبدأ / داده |
 |----------|---------------------------|-----------------|
-| **Marzban** | خیر (روش درجا) / بله (روش تازه) | Marzban روی سرور **یا** آپلود بکاپ — **روش را در ویزارد انتخاب کنید** |
+| **Marzban** | **بله — حتماً قبل** | آپلود بکاپ Marzban — نوع DB مبدأ خودکار تشخیص داده می‌شود |
 | **3x-ui** | **بله — حتماً قبل** | فایل `x-ui.db` یا آپلود بکاپ |
 | **Remnawave** | **بله — حتماً قبل** | URL پنل + API Token (می‌تواند روی سرور دیگر باشد) |
 | **Hiddify** | **بله — حتماً قبل** | dump MySQL یا دیتابیس زنده روی سرور |
@@ -59,19 +59,17 @@ http://SERVER_IP:7000
 
 > این اطلاعات در **مرحله ۰ و ۱** ویزارد وب هم نمایش داده می‌شود.
 
-### Marzban — دو روش رسمی
+### Marzban — فقط با PasarGuard از قبل نصب‌شده
 
-بعد از انتخاب Marzban در ویزارد، **روش مهاجرت** را انتخاب کنید (طبق [مستند رسمی](https://docs.pasarguard.org/en/migration/marzban/)):
+طبق [مستند رسمی](https://docs.pasarguard.org/en/migration/marzban/):
 
-| روش | شرایط | کار ویزارد |
-|-----|--------|------------|
-| **درجا (In-place)** | Marzban روی همین سرور، PasarGuard نصب **نیست** | توقف Marzban، تغییر نام `/opt/marzban` → `/opt/pasarguard`، به‌روزرسانی `.env` و compose |
-| **تازه (Fresh)** | PasarGuard از قبل نصب است **یا** بکاپ آپلود می‌کنید | نصب/استفاده از PasarGuard، import دیتابیس، کپی certs/templates |
+1. **ابتدا PasarGuard را دستی نصب کنید** (دیتابیس را در نصب انتخاب کنید)
+2. در ویزارد بکاپ Marzban را آپلود کنید — **نوع DB مبدأ** (SQLite / MySQL) خودکار تشخیص داده می‌شود
+3. در مرحله دیتابیس مقصد بپرسید: **با چه دیتابیسی PasarGuard را نصب کردید؟**
+4. اگر DB مبدأ و مقصد متفاوت باشند (مثلاً Marzban SQLite → PasarGuard TimescaleDB)، تبدیل با `db-migrations` رسمی انجام می‌شود
 
-**تغییر نوع دیتابیس** (مثلاً SQLite → TimescaleDB) در هر دو روش با ابزار رسمی `db-migrations` به‌صورت خودکار انجام می‌شود.
-
-- اگر هر دو Marzban و PasarGuard نصب باشند → روش **تازه** + آپلود بکاپ
-- مستند رسمی: [Marzban → PasarGuard](https://docs.pasarguard.org/en/migration/marzban/)
+- روش **درجا (in-place)** حذف شده — PasarGuard باید قبل از اجرای ویزارد نصب باشد
+- Marzban می‌تواند روی همین سرور باشد؛ داده از بکاپ یا SQLite زنده خوانده می‌شود
 
 ### 3x-ui
 1. ابتدا PasarGuard را نصب کنید (خالی و تازه)
@@ -89,9 +87,9 @@ http://SERVER_IP:7000
 ## مراحل ویزارد وب
 
 1. **پیش‌نیازها** — root، Docker، بکاپ
-2. **پنل مبدأ** — انتخاب + **روش Marzban** (درجا / تازه) + پیش‌نیازها
-3. **دیتابیس مبدأ** — نوع DB، رمز، آپلود بکاپ، فیلدهای Remnawave
-4. **دیتابیس مقصد** — پیشنهاد هوشمند + نصب PasarGuard از ویزارد
+2. **پنل مبدأ** — انتخاب + پیش‌نیازها (برای Marzban: PasarGuard باید نصب باشد)
+3. **دیتابیس مبدأ** — برای Marzban: آپلود بکاپ + تشخیص خودکار DB؛ برای بقیه: انتخاب نوع DB
+4. **دیتابیس مقصد** — برای Marzban: «با چه DBی PasarGuard را نصب کردید؟» + هشدار cross-DB
 5. **تأیید** — خلاصه + گزینه redirect (3x-ui)
 6. **مهاجرت** — لاگ زنده
 7. **نتیجه** — لینک `https://IP:8000/dashboard/`
@@ -157,7 +155,7 @@ PGClockMG/
 │   │   ├── upload.py
 │   │   ├── db_migration.py      # ابزار مشترک db-migrations
 │   │   └── migrators/
-│   │       ├── marzban.py       # دو روش: inplace + fresh
+│   │       ├── marzban.py       # Marzban → PasarGuard (fresh install only)
 │   │       ├── xui.py           # PasarGuard/migrations x-ui
 │   │       ├── remnawave.py     # آزمایشی — API
 │   │       ├── hiddify.py       # آزمایشی
@@ -207,6 +205,12 @@ systemctl disable pg-migrator
 ---
 
 ## Changelog
+
+### v1.5.0
+- Marzban: حذف روش **درجا (in-place)** — فقط مهاجرت با PasarGuard از قبل نصب‌شده
+- مرحله ۲ Marzban: تشخیص خودکار DB مبدأ از بکاپ (بدون انتخاب دستی)
+- مرحله ۳ Marzban: فقط «با چه دیتابیسی PasarGuard را نصب کردید؟» + هشدار cross-DB
+- پشتیبانی دقیق مهاجرت بین DBهای مختلف (مثلاً SQLite → TimescaleDB)
 
 ### v1.2.0
 - Marzban: دو روش رسمی — **درجا** (Marzban روی سرور) و **تازه** (PasarGuard + بکاپ)

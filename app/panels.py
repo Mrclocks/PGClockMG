@@ -2,6 +2,8 @@
 
 from app.models import PanelInfo, PanelPrerequisites
 
+PASARGUARD_INSTALL_DBS = ["sqlite", "mysql", "mariadb", "postgresql", "timescaledb"]
+
 PANELS: dict[str, PanelInfo] = {
     "marzban": PanelInfo(
         id="marzban",
@@ -10,39 +12,39 @@ PANELS: dict[str, PanelInfo] = {
         support_level="full",
         subscription_mode="native",
         description={
-            "en": "Two official methods: in-place rename (Marzban on server) or fresh PasarGuard install with backup import.",
-            "fa": "دو روش رسمی: مهاجرت درجا (مرزبان روی سرور) یا نصب تازه PasarGuard با بکاپ.",
-            "ru": "Два официальных метода: на месте (Marzban на сервере) или чистая установка PasarGuard с копией.",
+            "en": "Migrate Marzban to an already-installed PasarGuard. Upload backup; source DB is auto-detected.",
+            "fa": "مهاجرت Marzban به PasarGuard نصب‌شده. بکاپ آپلود کنید؛ نوع DB مبدأ خودکار تشخیص داده می‌شود.",
+            "ru": "Миграция Marzban в установленный PasarGuard. Загрузите копию; БД источника определяется автоматически.",
         },
         warnings={
             "en": [
-                "Method 1 (in-place): Marzban on THIS server, PasarGuard NOT installed yet.",
-                "Method 2 (fresh): PasarGuard already installed OR upload Marzban backup (db.sqlite3 / .sql).",
-                "Cross-DB (e.g. SQLite → TimescaleDB) uses official db-migrations tool automatically.",
-                "Docker is required.",
+                "PasarGuard MUST be installed on this server BEFORE running this wizard.",
+                "Upload Marzban backup (ZIP or separate files) — source DB is detected automatically.",
+                "Select the database you chose during PasarGuard install (may differ from Marzban).",
+                "Cross-DB (e.g. Marzban SQLite → PasarGuard TimescaleDB) uses official db-migrations.",
             ],
             "fa": [
-                "روش ۱ (درجا): مرزبان روی همین سرور، PasarGuard نصب نباشد.",
-                "روش ۲ (تازه): PasarGuard نصب است یا بکاپ مرزبان آپلود کنید.",
-                "تغییر نوع DB (مثلاً SQLite به TimescaleDB) با ابزار رسمی db-migrations انجام می‌شود.",
-                "Docker لازم است.",
+                "PasarGuard باید قبل از اجرای این ویزارد روی سرور نصب شده باشد.",
+                "بکاپ Marzban را آپلود کنید — نوع DB مبدأ خودکار تشخیص داده می‌شود.",
+                "دیتابیسی را انتخاب کنید که هنگام نصب PasarGuard انتخاب کردید (ممکن است با Marzban فرق داشته باشد).",
+                "تغییر نوع DB با ابزار رسمی db-migrations انجام می‌شود.",
             ],
             "ru": [
-                "Метод 1 (на месте): Marzban на ЭТОМ сервере, PasarGuard НЕ установлен.",
-                "Метод 2 (чистый): PasarGuard установлен ИЛИ загрузите копию Marzban.",
-                "Смена СУБД (SQLite → TimescaleDB) через официальный db-migrations.",
-                "Требуется Docker.",
+                "PasarGuard ДОЛЖЕН быть установлен ДО запуска мастера.",
+                "Загрузите копию Marzban — БД источника определяется автоматически.",
+                "Выберите БД, которую указали при установке PasarGuard.",
+                "Смена СУБД через официальный db-migrations.",
             ],
         },
         prerequisites=PanelPrerequisites(
-            pasarguard_required=False,
-            pasarguard_required_before=False,
-            source_panel_required=True,
-            source_panel_required_before=True,
+            pasarguard_required=True,
+            pasarguard_required_before=True,
+            source_panel_required=False,
+            source_panel_required_before=False,
             install_notes={
-                "en": "Choose migration method after selecting Marzban: in-place (Marzban on server) or fresh (PasarGuard install + backup).",
-                "fa": "بعد از انتخاب مرزبان روش را مشخص کنید: درجا (مرزبان روی سرور) یا تازه (نصب PasarGuard + بکاپ).",
-                "ru": "После выбора Marzban укажите метод: на месте или чистая установка PasarGuard с копией.",
+                "en": "1) Install PasarGuard manually (choose database during install). 2) Upload Marzban backup in wizard.",
+                "fa": "۱) PasarGuard را دستی نصب کنید (دیتابیس را در نصب انتخاب کنید). ۲) بکاپ Marzban را در ویزارد آپلود کنید.",
+                "ru": "1) Установите PasarGuard вручную. 2) Загрузите копию Marzban в мастере.",
             },
         ),
         supported_source_dbs=["sqlite", "mysql", "mariadb"],
