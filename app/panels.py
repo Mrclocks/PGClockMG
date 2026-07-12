@@ -21,13 +21,13 @@ PANELS: dict[str, PanelInfo] = {
                 "PasarGuard MUST be installed on this server BEFORE running this wizard.",
                 "Upload Marzban backup (ZIP or separate files) — source DB is detected automatically.",
                 "Select the database you chose during PasarGuard install (may differ from Marzban).",
-                "Cross-DB (e.g. Marzban SQLite → PasarGuard TimescaleDB) uses official db-migrations.",
+                "Cross-DB uses native engine (SQLite) or hybrid schema+import for MySQL/PostgreSQL.",
             ],
             "fa": [
                 "PasarGuard باید قبل از اجرای این ویزارد روی سرور نصب شده باشد.",
                 "بکاپ Marzban را آپلود کنید — نوع DB مبدأ خودکار تشخیص داده می‌شود.",
                 "دیتابیسی را انتخاب کنید که هنگام نصب PasarGuard انتخاب کردید (ممکن است با Marzban فرق داشته باشد).",
-                "تغییر نوع DB با ابزار رسمی db-migrations انجام می‌شود.",
+                "تغییر نوع DB: SQLite بومی، MySQL/PostgreSQL ترکیبی (schema + import).",
             ],
             "ru": [
                 "PasarGuard ДОЛЖЕН быть установлен ДО запуска мастера.",

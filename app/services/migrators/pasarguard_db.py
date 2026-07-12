@@ -6,7 +6,7 @@ import shutil
 from app.config import PASARGUARD_DIR, PASARGUARD_DATA, PASARGUARD_ENV, BACKUP_DIR
 from app.services.migrators.base import BaseMigrator
 from app.services.env_migration import transform_pasarguard_env_for_target
-from app.services.native_migration import run_native_cross_db_migration
+from app.services.native_migration import run_cross_db_migration
 from app.services.pasarguard_ops import safe_start_pasarguard, docker_compose_up, resolve_db_service
 
 
@@ -32,19 +32,15 @@ class PasarguardDbMigrator(BaseMigrator):
         if source_db != target_db:
             self.job.set_progress(30, f"Preparing cross-DB migration: {source_db} → {target_db}...")
             await self._ensure_target_database_stack(target_db)
-            if source_db == "sqlite":
-                await run_native_cross_db_migration(self, str(source_path), source_db, target_db)
-            else:
-                from app.services.db_migration import run_db_migration
-                await run_db_migration(self, str(source_path), source_db, target_db)
+            await run_cross_db_migration(self, str(source_path), source_db, target_db)
         elif source_db == target_db and source_db == "sqlite":
             self.job.set_progress(40, "Replacing SQLite database...")
             dest = PASARGUARD_DATA / "db.sqlite3"
             PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, dest)
-        else:
+        elif source_db == target_db:
             from app.services.db_migration import run_db_migration
-            self.job.set_progress(40, f"Running db-migrations: {source_db} → {target_db}...")
+            self.job.set_progress(40, f"Refreshing {source_db} database...")
             await run_db_migration(self, str(source_path), source_db, target_db)
 
         self.job.set_progress(75, "Updating PasarGuard .env...")

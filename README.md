@@ -1,6 +1,6 @@
 # PG-Migrator
 
-**نسخه 1.7.0** — سیستم مهاجرت از پنل‌های مختلف به [PasarGuard](https://github.com/PasarGuard/panel) با ویزارد وب گرافیکی.
+**نسخه 1.7.1** — سیستم مهاجرت از پنل‌های مختلف به [PasarGuard](https://github.com/PasarGuard/panel) با ویزارد وب گرافیکی.
 
 **Languages:** Web UI — English · فارسی · Русский | Installer script — English only
 
@@ -205,6 +205,11 @@ systemctl disable pg-migrator
 ---
 
 ## Changelog
+
+### v1.7.1
+- Router یکپارچه cross-DB برای همه ترکیب‌های SQLite/MySQL/PostgreSQL/TimescaleDB
+- Native: SQLite → PostgreSQL/TimescaleDB/MySQL/MariaDB
+- Hybrid: MySQL/PostgreSQL cross-DB (schema بومی + import داده)
 
 ### v1.7.0
 - **مهاجرت بومی جدید** — بدون `db-migrations` و بدون `compose run` برای Alembic

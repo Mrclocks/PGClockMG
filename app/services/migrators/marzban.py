@@ -10,7 +10,7 @@ from app.config import (
     PASARGUARD_ENV, BACKUP_DIR, TOOLS_DIR,
 )
 from app.services.migrators.base import BaseMigrator
-from app.services.native_migration import run_native_cross_db_migration
+from app.services.native_migration import run_cross_db_migration
 from app.services.env_migration import (
     transform_marzban_env,
     transform_compose_marzban_to_pasarguard,
@@ -116,21 +116,22 @@ class MarzbanMigrator(BaseMigrator):
             await safe_start_pasarguard(self)
         else:
             self.job.set_progress(40, "Preparing cross-database migration...")
-            if source_db == "sqlite" and not source_sqlite:
-                raise RuntimeError("SQLite source file missing")
-            if source_db != "sqlite":
-                raise RuntimeError(
-                    f"Cross-DB from {source_db} is not supported by native migrator yet. "
-                    "Use SQLite source or same-DB migration."
-                )
+            if source_db == "sqlite":
+                if not source_sqlite:
+                    raise RuntimeError("SQLite source file missing")
+                migration_source = str(source_sqlite)
+            elif source_db in ("mysql", "mariadb"):
+                if not source_sql:
+                    raise RuntimeError("SQL dump missing for cross-DB migration")
+                migration_source = str(source_sql)
+            else:
+                raise RuntimeError(f"Unsupported Marzban source database: {source_db}")
+
             await self._ensure_target_database_stack(target_db)
             await self._update_env_paths(source_db, target_db)
-            self.job.set_progress(55, f"Native cross-DB: {source_db} → {target_db}...")
-            await run_native_cross_db_migration(
-                self,
-                str(source_sqlite),
-                source_db,
-                target_db,
+            self.job.set_progress(55, f"Cross-DB: {source_db} → {target_db}...")
+            await run_cross_db_migration(
+                self, migration_source, source_db, target_db,
             )
             await self._update_env_paths(source_db, target_db)
             if extra_data_dir:
