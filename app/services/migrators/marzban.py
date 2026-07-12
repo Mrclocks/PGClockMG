@@ -117,7 +117,9 @@ class MarzbanMigrator(BaseMigrator):
             self.job.set_progress(40, "Preparing cross-database migration...")
             await self._ensure_target_database_stack(target_db, password)
             await self._update_env_paths(source_db, target_db, password)
-            await ensure_schema_initialized(self)
+            await ensure_schema_initialized(
+                self, target_db, password, source_sqlite=source_sqlite,
+            )
             self.job.set_progress(55, f"Cross-DB import: {source_db} → {target_db}...")
             if source_db == "sqlite":
                 if not source_sqlite:

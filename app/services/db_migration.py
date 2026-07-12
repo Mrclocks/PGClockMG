@@ -68,6 +68,12 @@ async def run_db_migration(migrator, source_path: str, source_db: str, target_db
     migrator.job.log(f"DB migration: {source_db} -> {target_db}")
     migrator.job.log(f"Source: {source_path}")
 
+    if source_db == "sqlite":
+        from app.services.pasarguard_ops import read_sqlite_alembic_version
+        src_ver = read_sqlite_alembic_version(source_path)
+        if src_ver:
+            migrator.job.log(f"Source Alembic version: {src_ver}")
+
     shell_cmd = (
         f'cd "{db_migrations}" && '
         f'export DEBIAN_FRONTEND=noninteractive CI=1 && '

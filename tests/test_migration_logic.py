@@ -66,6 +66,25 @@ def test_migration_request_marzban_mode():
     print("OK: MigrationRequest marzban_mode")
 
 
+def test_read_sqlite_alembic_version(tmp_path=None):
+    from app.services.pasarguard_ops import read_sqlite_alembic_version
+    import sqlite3
+    import tempfile
+    import os
+    fd, path = tempfile.mkstemp(suffix=".sqlite3")
+    os.close(fd)
+    try:
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE alembic_version (version_num VARCHAR(32))")
+        conn.execute("INSERT INTO alembic_version VALUES ('2b231de97dc3')")
+        conn.commit()
+        conn.close()
+        assert read_sqlite_alembic_version(path) == "2b231de97dc3"
+        print("OK: read_sqlite_alembic_version")
+    finally:
+        os.unlink(path)
+
+
 def test_extract_env_summary():
     from app.services.env_migration import extract_env_summary
     text = '''
@@ -113,6 +132,7 @@ if __name__ == "__main__":
     test_suggest_marzban_mode()
     test_migration_request_marzban_mode()
     test_extract_env_summary()
+    test_read_sqlite_alembic_version()
     test_pasarguard_install_dbs()
     test_import_migrators()
     test_system_status()
