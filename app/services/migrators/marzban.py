@@ -18,7 +18,10 @@ from app.services.env_migration import (
     read_env_var,
     merge_marzban_env_into_pasarguard,
 )
-from app.services.backup_analyzer import resolve_extract_root, find_file_in_upload
+from app.services.pasarguard_ops import (
+    ensure_schema_initialized,
+    restart_pasarguard,
+)
 
 
 class MarzbanMigrator(BaseMigrator):
@@ -116,7 +119,7 @@ class MarzbanMigrator(BaseMigrator):
             self.job.set_progress(60, f"Cross-database migration: {source_db} → {target_db}...")
             await self._ensure_target_database_stack(target_db, password)
             await self._update_env_paths(source_db, target_db, password)
-            await self._wait_pasarguard_schema(target_db, password)
+            await ensure_schema_initialized(self)
             source_path = await self._resolve_source_for_db_migration(source_db, sqlite_backup)
             await run_db_migration(self, source_path, source_db, target_db, password)
             await self._update_compose_for_target_db(target_db)
@@ -127,7 +130,7 @@ class MarzbanMigrator(BaseMigrator):
         await self._install_pasarguard_script()
 
         self.job.set_progress(92, "Starting PasarGuard...")
-        await self._start_pasarguard()
+        await restart_pasarguard(self)
 
         self.job.set_progress(100, "In-place Marzban migration completed")
         return self._result("inplace", target_db)
@@ -179,24 +182,34 @@ class MarzbanMigrator(BaseMigrator):
                 "Run the PasarGuard installer, then return to this wizard."
             )
 
-        self.job.set_progress(40, "Waiting for PasarGuard schema initialization...")
-        await self._wait_pasarguard_schema(target_db, password)
-
-        if source_db == target_db:
-            self.job.set_progress(55, "Same DB type — direct import...")
-            if source_db == "sqlite" and source_sqlite:
-                dest = PASARGUARD_DATA / "db.sqlite3"
-                PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
-                if dest.exists():
-                    self._backup_file(dest, BACKUP_DIR)
-                shutil.copy2(source_sqlite, dest)
-                self.job.log(f"Imported SQLite → {dest}")
-            elif source_db in ("mysql", "mariadb") and source_sql:
+        if source_db == target_db and source_db == "sqlite" and source_sqlite:
+            self.job.set_progress(45, "Importing SQLite database...")
+            dest = PASARGUARD_DATA / "db.sqlite3"
+            PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
+            if dest.exists():
+                self._backup_file(dest, BACKUP_DIR)
+            shutil.copy2(source_sqlite, dest)
+            self.job.log(f"Imported SQLite → {dest}")
+            if extra_data_dir:
+                await self._copy_marzban_assets(extra_data_dir)
+            self.job.set_progress(85, "Starting PasarGuard with migrated database...")
+            await restart_pasarguard(self)
+        elif source_db == target_db:
+            if source_db in ("mysql", "mariadb") and source_sql:
+                self.job.set_progress(45, "Importing MySQL/MariaDB dump...")
                 await self._import_mysql_dump(source_sql, password)
+            else:
+                raise RuntimeError("Source database file missing for fresh migration")
+            if extra_data_dir:
+                await self._copy_marzban_assets(extra_data_dir)
+            self.job.set_progress(85, "Starting PasarGuard...")
+            await restart_pasarguard(self)
         else:
-            self.job.set_progress(55, f"Cross-DB import: {source_db} → {target_db}...")
+            self.job.set_progress(40, "Preparing cross-database migration...")
             await self._ensure_target_database_stack(target_db, password)
             await self._update_env_paths(source_db, target_db, password)
+            await ensure_schema_initialized(self)
+            self.job.set_progress(55, f"Cross-DB import: {source_db} → {target_db}...")
             if source_db == "sqlite":
                 if not source_sqlite:
                     raise RuntimeError("SQLite source file missing")
@@ -207,12 +220,10 @@ class MarzbanMigrator(BaseMigrator):
                     raise RuntimeError("SQL dump missing for cross-DB migration")
             await run_db_migration(self, migration_source, source_db, target_db, password)
             await self._update_env_paths(source_db, target_db, password)
-
-        if extra_data_dir:
-            await self._copy_marzban_assets(extra_data_dir)
-
-        self.job.set_progress(90, "Starting PasarGuard...")
-        await self._start_pasarguard()
+            if extra_data_dir:
+                await self._copy_marzban_assets(extra_data_dir)
+            self.job.set_progress(90, "Starting PasarGuard...")
+            await restart_pasarguard(self)
 
         self.job.set_progress(100, "Fresh PasarGuard migration completed")
         return self._result("fresh", target_db)
@@ -414,13 +425,6 @@ class MarzbanMigrator(BaseMigrator):
             return str(p)
         raise RuntimeError(f"In-place cross-DB from {source_db} requires manual SQL export")
 
-    async def _wait_pasarguard_schema(self, target_db: str, password: str | None):
-        """Start PG once so Alembic migrations create schema on target DB."""
-        await self._run_cmd(["docker", "compose", "up", "-d"], cwd=str(PASARGUARD_DIR))
-        await asyncio.sleep(15)
-        await self._run_cmd(["pasarguard", "restart"])
-        await asyncio.sleep(10)
-
     async def _copy_marzban_assets(self, source_data: Path):
         """Copy certs, templates, xray_config from Marzban data dir."""
         PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
@@ -563,11 +567,6 @@ class MarzbanMigrator(BaseMigrator):
             "bash", "-c",
             "curl -sL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh | bash -s -- @ install-script"
         ])
-
-    async def _start_pasarguard(self):
-        ok, _ = await self._run_cmd(["pasarguard", "restart"])
-        if not ok:
-            await self._run_cmd(["docker", "compose", "up", "-d"], cwd=str(PASARGUARD_DIR))
 
     def _result(self, method: str, target_db: str) -> dict:
         return {

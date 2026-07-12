@@ -70,14 +70,16 @@ async def run_db_migration(migrator, source_path: str, source_db: str, target_db
 
     shell_cmd = (
         f'cd "{db_migrations}" && '
-        f'printf "yes\\n" | ./migrate.sh "{source_path}" --to {target_type} --db "{target_url}"'
+        f'export DEBIAN_FRONTEND=noninteractive CI=1 && '
+        f'yes | ./migrate.sh "{source_path}" --to {target_type} --db "{target_url}"'
     )
     ok, out = await migrator._run_cmd(["bash", "-c", shell_cmd], timeout=1800)
 
     if not ok:
         shell_cmd2 = (
             f'cd "{db_migrations}" && '
-            f'printf "yes\\n" | uv run migrations/universal.py --config "{config_path}"'
+            f'export DEBIAN_FRONTEND=noninteractive CI=1 && '
+            f'yes | uv run migrations/universal.py --config "{config_path}"'
         )
         ok, out = await migrator._run_cmd(["bash", "-c", shell_cmd2], timeout=1800)
 

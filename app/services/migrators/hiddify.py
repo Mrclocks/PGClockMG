@@ -8,6 +8,7 @@ from app.config import (
     BACKUP_DIR, TOOLS_DIR,
 )
 from app.services.migrators.base import BaseMigrator
+from app.services.pasarguard_ops import restart_pasarguard
 
 
 class HiddifyMigrator(BaseMigrator):
@@ -38,7 +39,7 @@ class HiddifyMigrator(BaseMigrator):
         migrated = await self._import_users_to_pasarguard(users)
 
         self.job.set_progress(90, "راه‌اندازی مجدد PasarGuard...")
-        await self._run_cmd(["pasarguard", "restart"])
+        await restart_pasarguard(self)
 
         self.job.set_progress(100, f"مهاجرت آزمایشی انجام شد — {migrated} کاربر منتقل شد")
         return {

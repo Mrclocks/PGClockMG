@@ -642,22 +642,35 @@ function setupUpload() {
   document.getElementById('uploadModeZip')?.addEventListener('click', () => setUploadMode('zip'));
   document.getElementById('uploadModeSeparate')?.addEventListener('click', () => setUploadMode('separate'));
 
+  bindZipUploadZone();
+}
+
+function bindZipUploadZone() {
   const zone = document.getElementById('uploadZone');
   const input = document.getElementById('fileInputZip');
+  const link = document.getElementById('uploadSelectText');
   if (!zone || !input) return;
-  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
-  zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
-  zone.addEventListener('drop', e => {
+
+  zone.onclick = () => input.click();
+  if (link) {
+    link.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      input.click();
+    };
+  }
+  input.onchange = () => {
+    if (input.files.length) uploadSlotFile('bundle_zip', input.files[0]);
+    input.value = '';
+  };
+
+  zone.ondragover = (e) => { e.preventDefault(); zone.classList.add('dragover'); };
+  zone.ondragleave = () => zone.classList.remove('dragover');
+  zone.ondrop = (e) => {
     e.preventDefault();
     zone.classList.remove('dragover');
     if (e.dataTransfer.files.length) uploadSlotFile('bundle_zip', e.dataTransfer.files[0]);
-  });
-  zone.addEventListener('click', e => {
-    if (e.target.id !== 'uploadSelectText') input.click();
-  });
-  input.addEventListener('change', () => {
-    if (input.files.length) uploadSlotFile('bundle_zip', input.files[0]);
-  });
+  };
 }
 
 function setUploadMode(mode) {
@@ -704,6 +717,7 @@ async function renderUploadSection() {
   document.getElementById('uploadModeZip').textContent = t('upload.modeZip');
   document.getElementById('uploadModeSeparate').textContent = t('upload.modeSeparate');
   setUploadMode(state.uploadMode);
+  bindZipUploadZone();
 
   const slotsEl = document.getElementById('uploadSlots');
   if (slotsEl) {
@@ -725,7 +739,7 @@ async function renderUploadSection() {
           </div>
           <div class="upload-slot-zone" data-slot="${s.id}">
             <input type="file" id="slot-${s.id}" accept="${accept}" hidden>
-            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('slot-${s.id}').click()">${t('upload.browse')}</button>
+            <button type="button" class="btn btn-secondary btn-sm slot-browse-btn" data-slot="${s.id}">${t('upload.browse')}</button>
             <span class="upload-slot-file">${st?.filename || ''}</span>
           </div>
         </div>`;
@@ -733,9 +747,19 @@ async function renderUploadSection() {
 
     separateSlots.forEach(s => {
       const inp = document.getElementById(`slot-${s.id}`);
-      if (inp) inp.addEventListener('change', () => {
-        if (inp.files.length) uploadSlotFile(s.id, inp.files[0]);
-      });
+      const btn = slotsEl.querySelector(`.slot-browse-btn[data-slot="${s.id}"]`);
+      if (btn && inp) {
+        btn.onclick = (e) => {
+          e.preventDefault();
+          inp.click();
+        };
+      }
+      if (inp) {
+        inp.onchange = () => {
+          if (inp.files.length) uploadSlotFile(s.id, inp.files[0]);
+          inp.value = '';
+        };
+      }
     });
   }
   updateStepButtons();

@@ -6,6 +6,7 @@ from app.config import PASARGUARD_DIR, PASARGUARD_DATA, PASARGUARD_ENV, BACKUP_D
 from app.services.migrators.base import BaseMigrator
 from app.services.env_migration import transform_pasarguard_env_for_target
 from app.services.db_migration import run_db_migration
+from app.services.pasarguard_ops import restart_pasarguard
 
 
 class PasarguardDbMigrator(BaseMigrator):
@@ -35,7 +36,7 @@ class PasarguardDbMigrator(BaseMigrator):
         await self._update_pasarguard_env(target_db, password)
 
         self.job.set_progress(90, "Restarting PasarGuard...")
-        await self._run_cmd(["pasarguard", "restart"])
+        await restart_pasarguard(self)
 
         self.job.set_progress(100, "Database migration completed")
         return {
