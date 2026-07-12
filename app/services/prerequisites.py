@@ -9,7 +9,7 @@ from app.config import (
     MARZBAN_DIR, MARZBAN_DATA, XUI_DB_PATHS, HIDDIFY_DIR,
 )
 from app.panels import PANELS, DATABASE_TYPES, TARGET_DB_RECOMMENDATIONS
-from app.services.env_migration import extract_env_summary
+from app.services.env_migration import extract_env_summary, detect_db_type_from_env
 
 
 def _run(cmd: list[str], timeout: int = 30) -> tuple[bool, str]:
@@ -52,15 +52,7 @@ def get_pasarguard_db_type() -> str | None:
     if not PASARGUARD_ENV.exists():
         return None
     text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
-    if "postgresql" in text or "asyncpg" in text:
-        return "timescaledb" if "timescale" in text.lower() else "postgresql"
-    if "mysql" in text or "asyncmy" in text:
-        return "mysql"
-    if "mariadb" in text:
-        return "mariadb"
-    if "sqlite" in text:
-        return "sqlite"
-    return None
+    return detect_db_type_from_env(text)
 
 
 def get_marzban_db_type() -> str | None:

@@ -101,8 +101,54 @@ UVICORN_PORT = 8443
     print("OK: extract_env_summary")
 
 
+def test_pasarguard_installer_db_vars():
+    from app.services.env_migration import (
+        get_pasarguard_target_connection,
+        extract_env_summary,
+        detect_db_type_from_env,
+        build_db_migration_target_url,
+    )
+    text = '''
+# Database configuration
+DB_NAME = "pasarguard"
+DB_USER = "pasarguard"
+DB_PASSWORD = "I3QdH0r62mmR0YDeBL8j"
+
+# PGAdmin configuration
+PGADMIN_EMAIL = "pg@github.io"
+PGADMIN_PASSWORD = "4teOIXEP0YYz1m9afNYV"
+'''
+    assert detect_db_type_from_env(text) == "postgresql"
+    conn = get_pasarguard_target_connection("postgresql", env_text=text)
+    assert conn["user"] == "pasarguard"
+    assert conn["password"] == "I3QdH0r62mmR0YDeBL8j"
+    assert conn["database"] == "pasarguard"
+    summary = extract_env_summary(text)
+    assert summary["db_user"] == "pasarguard"
+    assert summary["db_name"] == "pasarguard"
+    assert summary["has_password"] is True
+    url = build_db_migration_target_url("postgresql", password=conn["password"], env_text=text)
+    assert "pasarguard:I3QdH0r62mmR0YDeBL8j@127.0.0.1:5432/pasarguard" in url
+    print("OK: pasarguard installer DB_* vars")
+
+
+def test_pgbouncer_port_for_migrations():
+    from app.services.env_migration import build_db_migration_target_url, get_pasarguard_target_connection
+    text = '''
+DB_NAME = "pasarguard"
+DB_USER = "pasarguard"
+DB_PASSWORD = "secret"
+SQLALCHEMY_DATABASE_URL="postgresql+asyncpg://pasarguard:secret@127.0.0.1:6432/pasarguard"
+'''
+    conn = get_pasarguard_target_connection("postgresql", env_text=text)
+    url = build_db_migration_target_url("postgresql", password=conn["password"], env_text=text)
+    assert ":5432/" in url
+    assert ":6432/" not in url
+    print("OK: db-migrations uses direct postgres port")
+
+
 def test_parse_sqlalchemy_urls():
-    from app.services.env_migration import parse_sqlalchemy_url, build_db_migration_target_url
+    from app.services.env_migration import parse_sqlalchemy_url
     pg = parse_sqlalchemy_url("postgresql+asyncpg://pguser:pgpass@dbhost:5433/mydb")
     assert pg["user"] == "pguser"
     assert pg["password"] == "pgpass"
@@ -144,6 +190,8 @@ if __name__ == "__main__":
     test_suggest_marzban_mode()
     test_migration_request_marzban_mode()
     test_extract_env_summary()
+    test_pasarguard_installer_db_vars()
+    test_pgbouncer_port_for_migrations()
     test_parse_sqlalchemy_urls()
     test_read_sqlite_alembic_version()
     test_pasarguard_install_dbs()

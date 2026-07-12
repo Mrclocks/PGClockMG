@@ -21,8 +21,65 @@ def read_env_var(text: str, key: str) -> str | None:
     return m.group(1).strip().strip('"')
 
 
+def read_compose_db_credentials(text: str) -> dict:
+    """Read PasarGuard installer DB_* block used by docker-compose database stack."""
+    creds: dict = {}
+    for env_key, field in (
+        ("DB_USER", "user"),
+        ("DB_PASSWORD", "password"),
+        ("DB_NAME", "database"),
+        ("DB_HOST", "host"),
+        ("DB_PORT", "port"),
+    ):
+        val = read_env_var(text, env_key)
+        if val:
+            creds[field] = val
+    return creds
+
+
+def _compose_db_service() -> str | None:
+    from app.config import PASARGUARD_DIR
+
+    compose = PASARGUARD_DIR / "docker-compose.yml"
+    if not compose.exists():
+        return None
+    body = compose.read_text(encoding="utf-8", errors="ignore")
+    for svc in ("timescaledb", "postgresql", "mariadb", "mysql"):
+        if re.search(rf"^\s*{re.escape(svc)}\s*:", body, re.MULTILINE):
+            return svc
+    return None
+
+
+def _compose_has_pgbouncer() -> bool:
+    from app.config import PASARGUARD_DIR
+
+    compose = PASARGUARD_DIR / "docker-compose.yml"
+    if not compose.exists():
+        return False
+    body = compose.read_text(encoding="utf-8", errors="ignore")
+    return bool(re.search(r"^\s*pgbouncer\s*:", body, re.MULTILINE))
+
+
 def detect_db_type_from_env(text: str) -> str | None:
     """Detect database engine from .env content."""
+    if read_env_var(text, "PGADMIN_EMAIL") or read_env_var(text, "PGADMIN_PASSWORD"):
+        svc = _compose_db_service()
+        return "timescaledb" if svc == "timescaledb" else "postgresql"
+
+    db_creds = read_compose_db_credentials(text)
+    if db_creds.get("database") and db_creds.get("user"):
+        svc = _compose_db_service()
+        if svc in ("timescaledb", "postgresql"):
+            return svc
+        if svc in ("mysql", "mariadb"):
+            return svc
+        if read_env_var(text, "MYSQL_ROOT_PASSWORD"):
+            return "mariadb" if "mariadb" in text.lower() else "mysql"
+        if "postgres" in text.lower() or "pgadmin" in text.lower():
+            return "timescaledb" if "timescale" in text.lower() else "postgresql"
+        if "mysql" in text.lower():
+            return "mysql"
+
     url = read_env_var(text, "SQLALCHEMY_DATABASE_URL") or ""
     low = (url + text).lower()
     if "sqlite" in low:
@@ -80,20 +137,39 @@ def parse_sqlalchemy_url(url: str, env_text: str | None = None) -> dict:
         result["database"] = m.group(5) or None
 
     if env_text:
+        compose_db = read_compose_db_credentials(env_text)
         if not result["user"]:
-            result["user"] = read_env_var(env_text, "MYSQL_USER") or read_env_var(env_text, "POSTGRES_USER")
+            result["user"] = (
+                compose_db.get("user")
+                or read_env_var(env_text, "MYSQL_USER")
+                or read_env_var(env_text, "POSTGRES_USER")
+            )
         if not result["password"]:
             result["password"] = (
-                read_env_var(env_text, "MYSQL_ROOT_PASSWORD")
+                compose_db.get("password")
+                or read_env_var(env_text, "MYSQL_ROOT_PASSWORD")
                 or read_env_var(env_text, "MYSQL_PASSWORD")
                 or read_env_var(env_text, "POSTGRES_PASSWORD")
+                or read_env_var(env_text, "DB_PASSWORD")
             )
         if not result["database"]:
-            result["database"] = read_env_var(env_text, "MYSQL_DATABASE") or read_env_var(env_text, "POSTGRES_DB")
+            result["database"] = (
+                compose_db.get("database")
+                or read_env_var(env_text, "MYSQL_DATABASE")
+                or read_env_var(env_text, "POSTGRES_DB")
+            )
         if not result["port"]:
-            result["port"] = read_env_var(env_text, "MYSQL_PORT") or read_env_var(env_text, "POSTGRES_PORT")
+            result["port"] = (
+                compose_db.get("port")
+                or read_env_var(env_text, "MYSQL_PORT")
+                or read_env_var(env_text, "POSTGRES_PORT")
+            )
         if not result["host"]:
-            result["host"] = read_env_var(env_text, "MYSQL_HOST") or read_env_var(env_text, "POSTGRES_HOST")
+            result["host"] = (
+                compose_db.get("host")
+                or read_env_var(env_text, "MYSQL_HOST")
+                or read_env_var(env_text, "POSTGRES_HOST")
+            )
 
     return result
 
@@ -102,8 +178,8 @@ _DEFAULTS = {
     "sqlite": {"user": None, "password": None, "host": "127.0.0.1", "port": None, "database": "pasarguard"},
     "mysql": {"user": "root", "password": "password", "host": "127.0.0.1", "port": "3306", "database": "pasarguard"},
     "mariadb": {"user": "root", "password": "password", "host": "127.0.0.1", "port": "3306", "database": "pasarguard"},
-    "postgresql": {"user": "postgres", "password": "password", "host": "localhost", "port": "5432", "database": "pasarguard"},
-    "timescaledb": {"user": "postgres", "password": "password", "host": "localhost", "port": "5432", "database": "pasarguard"},
+    "postgresql": {"user": "postgres", "password": "password", "host": "127.0.0.1", "port": "5432", "database": "pasarguard"},
+    "timescaledb": {"user": "postgres", "password": "password", "host": "127.0.0.1", "port": "5432", "database": "pasarguard"},
 }
 
 
@@ -128,45 +204,113 @@ def get_pasarguard_target_connection(
 
     url = read_env_var(text, "SQLALCHEMY_DATABASE_URL") or ""
     parsed = parse_sqlalchemy_url(url, text)
-    conn = {**defaults}
-    for key, val in parsed.items():
-        if val is not None and val != "":
-            conn[key] = val
+    compose_db = read_compose_db_credentials(text)
+    conn = {
+        "user": None,
+        "password": None,
+        "host": None,
+        "port": None,
+        "database": None,
+        "sqlite_path": parsed.get("sqlite_path") or defaults["sqlite_path"],
+        "db_type": target_db,
+    }
 
     if target_db in ("mysql", "mariadb"):
-        conn["user"] = conn.get("user") or read_env_var(text, "MYSQL_USER") or defaults["user"]
+        conn["user"] = (
+            compose_db.get("user")
+            or parsed.get("user")
+            or read_env_var(text, "MYSQL_USER")
+            or defaults["user"]
+        )
         conn["password"] = (
             password_override
-            or conn.get("password")
+            or compose_db.get("password")
+            or parsed.get("password")
             or read_env_var(text, "MYSQL_ROOT_PASSWORD")
             or read_env_var(text, "MYSQL_PASSWORD")
             or defaults["password"]
         )
-        conn["database"] = read_env_var(text, "MYSQL_DATABASE") or conn.get("database") or defaults["database"]
-        conn["host"] = conn.get("host") or read_env_var(text, "MYSQL_HOST") or defaults["host"]
-        conn["port"] = conn.get("port") or read_env_var(text, "MYSQL_PORT") or defaults["port"]
+        conn["database"] = (
+            compose_db.get("database")
+            or parsed.get("database")
+            or read_env_var(text, "MYSQL_DATABASE")
+            or defaults["database"]
+        )
+        conn["host"] = (
+            compose_db.get("host")
+            or parsed.get("host")
+            or read_env_var(text, "MYSQL_HOST")
+            or defaults["host"]
+        )
+        conn["port"] = (
+            compose_db.get("port")
+            or parsed.get("port")
+            or read_env_var(text, "MYSQL_PORT")
+            or defaults["port"]
+        )
     elif target_db in ("postgresql", "timescaledb"):
-        conn["user"] = conn.get("user") or read_env_var(text, "POSTGRES_USER") or defaults["user"]
+        conn["user"] = (
+            compose_db.get("user")
+            or parsed.get("user")
+            or read_env_var(text, "POSTGRES_USER")
+            or defaults["user"]
+        )
         conn["password"] = (
             password_override
-            or conn.get("password")
+            or compose_db.get("password")
+            or parsed.get("password")
             or read_env_var(text, "POSTGRES_PASSWORD")
             or defaults["password"]
         )
-        conn["database"] = read_env_var(text, "POSTGRES_DB") or conn.get("database") or defaults["database"]
-        conn["host"] = conn.get("host") or read_env_var(text, "POSTGRES_HOST") or defaults["host"]
-        conn["port"] = conn.get("port") or read_env_var(text, "POSTGRES_PORT") or defaults["port"]
+        conn["database"] = (
+            compose_db.get("database")
+            or parsed.get("database")
+            or read_env_var(text, "POSTGRES_DB")
+            or defaults["database"]
+        )
+        conn["host"] = (
+            compose_db.get("host")
+            or parsed.get("host")
+            or read_env_var(text, "POSTGRES_HOST")
+            or defaults["host"]
+        )
+        conn["port"] = (
+            compose_db.get("port")
+            or parsed.get("port")
+            or read_env_var(text, "POSTGRES_PORT")
+            or defaults["port"]
+        )
     elif target_db == "sqlite":
-        conn["sqlite_path"] = conn.get("sqlite_path") or defaults["sqlite_path"]
+        conn["sqlite_path"] = parsed.get("sqlite_path") or defaults["sqlite_path"]
         conn["database"] = Path(conn["sqlite_path"]).name
 
     conn["db_type"] = target_db
     return conn
 
 
-def build_db_migration_target_url(target_db: str, password: str | None = None) -> str:
+def _direct_db_port(target_db: str, conn: dict) -> str:
+    """db-migrations and docker exec need direct DB port, not PgBouncer (6432)."""
+    port = conn.get("port") or ("3306" if target_db in ("mysql", "mariadb") else "5432")
+    if target_db in ("postgresql", "timescaledb") and port == "6432":
+        return "5432"
+    return port
+
+
+def _app_db_port(target_db: str, conn: dict) -> str:
+    """SQLALCHEMY URL for PasarGuard app — uses PgBouncer when installed."""
+    port = conn.get("port") or ("3306" if target_db in ("mysql", "mariadb") else "5432")
+    if target_db in ("postgresql", "timescaledb") and _compose_has_pgbouncer() and port in (None, "5432"):
+        return "6432"
+    return port
+
+
+def build_db_migration_target_url(
+    target_db: str,
+    password: str | None = None,
+    env_text: str | None = None,
+) -> str:
     """Build connection URL for official db-migrations tool (pymysql/asyncpg)."""
-    conn = get_pasarguard_target_connection(target_db, password)
+    conn = get_pasarguard_target_connection(target_db, password, env_text)
     pwd = conn.get("password") or "password"
     if target_db == "sqlite":
         path = conn.get("sqlite_path") or str(PASARGUARD_DATA / "db.sqlite3")
@@ -174,12 +318,12 @@ def build_db_migration_target_url(target_db: str, password: str | None = None) -
     if target_db in ("mysql", "mariadb"):
         user = conn.get("user") or "root"
         host = conn.get("host") or "127.0.0.1"
-        port = conn.get("port") or "3306"
+        port = _direct_db_port(target_db, conn)
         db = conn.get("database") or "pasarguard"
         return f"mysql+pymysql://{user}:{pwd}@{host}:{port}/{db}"
     user = conn.get("user") or "postgres"
-    host = conn.get("host") or "localhost"
-    port = conn.get("port") or "5432"
+    host = conn.get("host") or "127.0.0.1"
+    port = _direct_db_port(target_db, conn)
     db = conn.get("database") or "pasarguard"
     return f"postgresql+asyncpg://{user}:{pwd}@{host}:{port}/{db}"
 
@@ -194,12 +338,12 @@ def build_sqlalchemy_url_for_target(target_db: str, password_override: str | Non
     if target_db in ("mysql", "mariadb"):
         user = conn.get("user") or "root"
         host = conn.get("host") or "127.0.0.1"
-        port = conn.get("port") or "3306"
+        port = _app_db_port(target_db, conn)
         db = conn.get("database") or "pasarguard"
         return f"mysql+asyncmy://{user}:{pwd}@{host}:{port}/{db}"
     user = conn.get("user") or "postgres"
-    host = conn.get("host") or "localhost"
-    port = conn.get("port") or "5432"
+    host = conn.get("host") or "127.0.0.1"
+    port = _app_db_port(target_db, conn)
     db = conn.get("database") or "pasarguard"
     return f"postgresql+asyncpg://{user}:{pwd}@{host}:{port}/{db}"
 
@@ -209,13 +353,14 @@ def extract_env_summary(text: str) -> dict:
     db_type = detect_db_type_from_env(text)
     url = read_env_var(text, "SQLALCHEMY_DATABASE_URL") or ""
     parsed = parse_sqlalchemy_url(url, text)
+    compose_db = read_compose_db_credentials(text)
     mysql_password = read_env_var(text, "MYSQL_ROOT_PASSWORD") or read_env_var(text, "MYSQL_PASSWORD")
     postgres_password = read_env_var(text, "POSTGRES_PASSWORD")
-    db_password = parsed.get("password")
-    db_user = parsed.get("user")
-    db_name = parsed.get("database")
-    db_host = parsed.get("host")
-    db_port = parsed.get("port")
+    db_password = parsed.get("password") or compose_db.get("password")
+    db_user = parsed.get("user") or compose_db.get("user")
+    db_name = parsed.get("database") or compose_db.get("database")
+    db_host = parsed.get("host") or compose_db.get("host")
+    db_port = parsed.get("port") or compose_db.get("port")
     if db_type in ("mysql", "mariadb"):
         db_user = db_user or read_env_var(text, "MYSQL_USER") or "root"
         db_password = db_password or mysql_password
@@ -226,8 +371,8 @@ def extract_env_summary(text: str) -> dict:
         db_user = db_user or read_env_var(text, "POSTGRES_USER") or "postgres"
         db_password = db_password or postgres_password
         db_name = db_name or read_env_var(text, "POSTGRES_DB") or "pasarguard"
-        db_host = db_host or read_env_var(text, "POSTGRES_HOST") or "localhost"
-        db_port = db_port or read_env_var(text, "POSTGRES_PORT") or "5432"
+        db_host = db_host or read_env_var(text, "POSTGRES_HOST") or "127.0.0.1"
+        db_port = db_port or read_env_var(text, "POSTGRES_PORT") or ("6432" if _compose_has_pgbouncer() else "5432")
     elif db_type == "sqlite":
         db_name = Path(parsed.get("sqlite_path") or "db.sqlite3").name
     panel_port = read_env_var(text, "UVICORN_PORT") or "8000"
