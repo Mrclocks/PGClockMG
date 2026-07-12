@@ -27,7 +27,7 @@
           <button class="lang-btn" data-lang="ru" onclick="setLang('ru')">RU</button>
         </div>
         <span class="badge" id="serverIp">—</span>
-        <span class="version" id="appVersion">v1.2.0</span>
+        <span class="version" id="appVersion">v1.2.1</span>
       </div>
     </header>
 
@@ -123,8 +123,9 @@
         <div id="installPgSection" class="warning-card hidden">
           <h4></h4>
           <p></p>
-          <button class="btn btn-secondary" onclick="installPasarguard()"></button>
-          <div id="installPgLog" class="log-box hidden"></div>
+          <p class="desc-sm" id="installPgHint"></p>
+          <div class="install-cmd-box"><code id="installPgCmd"></code></div>
+          <button class="btn btn-secondary" id="btnRecheckPg" onclick="recheckPasarguard()"></button>
         </div>
 
         <div class="actions">

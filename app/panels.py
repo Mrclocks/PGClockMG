@@ -5,7 +5,7 @@ from app.models import PanelInfo, PanelPrerequisites
 PANELS: dict[str, PanelInfo] = {
     "marzban": PanelInfo(
         id="marzban",
-        name={"en": "Marzban", "fa": "مرزبان", "ru": "Marzban"},
+        name={"en": "Marzban", "fa": "Marzban", "ru": "Marzban"},
         icon="🛡️",
         support_level="full",
         subscription_mode="native",
@@ -49,7 +49,7 @@ PANELS: dict[str, PanelInfo] = {
     ),
     "3x-ui": PanelInfo(
         id="3x-ui",
-        name={"en": "3x-UI / X-UI", "fa": "۳ایکس-یوآی", "ru": "3x-UI / X-UI"},
+        name={"en": "3x-UI / X-UI", "fa": "3x-UI / X-UI", "ru": "3x-UI / X-UI"},
         icon="📡",
         support_level="partial",
         subscription_mode="redirect",
@@ -93,7 +93,7 @@ PANELS: dict[str, PanelInfo] = {
     ),
     "remnawave": PanelInfo(
         id="remnawave",
-        name={"en": "Remnawave", "fa": "رمناوی", "ru": "Remnawave"},
+        name={"en": "Remnawave", "fa": "Remnawave", "ru": "Remnawave"},
         icon="🌊",
         support_level="experimental",
         subscription_mode="changed",
@@ -137,7 +137,7 @@ PANELS: dict[str, PanelInfo] = {
     ),
     "hiddify": PanelInfo(
         id="hiddify",
-        name={"en": "Hiddify Manager", "fa": "هیدیفای", "ru": "Hiddify Manager"},
+        name={"en": "Hiddify Manager", "fa": "Hiddify Manager", "ru": "Hiddify Manager"},
         icon="🔮",
         support_level="experimental",
         subscription_mode="changed",
@@ -178,7 +178,7 @@ PANELS: dict[str, PanelInfo] = {
     ),
     "pasarguard": PanelInfo(
         id="pasarguard",
-        name={"en": "PasarGuard (DB only)", "fa": "پاسارگارد (تغییر DB)", "ru": "PasarGuard (только БД)"},
+        name={"en": "PasarGuard (DB only)", "fa": "PasarGuard (DB only)", "ru": "PasarGuard (DB only)"},
         icon="🔄",
         support_level="db_only",
         subscription_mode="native",

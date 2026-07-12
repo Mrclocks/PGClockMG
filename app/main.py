@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 
 from app.models import MigrationRequest
 from app.panels import PANELS, DATABASE_TYPES, SUBSCRIPTION_LABELS
-from app.services.prerequisites import check_prerequisites, get_recommended_target_dbs
+from app.services.prerequisites import check_prerequisites, get_recommended_target_dbs, get_system_status
 from app.services.orchestrator import start_migration, get_job
 from app.services.upload import save_upload, get_upload_path
 from app.config import WEB_PORT
@@ -39,7 +39,7 @@ async def index():
 @app.get("/api/info")
 async def api_info():
     return {
-        "version": "1.2.0",
+        "version": "1.2.1",
         "server_ip": _server_ip(),
         "web_port": WEB_PORT,
         "panels": [p.model_dump() for p in PANELS.values()],
@@ -51,6 +51,11 @@ async def api_info():
 @app.get("/api/panels")
 async def api_panels():
     return [p.model_dump() for p in PANELS.values()]
+
+
+@app.get("/api/system-check")
+async def api_system_check():
+    return get_system_status()
 
 
 @app.get("/api/prerequisites/{panel_id}")
@@ -145,28 +150,3 @@ async def ws_migrate(websocket: WebSocket, job_id: str):
     except WebSocketDisconnect:
         pass
 
-
-@app.post("/api/install-pasarguard")
-async def api_install_pasarguard(database: str = "sqlite"):
-    import asyncio
-    import subprocess
-
-    db_flags = {
-        "sqlite": "",
-        "mysql": "--database mysql",
-        "mariadb": "--database mariadb",
-        "postgresql": "--database postgresql",
-        "timescaledb": "--database timescaledb",
-    }
-    flag = db_flags.get(database, "")
-
-    proc = await asyncio.create_subprocess_shell(
-        f'bash -c \'curl -fsSL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh | bash -s -- @ install {flag}\'',
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-    stdout, _ = await proc.communicate()
-    return {
-        "ok": proc.returncode == 0,
-        "output": stdout.decode("utf-8", errors="replace")[-3000:],
-    }

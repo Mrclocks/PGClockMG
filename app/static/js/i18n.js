@@ -12,10 +12,18 @@ const I18N = {
       checks: [
         ['🖥️', 'Ubuntu server', 'This wizard runs on port 7000'],
         ['🔑', 'Root access', 'Required to modify .env and Docker'],
-        ['🐳', 'Docker', 'Required for Marzban / PasarGuard panels'],
         ['💾', 'Backup', 'Always backup before migrating'],
       ],
       start: 'Continue →',
+      pasarguardCheck: 'PasarGuard on server',
+      pasarguardYes: 'Installed',
+      pasarguardNo: 'Not installed — install manually before migration (if required)',
+      marzbanCheck: 'Marzban on server',
+      marzbanYes: 'Installed',
+      marzbanNo: 'Not installed',
+      dockerCheck: 'Docker',
+      dockerYes: 'Running',
+      dockerNo: 'Not running',
     },
     step1: {
       h2: 'Select Source Panel',
@@ -55,9 +63,9 @@ const I18N = {
       password: 'Target database password',
       passwordPh: 'New or existing password',
       pgMissing: 'PasarGuard is NOT installed',
-      pgMissingDesc: 'This migration type requires PasarGuard on this server first.',
-      installPg: 'Install PasarGuard',
-      installing: 'Installing PasarGuard — may take a few minutes...',
+      pgMissingDesc: 'Install PasarGuard manually on this server first. The installer needs interactive customization (domain, SSL, database, etc.) — this wizard cannot do that for you.',
+      pgInstallHint: 'Run this on your server (choose database during install):',
+      recheckPg: 'I installed it — Recheck',
       back: '← Back',
       next: 'Continue →',
     },
@@ -109,10 +117,18 @@ const I18N = {
       checks: [
         ['🖥️', 'سرور Ubuntu', 'ویزارد روی پورت ۷۰۰۰'],
         ['🔑', 'دسترسی root', 'برای تغییر .env و Docker'],
-        ['🐳', 'Docker', 'برای پنل Marzban / PasarGuard'],
         ['💾', 'بکاپ', 'قبل از مهاجرت حتماً بکاپ بگیرید'],
       ],
       start: 'ادامه ←',
+      pasarguardCheck: 'PasarGuard روی سرور',
+      pasarguardYes: 'نصب شده',
+      pasarguardNo: 'نصب نیست — در صورت نیاز قبل از مهاجرت دستی نصب کنید',
+      marzbanCheck: 'Marzban روی سرور',
+      marzbanYes: 'نصب شده',
+      marzbanNo: 'نصب نیست',
+      dockerCheck: 'Docker',
+      dockerYes: 'در حال اجرا',
+      dockerNo: 'اجرا نمی‌شود',
     },
     step1: {
       h2: 'انتخاب پنل مبدأ',
@@ -152,9 +168,9 @@ const I18N = {
       password: 'رمز دیتابیس مقصد',
       passwordPh: 'رمز جدید یا موجود',
       pgMissing: 'PasarGuard نصب نیست',
-      pgMissingDesc: 'این نوع مهاجرت نیاز به نصب قبلی PasarGuard دارد.',
-      installPg: 'نصب PasarGuard',
-      installing: 'در حال نصب PasarGuard...',
+      pgMissingDesc: 'ابتدا PasarGuard را دستی روی این سرور نصب کنید. نصب‌کننده نیاز به شخصی‌سازی تعاملی دارد (دامنه، SSL، دیتابیس و...) — ویزارد نمی‌تواند این کار را انجام دهد.',
+      pgInstallHint: 'این دستور را روی سرور اجرا کنید (دیتابیس را در نصب انتخاب کنید):',
+      recheckPg: 'نصب کردم — بررسی مجدد',
       back: '→ بازگشت',
       next: 'ادامه ←',
     },
@@ -203,10 +219,18 @@ const I18N = {
       checks: [
         ['🖥️', 'Сервер Ubuntu', 'Порт 7000'],
         ['🔑', 'Root доступ', 'Для .env и Docker'],
-        ['🐳', 'Docker', 'Для Marzban / PasarGuard'],
         ['💾', 'Резервная копия', 'Сделайте бэкап'],
       ],
       start: 'Далее →',
+      pasarguardCheck: 'PasarGuard на сервере',
+      pasarguardYes: 'Установлен',
+      pasarguardNo: 'Не установлен — установите вручную перед миграцией (если требуется)',
+      marzbanCheck: 'Marzban на сервере',
+      marzbanYes: 'Установлен',
+      marzbanNo: 'Не установлен',
+      dockerCheck: 'Docker',
+      dockerYes: 'Работает',
+      dockerNo: 'Не запущен',
     },
     step1: {
       h2: 'Исходная панель',
@@ -246,9 +270,9 @@ const I18N = {
       password: 'Пароль целевой БД',
       passwordPh: 'Новый или существующий пароль',
       pgMissing: 'PasarGuard НЕ установлен',
-      pgMissingDesc: 'Сначала установите PasarGuard на этом сервере.',
-      installPg: 'Установить PasarGuard',
-      installing: 'Установка PasarGuard...',
+      pgMissingDesc: 'Сначала установите PasarGuard вручную на этом сервере. Установщик требует интерактивной настройки (домен, SSL, БД и т.д.) — мастер не может сделать это за вас.',
+      pgInstallHint: 'Выполните на сервере (выберите БД при установке):',
+      recheckPg: 'Установил — Проверить снова',
       back: '← Назад',
       next: 'Далее →',
     },
@@ -312,6 +336,7 @@ function setLang(lang) {
     b.classList.toggle('active', b.dataset.lang === lang);
   });
   applyI18n();
+  renderGlobalChecks();
   if (state.selectedPanel) renderPanelPrereqs(state.selectedPanel.id);
   if (state.selectedPanel?.id === 'marzban' && typeof renderMarzbanModes === 'function') renderMarzbanModes();
   if (state.currentStep === 1 && state.panels.length) renderPanels();
@@ -328,8 +353,9 @@ function applyI18n() {
     'step2.uploadH3': '.upload-section h3', 'step2.uploadDesc': '.upload-section .desc-sm',
     'step2.back': '#step2 .btn-ghost', 'step2.next': '#btnStep2',
     'step3.h2': '#step3 h2', 'step3.desc': '#step3 .desc', 'step3.password': '#targetCredentials label',
-    'step3.pgMissing': '#installPgSection h4', 'step3.pgMissingDesc': '#installPgSection p',
-    'step3.installPg': '#installPgSection .btn-secondary', 'step3.back': '#step3 .btn-ghost', 'step3.next': '#btnStep3',
+    'step3.pgMissing': '#installPgSection h4', 'step3.pgMissingDesc': '#installPgSection > p:first-of-type',
+    'step3.pgInstallHint': '#installPgHint',
+    'step3.recheckPg': '#btnRecheckPg', 'step3.back': '#step3 .btn-ghost', 'step3.next': '#btnStep3',
     'step4.h2': '#step4 h2', 'step4.desc': '#step4 .desc', 'step4.start': '#step4 .btn-lg',
     'step4.back': '#step4 .btn-ghost',
     'step5.h2': '#step5 h2',
@@ -363,6 +389,27 @@ function renderSteps() {
 function renderGlobalChecks() {
   const checks = t('step0.checks');
   if (!Array.isArray(checks)) return;
-  document.getElementById('globalChecks').innerHTML = checks.map(([icon, title, detail]) => `
+  let html = checks.map(([icon, title, detail]) => `
     <div class="check-item"><span class="check-icon">${icon}</span><div><div>${title}</div><div class="check-detail">${detail}</div></div></div>`).join('');
+
+  const sys = state.systemCheck;
+  if (sys) {
+    const pgIcon = sys.pasarguard ? '✅' : '❌';
+    const pgDetail = sys.pasarguard
+      ? `${t('step0.pasarguardYes')}${sys.pasarguard_path ? ` — ${sys.pasarguard_path}` : ''}${sys.pasarguard_db ? ` (${sys.pasarguard_db})` : ''}`
+      : t('step0.pasarguardNo');
+    html += `<div class="check-item"><span class="check-icon">${pgIcon}</span><div><div>${t('step0.pasarguardCheck')}</div><div class="check-detail">${pgDetail}</div></div></div>`;
+
+    const mzIcon = sys.marzban ? '✅' : '⚠️';
+    const mzDetail = sys.marzban
+      ? `${t('step0.marzbanYes')}${sys.marzban_path ? ` — ${sys.marzban_path}` : ''}${sys.marzban_db ? ` (${sys.marzban_db})` : ''}`
+      : t('step0.marzbanNo');
+    html += `<div class="check-item"><span class="check-icon">${mzIcon}</span><div><div>${t('step0.marzbanCheck')}</div><div class="check-detail">${mzDetail}</div></div></div>`;
+
+    const dkIcon = sys.docker ? '✅' : '❌';
+    const dkDetail = sys.docker ? t('step0.dockerYes') : t('step0.dockerNo');
+    html += `<div class="check-item"><span class="check-icon">${dkIcon}</span><div><div>${t('step0.dockerCheck')}</div><div class="check-detail">${dkDetail}</div></div></div>`;
+  }
+
+  document.getElementById('globalChecks').innerHTML = html;
 }

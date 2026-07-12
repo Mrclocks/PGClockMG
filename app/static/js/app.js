@@ -17,11 +17,31 @@ const state = {
   detected: {},
   prereqData: null,
   marzbanMode: null,
+  systemCheck: null,
 };
+
+function panelLatinName(panel) {
+  return panel?.name?.en || panel?.id || '';
+}
+
+function getPgInstallCmd() {
+  return 'sudo bash -c "$(curl -fsSL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh)" @ install';
+}
+
+function needsPasarguardInstall() {
+  const panel = state.selectedPanel;
+  if (!panel) return false;
+  if (panel.id === 'marzban' && state.marzbanMode === 'inplace') return false;
+  if (panel.id === 'pasarguard') return !state.detected?.pasarguard;
+  if (panel.prerequisites?.pasarguard_required) return !state.detected?.pasarguard;
+  if (panel.id === 'marzban' && state.marzbanMode === 'fresh') return !state.detected?.pasarguard;
+  return false;
+}
 
 document.addEventListener('DOMContentLoaded', async () => {
   setLang(state.lang);
   await loadInfo();
+  await loadSystemCheck();
   document.getElementById('uploadDragText').textContent = t('step2.uploadDrag');
   document.getElementById('uploadSelectText').textContent = t('step2.uploadSelect');
   document.querySelector('#remnawaveFields .form-group:nth-child(1) label').textContent = t('step2.remnawaveUrl');
@@ -43,6 +63,23 @@ async function loadInfo() {
     state.serverIp = data.server_ip;
     document.getElementById('serverIp').textContent = `${data.server_ip}:${data.web_port}`;
     if (data.version) document.getElementById('appVersion').textContent = `v${data.version}`;
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function loadSystemCheck() {
+  try {
+    const res = await fetch('/api/system-check');
+    state.systemCheck = await res.json();
+    state.detected = {
+      ...state.detected,
+      pasarguard: state.systemCheck.pasarguard,
+      marzban: state.systemCheck.marzban,
+      pasarguard_db: state.systemCheck.pasarguard_db,
+      marzban_db: state.systemCheck.marzban_db,
+    };
+    renderGlobalChecks();
   } catch (e) {
     console.error(e);
   }
@@ -74,9 +111,11 @@ function renderPanels() {
     const subClass = p.subscription_mode === 'changed' ? 'sub-no' : 'sub-yes';
     return `
       <div class="panel-card" data-id="${p.id}" onclick="selectPanel('${p.id}')">
-        <span class="support-badge ${supClass}">${sup}</span>
         <div class="icon">${p.icon}</div>
-        <h3>${tr(p.name, lang)}</h3>
+        <div class="panel-card-head">
+          <h3>${panelLatinName(p)}</h3>
+          <span class="support-badge ${supClass}">${sup}</span>
+        </div>
         <p>${tr(p.description, lang)}</p>
         <div class="sub-preserve ${subClass}">${subText}</div>
       </div>`;
@@ -252,13 +291,19 @@ async function renderTargetDbs() {
     grid.innerHTML = 'Error';
   }
 
-  const needsPg = panel.prerequisites?.pasarguard_required && !state.detected?.pasarguard;
-  const marzbanFresh = panel.id === 'marzban' && state.marzbanMode === 'fresh';
-  const marzbanInplace = panel.id === 'marzban' && state.marzbanMode === 'inplace';
-  document.getElementById('installPgSection').classList.toggle('hidden', !needsPg && !marzbanFresh);
-  if (marzbanInplace) {
-    document.getElementById('installPgSection').classList.add('hidden');
+  const needsPg = needsPasarguardInstall();
+  const installSection = document.getElementById('installPgSection');
+  installSection.classList.toggle('hidden', !needsPg);
+  if (needsPg) {
+    const cmdEl = document.getElementById('installPgCmd');
+    if (cmdEl) cmdEl.textContent = getPgInstallCmd();
   }
+  updateStep3Continue();
+}
+
+function updateStep3Continue() {
+  const btn = document.getElementById('btnStep3');
+  if (btn) btn.disabled = needsPasarguardInstall();
 }
 
 function selectTargetDb(db) {
@@ -270,22 +315,19 @@ function selectTargetDb(db) {
   document.getElementById('targetCredentials').classList.toggle('hidden', !needsPwd);
 }
 
-async function installPasarguard() {
-  const logEl = document.getElementById('installPgLog');
-  logEl.classList.remove('hidden');
-  logEl.textContent = t('step3.installing') + '\n';
-  const db = state.targetDb || 'sqlite';
-  try {
-    const res = await fetch(`/api/install-pasarguard?database=${db}`, { method: 'POST' });
-    const data = await res.json();
-    logEl.textContent += data.output || '';
-    if (data.ok) {
-      state.detected.pasarguard = true;
-      document.getElementById('installPgSection').classList.add('hidden');
-    }
-  } catch (e) {
-    logEl.textContent += e.message;
+async function recheckPasarguard() {
+  const btn = document.getElementById('btnRecheckPg');
+  if (btn) btn.disabled = true;
+  await loadSystemCheck();
+  if (state.selectedPanel) {
+    await renderPanelPrereqs(state.selectedPanel.id);
   }
+  if (state.currentStep === 3) {
+    await renderTargetDbs();
+  } else {
+    updateStep3Continue();
+  }
+  if (btn) btn.disabled = false;
 }
 
 function renderSummary() {
@@ -305,7 +347,7 @@ function renderSummary() {
     : '';
 
   document.getElementById('migrationSummary').innerHTML = `
-    <div class="summary-row"><span class="summary-label">${s.source}</span><span>${tr(panel.name, lang)}</span></div>
+    <div class="summary-row"><span class="summary-label">${s.source}</span><span>${panelLatinName(panel)}</span></div>
     ${methodRow}
     <div class="summary-row"><span class="summary-label">${s.sourceDb}</span><span>${names[state.sourceDb] || '—'}</span></div>
     <div class="summary-row"><span class="summary-label">${s.targetDb}</span><span>${names[state.targetDb] || '—'}</span></div>

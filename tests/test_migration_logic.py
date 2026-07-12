@@ -74,6 +74,15 @@ def test_import_migrators():
     print("OK: migrator imports")
 
 
+def test_system_status():
+    from app.services.prerequisites import get_system_status
+    status = get_system_status()
+    assert "pasarguard" in status
+    assert "marzban" in status
+    assert "docker" in status
+    print("OK: system status")
+
+
 if __name__ == "__main__":
     test_marzban_panel_exists()
     test_sqlite_to_timescaledb_config()
@@ -83,4 +92,5 @@ if __name__ == "__main__":
     test_suggest_marzban_mode()
     test_migration_request_marzban_mode()
     test_import_migrators()
+    test_system_status()
     print("\nAll validation tests passed.")

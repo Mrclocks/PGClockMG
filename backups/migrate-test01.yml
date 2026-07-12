@@ -1,0 +1,12 @@
+source:
+  type: "sqlite"
+  url: "/tmp/marzban.db.sqlite3"
+
+target:
+  type: "postgres"
+  url: "postgresql+asyncpg://postgres:secret@localhost:5432/pasarguard"
+
+exclude_tables:
+  - admin_usage_logs
+  - user_usage_logs
+  - node_stats

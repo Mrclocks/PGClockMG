@@ -265,17 +265,33 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
 }
 
 .panel-card .icon { font-size: 2rem; margin-bottom: 10px; }
-.panel-card h3 { font-size: 1rem; font-weight: 600; margin-bottom: 6px; }
+
+.panel-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.panel-card-head h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+}
+
 .panel-card p { font-size: 0.8rem; color: var(--text-muted); line-height: 1.5; }
 
 .support-badge {
-  position: absolute;
-  top: 10px;
-  left: 10px;
+  position: static;
+  flex-shrink: 0;
   font-size: 0.65rem;
   padding: 2px 8px;
   border-radius: 10px;
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .support-full { background: var(--success-bg); color: var(--success); }
@@ -288,8 +304,28 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
   font-size: 0.75rem;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 4px;
+  text-align: end;
 }
+
+.install-cmd-box {
+  margin: 12px 0;
+  padding: 12px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+}
+
+.install-cmd-box code {
+  font-family: ui-monospace, 'Cascadia Code', monospace;
+  font-size: 0.78rem;
+  color: var(--text);
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
 
 .sub-yes { color: var(--success); }
 .sub-no { color: var(--warning); }

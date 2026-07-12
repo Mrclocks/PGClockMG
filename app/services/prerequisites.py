@@ -78,6 +78,23 @@ def get_marzban_db_type() -> str | None:
     return None
 
 
+def get_system_status() -> dict:
+    """Server-wide detection for step 0 and install recheck."""
+    pg = is_pasarguard_installed()
+    marzban = is_marzban_installed()
+    return {
+        "pasarguard": pg,
+        "marzban": marzban,
+        "hiddify": is_hiddify_installed(),
+        "docker": is_docker_running(),
+        "root": is_root(),
+        "pasarguard_db": get_pasarguard_db_type(),
+        "marzban_db": get_marzban_db_type(),
+        "pasarguard_path": str(PASARGUARD_DIR) if pg else None,
+        "marzban_path": str(MARZBAN_DIR) if MARZBAN_DIR.exists() else None,
+    }
+
+
 def _suggest_marzban_mode(marzban_installed: bool, pg_installed: bool) -> str:
     if marzban_installed and not pg_installed:
         return "inplace"
