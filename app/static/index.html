@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PG-Migrator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <div class="bg-grid"></div>
+  <div class="app">
+
+    <header class="header">
+      <div class="header-brand">
+        <div class="logo">🛡️</div>
+        <div>
+          <h1>PG-Migrator</h1>
+          <p class="subtitle"></p>
+        </div>
+      </div>
+      <div class="header-meta">
+        <div class="lang-switch">
+          <button class="lang-btn active" data-lang="en" onclick="setLang('en')">EN</button>
+          <button class="lang-btn" data-lang="fa" onclick="setLang('fa')">FA</button>
+          <button class="lang-btn" data-lang="ru" onclick="setLang('ru')">RU</button>
+        </div>
+        <span class="badge" id="serverIp">—</span>
+        <span class="version" id="appVersion">v1.1.0</span>
+      </div>
+    </header>
+
+    <nav class="steps" id="stepsNav">
+      <div class="step active" data-step="0"><span class="step-num">0</span><span class="step-label"></span></div>
+      <div class="step" data-step="1"><span class="step-num">1</span><span class="step-label"></span></div>
+      <div class="step" data-step="2"><span class="step-num">2</span><span class="step-label"></span></div>
+      <div class="step" data-step="3"><span class="step-num">3</span><span class="step-label"></span></div>
+      <div class="step" data-step="4"><span class="step-num">4</span><span class="step-label"></span></div>
+      <div class="step" data-step="5"><span class="step-num">5</span><span class="step-label"></span></div>
+      <div class="step" data-step="6"><span class="step-num">6</span><span class="step-label"></span></div>
+    </nav>
+
+    <main class="main">
+
+      <section class="panel active" id="step0">
+        <h2></h2>
+        <p class="desc"></p>
+        <div class="info-box"><p></p></div>
+        <div id="globalChecks" class="checks-list"></div>
+        <div class="actions">
+          <button class="btn btn-primary" onclick="goStep(1)"></button>
+        </div>
+      </section>
+
+      <section class="panel" id="step1">
+        <h2></h2>
+        <p class="desc"></p>
+        <div class="panel-grid" id="panelGrid"></div>
+        <div id="panelInstallNotes" class="info-box hidden"></div>
+        <div id="panelWarnings" class="warnings-box hidden"></div>
+        <div id="panelPrereqs" class="checks-list hidden"></div>
+        <div class="actions">
+          <button class="btn btn-ghost" onclick="goStep(0)"></button>
+          <button class="btn btn-primary" id="btnStep1" disabled onclick="goStep(2)"></button>
+        </div>
+      </section>
+
+      <section class="panel" id="step2">
+        <h2></h2>
+        <p class="desc"></p>
+        <div class="db-grid" id="sourceDbGrid"></div>
+
+        <div id="remnawaveFields" class="hidden">
+          <div class="form-group">
+            <label></label>
+            <input type="url" id="remnawaveUrl" placeholder="" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label></label>
+            <input type="password" id="remnawaveToken" placeholder="" autocomplete="off">
+          </div>
+        </div>
+
+        <div id="dbCredentials" class="form-group hidden">
+          <label></label>
+          <input type="password" id="sourcePassword" autocomplete="off">
+        </div>
+
+        <div class="upload-section">
+          <h3></h3>
+          <p class="desc-sm"></p>
+          <div class="upload-zone" id="uploadZone">
+            <input type="file" id="fileInput" accept=".zip,.sql,.sqlite3,.db" hidden>
+            <div class="upload-icon">📁</div>
+            <p><span id="uploadDragText"></span> <span class="link" id="uploadSelectText" onclick="document.getElementById('fileInput').click()"></span></p>
+          </div>
+          <div id="uploadStatus" class="upload-status hidden"></div>
+        </div>
+
+        <div class="actions">
+          <button class="btn btn-ghost" onclick="goStep(1)"></button>
+          <button class="btn btn-primary" id="btnStep2" onclick="goStep(3)"></button>
+        </div>
+      </section>
+
+      <section class="panel" id="step3">
+        <h2></h2>
+        <p class="desc"></p>
+        <div class="db-grid" id="targetDbGrid"></div>
+        <div id="targetRecommendation" class="info-box hidden"></div>
+
+        <div id="targetCredentials" class="form-group hidden">
+          <label></label>
+          <input type="password" id="targetPassword" autocomplete="off">
+        </div>
+
+        <div id="installPgSection" class="warning-card hidden">
+          <h4></h4>
+          <p></p>
+          <button class="btn btn-secondary" onclick="installPasarguard()"></button>
+          <div id="installPgLog" class="log-box hidden"></div>
+        </div>
+
+        <div class="actions">
+          <button class="btn btn-ghost" onclick="goStep(2)"></button>
+          <button class="btn btn-primary" id="btnStep3" onclick="goStep(4)"></button>
+        </div>
+      </section>
+
+      <section class="panel" id="step4">
+        <h2></h2>
+        <p class="desc"></p>
+        <div class="summary-card" id="migrationSummary"></div>
+        <div id="redirectOption" class="option-card hidden">
+          <label class="checkbox-label">
+            <input type="checkbox" id="installRedirect" checked>
+            <span></span>
+          </label>
+        </div>
+        <div class="warning-card" id="finalWarnings"></div>
+        <div class="actions">
+          <button class="btn btn-ghost" onclick="goStep(3)"></button>
+          <button class="btn btn-primary btn-lg" onclick="startMigration()"></button>
+        </div>
+      </section>
+
+      <section class="panel" id="step5">
+        <h2></h2>
+        <div class="progress-wrap">
+          <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+          <span class="progress-text" id="progressText">0%</span>
+        </div>
+        <p class="status-msg" id="statusMsg"></p>
+        <div class="log-terminal" id="logTerminal"></div>
+      </section>
+
+      <section class="panel" id="step6">
+        <div id="resultSuccess" class="result-card success hidden">
+          <div class="result-icon">✅</div>
+          <h2></h2>
+          <p id="resultMessage"></p>
+          <a class="btn btn-primary btn-lg" id="panelLink" href="#" target="_blank"></a>
+          <div id="resultDetails" class="result-details"></div>
+        </div>
+        <div id="resultError" class="result-card error hidden">
+          <div class="result-icon">❌</div>
+          <h2></h2>
+          <p id="errorMessage"></p>
+          <div class="log-terminal" id="errorLog"></div>
+          <button class="btn btn-secondary" onclick="goStep(4)"></button>
+        </div>
+      </section>
+
+    </main>
+
+    <footer class="footer">
+      <span>PG-Migrator</span>
+      <span>·</span>
+      <a href="https://docs.pasarguard.org/en/migration/marzban/" target="_blank" id="footerDocs"></a>
+      <span>·</span>
+      <a href="https://github.com/PasarGuard/panel" target="_blank" id="footerGithub"></a>
+    </footer>
+  </div>
+
+  <script src="/static/js/i18n.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
