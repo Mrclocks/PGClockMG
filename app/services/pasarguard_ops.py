@@ -7,8 +7,8 @@ import re
 import sqlite3
 from pathlib import Path
 
-from app.config import PASARGUARD_DIR, PASARGUARD_ENV
-from app.services.env_migration import read_env_var
+from app.config import PASARGUARD_DIR, PASARGUARD_ENV, PASARGUARD_DATA
+from app.services.env_migration import get_pasarguard_target_connection
 
 STARTUP_MARKERS = (
     "Application startup complete",
@@ -20,6 +20,7 @@ DB_SERVICES = {
     "postgresql": ("postgresql", "timescaledb"),
     "mysql": ("mysql",),
     "mariadb": ("mariadb", "mysql"),
+    "sqlite": tuple(),
 }
 
 
@@ -29,11 +30,17 @@ def _compose_text() -> str:
 
 
 def resolve_db_service(target_db: str) -> str | None:
+    if target_db == "sqlite":
+        return None
     text = _compose_text()
     for name in DB_SERVICES.get(target_db, (target_db,)):
-        if re.search(rf"^\s*{re.escape(name)}\s*:", text, re.MULTILINE):
+        if name and re.search(rf"^\s*{re.escape(name)}\s*:", text, re.MULTILINE):
             return name
     return DB_SERVICES.get(target_db, (None,))[0]
+
+
+def _target_conn(target_db: str, password: str | None = None) -> dict:
+    return get_pasarguard_target_connection(target_db, password)
 
 
 def read_sqlite_alembic_version(sqlite_path: str | Path) -> str | None:
@@ -52,6 +59,41 @@ def read_sqlite_alembic_version(sqlite_path: str | Path) -> str | None:
         return None
 
 
+async def read_mysql_alembic_version(migrator, target_db: str, password: str | None) -> str | None:
+    service = resolve_db_service(target_db)
+    if not service:
+        return None
+    conn = _target_conn(target_db, password)
+    user = conn.get("user") or "root"
+    pwd = conn.get("password") or "password"
+    host = conn.get("host") or "127.0.0.1"
+    db = conn.get("database") or "pasarguard"
+    cwd = str(PASARGUARD_DIR)
+    cmd = (
+        f'cd "{cwd}" && docker compose exec -T {service} '
+        f'mysql -u {user} -p"{pwd}" -h {host} -N -e '
+        f'"SELECT version_num FROM `{db}`.alembic_version LIMIT 1"'
+    )
+    proc = await asyncio.create_subprocess_shell(
+        cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return None
+    version = (stdout or b"").decode("utf-8", errors="ignore").strip()
+    return version or None
+
+
+def read_source_alembic_version(
+    source_db: str,
+    source_path: str | Path | None,
+    password: str | None = None,
+) -> str | None:
+    if source_db == "sqlite" and source_path:
+        return read_sqlite_alembic_version(source_path)
+    return None
+
+
 async def docker_compose_up(migrator, services: list[str] | None = None) -> bool:
     cwd = str(PASARGUARD_DIR)
     cmd = ["docker", "compose", "up", "-d"]
@@ -62,7 +104,6 @@ async def docker_compose_up(migrator, services: list[str] | None = None) -> bool
 
 
 async def wait_pasarguard_ready(migrator, max_wait: int = 90) -> bool:
-    """Poll container logs until startup completes — never blocks on pasarguard CLI."""
     cwd = str(PASARGUARD_DIR)
     migrator.job.log("Waiting for PasarGuard to become ready...")
 
@@ -105,7 +146,6 @@ async def start_pasarguard(migrator, wait: bool = True, recreate: bool = False) 
 
 
 async def restart_pasarguard(migrator, wait: bool = True) -> None:
-    """Restart via docker compose — avoids `pasarguard restart` streaming logs forever."""
     cwd = str(PASARGUARD_DIR)
     migrator.job.log("Restarting PasarGuard (docker compose)...")
     ok, _ = await migrator._run_cmd(
@@ -123,23 +163,24 @@ async def restart_pasarguard(migrator, wait: bool = True) -> None:
         await wait_pasarguard_ready(migrator, max_wait=60)
 
 
-async def _wait_db_service(migrator, service: str, password: str | None, attempts: int = 20) -> None:
+async def _wait_db_service(migrator, target_db: str, service: str, password: str | None, attempts: int = 20) -> None:
     cwd = str(PASARGUARD_DIR)
-    pwd = password or read_env_var(
-        PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.exists() else "",
-        "POSTGRES_PASSWORD",
-    ) or "password"
+    conn = _target_conn(target_db, password)
+    user = conn.get("user") or ("postgres" if service in ("postgresql", "timescaledb") else "root")
+    pwd = conn.get("password") or "password"
+    db = conn.get("database") or "pasarguard"
+    host = conn.get("host") or "127.0.0.1"
 
-    for i in range(attempts):
+    for _ in range(attempts):
         if service in ("postgresql", "timescaledb"):
             cmd = (
                 f'cd "{cwd}" && docker compose exec -T {service} '
-                f'env PGPASSWORD="{pwd}" psql -U postgres -d pasarguard -c "SELECT 1"'
+                f'env PGPASSWORD="{pwd}" psql -U {user} -d {db} -c "SELECT 1"'
             )
         elif service in ("mysql", "mariadb"):
             cmd = (
                 f'cd "{cwd}" && docker compose exec -T {service} '
-                f'mysqladmin ping -h 127.0.0.1 -u root -p"{pwd}"'
+                f'mysqladmin ping -h {host} -u {user} -p"{pwd}"'
             )
         else:
             return
@@ -149,7 +190,7 @@ async def _wait_db_service(migrator, service: str, password: str | None, attempt
         )
         await proc.wait()
         if proc.returncode == 0:
-            migrator.job.log(f"Database service {service} is ready")
+            migrator.job.log(f"Database service {service} ready (db={db}, user={user})")
             return
         await asyncio.sleep(3)
 
@@ -158,30 +199,32 @@ async def _wait_db_service(migrator, service: str, password: str | None, attempt
 
 async def read_target_alembic_version(migrator, target_db: str, password: str | None) -> str | None:
     if target_db == "sqlite":
-        from app.config import PASARGUARD_DATA
-        return read_sqlite_alembic_version(PASARGUARD_DATA / "db.sqlite3")
+        conn = _target_conn("sqlite", password)
+        path = conn.get("sqlite_path") or str(PASARGUARD_DATA / "db.sqlite3")
+        return read_sqlite_alembic_version(path)
 
     service = resolve_db_service(target_db)
     if not service:
         return None
 
+    conn = _target_conn(target_db, password)
+    user = conn.get("user") or ("postgres" if service in ("postgresql", "timescaledb") else "root")
+    pwd = conn.get("password") or "password"
+    db = conn.get("database") or "pasarguard"
     cwd = str(PASARGUARD_DIR)
-    pwd = password or read_env_var(
-        PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.exists() else "",
-        "POSTGRES_PASSWORD",
-    ) or "password"
 
     if service in ("postgresql", "timescaledb"):
         cmd = (
             f'cd "{cwd}" && docker compose exec -T {service} '
-            f'env PGPASSWORD="{pwd}" psql -U postgres -d pasarguard -tAc '
+            f'env PGPASSWORD="{pwd}" psql -U {user} -d {db} -tAc '
             f'"SELECT version_num FROM alembic_version LIMIT 1"'
         )
     elif service in ("mysql", "mariadb"):
+        host = conn.get("host") or "127.0.0.1"
         cmd = (
             f'cd "{cwd}" && docker compose exec -T {service} '
-            f'mysql -u root -p"{pwd}" -h 127.0.0.1 -N -e '
-            f'"SELECT version_num FROM pasarguard.alembic_version LIMIT 1"'
+            f'mysql -u {user} -p"{pwd}" -h {host} -N -e '
+            f'"SELECT version_num FROM `{db}`.alembic_version LIMIT 1"'
         )
     else:
         return None
@@ -197,7 +240,6 @@ async def read_target_alembic_version(migrator, target_db: str, password: str | 
 
 
 async def run_alembic_upgrade(migrator) -> bool:
-    """Try common in-container Alembic commands."""
     cwd = str(PASARGUARD_DIR)
     commands = [
         ["docker", "compose", "exec", "-T", "pasarguard", "alembic", "upgrade", "head"],
@@ -218,19 +260,35 @@ async def run_alembic_upgrade(migrator) -> bool:
 async def set_target_alembic_version(
     migrator, target_db: str, version: str, password: str | None,
 ) -> bool:
-    """Align target alembic_version with source (required by db-migrations tool)."""
     if not version:
         return False
+
+    if target_db == "sqlite":
+        conn = _target_conn("sqlite", password)
+        path = Path(conn.get("sqlite_path") or PASARGUARD_DATA / "db.sqlite3")
+        if not path.parent.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            db = sqlite3.connect(str(path))
+            db.execute("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32))")
+            db.execute("DELETE FROM alembic_version")
+            db.execute("INSERT INTO alembic_version (version_num) VALUES (?)", (version,))
+            db.commit()
+            db.close()
+            migrator.job.log(f"SQLite alembic_version set to {version}")
+            return True
+        except Exception:
+            return False
 
     service = resolve_db_service(target_db)
     if not service:
         return False
 
+    conn = _target_conn(target_db, password)
+    user = conn.get("user") or ("postgres" if service in ("postgresql", "timescaledb") else "root")
+    pwd = conn.get("password") or "password"
+    db = conn.get("database") or "pasarguard"
     cwd = str(PASARGUARD_DIR)
-    pwd = password or read_env_var(
-        PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.exists() else "",
-        "POSTGRES_PASSWORD",
-    ) or "password"
 
     if service in ("postgresql", "timescaledb"):
         sql = (
@@ -239,16 +297,17 @@ async def set_target_alembic_version(
         )
         cmd = (
             f'cd "{cwd}" && docker compose exec -T {service} '
-            f'env PGPASSWORD="{pwd}" psql -U postgres -d pasarguard -c "{sql}"'
+            f'env PGPASSWORD="{pwd}" psql -U {user} -d {db} -c "{sql}"'
         )
     elif service in ("mysql", "mariadb"):
+        host = conn.get("host") or "127.0.0.1"
         sql = (
             f"DELETE FROM alembic_version; "
             f"INSERT INTO alembic_version (version_num) VALUES ('{version}');"
         )
         cmd = (
             f'cd "{cwd}" && docker compose exec -T {service} '
-            f'mysql -u root -p"{pwd}" -h 127.0.0.1 pasarguard -e "{sql}"'
+            f'mysql -u {user} -p"{pwd}" -h {host} {db} -e "{sql}"'
         )
     else:
         return False
@@ -258,7 +317,7 @@ async def set_target_alembic_version(
     )
     await proc.wait()
     if proc.returncode == 0:
-        migrator.job.log(f"Target alembic_version set to {version}")
+        migrator.job.log(f"Target alembic_version set to {version} (db={db}, user={user})")
         return True
     return False
 
@@ -267,22 +326,35 @@ async def ensure_schema_initialized(
     migrator,
     target_db: str,
     password: str | None = None,
-    source_sqlite: str | Path | None = None,
+    source_db: str | None = None,
+    source_path: str | Path | None = None,
 ) -> str | None:
     """
-    Boot PasarGuard on the target DB so Alembic creates schema, then align
-    alembic_version with the Marzban source when needed for db-migrations.
+    Boot PasarGuard on the target DB so Alembic creates schema (all DB types),
+    then align alembic_version with source when needed for db-migrations.
     """
     cwd = str(PASARGUARD_DIR)
-    source_version = read_sqlite_alembic_version(source_sqlite) if source_sqlite else None
+    conn = _target_conn(target_db, password)
+    migrator.job.log(
+        f"Target DB connection from PasarGuard .env: "
+        f"type={target_db}, user={conn.get('user')}, database={conn.get('database')}, "
+        f"host={conn.get('host')}, port={conn.get('port') or 'default'}"
+    )
+
+    source_version = read_source_alembic_version(source_db or "sqlite", source_path, password)
     if source_version:
         migrator.job.log(f"Source Alembic version: {source_version}")
 
-    service = resolve_db_service(target_db) if target_db != "sqlite" else None
+    service = resolve_db_service(target_db)
     if service:
         migrator.job.log(f"Ensuring DB service {service} is running...")
         await docker_compose_up(migrator, [service])
-        await _wait_db_service(migrator, service, password)
+        await _wait_db_service(migrator, target_db, service, password)
+    elif target_db == "sqlite":
+        PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
+        sqlite_path = Path(conn.get("sqlite_path") or PASARGUARD_DATA / "db.sqlite3")
+        sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+        migrator.job.log(f"Target SQLite path: {sqlite_path}")
 
     migrator.job.log("Stopping PasarGuard before schema init...")
     await migrator._run_cmd(["docker", "compose", "stop", "pasarguard"], cwd=cwd, timeout=120)
@@ -301,9 +373,9 @@ async def ensure_schema_initialized(
 
     if not target_version:
         raise RuntimeError(
-            "Target database has no Alembic schema. "
-            "Start PasarGuard manually once on the target DB (PostgreSQL/MySQL), "
-            "wait until it finishes migrations, then retry."
+            f"Target database ({target_db}) has no Alembic schema. "
+            f"Start PasarGuard manually once on database '{conn.get('database')}' "
+            f"with user '{conn.get('user')}', wait for migrations, then retry."
         )
 
     migrator.job.log(f"Target Alembic version after init: {target_version}")

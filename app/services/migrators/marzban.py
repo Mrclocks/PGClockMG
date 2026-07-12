@@ -18,10 +18,12 @@ from app.services.env_migration import (
     read_env_var,
     merge_marzban_env_into_pasarguard,
     get_panel_url_from_env,
+    get_pasarguard_target_connection,
 )
 from app.services.pasarguard_ops import (
     ensure_schema_initialized,
     restart_pasarguard,
+    resolve_db_service,
 )
 from app.services.backup_analyzer import resolve_extract_root, find_file_in_upload
 
@@ -118,7 +120,11 @@ class MarzbanMigrator(BaseMigrator):
             await self._ensure_target_database_stack(target_db, password)
             await self._update_env_paths(source_db, target_db, password)
             await ensure_schema_initialized(
-                self, target_db, password, source_sqlite=source_sqlite,
+                self,
+                target_db,
+                password,
+                source_db=source_db,
+                source_path=source_sqlite if source_db == "sqlite" else source_sql,
             )
             self.job.set_progress(55, f"Cross-DB import: {source_db} → {target_db}...")
             if source_db == "sqlite":
@@ -357,15 +363,20 @@ class MarzbanMigrator(BaseMigrator):
         return dump_path
 
     async def _import_mysql_dump(self, dump_file: Path, password: str | None):
-        pwd = password or ""
+        conn = get_pasarguard_target_connection("mysql", password)
+        user = conn.get("user") or "root"
+        pwd = conn.get("password") or password or ""
+        db = conn.get("database") or "pasarguard"
+        host = conn.get("host") or "127.0.0.1"
         fixed = dump_file.parent / "fixed_import.sql"
         text = fix_mysql_dump_for_pasarguard(dump_file.read_text(encoding="utf-8", errors="ignore"))
         fixed.write_text(text, encoding="utf-8")
-        await self._run_cmd(["docker", "compose", "up", "-d", "mysql"], cwd=str(PASARGUARD_DIR))
+        svc = resolve_db_service("mysql") or "mysql"
+        await self._run_cmd(["docker", "compose", "up", "-d", svc], cwd=str(PASARGUARD_DIR))
         await asyncio.sleep(6)
         proc = await asyncio.create_subprocess_shell(
-            f'cd "{PASARGUARD_DIR}" && docker compose exec -T mysql '
-            f'mysql -u root -p"{pwd}" -h 127.0.0.1 < "{fixed}"',
+            f'cd "{PASARGUARD_DIR}" && docker compose exec -T {svc} '
+            f'mysql -u {user} -p"{pwd}" -h {host} {db} < "{fixed}"',
         )
         await proc.wait()
 

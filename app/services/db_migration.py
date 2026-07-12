@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from app.config import PASARGUARD_DATA, BACKUP_DIR, TOOLS_DIR
+from app.services.env_migration import build_db_migration_target_url, get_pasarguard_target_connection
 
 
 def map_db_type(db_type: str) -> str:
@@ -12,12 +13,8 @@ def map_db_type(db_type: str) -> str:
 
 
 def build_target_url(db_type: str, password: str | None) -> str:
-    pwd = password or "password"
-    if db_type == "sqlite":
-        return f"sqlite:///{PASARGUARD_DATA}/db.sqlite3"
-    if db_type in ("mysql", "mariadb"):
-        return f"mysql+pymysql://root:{pwd}@127.0.0.1:3306/pasarguard"
-    return f"postgresql+asyncpg://postgres:{pwd}@localhost:5432/pasarguard"
+    """Build target URL from installed PasarGuard .env (user, database, host, port)."""
+    return build_db_migration_target_url(db_type, password)
 
 
 def write_migration_config(
@@ -62,6 +59,11 @@ async def run_db_migration(migrator, source_path: str, source_db: str, target_db
         raise RuntimeError(f"Source database not found: {source_path}")
 
     target_url = build_target_url(target_db, password)
+    conn = get_pasarguard_target_connection(target_db, password)
+    migrator.job.log(
+        f"Target connection: user={conn.get('user')}, database={conn.get('database')}, "
+        f"host={conn.get('host')}, port={conn.get('port') or 'default'}"
+    )
     config_path = write_migration_config(migrator.job.job_id, source_path, source_db, target_db, target_url)
     target_type = map_db_type(target_db)
 

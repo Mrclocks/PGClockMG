@@ -80,6 +80,8 @@ function renderEnvSummaryHtml(summary, kind) {
   if (!summary) return '';
   const db = summary.db_type ? dbDisplayName(summary.db_type) : '—';
   const user = summary.db_user || '—';
+  const dbName = summary.db_name || '—';
+  const host = summary.db_host ? `${summary.db_host}${summary.db_port ? ':' + summary.db_port : ''}` : '—';
   const pwd = summary.has_password ? maskPassword(summary.db_password) : '—';
   const port = summary.panel_port || '8000';
   const fromEnv = kind === 'source' ? t('envSummary.sourceFromBackup') : t('envSummary.targetFromPg');
@@ -87,7 +89,9 @@ function renderEnvSummaryHtml(summary, kind) {
     <p class="check-detail">${fromEnv}</p>
     <div class="env-summary-grid">
       <span><strong>${t('envSummary.db')}</strong> ${db}</span>
+      <span><strong>${t('envSummary.dbName')}</strong> ${dbName}</span>
       <span><strong>${t('envSummary.user')}</strong> ${user}</span>
+      <span><strong>${t('envSummary.host')}</strong> ${host}</span>
       <span><strong>${t('envSummary.password')}</strong> ${pwd}</span>
       <span><strong>${t('envSummary.port')}</strong> ${port}</span>
     </div>`;

@@ -95,8 +95,20 @@ UVICORN_PORT = 8443
     s = extract_env_summary(text)
     assert s["db_type"] == "mysql"
     assert s["db_password"] == "secret123"
+    assert s["db_name"] == "pasarguard"
+    assert s["db_user"] == "root"
     assert s["panel_port"] == "8443"
     print("OK: extract_env_summary")
+
+
+def test_parse_sqlalchemy_urls():
+    from app.services.env_migration import parse_sqlalchemy_url, build_db_migration_target_url
+    pg = parse_sqlalchemy_url("postgresql+asyncpg://pguser:pgpass@dbhost:5433/mydb")
+    assert pg["user"] == "pguser"
+    assert pg["password"] == "pgpass"
+    assert pg["database"] == "mydb"
+    assert pg["port"] == "5433"
+    print("OK: parse_sqlalchemy_url")
 
 
 def test_pasarguard_install_dbs():
@@ -132,6 +144,7 @@ if __name__ == "__main__":
     test_suggest_marzban_mode()
     test_migration_request_marzban_mode()
     test_extract_env_summary()
+    test_parse_sqlalchemy_urls()
     test_read_sqlite_alembic_version()
     test_pasarguard_install_dbs()
     test_import_migrators()

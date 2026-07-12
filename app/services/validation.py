@@ -19,7 +19,7 @@ from app.services.prerequisites import (
 from app.services.upload import get_upload_path, get_upload_analysis
 from app.services.upload_bundle import get_bundle_status
 from app.services.upload_requirements import get_upload_requirements
-from app.services.env_migration import extract_env_summary
+from app.services.env_migration import extract_env_summary, get_pasarguard_target_connection
 
 
 def _db_needs_password(db: str | None) -> bool:
@@ -53,6 +53,11 @@ def _resolve_target_password(params: dict, upload_analysis, source_pwd: str | No
     pwd = params.get("target_db_password")
     if pwd:
         return pwd
+    target_db = params.get("target_db")
+    if target_db:
+        conn = get_pasarguard_target_connection(target_db, params.get("target_db_password"))
+        if conn.get("password"):
+            return conn["password"]
     pg = get_pasarguard_env_summary()
     if pg and pg.get("db_password"):
         return pg["db_password"]

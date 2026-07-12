@@ -2,6 +2,9 @@
 
 import re
 from pathlib import Path
+from urllib.parse import unquote
+
+from app.config import PASARGUARD_DATA, PASARGUARD_ENV
 
 PATH_REPLACEMENTS = [
     ("/opt/marzban", "/opt/pasarguard"),
@@ -38,25 +41,203 @@ def _parse_db_user_from_url(url: str) -> str | None:
     return m.group(1) if m else None
 
 
+def parse_sqlalchemy_url(url: str, env_text: str | None = None) -> dict:
+    """Parse SQLALCHEMY_DATABASE_URL into user, password, host, port, database."""
+    result: dict = {
+        "user": None,
+        "password": None,
+        "host": None,
+        "port": None,
+        "database": None,
+        "sqlite_path": None,
+    }
+    if not url:
+        return result
+
+    low = url.lower()
+    if "sqlite" in low:
+        if "///" in url:
+            result["sqlite_path"] = url.split("///", 1)[1].split("?")[0]
+        else:
+            result["sqlite_path"] = url.split("//", 1)[-1].split("?")[0]
+        result["database"] = Path(result["sqlite_path"]).stem or "pasarguard"
+        return result
+
+    m = re.match(
+        r"^(?:[\w+]+://)"
+        r"(?:([^:@/]*)(?::([^@/]*))?@)?"
+        r"([^:/]+)"
+        r"(?::(\d+))?"
+        r"/([^?]*)",
+        url,
+    )
+    if m:
+        user = m.group(1) or ""
+        result["user"] = unquote(user) if user else None
+        result["password"] = unquote(m.group(2)) if m.group(2) is not None else None
+        result["host"] = m.group(3)
+        result["port"] = m.group(4)
+        result["database"] = m.group(5) or None
+
+    if env_text:
+        if not result["user"]:
+            result["user"] = read_env_var(env_text, "MYSQL_USER") or read_env_var(env_text, "POSTGRES_USER")
+        if not result["password"]:
+            result["password"] = (
+                read_env_var(env_text, "MYSQL_ROOT_PASSWORD")
+                or read_env_var(env_text, "MYSQL_PASSWORD")
+                or read_env_var(env_text, "POSTGRES_PASSWORD")
+            )
+        if not result["database"]:
+            result["database"] = read_env_var(env_text, "MYSQL_DATABASE") or read_env_var(env_text, "POSTGRES_DB")
+        if not result["port"]:
+            result["port"] = read_env_var(env_text, "MYSQL_PORT") or read_env_var(env_text, "POSTGRES_PORT")
+        if not result["host"]:
+            result["host"] = read_env_var(env_text, "MYSQL_HOST") or read_env_var(env_text, "POSTGRES_HOST")
+
+    return result
+
+
+_DEFAULTS = {
+    "sqlite": {"user": None, "password": None, "host": "127.0.0.1", "port": None, "database": "pasarguard"},
+    "mysql": {"user": "root", "password": "password", "host": "127.0.0.1", "port": "3306", "database": "pasarguard"},
+    "mariadb": {"user": "root", "password": "password", "host": "127.0.0.1", "port": "3306", "database": "pasarguard"},
+    "postgresql": {"user": "postgres", "password": "password", "host": "localhost", "port": "5432", "database": "pasarguard"},
+    "timescaledb": {"user": "postgres", "password": "password", "host": "localhost", "port": "5432", "database": "pasarguard"},
+}
+
+
+def get_pasarguard_target_connection(
+    target_db: str,
+    password_override: str | None = None,
+    env_text: str | None = None,
+) -> dict:
+    """Read target DB user/name/host/port/password from installed PasarGuard .env."""
+    defaults = _DEFAULTS.get(target_db, _DEFAULTS["postgresql"]).copy()
+    defaults["sqlite_path"] = str(PASARGUARD_DATA / "db.sqlite3")
+    defaults["db_type"] = target_db
+
+    text = env_text
+    if text is None and PASARGUARD_ENV.exists():
+        text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+
+    if not text:
+        if password_override:
+            defaults["password"] = password_override
+        return defaults
+
+    url = read_env_var(text, "SQLALCHEMY_DATABASE_URL") or ""
+    parsed = parse_sqlalchemy_url(url, text)
+    conn = {**defaults}
+    for key, val in parsed.items():
+        if val is not None and val != "":
+            conn[key] = val
+
+    if target_db in ("mysql", "mariadb"):
+        conn["user"] = conn.get("user") or read_env_var(text, "MYSQL_USER") or defaults["user"]
+        conn["password"] = (
+            password_override
+            or conn.get("password")
+            or read_env_var(text, "MYSQL_ROOT_PASSWORD")
+            or read_env_var(text, "MYSQL_PASSWORD")
+            or defaults["password"]
+        )
+        conn["database"] = read_env_var(text, "MYSQL_DATABASE") or conn.get("database") or defaults["database"]
+        conn["host"] = conn.get("host") or read_env_var(text, "MYSQL_HOST") or defaults["host"]
+        conn["port"] = conn.get("port") or read_env_var(text, "MYSQL_PORT") or defaults["port"]
+    elif target_db in ("postgresql", "timescaledb"):
+        conn["user"] = conn.get("user") or read_env_var(text, "POSTGRES_USER") or defaults["user"]
+        conn["password"] = (
+            password_override
+            or conn.get("password")
+            or read_env_var(text, "POSTGRES_PASSWORD")
+            or defaults["password"]
+        )
+        conn["database"] = read_env_var(text, "POSTGRES_DB") or conn.get("database") or defaults["database"]
+        conn["host"] = conn.get("host") or read_env_var(text, "POSTGRES_HOST") or defaults["host"]
+        conn["port"] = conn.get("port") or read_env_var(text, "POSTGRES_PORT") or defaults["port"]
+    elif target_db == "sqlite":
+        conn["sqlite_path"] = conn.get("sqlite_path") or defaults["sqlite_path"]
+        conn["database"] = Path(conn["sqlite_path"]).name
+
+    conn["db_type"] = target_db
+    return conn
+
+
+def build_db_migration_target_url(target_db: str, password: str | None = None) -> str:
+    """Build connection URL for official db-migrations tool (pymysql/asyncpg)."""
+    conn = get_pasarguard_target_connection(target_db, password)
+    pwd = conn.get("password") or "password"
+    if target_db == "sqlite":
+        path = conn.get("sqlite_path") or str(PASARGUARD_DATA / "db.sqlite3")
+        return f"sqlite:///{path}"
+    if target_db in ("mysql", "mariadb"):
+        user = conn.get("user") or "root"
+        host = conn.get("host") or "127.0.0.1"
+        port = conn.get("port") or "3306"
+        db = conn.get("database") or "pasarguard"
+        return f"mysql+pymysql://{user}:{pwd}@{host}:{port}/{db}"
+    user = conn.get("user") or "postgres"
+    host = conn.get("host") or "localhost"
+    port = conn.get("port") or "5432"
+    db = conn.get("database") or "pasarguard"
+    return f"postgresql+asyncpg://{user}:{pwd}@{host}:{port}/{db}"
+
+
+def build_sqlalchemy_url_for_target(target_db: str, password_override: str | None = None) -> str:
+    """Build SQLALCHEMY_DATABASE_URL line for PasarGuard .env (async drivers)."""
+    conn = get_pasarguard_target_connection(target_db, password_override)
+    pwd = conn.get("password") or "password"
+    if target_db == "sqlite":
+        path = conn.get("sqlite_path") or "/var/lib/pasarguard/db.sqlite3"
+        return f"sqlite+aiosqlite:///{path}"
+    if target_db in ("mysql", "mariadb"):
+        user = conn.get("user") or "root"
+        host = conn.get("host") or "127.0.0.1"
+        port = conn.get("port") or "3306"
+        db = conn.get("database") or "pasarguard"
+        return f"mysql+asyncmy://{user}:{pwd}@{host}:{port}/{db}"
+    user = conn.get("user") or "postgres"
+    host = conn.get("host") or "localhost"
+    port = conn.get("port") or "5432"
+    db = conn.get("database") or "pasarguard"
+    return f"postgresql+asyncpg://{user}:{pwd}@{host}:{port}/{db}"
+
+
 def extract_env_summary(text: str) -> dict:
     """Extract DB credentials and panel port from a panel .env file."""
     db_type = detect_db_type_from_env(text)
     url = read_env_var(text, "SQLALCHEMY_DATABASE_URL") or ""
+    parsed = parse_sqlalchemy_url(url, text)
     mysql_password = read_env_var(text, "MYSQL_ROOT_PASSWORD") or read_env_var(text, "MYSQL_PASSWORD")
     postgres_password = read_env_var(text, "POSTGRES_PASSWORD")
-    db_password = None
-    db_user = None
+    db_password = parsed.get("password")
+    db_user = parsed.get("user")
+    db_name = parsed.get("database")
+    db_host = parsed.get("host")
+    db_port = parsed.get("port")
     if db_type in ("mysql", "mariadb"):
-        db_user = _parse_db_user_from_url(url) or "root"
-        db_password = mysql_password
+        db_user = db_user or read_env_var(text, "MYSQL_USER") or "root"
+        db_password = db_password or mysql_password
+        db_name = db_name or read_env_var(text, "MYSQL_DATABASE") or "pasarguard"
+        db_host = db_host or read_env_var(text, "MYSQL_HOST") or "127.0.0.1"
+        db_port = db_port or read_env_var(text, "MYSQL_PORT") or "3306"
     elif db_type in ("postgresql", "timescaledb"):
-        db_user = _parse_db_user_from_url(url) or "postgres"
-        db_password = postgres_password
+        db_user = db_user or read_env_var(text, "POSTGRES_USER") or "postgres"
+        db_password = db_password or postgres_password
+        db_name = db_name or read_env_var(text, "POSTGRES_DB") or "pasarguard"
+        db_host = db_host or read_env_var(text, "POSTGRES_HOST") or "localhost"
+        db_port = db_port or read_env_var(text, "POSTGRES_PORT") or "5432"
+    elif db_type == "sqlite":
+        db_name = Path(parsed.get("sqlite_path") or "db.sqlite3").name
     panel_port = read_env_var(text, "UVICORN_PORT") or "8000"
     panel_host = read_env_var(text, "UVICORN_HOST") or "0.0.0.0"
     return {
         "db_type": db_type,
         "db_user": db_user,
+        "db_name": db_name,
+        "db_host": db_host,
+        "db_port": db_port,
         "db_password": db_password,
         "mysql_password": mysql_password,
         "postgres_password": postgres_password,
@@ -92,6 +273,7 @@ def transform_marzban_env(
     """
     Convert Marzban .env to PasarGuard .env per:
     https://docs.pasarguard.org/en/migration/marzban/
+    Preserves user/database/host from installed PasarGuard .env when available.
     """
     for old, new in PATH_REPLACEMENTS:
         text = text.replace(old, new)
@@ -102,20 +284,9 @@ def transform_marzban_env(
 
     text = re.sub(r"(?m)^(\s*MYSQL_DATABASE\s*=\s*)marzban\s*$", r"\1pasarguard", text, flags=re.I)
 
-    mysql_pwd = (
-        password_override
-        or read_env_var(text, "MYSQL_ROOT_PASSWORD")
-        or read_env_var(text, "MYSQL_PASSWORD")
-        or "password"
-    )
-    pg_pwd = password_override or read_env_var(text, "POSTGRES_PASSWORD") or "password"
-
-    if target_db == "sqlite":
-        db_url = 'SQLALCHEMY_DATABASE_URL = "sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3"'
-    elif target_db in ("mysql", "mariadb"):
-        db_url = f'SQLALCHEMY_DATABASE_URL = "mysql+asyncmy://root:{mysql_pwd}@127.0.0.1/pasarguard"'
-    else:
-        db_url = f'SQLALCHEMY_DATABASE_URL = "postgresql+asyncpg://postgres:{pg_pwd}@localhost:5432/pasarguard"'
+    pg_env = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.exists() else None
+    sqlalchemy_url = build_sqlalchemy_url_for_target(target_db, password_override)
+    db_url = f'SQLALCHEMY_DATABASE_URL = "{sqlalchemy_url}"'
 
     if re.search(r"SQLALCHEMY_DATABASE_URL", text, re.I):
         text = re.sub(
@@ -132,21 +303,15 @@ def transform_marzban_env(
 
 def transform_pasarguard_env_for_target(text: str, target_db: str, password: str | None = None) -> str:
     """Update existing PasarGuard .env when only DB backend changes."""
-    pwd = password or read_env_var(text, "MYSQL_ROOT_PASSWORD") or read_env_var(text, "POSTGRES_PASSWORD") or "password"
-    if target_db == "sqlite":
-        url = 'SQLALCHEMY_DATABASE_URL = "sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3"'
-    elif target_db in ("mysql", "mariadb"):
-        url = f'SQLALCHEMY_DATABASE_URL = "mysql+asyncmy://root:{pwd}@127.0.0.1/pasarguard"'
-    else:
-        url = f'SQLALCHEMY_DATABASE_URL = "postgresql+asyncpg://postgres:{pwd}@localhost:5432/pasarguard"'
+    url_line = f'SQLALCHEMY_DATABASE_URL = "{build_sqlalchemy_url_for_target(target_db, password)}"'
     if re.search(r"SQLALCHEMY_DATABASE_URL", text, re.I):
         return re.sub(
             r'#\s*SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"|SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"',
-            url,
+            url_line,
             text,
             count=1,
         )
-    return text.rstrip() + f"\n{url}\n"
+    return text.rstrip() + f"\n{url_line}\n"
 
 
 def transform_compose_marzban_to_pasarguard(text: str) -> str:
