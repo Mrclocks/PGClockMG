@@ -31,6 +31,7 @@ class MigrationRequest(BaseModel):
     target_db: str
     target_db_password: Optional[str] = None
     upload_id: Optional[str] = None
+    upload_bundle_id: Optional[str] = None
     install_redirect: bool = True
     pasarguard_install: bool = False
     remnawave_url: Optional[str] = None

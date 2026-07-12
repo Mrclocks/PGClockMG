@@ -16,6 +16,8 @@ from app.services.prerequisites import (
     get_marzban_db_type,
 )
 from app.services.upload import get_upload_path, get_upload_analysis
+from app.services.upload_bundle import get_bundle_status
+from app.services.upload_requirements import get_upload_requirements
 
 
 def validate_migration(params: dict) -> dict:
@@ -32,7 +34,8 @@ def validate_migration(params: dict) -> dict:
         errors.append(_msg("Docker must be running", "Docker باید در حال اجرا باشد", "Docker должен работать"))
 
     marzban_mode = params.get("marzban_mode") or "auto"
-    prereq = check_prerequisites(panel_id, marzban_mode=marzban_mode)
+    bundle_id = params.get("upload_bundle_id")
+    prereq = check_prerequisites(panel_id, marzban_mode=marzban_mode, upload_bundle_id=bundle_id)
     if not prereq["ok"]:
         for c in prereq["checks"]:
             if not c.get("optional") and not c["ok"]:
@@ -40,13 +43,23 @@ def validate_migration(params: dict) -> dict:
 
     source_db = params.get("source_db")
     target_db = params.get("target_db")
-    upload_path = get_upload_path(params["upload_id"]) if params.get("upload_id") else None
-    upload_analysis = get_upload_analysis(params["upload_id"]) if params.get("upload_id") else None
+    upload_path = params.get("upload_path") or params.get("upload_work_dir")
+    if not upload_path and params.get("upload_id"):
+        upload_path = get_upload_path(params["upload_id"])
+
+    bundle_status = get_bundle_status(bundle_id) if bundle_id else None
+    upload_analysis = (
+        params.get("upload_analysis")
+        or (bundle_status.get("analysis") if bundle_status else None)
+        or (get_upload_analysis(params["upload_id"]) if params.get("upload_id") else None)
+    )
+
+    errors.extend(_validate_uploads(panel_id, source_db, marzban_mode, upload_path, bundle_status, upload_analysis))
 
     if panel_id == "marzban":
-        errors.extend(_validate_marzban(params, marzban_mode, source_db, target_db, upload_path, upload_analysis))
+        errors.extend(_validate_marzban(params, marzban_mode, source_db, target_db, upload_path, upload_analysis, bundle_status))
     elif panel_id == "3x-ui":
-        errors.extend(_validate_xui(upload_path))
+        errors.extend(_validate_xui(upload_path, bundle_status))
     elif panel_id == "remnawave":
         if not params.get("remnawave_url") or not params.get("remnawave_token"):
             errors.append(_msg("Remnawave URL and API token required", "URL و Token رمناوی لازم است", "Нужны URL и токен Remnawave"))
@@ -67,16 +80,55 @@ def validate_migration(params: dict) -> dict:
                 from app.services.env_migration import read_env_var
                 text = env_path.read_text(encoding="utf-8", errors="ignore")
                 pwd = read_env_var(text, "MYSQL_ROOT_PASSWORD") or read_env_var(text, "MYSQL_PASSWORD")
+        if not pwd and upload_analysis and upload_analysis.get("mysql_password_found"):
+            pwd = "from-env"
+        if not pwd and bundle_status:
+            for s in bundle_status.get("slots", []):
+                if s.get("id") == "env" and s.get("ok"):
+                    pwd = "from-env"
         if not pwd:
             errors.append(_msg("Database password required", "رمز دیتابیس لازم است", "Нужен пароль БД"))
 
     return {"ok": len(errors) == 0, "errors": errors}
 
 
-def _validate_marzban(params, mode, source_db, target_db, upload_path, upload_analysis=None) -> list:
+def _validate_uploads(panel_id, source_db, marzban_mode, upload_path, bundle_status, upload_analysis) -> list:
+    errors = []
+    reqs = get_upload_requirements(panel_id, source_db, marzban_mode)
+    if reqs["upload_mode"] == "none":
+        return errors
+    if reqs["upload_mode"] == "optional":
+        if upload_path or (bundle_status and bundle_status.get("complete")):
+            pass
+        else:
+            return errors
+    if reqs["upload_mode"] == "required":
+        if bundle_status and bundle_status.get("complete"):
+            return errors
+        if upload_path and upload_analysis and upload_analysis.get("backup_ok"):
+            return errors
+        if panel_id == "marzban" and marzban_mode == "fresh" and is_marzban_installed():
+            return errors
+        if panel_id == "3x-ui" and find_xui_db():
+            return errors
+        if bundle_status and bundle_status.get("missing"):
+            for m in bundle_status["missing"]:
+                label = m.get("label")
+                if label:
+                    errors.append(label)
+            return errors
+        errors.append(_msg(
+            "Upload all required files before continuing",
+            "فایل‌های اجباری را آپلود کنید",
+            "Загрузите все обязательные файлы",
+        ))
+    return errors
+
+
+def _validate_marzban(params, mode, source_db, target_db, upload_path, upload_analysis=None, bundle_status=None) -> list:
     errors = []
     if mode == "auto":
-        if upload_path:
+        if upload_path or bundle_status:
             mode = "fresh"
         elif is_marzban_installed() and not is_pasarguard_installed():
             mode = "inplace"
@@ -103,13 +155,15 @@ def _validate_marzban(params, mode, source_db, target_db, upload_path, upload_an
     elif mode == "fresh":
         if not is_pasarguard_installed():
             errors.append(_msg("Install PasarGuard manually before fresh migration", "ابتدا PasarGuard را دستی نصب کنید", "Установите PasarGuard вручную"))
-        has_source = bool(upload_path) or (is_marzban_installed() and source_db == "sqlite" and (MARZBAN_DATA / "db.sqlite3").exists())
+        has_source = bool(upload_path) or (bundle_status and bundle_status.get("complete"))
+        has_source = has_source or (is_marzban_installed() and source_db == "sqlite" and (MARZBAN_DATA / "db.sqlite3").exists())
         if source_db in ("mysql", "mariadb"):
-            has_source = has_source or bool(upload_path) or is_marzban_installed()
+            has_source = has_source or is_marzban_installed()
         if upload_analysis:
-            if not upload_analysis.get("backup_ok"):
+            if not upload_analysis.get("backup_ok") and not (bundle_status and bundle_status.get("complete")):
                 for m in upload_analysis.get("missing", []):
-                    errors.append(m)
+                    if isinstance(m, dict):
+                        errors.append(m)
             elif upload_analysis.get("detected_source_db") and source_db:
                 if upload_analysis["detected_source_db"] != source_db:
                     errors.append(_msg(
@@ -117,21 +171,18 @@ def _validate_marzban(params, mode, source_db, target_db, upload_path, upload_an
                         f"بکاپ {upload_analysis['detected_source_db']} است ولی شما {source_db} انتخاب کردید",
                         f"В копии {upload_analysis['detected_source_db']}, выбрано {source_db}",
                     ))
-            if source_db in ("mysql", "mariadb") and not upload_analysis.get("mysql_password_found"):
-                pwd = params.get("source_db_password") or params.get("target_db_password")
-                if not pwd:
-                    errors.append(_msg("Database password required", "رمز دیتابیس لازم است", "Нужен пароль БД"))
         elif not has_source:
             errors.append(_msg("Marzban backup or live database required", "بکاپ یا دیتابیس Marzban لازم است", "Нужна копия или БД Marzban"))
 
     return errors
 
 
-def _validate_xui(upload_path) -> list:
+def _validate_xui(upload_path, bundle_status=None) -> list:
     errors = []
     if not is_pasarguard_installed():
         errors.append(_msg("PasarGuard must be installed first", "ابتدا PasarGuard را نصب کنید", "Сначала установите PasarGuard"))
-    if not find_xui_db() and not upload_path:
+    has_db = find_xui_db() or upload_path or (bundle_status and bundle_status.get("complete"))
+    if not has_db:
         errors.append(_msg("x-ui.db not found — upload backup", "x-ui.db یافت نشد — بکاپ آپلود کنید", "x-ui.db не найден — загрузите копию"))
     return errors
 

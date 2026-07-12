@@ -562,6 +562,65 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
 
 .upload-inventory .inv-map li { margin: 4px 0; }
 
+.upload-mode-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.upload-mode-btn {
+  flex: 1;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.upload-mode-btn.active {
+  border-color: var(--primary);
+  background: var(--primary-glow);
+  color: var(--primary);
+}
+
+.upload-slots { display: flex; flex-direction: column; gap: 12px; }
+
+.upload-slot {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  background: var(--bg-elevated);
+}
+
+.upload-slot.done { border-color: rgba(16,185,129,0.4); }
+
+.upload-slot-head { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 10px; }
+.upload-slot-icon { font-size: 1.1rem; min-width: 24px; }
+.upload-slot-badge {
+  font-size: 0.7rem;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.upload-slot-zone { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.upload-slot-file { font-size: 0.8rem; color: var(--success); }
+
+.upload-bundle-status {
+  margin-top: 14px;
+  padding: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.btn-sm { padding: 6px 12px; font-size: 0.8rem; }
+
 /* Info / Warning boxes */
 .info-box, .warnings-box, .warning-card, .option-card, .summary-card {
   background: var(--bg-card);

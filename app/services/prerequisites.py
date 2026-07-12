@@ -101,7 +101,7 @@ def _suggest_marzban_mode(marzban_installed: bool, pg_installed: bool) -> str:
     return "fresh"
 
 
-def check_prerequisites(panel_id: str, marzban_mode: str | None = None, upload_id: str | None = None) -> dict:
+def check_prerequisites(panel_id: str, marzban_mode: str | None = None, upload_id: str | None = None, upload_bundle_id: str | None = None) -> dict:
     panel = PANELS.get(panel_id)
     if not panel:
         return {"ok": False, "checks": [], "message": {"en": "Invalid panel", "fa": "پنل نامعتبر", "ru": "Неверная панель"}}
@@ -139,7 +139,13 @@ def check_prerequisites(panel_id: str, marzban_mode: str | None = None, upload_i
     xui_db = find_xui_db()
 
     upload_analysis = None
-    if upload_id:
+    bundle_status = None
+    if upload_bundle_id:
+        from app.services.upload_bundle import get_bundle_status
+        bundle_status = get_bundle_status(upload_bundle_id)
+        if bundle_status:
+            upload_analysis = bundle_status.get("analysis")
+    elif upload_id:
         from app.services.upload import get_upload_analysis
         upload_analysis = get_upload_analysis(upload_id)
 
@@ -203,6 +209,8 @@ def check_prerequisites(panel_id: str, marzban_mode: str | None = None, upload_i
         })
         has_marzban_data = marzban_installed or (MARZBAN_DATA / "db.sqlite3").exists()
         backup_ok = upload_analysis.get("backup_ok") if upload_analysis else False
+        if bundle_status and bundle_status.get("complete"):
+            backup_ok = True
         checks.append({
             "id": "marzban_source",
             "label": {"en": "Marzban data or backup", "fa": "داده Marzban یا بکاپ", "ru": "Данные Marzban или копия"},

@@ -3,7 +3,7 @@
 import socket
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect, Form
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
 
@@ -12,7 +12,11 @@ from app.panels import PANELS, DATABASE_TYPES, SUBSCRIPTION_LABELS
 from app.services.prerequisites import check_prerequisites, get_recommended_target_dbs, get_system_status
 from app.services.orchestrator import start_migration, get_job
 from app.services.validation import validate_migration
-from app.services.upload import save_upload, get_upload_path
+from app.services.upload import save_upload, get_upload_path, get_upload_analysis
+from app.services.upload_bundle import (
+    init_bundle, save_bundle_slot, get_bundle_status, prepare_bundle_workspace, bundle_has_upload,
+)
+from app.services.upload_requirements import get_upload_requirements
 from app.config import WEB_PORT
 
 app = FastAPI(title="PG-Migrator", version="1.0.0")
@@ -35,7 +39,7 @@ def _server_ip() -> str:
 @app.get("/api/info")
 async def api_info():
     return {
-        "version": "1.3.1",
+        "version": "1.4.0",
         "server_ip": _server_ip(),
         "web_port": WEB_PORT,
         "panels": [p.model_dump() for p in PANELS.values()],
@@ -64,10 +68,17 @@ async def api_system_check():
 
 
 @app.get("/api/prerequisites/{panel_id}")
-async def api_prerequisites(panel_id: str, marzban_mode: str | None = None, upload_id: str | None = None):
+async def api_prerequisites(
+    panel_id: str,
+    marzban_mode: str | None = None,
+    upload_id: str | None = None,
+    upload_bundle_id: str | None = None,
+):
     if panel_id not in PANELS:
         raise HTTPException(404, "پنل یافت نشد")
-    return check_prerequisites(panel_id, marzban_mode=marzban_mode, upload_id=upload_id)
+    return check_prerequisites(
+        panel_id, marzban_mode=marzban_mode, upload_id=upload_id, upload_bundle_id=upload_bundle_id,
+    )
 
 
 @app.get("/api/upload/{upload_id}/analysis")
@@ -84,32 +95,85 @@ async def api_recommendations(panel_id: str, source_db: str):
     return get_recommended_target_dbs(panel_id, source_db)
 
 
+@app.get("/api/upload-requirements")
+async def api_upload_requirements(
+    panel_id: str,
+    source_db: str | None = None,
+    marzban_mode: str | None = None,
+):
+    if panel_id not in PANELS:
+        raise HTTPException(404, "پنل یافت نشد")
+    return get_upload_requirements(panel_id, source_db, marzban_mode)
+
+
+@app.get("/api/upload-bundle/{bundle_id}")
+async def api_upload_bundle(bundle_id: str):
+    status = get_bundle_status(bundle_id)
+    if status is None:
+        raise HTTPException(404, "Bundle not found")
+    return status
+
+
 @app.post("/api/upload")
-async def api_upload(file: UploadFile = File(...)):
+async def api_upload(
+    file: UploadFile = File(...),
+    bundle_id: str | None = Form(None),
+    slot: str | None = Form(None),
+    panel_id: str | None = Form(None),
+    source_db: str | None = Form(None),
+    marzban_mode: str | None = Form(None),
+):
     content = await file.read()
     if len(content) > 500 * 1024 * 1024:
         raise HTTPException(400, "حداکثر حجم فایل ۵۰۰ مگابایت")
-    result = save_upload(content, file.filename or "upload.bin")
+
+    filename = file.filename or "upload.bin"
+
+    if slot or bundle_id:
+        bid = bundle_id or init_bundle()
+        result = save_bundle_slot(
+            bid, slot or "bundle_zip", content, filename,
+            panel_id=panel_id, source_db=source_db, marzban_mode=marzban_mode,
+        )
+        if result.get("error"):
+            raise HTTPException(400, result["error"])
+        return result
+
+    result = save_upload(content, filename)
     return result
+
+
+def _resolve_upload_params(params: dict) -> dict:
+    if params.get("upload_bundle_id"):
+        bid = params["upload_bundle_id"]
+        if bundle_has_upload(bid):
+            work = prepare_bundle_workspace(bid)
+            params["upload_work_dir"] = str(work)
+            params["upload_path"] = str(work)
+            status = get_bundle_status(bid)
+            if status:
+                params["upload_analysis"] = status.get("analysis")
+    elif params.get("upload_id"):
+        path = get_upload_path(params["upload_id"])
+        if path:
+            params["upload_path"] = path
+            analysis = get_upload_analysis(params["upload_id"])
+            if analysis:
+                params["upload_analysis"] = analysis
+    return params
 
 
 @app.post("/api/validate-migration")
 async def api_validate_migration(req: MigrationRequest):
     params = req.model_dump()
-    if req.upload_id:
-        path = get_upload_path(req.upload_id)
-        if path:
-            params["upload_path"] = path
+    params = _resolve_upload_params(params)
     return validate_migration(params)
 
 
 @app.post("/api/migrate")
 async def api_migrate(req: MigrationRequest):
     params = req.model_dump()
-    if req.upload_id:
-        path = get_upload_path(req.upload_id)
-        if path:
-            params["upload_path"] = path
+    params = _resolve_upload_params(params)
 
     validation = validate_migration(params)
     if not validation["ok"]:

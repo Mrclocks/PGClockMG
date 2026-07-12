@@ -12,6 +12,10 @@ const state = {
   targetPassword: '',
   uploadId: null,
   uploadInfo: null,
+  uploadBundleId: null,
+  uploadMode: 'zip',
+  uploadRequirements: null,
+  bundleStatus: null,
   jobId: null,
   serverIp: '',
   detected: {},
@@ -127,11 +131,7 @@ function canProceedStep1() {
 }
 
 function canProceedStep2() {
-  const analysis = state.uploadInfo?.analysis;
-  if (!state.sourceDb) {
-    if (analysis?.detected_source_db) return t('block.selectDetectedDb');
-    return t('block.noSourceDb');
-  }
+  if (!state.sourceDb) return t('block.noSourceDb');
   const panel = state.selectedPanel;
   if (panel?.id === 'remnawave') {
     const url = document.getElementById('remnawaveUrl')?.value?.trim();
@@ -139,27 +139,31 @@ function canProceedStep2() {
     if (!url || !token) return t('block.remnawaveCreds');
   }
   const needsPwd = ['mysql', 'mariadb', 'postgresql', 'timescaledb'].includes(state.sourceDb);
+  const analysis = state.bundleStatus?.analysis || state.uploadInfo?.analysis;
   if (needsPwd && panel?.id !== 'remnawave' && !document.getElementById('sourcePassword')?.value) {
-    if (analysis?.mysql_password_found) {
-      // password will be read from backup .env during migration
-    } else {
+    if (!analysis?.mysql_password_found && !bundleHasEnvPassword()) {
       return t('block.sourcePassword');
     }
   }
-  if (panel?.id === 'marzban' && state.marzbanMode === 'fresh' && !state.detected?.marzban && !state.uploadId) {
-    return t('block.marzbanBackup');
-  }
-  if (panel?.id === 'marzban' && state.uploadId && analysis && !analysis.backup_ok) {
-    const miss = analysis.missing?.[0];
-    return miss ? tr(miss, state.lang) : t('block.backupIncomplete');
-  }
-  if (panel?.id === '3x-ui' && !state.detected?.xui_db && !state.uploadId) {
-    return t('block.xuiDb');
+  if (!uploadSatisfied()) {
+    return t('block.uploadsIncomplete');
   }
   if (analysis?.detected_source_db && state.sourceDb !== analysis.detected_source_db) {
     return t('block.dbMismatch');
   }
   return null;
+}
+
+function uploadSatisfied() {
+  const reqs = state.uploadRequirements;
+  if (!reqs || reqs.upload_mode === 'none') return true;
+  if (reqs.upload_mode === 'optional' && !state.uploadBundleId) return true;
+  return !!state.bundleStatus?.complete;
+}
+
+function bundleHasEnvPassword() {
+  const slots = state.bundleStatus?.slots || [];
+  return slots.some(s => s.id === 'env' && s.ok);
 }
 
 function canProceedStep3() {
@@ -252,6 +256,7 @@ function buildMigrationBody() {
     source_db_password: state.sourcePassword || document.getElementById('sourcePassword')?.value || null,
     target_db_password: state.targetPassword || document.getElementById('targetPassword')?.value || null,
     upload_id: state.uploadId,
+    upload_bundle_id: state.uploadBundleId,
     install_redirect: document.getElementById('installRedirect')?.checked ?? true,
     remnawave_url: document.getElementById('remnawaveUrl')?.value || null,
     remnawave_token: document.getElementById('remnawaveToken')?.value || null,
@@ -324,6 +329,7 @@ async function renderPanelPrereqs(id) {
     const params = new URLSearchParams();
     if (state.marzbanMode) params.set('marzban_mode', state.marzbanMode);
     if (state.uploadId) params.set('upload_id', state.uploadId);
+    if (state.uploadBundleId) params.set('upload_bundle_id', state.uploadBundleId);
     const qs = params.toString() ? `?${params}` : '';
     const res = await fetch(`/api/prerequisites/${id}${qs}`);
     const data = await res.json();
@@ -389,6 +395,7 @@ function selectMarzbanMode(mode) {
     c.classList.toggle('selected', c.dataset.mode === mode);
   });
   if (state.selectedPanel) renderPanelPrereqs(state.selectedPanel.id);
+  if (state.currentStep === 2) renderUploadSection();
   updateStepButtons();
 }
 
@@ -411,9 +418,9 @@ function renderSourceDbs() {
   }).join('');
 
   if (state.detected?.marzban_db) selectSourceDb(state.detected.marzban_db);
-  else if (state.uploadInfo?.analysis?.detected_source_db) selectSourceDb(state.uploadInfo.analysis.detected_source_db);
   else if (state.detected?.pasarguard_db && panel.id === 'pasarguard') selectSourceDb(state.detected.pasarguard_db);
   else if (panel.supported_source_dbs.length === 1) selectSourceDb(panel.supported_source_dbs[0]);
+  else renderUploadSection();
 }
 
 function selectSourceDb(db) {
@@ -423,6 +430,7 @@ function selectSourceDb(db) {
   });
   const needsPwd = ['mysql', 'mariadb', 'postgresql', 'timescaledb'].includes(db);
   document.getElementById('dbCredentials').classList.toggle('hidden', !needsPwd || state.selectedPanel?.id === 'remnawave');
+  renderUploadSection();
   updateStepButtons();
 }
 
@@ -513,7 +521,7 @@ function renderSummary() {
     <div class="summary-row"><span class="summary-label">${s.sourceDb}</span><span>${names[state.sourceDb] || '—'}</span></div>
     <div class="summary-row"><span class="summary-label">${s.targetDb}</span><span>${names[state.targetDb] || '—'}</span></div>
     <div class="summary-row"><span class="summary-label">${s.links}</span><span>${linkLabel}</span></div>
-    <div class="summary-row"><span class="summary-label">${s.backup}</span><span>${state.uploadInfo?.filename || s.server}</span></div>`;
+    <div class="summary-row"><span class="summary-label">${s.backup}</span><span>${state.uploadInfo?.filename || state.bundleStatus?.mode === 'zip' ? t('upload.fullZip') : state.bundleStatus?.mode === 'separate' ? t('upload.separateFiles') : s.server}</span></div>`;
 
   document.getElementById('redirectOption').classList.toggle('hidden', panel.id !== '3x-ui');
 
@@ -631,40 +639,148 @@ function showError(msg, logs) {
 }
 
 function setupUpload() {
+  document.getElementById('uploadModeZip')?.addEventListener('click', () => setUploadMode('zip'));
+  document.getElementById('uploadModeSeparate')?.addEventListener('click', () => setUploadMode('separate'));
+
   const zone = document.getElementById('uploadZone');
-  const input = document.getElementById('fileInput');
+  const input = document.getElementById('fileInputZip');
+  if (!zone || !input) return;
   zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
   zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
-  zone.addEventListener('drop', e => { e.preventDefault(); zone.classList.remove('dragover'); if (e.dataTransfer.files.length) uploadFile(e.dataTransfer.files[0]); });
-  zone.addEventListener('click', e => { if (e.target.id !== 'uploadSelectText') input.click(); });
-  input.addEventListener('change', () => { if (input.files.length) uploadFile(input.files[0]); });
+  zone.addEventListener('drop', e => {
+    e.preventDefault();
+    zone.classList.remove('dragover');
+    if (e.dataTransfer.files.length) uploadSlotFile('bundle_zip', e.dataTransfer.files[0]);
+  });
+  zone.addEventListener('click', e => {
+    if (e.target.id !== 'uploadSelectText') input.click();
+  });
+  input.addEventListener('change', () => {
+    if (input.files.length) uploadSlotFile('bundle_zip', input.files[0]);
+  });
 }
 
-async function uploadFile(file) {
+function setUploadMode(mode) {
+  state.uploadMode = mode;
+  document.querySelectorAll('.upload-mode-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.mode === mode);
+  });
+  document.getElementById('uploadZipPanel')?.classList.toggle('hidden', mode !== 'zip');
+  document.getElementById('uploadSeparatePanel')?.classList.toggle('hidden', mode !== 'separate');
+}
+
+async function renderUploadSection() {
+  const panel = state.selectedPanel;
+  const section = document.getElementById('uploadSection');
+  const notNeeded = document.getElementById('uploadNotNeeded');
+  if (!panel || !section) return;
+
+  const params = new URLSearchParams({
+    panel_id: panel.id,
+    source_db: state.sourceDb || '',
+    marzban_mode: state.marzbanMode || 'auto',
+  });
+  try {
+    const res = await fetch(`/api/upload-requirements?${params}`);
+    state.uploadRequirements = await res.json();
+  } catch (e) {
+    state.uploadRequirements = { upload_mode: 'none', slots: [] };
+  }
+
+  const reqs = state.uploadRequirements;
+  if (reqs.upload_mode === 'none') {
+    section.classList.add('hidden');
+    notNeeded?.classList.remove('hidden');
+    if (notNeeded) notNeeded.textContent = tr(reqs.reason, state.lang);
+    state.bundleStatus = { complete: true, ok: true };
+    updateStepButtons();
+    return;
+  }
+
+  section.classList.remove('hidden');
+  notNeeded?.classList.add('hidden');
+  document.getElementById('uploadSectionTitle').textContent = t('step2.uploadH3');
+  document.getElementById('uploadSectionDesc').textContent = tr(reqs.reason, state.lang);
+  document.getElementById('uploadModeZip').textContent = t('upload.modeZip');
+  document.getElementById('uploadModeSeparate').textContent = t('upload.modeSeparate');
+  setUploadMode(state.uploadMode);
+
+  const slotsEl = document.getElementById('uploadSlots');
+  if (slotsEl) {
+    const separateSlots = (reqs.slots || []).filter(s => s.id !== 'bundle_zip');
+    slotsEl.innerHTML = separateSlots.map(s => {
+      const accept = (s.accept || ['.zip']).join(',');
+      const reqLabel = s.required ? t('upload.required') : t('upload.optional');
+      const st = (state.bundleStatus?.slots || []).find(x => x.id === s.id);
+      const done = st?.ok ? '✅' : s.required ? '⏳' : '○';
+      return `
+        <div class="upload-slot ${st?.ok ? 'done' : ''}" data-slot="${s.id}">
+          <div class="upload-slot-head">
+            <span class="upload-slot-icon">${done}</span>
+            <div>
+              <strong>${tr(s.label, state.lang)}</strong>
+              <span class="upload-slot-badge">${reqLabel}</span>
+              <p class="check-detail">${tr(s.hint, state.lang)}</p>
+            </div>
+          </div>
+          <div class="upload-slot-zone" data-slot="${s.id}">
+            <input type="file" id="slot-${s.id}" accept="${accept}" hidden>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('slot-${s.id}').click()">${t('upload.browse')}</button>
+            <span class="upload-slot-file">${st?.filename || ''}</span>
+          </div>
+        </div>`;
+    }).join('');
+
+    separateSlots.forEach(s => {
+      const inp = document.getElementById(`slot-${s.id}`);
+      if (inp) inp.addEventListener('change', () => {
+        if (inp.files.length) uploadSlotFile(s.id, inp.files[0]);
+      });
+    });
+  }
+  updateStepButtons();
+}
+
+async function uploadSlotFile(slot, file) {
   const status = document.getElementById('uploadStatus');
   const inventory = document.getElementById('uploadInventory');
   status.classList.remove('hidden');
-  inventory.classList.add('hidden');
   status.textContent = `${t('uploading')} ${file.name}...`;
 
   const form = new FormData();
   form.append('file', file);
+  form.append('slot', slot);
+  if (state.uploadBundleId) form.append('bundle_id', state.uploadBundleId);
+  if (state.selectedPanel) form.append('panel_id', state.selectedPanel.id);
+  if (state.sourceDb) form.append('source_db', state.sourceDb);
+  if (state.marzbanMode) form.append('marzban_mode', state.marzbanMode);
 
   try {
     const res = await fetch('/api/upload', { method: 'POST', body: form });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || res.statusText);
+    }
     const data = await res.json();
-    state.uploadId = data.upload_id;
-    state.uploadInfo = data;
-    const a = data.analysis || {};
-    let hint = data.detected?.panel_hint ? ` — ${t('detected')}: ${data.detected.panel_hint}` : '';
-    if (a.detected_source_db) hint += ` — DB: ${a.detected_source_db}`;
-    const okLabel = a.backup_ok ? '✅' : '⚠️';
-    status.textContent = `${okLabel} ${file.name} ${t('uploaded')} (${(data.size / 1024).toFixed(0)} KB)${hint}`;
-    status.style.background = a.backup_ok ? 'var(--success-bg)' : 'var(--warning-bg)';
-    status.style.color = a.backup_ok ? 'var(--success)' : 'var(--warning)';
+    state.uploadBundleId = data.bundle_id;
+    state.bundleStatus = data.bundle_status;
+    state.uploadInfo = data.slot_meta;
 
-    applyUploadAnalysis(data);
-    renderUploadInventory(data);
+    const bs = data.bundle_status || {};
+    const ok = bs.complete;
+    status.textContent = `${ok ? '✅' : '⚠️'} ${file.name} ${t('uploaded')}`;
+    status.style.background = ok ? 'var(--success-bg)' : 'var(--warning-bg)';
+    status.style.color = ok ? 'var(--success)' : 'var(--warning)';
+
+    if (bs.analysis) {
+      renderUploadInventory({ analysis: bs.analysis });
+    } else {
+      inventory?.classList.add('hidden');
+    }
+
+    applyBundleAnalysis(bs);
+    renderUploadSection();
+    renderBundleStatus(bs);
     if (state.selectedPanel) await renderPanelPrereqs(state.selectedPanel.id);
     updateStepButtons();
   } catch (e) {
@@ -674,31 +790,41 @@ async function uploadFile(file) {
   }
 }
 
-function applyUploadAnalysis(data) {
-  const a = data.analysis;
+function applyBundleAnalysis(bs) {
+  const a = bs?.analysis;
   if (!a) return;
-
-  if (a.panel_hint === 'marzban' && state.selectedPanel?.id === 'marzban') {
-    if (!state.marzbanMode || state.marzbanMode === 'inplace') {
-      state.marzbanMode = 'fresh';
-      selectMarzbanMode('fresh');
-    }
+  if (a.detected_source_db && document.querySelector('#sourceDbGrid .db-card')) {
+    selectSourceDb(a.detected_source_db);
   }
-
-  if (a.detected_source_db) {
-    if (document.querySelector('#sourceDbGrid .db-card')) {
-      selectSourceDb(a.detected_source_db);
-    } else {
-      state.sourceDb = a.detected_source_db;
-    }
-  }
-
-  if (a.mysql_password_found && a.paths?.env) {
+  if (a.mysql_password_found) {
     const el = document.getElementById('sourcePassword');
-    if (el && !el.value) {
-      el.placeholder = t('upload.pwdFromEnv');
-    }
+    if (el && !el.value) el.placeholder = t('upload.pwdFromEnv');
   }
+}
+
+function renderBundleStatus(bs) {
+  const el = document.getElementById('uploadBundleStatus');
+  if (!el || !bs) return;
+  if (bs.upload_mode === 'none' || bs.upload_mode === 'optional' && !state.uploadBundleId) {
+    el.classList.add('hidden');
+    return;
+  }
+  const lang = state.lang;
+  const rows = (bs.slots || []).map(s => {
+    const label = s.label ? tr(s.label, lang) : t(`upload.slot.${s.id}`) || s.id;
+    const icon = s.ok ? '✅' : (s.required ? '❌' : '○');
+    const via = s.via === 'bundle_zip' ? ` (${t('upload.viaZip')})` : '';
+    return `<div class="check-item"><span class="check-icon">${icon}</span><div><div>${label}${via}</div><div class="check-detail">${s.filename || (s.required ? t('upload.missing') : t('upload.optional'))}</div></div></div>`;
+  }).join('');
+  const head = bs.complete
+    ? `<p style="color:var(--success);margin-bottom:8px">✅ ${t('upload.allReady')}</p>`
+    : `<p style="color:var(--warning);margin-bottom:8px">⏳ ${t('upload.waitingFiles')}</p>`;
+  el.innerHTML = head + rows;
+  el.classList.remove('hidden');
+}
+
+async function uploadFile(file) {
+  return uploadSlotFile('bundle_zip', file);
 }
 
 function renderUploadInventory(data) {

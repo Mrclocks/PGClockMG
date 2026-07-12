@@ -34,12 +34,13 @@ class MarzbanMigrator(BaseMigrator):
         target_db = params["target_db"]
         password = params.get("target_db_password") or params.get("source_db_password")
         upload_path = params.get("upload_path")
+        upload_work_dir = params.get("upload_work_dir")
 
         marzban_exists = MARZBAN_DIR.exists() or MARZBAN_DATA.exists()
         pg_exists = PASARGUARD_DIR.exists()
 
         if mode == "auto":
-            if upload_path:
+            if upload_path or upload_work_dir:
                 mode = "fresh"
             elif marzban_exists and not pg_exists:
                 mode = "inplace"
@@ -54,7 +55,7 @@ class MarzbanMigrator(BaseMigrator):
         if mode == "inplace":
             return await self._migrate_inplace(source_db, target_db, password)
         return await self._migrate_fresh(
-            source_db, target_db, password, upload_path, marzban_exists,
+            source_db, target_db, password, upload_path, marzban_exists, upload_work_dir,
         )
 
     # ─── Method 1: In-place (Marzban on this server) ─────────────────
@@ -135,7 +136,7 @@ class MarzbanMigrator(BaseMigrator):
 
     async def _migrate_fresh(
         self, source_db: str, target_db: str, password: str | None,
-        upload_path: str | None, marzban_exists: bool,
+        upload_path: str | None, marzban_exists: bool, upload_work_dir: str | None = None,
     ) -> dict:
         self.job.set_progress(10, "Preparing fresh PasarGuard installation...")
 
@@ -145,7 +146,13 @@ class MarzbanMigrator(BaseMigrator):
         source_sql = None
         extra_data_dir = None
 
-        if upload_path:
+        if upload_work_dir:
+            bundled = Path(upload_work_dir)
+            shutil.copytree(bundled, work_dir, dirs_exist_ok=True)
+            source_sqlite, source_sql, extra_data_dir = self._parse_work_dir(work_dir, source_db)
+            await self._apply_backup_env_and_assets(work_dir, source_db, target_db, password)
+            self.job.log(f"Using upload bundle workspace ({len(list(work_dir.rglob('*')))} items)")
+        elif upload_path:
             source_sqlite, source_sql, extra_data_dir = await self._extract_upload(
                 upload_path, work_dir, source_db,
             )
@@ -227,6 +234,41 @@ class MarzbanMigrator(BaseMigrator):
         shutil.rmtree(src, ignore_errors=True)
         self.job.log("Relocated MySQL data from /var/lib/pasarguard/mysql")
 
+    def _parse_work_dir(self, work_dir: Path, source_db: str):
+        source_sqlite = None
+        source_sql = None
+        extra = None
+
+        for name in ("db.sqlite3", "marzban.db", "x-ui.db"):
+            for p in work_dir.rglob(name):
+                source_sqlite = p
+                break
+            if source_sqlite:
+                break
+
+        for p in sorted(work_dir.rglob("*.sql")):
+            source_sql = p
+            break
+
+        for p in work_dir.rglob("xray_config.json"):
+            extra = p.parent
+            break
+        if not extra:
+            for name in ("certs", "templates"):
+                for p in work_dir.rglob(name):
+                    if p.is_dir():
+                        extra = p.parent
+                        break
+                if extra:
+                    break
+
+        if source_db == "sqlite" and not source_sqlite:
+            raise RuntimeError("No SQLite database found in backup (db.sqlite3)")
+        if source_db in ("mysql", "mariadb") and not source_sql:
+            raise RuntimeError("No .sql dump found in backup")
+
+        return source_sqlite, source_sql, extra
+
     async def _extract_upload(self, upload_path: str, work_dir: Path, source_db: str):
         upload = Path(upload_path)
         upload_dir = upload.parent
@@ -284,21 +326,19 @@ class MarzbanMigrator(BaseMigrator):
                 if extra:
                     break
 
-        if source_db == "sqlite" and not source_sqlite:
-            raise RuntimeError("No SQLite database found in backup (db.sqlite3)")
-        if source_db in ("mysql", "mariadb") and not source_sql:
-            raise RuntimeError("No .sql dump found in backup")
-
+        source_sqlite, source_sql, extra_parsed = self._parse_work_dir(work_dir, source_db)
+        extra = extra or extra_parsed
         self.job.log(f"Backup parsed: sqlite={source_sqlite}, sql={source_sql}, assets={extra}")
         return source_sqlite, source_sql, extra
 
     async def _apply_backup_env_and_assets(self, work_dir: Path, source_db: str, target_db: str, password: str | None):
         """Map Marzban backup settings to PasarGuard per official docs."""
-        env_file = None
-        for p in work_dir.rglob(".env"):
-            env_file = p
-            break
-        if env_file and PASARGUARD_ENV.exists():
+        env_file = work_dir / ".env"
+        if not env_file.exists():
+            for p in work_dir.rglob(".env"):
+                env_file = p
+                break
+        if env_file and env_file.exists() and PASARGUARD_ENV.exists():
             marzban_env = env_file.read_text(encoding="utf-8", errors="ignore")
             pg_env = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
             pwd = password or read_env_var(marzban_env, "MYSQL_ROOT_PASSWORD")
