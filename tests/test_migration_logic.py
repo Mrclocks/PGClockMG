@@ -197,6 +197,23 @@ def test_alembic_duplicate_heal_helpers():
     print("OK: alembic duplicate heal helpers")
 
 
+def test_resolve_pasarguard_service():
+    from app.services.pasarguard_ops import resolve_pasarguard_service
+    import app.services.pasarguard_ops as ops
+    from unittest.mock import patch
+
+    compose = """
+services:
+  postgresql:
+    image: postgres:16
+  pasarguard:
+    image: pasarguard/panel:latest
+"""
+    with patch.object(ops, "_compose_text", return_value=compose):
+        assert resolve_pasarguard_service() == "pasarguard"
+    print("OK: resolve_pasarguard_service")
+
+
 def test_import_migrators():
     from app.services.migrators.marzban import MarzbanMigrator
     from app.services.migrators.pasarguard_db import PasarguardDbMigrator
@@ -228,6 +245,7 @@ if __name__ == "__main__":
     test_parse_sqlalchemy_urls()
     test_read_sqlite_alembic_version()
     test_alembic_duplicate_heal_helpers()
+    test_resolve_pasarguard_service()
     test_pasarguard_install_dbs()
     test_import_migrators()
     test_system_status()

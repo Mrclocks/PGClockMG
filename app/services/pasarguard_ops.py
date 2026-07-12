@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import shlex
 import sqlite3
 from pathlib import Path
 
@@ -35,6 +36,8 @@ DB_SERVICES = {
     "mariadb": ("mariadb", "mysql"),
     "sqlite": tuple(),
 }
+
+PASARGUARD_SERVICE_CANDIDATES = ("pasarguard", "panel", "app", "pg")
 
 
 def _compose_text() -> str:
@@ -366,22 +369,100 @@ async def run_alembic_upgrade(migrator) -> bool:
     return False
 
 
-async def _run_pasarguard_alembic(migrator, *args: str) -> tuple[bool, str]:
-    """Run alembic inside one-shot pasarguard container (avoids all-in-one startup)."""
+def resolve_pasarguard_service() -> str:
+    text = _compose_text()
+    for name in PASARGUARD_SERVICE_CANDIDATES:
+        if re.search(rf"^\s*{re.escape(name)}\s*:", text, re.MULTILINE):
+            return name
+    return "pasarguard"
+
+
+def _discover_compose_profiles() -> list[str]:
+    text = _compose_text()
+    found: list[str] = []
+    for block in re.finditer(r"profiles:\s*\n((?:[ \t]+-\s*[^\n]+\n?)+)", text):
+        for item in re.findall(r"-\s*['\"]?([^'\"\n]+)['\"]?", block.group(1)):
+            name = item.strip()
+            if name and name not in found:
+                found.append(name)
+    return found
+
+
+def _compose_cmd(*args: str, profiles: list[str] | None = None) -> list[str]:
+    cmd: list[str] = ["docker", "compose"]
+    for profile in profiles or []:
+        cmd.extend(["--profile", profile])
+    env_file = PASARGUARD_ENV if PASARGUARD_ENV.exists() else PASARGUARD_DIR / ".env"
+    if env_file.exists():
+        cmd.extend(["--env-file", str(env_file)])
+    cmd.extend(args)
+    return cmd
+
+
+def _alembic_output_indicates_success(output: str) -> bool:
+    low = (output or "").lower()
+    return any(
+        marker in low
+        for marker in (
+            "running upgrade",
+            "already at head",
+            "stamp",
+            "(head)",
+        )
+    )
+
+
+async def _ensure_pasarguard_image(migrator, service: str | None = None) -> None:
+    svc = service or resolve_pasarguard_service()
     cwd = str(PASARGUARD_DIR)
-    quoted = " ".join(args)
-    commands = [
-        ["docker", "compose", "run", "--rm", "--no-deps", "pasarguard", "bash", "-lc", f"uv run alembic {quoted}"],
-        ["docker", "compose", "run", "--rm", "--no-deps", "pasarguard", "bash", "-lc", f"cd /code && uv run alembic {quoted}"],
-        ["docker", "compose", "exec", "-T", "pasarguard", "bash", "-lc", f"uv run alembic {quoted}"],
-    ]
-    last_out = ""
-    for cmd in commands:
-        ok, out = await migrator._run_cmd(cmd, cwd=cwd, timeout=300)
-        last_out = out or last_out
-        if ok:
-            return True, last_out
-    return False, last_out
+    migrator.job.log(f"Ensuring Docker image for {svc} is available...")
+    await migrator._run_cmd(_compose_cmd("pull", svc), cwd=cwd, timeout=600)
+
+
+async def _run_pasarguard_alembic(migrator, *args: str) -> tuple[bool, str]:
+    """Run alembic in a one-shot container without starting the full PasarGuard panel."""
+    cwd = str(PASARGUARD_DIR)
+    svc = resolve_pasarguard_service()
+    await _ensure_pasarguard_image(migrator, svc)
+
+    run_prefix = ("run", "--rm", "--no-deps", "-T")
+    quoted_args = " ".join(shlex.quote(a) for a in args)
+    shell_cmd = f"uv run alembic {quoted_args}"
+
+    def _attempts(profiles: list[str] | None = None) -> list[list[str]]:
+        cmds: list[list[str]] = [
+            _compose_cmd(*run_prefix, "--entrypoint", "uv", svc, "run", "alembic", *args, profiles=profiles),
+            _compose_cmd(*run_prefix, "--entrypoint", "", svc, "uv", "run", "alembic", *args, profiles=profiles),
+            _compose_cmd(
+                *run_prefix, "--entrypoint", "bash", svc, "-lc", f"cd /code && {shell_cmd}",
+                profiles=profiles,
+            ),
+            _compose_cmd(*run_prefix, "--entrypoint", "bash", svc, "-lc", shell_cmd, profiles=profiles),
+            _compose_cmd(*run_prefix, "bash", "-lc", shell_cmd, profiles=profiles),
+        ]
+        legacy = []
+        for cmd in cmds[:3]:
+            if cmd[0] == "docker" and len(cmd) > 1 and cmd[1] == "compose":
+                legacy.append(["docker-compose", *cmd[2:]])
+        return cmds + legacy
+
+    all_outputs: list[str] = []
+    profile_sets: list[list[str] | None] = [None]
+    for profile in _discover_compose_profiles():
+        profile_sets.append([profile])
+
+    for profiles in profile_sets:
+        for cmd in _attempts(profiles):
+            ok, out = await migrator._run_cmd(cmd, cwd=cwd, timeout=300)
+            if out:
+                all_outputs.append(out)
+            if ok or _alembic_output_indicates_success(out or ""):
+                return True, out or ""
+            if "is not running" in (out or "").lower():
+                continue
+
+    combined = "\n".join(all_outputs)
+    return False, combined[-4000:]
 
 
 async def get_alembic_head_revision(migrator) -> str | None:
@@ -671,7 +752,9 @@ async def ensure_schema_initialized(
                 migrator.job.log(f"Target Alembic version after heal: {target_version}")
                 return target_version
         raise RuntimeError(
-            f"Failed to initialize target schema with alembic upgrade {revision}:\n{(out or '')[-3000:]}"
+            f"Failed to initialize target schema with alembic upgrade {revision}. "
+            "The wizard runs alembic in a one-shot container (panel does not need to be running).\n"
+            f"{(out or '')[-3000:]}"
         )
 
     target_version = await read_target_alembic_version(migrator, target_db)
