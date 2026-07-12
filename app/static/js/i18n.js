@@ -24,6 +24,14 @@ const I18N = {
       next: 'Continue →',
       prereqTitle: 'What must be installed:',
       uploadHint: 'Missing something? You can upload a backup in the next step.',
+      marzbanModeTitle: 'Marzban migration method',
+      marzbanModeDesc: 'Choose how to migrate based on your server setup (per official PasarGuard docs).',
+      marzbanInplace: 'In-place (Marzban on this server)',
+      marzbanInplaceDesc: 'Marzban is installed here and PasarGuard is NOT. Directories are renamed in-place.',
+      marzbanFresh: 'Fresh PasarGuard install',
+      marzbanFreshDesc: 'PasarGuard already installed, or you will upload a Marzban backup / use another server.',
+      suggested: 'Suggested',
+      alternative: 'Alternative',
     },
     step2: {
       h2: 'Source Database',
@@ -66,6 +74,7 @@ const I18N = {
         links: 'Subscription links',
         backup: 'Backup file',
         server: 'From server',
+        method: 'Migration method',
       },
     },
     step5: {
@@ -112,6 +121,14 @@ const I18N = {
       next: 'ادامه ←',
       prereqTitle: 'چه چیزهایی باید نصب باشد:',
       uploadHint: 'چیزی کم است؟ در مرحله بعد بکاپ آپلود کنید.',
+      marzbanModeTitle: 'روش مهاجرت مرزبان',
+      marzbanModeDesc: 'بر اساس وضعیت سرور یکی از دو روش رسمی PasarGuard را انتخاب کنید.',
+      marzbanInplace: 'درجا (مرزبان روی همین سرور)',
+      marzbanInplaceDesc: 'مرزبان نصب است و PasarGuard نصب نیست. پوشه‌ها درجا تغییر نام می‌یابند.',
+      marzbanFresh: 'نصب تازه PasarGuard',
+      marzbanFreshDesc: 'PasarGuard از قبل نصب است، یا بکاپ مرزبان آپلود می‌کنید / سرور دیگر.',
+      suggested: 'پیشنهادی',
+      alternative: 'جایگزین',
     },
     step2: {
       h2: 'دیتابیس مبدأ',
@@ -154,6 +171,7 @@ const I18N = {
         links: 'لینک اشتراک',
         backup: 'فایل بکاپ',
         server: 'از سرور',
+        method: 'روش مهاجرت',
       },
     },
     step5: { h2: 'در حال مهاجرت...', preparing: 'آماده‌سازی...' },
@@ -197,6 +215,14 @@ const I18N = {
       next: 'Далее →',
       prereqTitle: 'Что должно быть установлено:',
       uploadHint: 'Нет данных? Загрузите копию на следующем шаге.',
+      marzbanModeTitle: 'Метод миграции Marzban',
+      marzbanModeDesc: 'Выберите метод по состоянию сервера (официальная документация PasarGuard).',
+      marzbanInplace: 'На месте (Marzban на этом сервере)',
+      marzbanInplaceDesc: 'Marzban установлен, PasarGuard НЕТ. Каталоги переименовываются на месте.',
+      marzbanFresh: 'Чистая установка PasarGuard',
+      marzbanFreshDesc: 'PasarGuard уже установлен, или загрузите копию Marzban / другой сервер.',
+      suggested: 'Рекомендуется',
+      alternative: 'Альтернатива',
     },
     step2: {
       h2: 'База данных источника',
@@ -239,6 +265,7 @@ const I18N = {
         links: 'Ссылки подписки',
         backup: 'Файл копии',
         server: 'С сервера',
+        method: 'Метод миграции',
       },
     },
     step5: { h2: 'Миграция...', preparing: 'Подготовка...' },
@@ -285,7 +312,8 @@ function setLang(lang) {
     b.classList.toggle('active', b.dataset.lang === lang);
   });
   applyI18n();
-  if (state.selectedPanel) renderPanelPrereqs(state.selectedPanel);
+  if (state.selectedPanel) renderPanelPrereqs(state.selectedPanel.id);
+  if (state.selectedPanel?.id === 'marzban' && typeof renderMarzbanModes === 'function') renderMarzbanModes();
   if (state.currentStep === 1 && state.panels.length) renderPanels();
 }
 

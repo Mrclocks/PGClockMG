@@ -1,6 +1,6 @@
 # PG-Migrator
 
-**نسخه 1.1.0** — سیستم مهاجرت از پنل‌های مختلف به [PasarGuard](https://github.com/PasarGuard/panel) با ویزارد وب گرافیکی.
+**نسخه 1.2.0** — سیستم مهاجرت از پنل‌های مختلف به [PasarGuard](https://github.com/PasarGuard/panel) با ویزارد وب گرافیکی.
 
 **Languages:** Web UI — English · فارسی · Русский | Installer script — English only
 
@@ -19,7 +19,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 # یا دانلود و اجرای مستقیم
 curl -fsSL "https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh" -o /tmp/pg-install.sh
-grep SCRIPT_VERSION /tmp/pg-install.sh   # باید 1.1.0 باشد
+grep SCRIPT_VERSION /tmp/pg-install.sh   # باید 1.2.0 باشد
 sudo bash /tmp/pg-install.sh
 ```
 
@@ -37,7 +37,7 @@ http://SERVER_IP:7000
 
 | پنل مبدأ | سطح | لینک اشتراک | دیتابیس مبدأ |
 |----------|-----|-------------|--------------|
-| **Marzban** | کامل | حفظ می‌شود | SQLite, MySQL, MariaDB |
+| **Marzban** | کامل | حفظ می‌شود | SQLite, MySQL, MariaDB — **دو روش مهاجرت** |
 | **3x-ui** | جزئی | با redirect server حفظ می‌شود* | SQLite |
 | **Remnawave** | آزمایشی | تغییر می‌کند | PostgreSQL (API) |
 | **Hiddify** | آزمایشی | تغییر می‌کند | MySQL, MariaDB |
@@ -51,7 +51,7 @@ http://SERVER_IP:7000
 
 | پنل مبدأ | PasarGuard قبل از مهاجرت؟ | پنل مبدأ / داده |
 |----------|---------------------------|-----------------|
-| **Marzban** | خیر — خودکار نصب می‌شود | Marzban روی همین سرور **یا** آپلود بکاپ |
+| **Marzban** | خیر (روش درجا) / بله (روش تازه) | Marzban روی سرور **یا** آپلود بکاپ — **روش را در ویزارد انتخاب کنید** |
 | **3x-ui** | **بله — حتماً قبل** | فایل `x-ui.db` یا آپلود بکاپ |
 | **Remnawave** | **بله — حتماً قبل** | URL پنل + API Token (می‌تواند روی سرور دیگر باشد) |
 | **Hiddify** | **بله — حتماً قبل** | dump MySQL یا دیتابیس زنده روی سرور |
@@ -59,9 +59,18 @@ http://SERVER_IP:7000
 
 > این اطلاعات در **مرحله ۰ و ۱** ویزارد وب هم نمایش داده می‌شود.
 
-### Marzban
-- مهاجرت درجا: Marzban نصب باشد، PasarGuard **نباید** از قبل نصب باشد
-- اگر هر دو نصب هستند → از آپلود بکاپ استفاده کنید
+### Marzban — دو روش رسمی
+
+بعد از انتخاب Marzban در ویزارد، **روش مهاجرت** را انتخاب کنید (طبق [مستند رسمی](https://docs.pasarguard.org/en/migration/marzban/)):
+
+| روش | شرایط | کار ویزارد |
+|-----|--------|------------|
+| **درجا (In-place)** | Marzban روی همین سرور، PasarGuard نصب **نیست** | توقف Marzban، تغییر نام `/opt/marzban` → `/opt/pasarguard`، به‌روزرسانی `.env` و compose |
+| **تازه (Fresh)** | PasarGuard از قبل نصب است **یا** بکاپ آپلود می‌کنید | نصب/استفاده از PasarGuard، import دیتابیس، کپی certs/templates |
+
+**تغییر نوع دیتابیس** (مثلاً SQLite → TimescaleDB) در هر دو روش با ابزار رسمی `db-migrations` به‌صورت خودکار انجام می‌شود.
+
+- اگر هر دو Marzban و PasarGuard نصب باشند → روش **تازه** + آپلود بکاپ
 - مستند رسمی: [Marzban → PasarGuard](https://docs.pasarguard.org/en/migration/marzban/)
 
 ### 3x-ui
@@ -80,7 +89,7 @@ http://SERVER_IP:7000
 ## مراحل ویزارد وب
 
 1. **پیش‌نیازها** — root، Docker، بکاپ
-2. **پنل مبدأ** — انتخاب + نمایش دقیق «چه چیز نصب باشد»
+2. **پنل مبدأ** — انتخاب + **روش Marzban** (درجا / تازه) + پیش‌نیازها
 3. **دیتابیس مبدأ** — نوع DB، رمز، آپلود بکاپ، فیلدهای Remnawave
 4. **دیتابیس مقصد** — پیشنهاد هوشمند + نصب PasarGuard از ویزارد
 5. **تأیید** — خلاصه + گزینه redirect (3x-ui)
@@ -135,6 +144,8 @@ tail -f /opt/pg-migrator/logs/service.log
 PGClockMG/
 ├── install.sh              # نصب یک‌خطی (انگلیسی)
 ├── requirements.txt
+├── tests/
+│   └── test_migration_logic.py  # تست منطق بدون Docker
 ├── app/
 │   ├── main.py             # FastAPI backend
 │   ├── panels.py           # ماتریس پنل‌ها + پیش‌نیازها (EN/FA/RU)
@@ -144,8 +155,9 @@ PGClockMG/
 │   │   ├── prerequisites.py
 │   │   ├── orchestrator.py
 │   │   ├── upload.py
+│   │   ├── db_migration.py      # ابزار مشترک db-migrations
 │   │   └── migrators/
-│   │       ├── marzban.py       # مستند رسمی Marzban
+│   │       ├── marzban.py       # دو روش: inplace + fresh
 │   │       ├── xui.py           # PasarGuard/migrations x-ui
 │   │       ├── remnawave.py     # آزمایشی — API
 │   │       ├── hiddify.py       # آزمایشی
@@ -160,6 +172,15 @@ PGClockMG/
     ├── db-migrations/
     └── migrations/
 ```
+
+### تست محلی (بدون سرور Ubuntu)
+
+```bash
+cd /opt/pg-migrator   # یا مسیر clone
+python3 tests/test_migration_logic.py
+```
+
+این تست‌ها config تولیدی، پیشنهاد روش Marzban و import ماژول‌ها را بررسی می‌کنند. تست کامل end-to-end نیاز به سرور Ubuntu با Docker و Marzban واقعی دارد.
 
 ---
 
@@ -186,6 +207,13 @@ systemctl disable pg-migrator
 ---
 
 ## Changelog
+
+### v1.2.0
+- Marzban: دو روش رسمی — **درجا** (Marzban روی سرور) و **تازه** (PasarGuard + بکاپ)
+- انتخاب روش در ویزارد بعد از انتخاب Marzban (EN/FA/RU)
+- Cross-DB خودکار (مثلاً SQLite → TimescaleDB) با `db-migrations` مشترک
+- رفع باگ `run_db_migration` و refactor `pasarguard_db.py`
+- تست‌های validation در `tests/test_migration_logic.py`
 
 ### v1.1.0
 - Web UI: English, Persian, Russian

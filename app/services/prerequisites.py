@@ -78,6 +78,12 @@ def get_marzban_db_type() -> str | None:
     return None
 
 
+def _suggest_marzban_mode(marzban_installed: bool, pg_installed: bool) -> str:
+    if marzban_installed and not pg_installed:
+        return "inplace"
+    return "fresh"
+
+
 def check_prerequisites(panel_id: str) -> dict:
     panel = PANELS.get(panel_id)
     if not panel:
@@ -204,6 +210,7 @@ def check_prerequisites(panel_id: str) -> dict:
             "xui_db": str(xui_db) if xui_db else None,
             "pasarguard_db": get_pasarguard_db_type(),
             "marzban_db": get_marzban_db_type(),
+            "suggested_marzban_mode": _suggest_marzban_mode(marzban_installed, pg_installed) if panel_id == "marzban" else None,
         },
     }
 

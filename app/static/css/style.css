@@ -326,6 +326,52 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
 .db-card h4 { font-size: 0.95rem; font-weight: 600; }
 .db-card p { font-size: 0.75rem; color: var(--text-dim); margin-top: 4px; }
 
+/* Marzban migration method */
+.mode-title {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 24px 0 8px;
+}
+.mode-desc {
+  margin-bottom: 16px;
+}
+.mode-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-bottom: 20px;
+}
+@media (max-width: 600px) {
+  .mode-grid { grid-template-columns: 1fr; }
+}
+.mode-card {
+  background: var(--bg-card);
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.mode-card:hover { border-color: var(--border-hover); }
+.mode-card.selected {
+  border-color: var(--primary);
+  background: rgba(59, 130, 246, 0.08);
+  box-shadow: 0 0 0 3px var(--primary-glow);
+}
+.mode-card .mode-icon { font-size: 1.6rem; margin-bottom: 8px; }
+.mode-card h4 { font-size: 0.95rem; font-weight: 600; margin-bottom: 6px; }
+.mode-card p { font-size: 0.8rem; color: var(--text-muted); line-height: 1.5; }
+.mode-card .mode-badge {
+  display: inline-block;
+  font-size: 0.65rem;
+  padding: 2px 8px;
+  border-radius: 10px;
+  margin-top: 8px;
+  font-weight: 600;
+}
+.mode-badge-suggested { background: var(--success-bg); color: var(--success); }
+.mode-badge-alt { background: var(--bg-elevated); color: var(--text-dim); }
+
 /* Forms */
 .form-group {
   margin-bottom: 20px;

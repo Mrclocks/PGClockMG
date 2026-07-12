@@ -35,6 +35,7 @@ class MigrationRequest(BaseModel):
     pasarguard_install: bool = False
     remnawave_url: Optional[str] = None
     remnawave_token: Optional[str] = None
+    marzban_mode: Optional[Literal["inplace", "fresh", "auto"]] = "auto"
 
 
 class MigrationStatus(BaseModel):

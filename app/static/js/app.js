@@ -16,6 +16,7 @@ const state = {
   serverIp: '',
   detected: {},
   prereqData: null,
+  marzbanMode: null,
 };
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -84,12 +85,23 @@ function renderPanels() {
 
 async function selectPanel(id) {
   state.selectedPanel = state.panels.find(p => p.id === id);
+  state.marzbanMode = null;
   document.querySelectorAll('.panel-card').forEach(c => {
     c.classList.toggle('selected', c.dataset.id === id);
   });
 
   const panel = state.selectedPanel;
   const lang = state.lang;
+
+  const modeSection = document.getElementById('marzbanModeSection');
+  if (panel.id === 'marzban') {
+    modeSection.classList.remove('hidden');
+    modeSection.querySelector('.mode-title').textContent = t('step1.marzbanModeTitle');
+    modeSection.querySelector('.mode-desc').textContent = t('step1.marzbanModeDesc');
+    renderMarzbanModes();
+  } else {
+    modeSection.classList.add('hidden');
+  }
 
   const notesEl = document.getElementById('panelInstallNotes');
   if (panel.prerequisites?.install_notes) {
@@ -132,10 +144,50 @@ async function renderPanelPrereqs(id) {
       prereqEl.innerHTML += `<div class="info-box" style="margin-top:12px">💡 ${t('step1.uploadHint')}</div>`;
     }
 
-    document.getElementById('btnStep1').disabled = false;
+    if (id === 'marzban') {
+      renderMarzbanModes();
+    }
+
+    document.getElementById('btnStep1').disabled = id === 'marzban' && !state.marzbanMode;
   } catch (e) {
     prereqEl.innerHTML = `<div class="check-item"><span class="check-icon">❌</span><div>Error</div></div>`;
   }
+}
+
+function suggestMarzbanMode() {
+  const d = state.detected || {};
+  if (d.marzban && !d.pasarguard) return 'inplace';
+  if (d.pasarguard || state.uploadId) return 'fresh';
+  if (d.marzban && d.pasarguard) return 'fresh';
+  return 'fresh';
+}
+
+function renderMarzbanModes() {
+  const grid = document.getElementById('marzbanModeGrid');
+  if (!grid) return;
+  const suggested = state.prereqData?.detected?.suggested_marzban_mode || suggestMarzbanMode();
+  const modes = [
+    { id: 'inplace', icon: '🔄', title: t('step1.marzbanInplace'), desc: t('step1.marzbanInplaceDesc') },
+    { id: 'fresh', icon: '🆕', title: t('step1.marzbanFresh'), desc: t('step1.marzbanFreshDesc') },
+  ];
+  grid.innerHTML = modes.map(m => `
+    <div class="mode-card ${state.marzbanMode === m.id ? 'selected' : ''}" data-mode="${m.id}" onclick="selectMarzbanMode('${m.id}')">
+      <div class="mode-icon">${m.icon}</div>
+      <h4>${m.title}</h4>
+      <p>${m.desc}</p>
+      <span class="mode-badge ${m.id === suggested ? 'mode-badge-suggested' : 'mode-badge-alt'}">
+        ${m.id === suggested ? t('step1.suggested') : t('step1.alternative')}
+      </span>
+    </div>`).join('');
+  if (!state.marzbanMode) selectMarzbanMode(suggested);
+}
+
+function selectMarzbanMode(mode) {
+  state.marzbanMode = mode;
+  document.querySelectorAll('.mode-card').forEach(c => {
+    c.classList.toggle('selected', c.dataset.mode === mode);
+  });
+  document.getElementById('btnStep1').disabled = false;
 }
 
 function renderSourceDbs() {
@@ -201,7 +253,12 @@ async function renderTargetDbs() {
   }
 
   const needsPg = panel.prerequisites?.pasarguard_required && !state.detected?.pasarguard;
-  document.getElementById('installPgSection').classList.toggle('hidden', !needsPg);
+  const marzbanFresh = panel.id === 'marzban' && state.marzbanMode === 'fresh';
+  const marzbanInplace = panel.id === 'marzban' && state.marzbanMode === 'inplace';
+  document.getElementById('installPgSection').classList.toggle('hidden', !needsPg && !marzbanFresh);
+  if (marzbanInplace) {
+    document.getElementById('installPgSection').classList.add('hidden');
+  }
 }
 
 function selectTargetDb(db) {
@@ -239,9 +296,17 @@ function renderSummary() {
   const names = { sqlite: 'SQLite', mysql: 'MySQL', mariadb: 'MariaDB', postgresql: 'PostgreSQL', timescaledb: 'TimescaleDB' };
 
   const linkLabel = t(`sub.${panel.subscription_mode}`);
+  const methodNames = {
+    inplace: t('step1.marzbanInplace'),
+    fresh: t('step1.marzbanFresh'),
+  };
+  const methodRow = panel.id === 'marzban' && state.marzbanMode
+    ? `<div class="summary-row"><span class="summary-label">${s.method}</span><span>${methodNames[state.marzbanMode] || state.marzbanMode}</span></div>`
+    : '';
 
   document.getElementById('migrationSummary').innerHTML = `
     <div class="summary-row"><span class="summary-label">${s.source}</span><span>${tr(panel.name, lang)}</span></div>
+    ${methodRow}
     <div class="summary-row"><span class="summary-label">${s.sourceDb}</span><span>${names[state.sourceDb] || '—'}</span></div>
     <div class="summary-row"><span class="summary-label">${s.targetDb}</span><span>${names[state.targetDb] || '—'}</span></div>
     <div class="summary-row"><span class="summary-label">${s.links}</span><span>${linkLabel}</span></div>
@@ -272,6 +337,7 @@ async function startMigration() {
     install_redirect: document.getElementById('installRedirect')?.checked ?? true,
     remnawave_url: document.getElementById('remnawaveUrl')?.value || null,
     remnawave_token: document.getElementById('remnawaveToken')?.value || null,
+    marzban_mode: state.marzbanMode || 'auto',
   };
 
   try {
@@ -388,6 +454,7 @@ async function uploadFile(file) {
     status.style.background = 'var(--success-bg)';
     status.style.color = 'var(--success)';
     document.getElementById('btnStep1').disabled = false;
+    if (state.selectedPanel?.id === 'marzban') renderMarzbanModes();
   } catch (e) {
     status.textContent = `❌ ${t('uploadErr')}: ${e.message}`;
     status.style.background = 'var(--error-bg)';
