@@ -674,6 +674,10 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
 .hidden { display: none !important; }
 
 /* Responsive */
+@media (max-width: 768px) {
+  .panel-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
 @media (max-width: 600px) {
   .header { flex-direction: column; gap: 12px; align-items: flex-start; }
   .panel-grid { grid-template-columns: 1fr; }
