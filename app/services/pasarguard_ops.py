@@ -384,10 +384,118 @@ async def _run_pasarguard_alembic(migrator, *args: str) -> tuple[bool, str]:
     return False, last_out
 
 
+async def get_alembic_head_revision(migrator) -> str | None:
+    ok, out = await _run_pasarguard_alembic(migrator, "heads")
+    if not ok:
+        return None
+    for line in (out or "").splitlines():
+        m = re.search(r"([0-9a-f]{12,})\s*\(head\)", line, re.I)
+        if m:
+            return m.group(1)
+        m = re.match(r"^([0-9a-f]{12,})", line.strip(), re.I)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _parse_upgrade_target_revision(output: str) -> str | None:
+    m = re.search(r"Running upgrade\s+\S+\s*->\s*([0-9a-f]+)", output, re.I)
+    if m:
+        return m.group(1)
+    m = re.search(r"versions/([0-9a-f]+)_", output, re.I)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _is_duplicate_schema_error(output: str) -> bool:
+    low = (output or "").lower()
+    return "duplicatecolumn" in low or "already exists" in low
+
+
+async def _heal_alembic_duplicate_schema(migrator, target_db: str, output: str) -> bool:
+    """When schema already has migration changes but alembic_version lags, stamp the right revision."""
+    target_rev = _parse_upgrade_target_revision(output)
+    if not target_rev:
+        target_rev = await get_alembic_head_revision(migrator)
+    if target_rev:
+        migrator.job.log(f"Healing alembic_version → {target_rev} (schema already migrated)")
+        if await set_target_alembic_version(migrator, target_db, target_rev):
+            return True
+    migrator.job.log("Falling back to alembic stamp head...")
+    if await stamp_alembic_head(migrator):
+        return True
+    head = await get_alembic_head_revision(migrator)
+    if head:
+        return await set_target_alembic_version(migrator, target_db, head)
+    return False
+
+
+async def _run_alembic_upgrade_head_with_heal(
+    migrator, target_db: str, max_attempts: int = 6,
+) -> None:
+    """Run upgrade head; on duplicate-column errors heal alembic_version and retry."""
+    last_out = ""
+    for attempt in range(1, max_attempts + 1):
+        ok, out = await _run_pasarguard_alembic(migrator, "upgrade", "head")
+        last_out = out or last_out
+        if ok or (out and "already at head" in (out or "").lower()):
+            return
+        if _is_duplicate_schema_error(out or ""):
+            migrator.job.log(f"Alembic duplicate schema (attempt {attempt}/{max_attempts}) — healing...")
+            if await _heal_alembic_duplicate_schema(migrator, target_db, out or ""):
+                continue
+        break
+    raise RuntimeError(
+        "Failed to sync Alembic before PasarGuard startup. "
+        f"The wizard could not align alembic_version with the database schema.\n{last_out[-3000:]}"
+    )
+
+
+async def sync_alembic_for_startup(migrator, target_db: str) -> None:
+    """
+    Align alembic_version with physical schema BEFORE PasarGuard all-in-one starts.
+    Prevents DuplicateColumnError on panel restart after cross-DB migration.
+    """
+    cwd = str(PASARGUARD_DIR)
+    await migrator._run_cmd(["docker", "compose", "stop", "pasarguard"], cwd=cwd, timeout=120)
+
+    if target_db == "sqlite":
+        migrator.job.log("SQLite target — running alembic upgrade head (one-shot)...")
+        await _run_alembic_upgrade_head_with_heal(migrator, target_db)
+        return
+
+    if target_db not in ("postgresql", "timescaledb", "mysql", "mariadb"):
+        return
+
+    current = await read_target_alembic_version(migrator, target_db)
+    migrator.job.log(f"Target alembic before sync: {current or '(none)'}")
+
+    migrator.job.log("Running alembic upgrade head (one-shot, before panel start)...")
+    await _run_alembic_upgrade_head_with_heal(migrator, target_db)
+    final = await read_target_alembic_version(migrator, target_db)
+    migrator.job.log(f"Alembic ready for startup: {final or 'head'}")
+
+
+async def safe_start_pasarguard(migrator) -> None:
+    """Sync Alembic, start PasarGuard, and fail if the panel does not become healthy."""
+    target_db = migrator.params.get("target_db", "sqlite")
+    await sync_alembic_for_startup(migrator, target_db)
+    cwd = str(PASARGUARD_DIR)
+    migrator.job.log("Starting PasarGuard panel...")
+    await migrator._run_cmd(["docker", "compose", "up", "-d", "pasarguard"], cwd=cwd, timeout=180)
+    await verify_pasarguard_healthy(migrator)
+
+
 async def stamp_alembic_head(migrator) -> bool:
     ok, out = await _run_pasarguard_alembic(migrator, "stamp", "head")
     if ok:
         migrator.job.log("Alembic stamped to head")
+        return True
+    head = await get_alembic_head_revision(migrator)
+    target_db = migrator.params.get("target_db")
+    if head and target_db and await set_target_alembic_version(migrator, target_db, head):
+        migrator.job.log(f"Alembic stamped to head via SQL ({head})")
         return True
     migrator.job.log(f"alembic stamp head failed: {(out or '')[-500:]}")
     return False
@@ -447,24 +555,8 @@ async def _target_has_public_tables(migrator, target_db: str) -> bool:
 
 
 async def finalize_target_alembic_after_import(migrator, target_db: str) -> None:
-    """
-    After db-migrations: if schema already has columns from a prior head-migration
-    but alembic_version is still at Marzban revision, stamp head to prevent
-    DuplicateColumnError on PasarGuard restart.
-    """
-    if target_db not in ("postgresql", "timescaledb"):
-        return
-
-    if await _pg_column_exists(migrator, "next_plans", "user_template_id"):
-        current = await read_target_alembic_version(migrator, target_db)
-        migrator.job.log(
-            f"Schema already has PasarGuard columns (alembic={current or 'none'}) — stamping head"
-        )
-        if not await stamp_alembic_head(migrator):
-            raise RuntimeError(
-                "Database schema is ahead of alembic_version but 'alembic stamp head' failed. "
-                "Drop/recreate the target database or fix alembic_version manually."
-            )
+    """After db-migrations — sync alembic before PasarGuard starts."""
+    await sync_alembic_for_startup(migrator, target_db)
 
 
 async def set_target_alembic_version(
@@ -568,23 +660,16 @@ async def ensure_schema_initialized(
     migrator.job.log("Stopping PasarGuard before schema init...")
     await migrator._run_cmd(["docker", "compose", "stop", "pasarguard"], cwd=cwd, timeout=120)
 
-    if target_db in ("postgresql", "timescaledb") and await _pg_column_exists(
-        migrator, "next_plans", "user_template_id"
-    ):
-        migrator.job.log("Target DB already has PasarGuard schema from a previous attempt")
-        if not await stamp_alembic_head(migrator):
-            raise RuntimeError(
-                "Target database schema exists but alembic_version is out of sync. "
-                "Use a fresh empty database or run: docker compose exec pasarguard uv run alembic stamp head"
-            )
-        target_version = await read_target_alembic_version(migrator, target_db)
-        migrator.job.log(f"Target Alembic version after heal: {target_version}")
-        return target_version
-
     revision = source_version or "head"
     migrator.job.log(f"Running alembic upgrade {revision} (one-shot, no panel startup)...")
     ok, out = await _run_pasarguard_alembic(migrator, "upgrade", revision)
     if not ok:
+        if _is_duplicate_schema_error(out or ""):
+            migrator.job.log("Schema partially exists — healing alembic_version...")
+            if await _heal_alembic_duplicate_schema(migrator, target_db, out or ""):
+                target_version = await read_target_alembic_version(migrator, target_db)
+                migrator.job.log(f"Target Alembic version after heal: {target_version}")
+                return target_version
         raise RuntimeError(
             f"Failed to initialize target schema with alembic upgrade {revision}:\n{(out or '')[-3000:]}"
         )

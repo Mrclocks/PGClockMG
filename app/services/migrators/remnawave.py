@@ -5,7 +5,7 @@ import urllib.request
 import urllib.error
 from app.config import PASARGUARD_DIR
 from app.services.migrators.base import BaseMigrator
-from app.services.pasarguard_ops import restart_pasarguard
+from app.services.pasarguard_ops import safe_start_pasarguard
 
 
 class RemnawaveMigrator(BaseMigrator):
@@ -50,7 +50,7 @@ class RemnawaveMigrator(BaseMigrator):
             else:
                 self.job.log(f"SKIP: {username} — {out[:80]}")
 
-        await restart_pasarguard(self)
+        await safe_start_pasarguard(self)
         self.job.set_progress(100, f"Done — {migrated}/{len(users)} users migrated")
 
         return {

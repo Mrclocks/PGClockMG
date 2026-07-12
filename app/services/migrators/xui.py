@@ -6,7 +6,7 @@ from pathlib import Path
 from app.config import PASARGUARD_DIR, PASARGUARD_DATA, TOOLS_DIR, BACKUP_DIR
 from app.services.migrators.base import BaseMigrator
 from app.services.prerequisites import find_xui_db
-from app.services.pasarguard_ops import restart_pasarguard
+from app.services.pasarguard_ops import safe_start_pasarguard
 
 
 class XuiMigrator(BaseMigrator):
@@ -47,7 +47,7 @@ class XuiMigrator(BaseMigrator):
         schema_db = PASARGUARD_DATA / "db.sqlite3"
         if not schema_db.exists():
             self.job.log("راه‌اندازی PasarGuard برای ایجاد schema...")
-            await restart_pasarguard(self, wait=False)
+            await safe_start_pasarguard(self)
             import asyncio
             await asyncio.sleep(10)
 
@@ -104,7 +104,7 @@ class XuiMigrator(BaseMigrator):
             redirect_installed = ok
 
         self.job.set_progress(95, "راه‌اندازی مجدد PasarGuard...")
-        await restart_pasarguard(self)
+        await safe_start_pasarguard(self)
 
         self.job.set_progress(100, "3x-ui migration complete!")
         return {

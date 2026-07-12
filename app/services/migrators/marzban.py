@@ -23,10 +23,8 @@ from app.services.env_migration import (
 from app.services.db_credentials import build_app_sqlalchemy_url, get_source_connection, get_target_connection
 from app.services.pasarguard_ops import (
     ensure_schema_initialized,
-    restart_pasarguard,
+    safe_start_pasarguard,
     resolve_db_service,
-    verify_pasarguard_healthy,
-    finalize_target_alembic_after_import,
 )
 from app.services.backup_analyzer import resolve_extract_root, find_file_in_upload
 
@@ -106,8 +104,7 @@ class MarzbanMigrator(BaseMigrator):
             if extra_data_dir:
                 await self._copy_marzban_assets(extra_data_dir)
             self.job.set_progress(85, "Starting PasarGuard with migrated database...")
-            await restart_pasarguard(self)
-            await verify_pasarguard_healthy(self)
+            await safe_start_pasarguard(self)
         elif source_db == target_db:
             if source_db in ("mysql", "mariadb") and source_sql:
                 self.job.set_progress(45, "Importing MySQL/MariaDB dump...")
@@ -117,8 +114,7 @@ class MarzbanMigrator(BaseMigrator):
             if extra_data_dir:
                 await self._copy_marzban_assets(extra_data_dir)
             self.job.set_progress(85, "Starting PasarGuard...")
-            await restart_pasarguard(self)
-            await verify_pasarguard_healthy(self)
+            await safe_start_pasarguard(self)
         else:
             self.job.set_progress(40, "Preparing cross-database migration...")
             await self._ensure_target_database_stack(target_db)
@@ -139,13 +135,11 @@ class MarzbanMigrator(BaseMigrator):
                 if not migration_source:
                     raise RuntimeError("SQL dump missing for cross-DB migration")
             await run_db_migration(self, migration_source, source_db, target_db)
-            await finalize_target_alembic_after_import(self, target_db)
             await self._update_env_paths(source_db, target_db)
             if extra_data_dir:
                 await self._copy_marzban_assets(extra_data_dir)
             self.job.set_progress(90, "Starting PasarGuard...")
-            await restart_pasarguard(self)
-            await verify_pasarguard_healthy(self)
+            await safe_start_pasarguard(self)
 
         self.job.set_progress(100, "Marzban migration completed")
         return self._result("fresh", target_db)

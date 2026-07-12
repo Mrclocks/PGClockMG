@@ -181,6 +181,22 @@ def test_pasarguard_install_dbs():
     print("OK: PASARGUARD_INSTALL_DBS")
 
 
+def test_alembic_duplicate_heal_helpers():
+    from app.services.pasarguard_ops import (
+        _parse_upgrade_target_revision,
+        _is_duplicate_schema_error,
+    )
+    log = (
+        "Running upgrade 931ed40d6eec -> 68edca039166, "
+        "DuplicateColumnError: column user_template_id already exists"
+    )
+    assert _parse_upgrade_target_revision(log) == "68edca039166"
+    assert _is_duplicate_schema_error(log) is True
+    assert _is_duplicate_schema_error("column already exists") is True
+    assert _is_duplicate_schema_error("ok") is False
+    print("OK: alembic duplicate heal helpers")
+
+
 def test_import_migrators():
     from app.services.migrators.marzban import MarzbanMigrator
     from app.services.migrators.pasarguard_db import PasarguardDbMigrator
@@ -211,6 +227,7 @@ if __name__ == "__main__":
     test_pgbouncer_port_for_migrations()
     test_parse_sqlalchemy_urls()
     test_read_sqlite_alembic_version()
+    test_alembic_duplicate_heal_helpers()
     test_pasarguard_install_dbs()
     test_import_migrators()
     test_system_status()

@@ -6,14 +6,13 @@ from app.config import PASARGUARD_DIR, PASARGUARD_DATA, PASARGUARD_ENV, BACKUP_D
 from app.services.migrators.base import BaseMigrator
 from app.services.env_migration import transform_pasarguard_env_for_target
 from app.services.db_migration import run_db_migration
-from app.services.pasarguard_ops import restart_pasarguard
+from app.services.pasarguard_ops import ensure_schema_initialized, safe_start_pasarguard, docker_compose_up, resolve_db_service
 
 
 class PasarguardDbMigrator(BaseMigrator):
     async def run(self, params: dict) -> dict:
         source_db = params["source_db"]
         target_db = params["target_db"]
-        password = params.get("source_db_password") or params.get("target_db_password")
         upload_path = params.get("upload_path")
 
         self.job.set_progress(5, "Checking PasarGuard installation...")
@@ -29,14 +28,21 @@ class PasarguardDbMigrator(BaseMigrator):
         self.job.set_progress(25, "Backing up current database...")
         self._backup_current_db(source_db)
 
+        if source_db != target_db:
+            self.job.set_progress(30, f"Preparing cross-DB migration: {source_db} → {target_db}...")
+            await self._ensure_target_database_stack(target_db)
+            await ensure_schema_initialized(
+                self, target_db, source_db=source_db, source_path=source_path,
+            )
+
         self.job.set_progress(40, f"Running db-migrations: {source_db} → {target_db}...")
-        await run_db_migration(self, str(source_path), source_db, target_db, password)
+        await run_db_migration(self, str(source_path), source_db, target_db)
 
         self.job.set_progress(75, "Updating PasarGuard .env...")
-        await self._update_pasarguard_env(target_db, password)
+        await self._update_pasarguard_env(target_db)
 
-        self.job.set_progress(90, "Restarting PasarGuard...")
-        await restart_pasarguard(self)
+        self.job.set_progress(90, "Starting PasarGuard...")
+        await safe_start_pasarguard(self)
 
         self.job.set_progress(100, "Database migration completed")
         return {
@@ -57,12 +63,28 @@ class PasarguardDbMigrator(BaseMigrator):
             if p.exists():
                 self._backup_file(p, BACKUP_DIR)
 
-    async def _update_pasarguard_env(self, target_db: str, password: str | None):
+    async def _ensure_target_database_stack(self, target_db: str):
+        if target_db == "sqlite":
+            return
+        svc = resolve_db_service(target_db)
+        if svc:
+            self.job.log(f"Starting {svc} container...")
+            await docker_compose_up(self, [svc])
+            import asyncio
+            await asyncio.sleep(8)
+
+    async def _update_pasarguard_env(self, target_db: str):
         if not PASARGUARD_ENV.exists():
             return
+        from app.services.db_credentials import get_target_connection
         self._backup_file(PASARGUARD_ENV, BACKUP_DIR)
         text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
-        PASARGUARD_ENV.write_text(transform_pasarguard_env_for_target(text, target_db, password), encoding="utf-8")
+        conn = get_target_connection(self.params)
+        pwd = conn.get("password")
+        PASARGUARD_ENV.write_text(
+            transform_pasarguard_env_for_target(text, target_db, pwd),
+            encoding="utf-8",
+        )
         self.job.log(".env updated for target database")
 
     def _get_panel_url(self) -> str:
