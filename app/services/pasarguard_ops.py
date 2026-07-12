@@ -451,7 +451,7 @@ async def _run_pasarguard_alembic(migrator, *args: str) -> tuple[bool, str]:
     migrator.job.log(f"Host-network alembic: {' '.join(args)}")
     migrator.job.log(f"Alembic DB URL: {url.split('@')[-1] if '@' in url else url}")
 
-    cmd: list[str] = ["docker", "run", "--rm", "-T", "--network", "host"]
+    cmd: list[str] = ["docker", "run", "--rm", "--network", "host"]
     if PASARGUARD_ENV.exists():
         cmd.extend(["--env-file", str(PASARGUARD_ENV)])
     cmd.extend([
