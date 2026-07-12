@@ -246,10 +246,13 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
   background: var(--bg-card);
   border: 2px solid var(--border);
   border-radius: var(--radius);
-  padding: 20px;
+  padding: 16px;
   cursor: pointer;
   transition: all 0.25s;
   position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 148px;
 }
 
 .panel-card:hover {
@@ -264,40 +267,48 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
   box-shadow: 0 0 0 3px var(--primary-glow);
 }
 
-.panel-card .icon { font-size: 2rem; margin-bottom: 10px; }
-
-.panel-card-head {
+.panel-card-top {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 10px;
-  margin-bottom: 6px;
+  margin-bottom: 10px;
 }
 
-.panel-card-head h3 {
-  font-size: 1rem;
+.panel-card-top .panel-icon {
+  font-size: 1.5rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.panel-card-top h3 {
+  flex: 1;
+  font-size: 0.95rem;
   font-weight: 600;
   margin: 0;
-  flex: 1;
   min-width: 0;
-  text-align: start;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.panel-card-tags {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 4px;
-  flex-shrink: 0;
+.panel-caption {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin: 0 0 10px;
+  flex: 1;
 }
 
-.panel-card p { font-size: 0.8rem; color: var(--text-muted); line-height: 1.5; margin-bottom: 0; }
+.panel-card-footer {
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
 
 .support-badge {
-  position: static;
   flex-shrink: 0;
   font-size: 0.65rem;
-  padding: 2px 8px;
+  padding: 3px 8px;
   border-radius: 10px;
   font-weight: 600;
   white-space: nowrap;
@@ -309,12 +320,10 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
 .support-db_only { background: rgba(139, 92, 246, 0.15); color: #a78bfa; }
 
 .sub-preserve {
-  margin-top: 0;
-  font-size: 0.65rem;
-  display: inline-flex;
+  font-size: 0.72rem;
+  display: flex;
   align-items: center;
   gap: 4px;
-  white-space: nowrap;
 }
 
 .check-item.check-live {

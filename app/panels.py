@@ -49,7 +49,7 @@ PANELS: dict[str, PanelInfo] = {
     ),
     "3x-ui": PanelInfo(
         id="3x-ui",
-        name={"en": "3x-UI / X-UI", "fa": "3x-UI / X-UI", "ru": "3x-UI / X-UI"},
+        name={"en": "X-UI", "fa": "X-UI", "ru": "X-UI"},
         icon="📡",
         support_level="partial",
         subscription_mode="redirect",

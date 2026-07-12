@@ -21,6 +21,7 @@ const state = {
 };
 
 function panelLatinName(panel) {
+  if (panel?.id === '3x-ui') return 'X-UI';
   return panel?.name?.en || panel?.id || '';
 }
 
@@ -123,15 +124,13 @@ function renderPanels() {
     const subClass = p.subscription_mode === 'changed' ? 'sub-no' : 'sub-yes';
     return `
       <div class="panel-card" data-id="${p.id}" onclick="selectPanel('${p.id}')">
-        <div class="icon">${p.icon}</div>
-        <div class="panel-card-head">
+        <div class="panel-card-top">
+          <span class="panel-icon">${p.icon}</span>
           <h3>${panelLatinName(p)}</h3>
-          <div class="panel-card-tags">
-            <span class="support-badge ${supClass}">${sup}</span>
-            <span class="sub-preserve ${subClass}">${subText}</span>
-          </div>
+          <span class="support-badge ${supClass}">${sup}</span>
         </div>
-        <p>${tr(p.description, lang)}</p>
+        <p class="panel-caption">${tr(p.description, lang)}</p>
+        <div class="panel-card-footer sub-preserve ${subClass}">${subText}</div>
       </div>`;
   }).join('');
 }
