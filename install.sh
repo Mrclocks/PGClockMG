@@ -4,7 +4,7 @@
 # One-command installer for Ubuntu server
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/YOUR_REPO/pg-migrator/main/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh | sudo bash
 #   # or locally:
 #   sudo bash install.sh
 #
@@ -15,25 +15,23 @@ readonly INSTALL_DIR="/opt/pg-migrator"
 readonly SERVICE_NAME="pg-migrator"
 readonly WEB_PORT=7000
 readonly TOOLS_DIR="${INSTALL_DIR}/tools"
+readonly DEFAULT_REPO="https://github.com/Mrclocks/PGClockMG.git"
+readonly DEFAULT_INSTALL_URL="https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh"
 
-# Re-exec from temp file when piped via curl
+# Re-exec from temp file when piped via curl (stdin is not a tty)
 if [[ ! -t 0 ]] && [[ -z "${PG_MIGRATOR_REEXEC:-}" ]]; then
   tmpfile="$(mktemp /tmp/pg-migrator-install-XXXXXX.sh)"
   cleanup() { rm -f "$tmpfile"; }
   trap cleanup EXIT
-  if [[ -n "${PG_MIGRATOR_INSTALL_URL:-}" ]]; then
-    curl -fsSL "$PG_MIGRATOR_INSTALL_URL" -o "$tmpfile"
-  else
-    # Running from local directory
-    SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || realpath "${BASH_SOURCE[0]}")"
-    cp "$SCRIPT_PATH" "$tmpfile"
-  fi
+  install_url="${PG_MIGRATOR_INSTALL_URL:-$DEFAULT_INSTALL_URL}"
+  curl -fsSL "$install_url" -o "$tmpfile"
   chmod 700 "$tmpfile"
   export PG_MIGRATOR_REEXEC=1
+  export PG_MIGRATOR_REPO="${PG_MIGRATOR_REPO:-$DEFAULT_REPO}"
   exec bash "$tmpfile" "$@"
 fi
 
-C_RESET='\033[0m'; C_BOLD='\033[1m'; C_GREEN='\033[32m'
+C_RESET='\033[0m'; C_BOLD='\033[1m'; C_DIM='\033[2m'; C_GREEN='\033[32m'
 C_YELLOW='\033[33m'; C_CYAN='\033[36m'; C_RED='\033[31m'; C_WHITE='\033[97m'
 
 log()  { printf '%b\n' "$1"; }
@@ -93,25 +91,28 @@ copy_app_files() {
   info "کپی فایل‌های برنامه..."
   mkdir -p "$INSTALL_DIR" "$TOOLS_DIR" "${INSTALL_DIR}/uploads" "${INSTALL_DIR}/backups" "${INSTALL_DIR}/logs"
 
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local script_dir=""
+  if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  fi
 
-  if [[ -d "${SCRIPT_DIR}/app" ]]; then
+  if [[ -n "$script_dir" && -d "${script_dir}/app" ]]; then
     mkdir -p "${INSTALL_DIR}/app"
-    cp -r "${SCRIPT_DIR}/app/." "${INSTALL_DIR}/app/"
-    cp -f "${SCRIPT_DIR}/requirements.txt" "${INSTALL_DIR}/" 2>/dev/null || true
+    cp -r "${script_dir}/app/." "${INSTALL_DIR}/app/"
+    cp -f "${script_dir}/requirements.txt" "${INSTALL_DIR}/" 2>/dev/null || true
   fi
 
-  # If running from curl without local files, clone from git
+  # Clone from GitHub when installed via curl or when local app/ is missing
   if [[ ! -f "${INSTALL_DIR}/app/main.py" ]]; then
-    if [[ -n "${PG_MIGRATOR_REPO:-}" ]]; then
-      git clone --depth 1 "$PG_MIGRATOR_REPO" /tmp/pg-migrator-src
-      cp -r /tmp/pg-migrator-src/* "$INSTALL_DIR/"
-      rm -rf /tmp/pg-migrator-src
-    else
-      fail "فایل‌های برنامه یافت نشد. لطفاً از مسیر پروژه اجرا کنید."
-    fi
+    local repo="${PG_MIGRATOR_REPO:-$DEFAULT_REPO}"
+    info "دریافت سورس از GitHub..."
+    rm -rf /tmp/pg-migrator-src
+    git clone --depth 1 "$repo" /tmp/pg-migrator-src
+    cp -r /tmp/pg-migrator-src/. "$INSTALL_DIR/"
+    rm -rf /tmp/pg-migrator-src
   fi
 
+  [[ -f "${INSTALL_DIR}/app/main.py" ]] || fail "فایل‌های برنامه یافت نشد."
   ok "فایل‌ها کپی شدند به ${INSTALL_DIR}"
 }
 
