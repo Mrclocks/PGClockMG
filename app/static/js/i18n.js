@@ -24,6 +24,8 @@ const I18N = {
       dockerCheck: 'Docker',
       dockerYes: 'Running',
       dockerNo: 'Not running',
+      checking: 'Checking server...',
+      checkingDetail: 'Detecting PasarGuard, Marzban, Docker',
     },
     step1: {
       h2: 'Select Source Panel',
@@ -129,6 +131,8 @@ const I18N = {
       dockerCheck: 'Docker',
       dockerYes: 'در حال اجرا',
       dockerNo: 'اجرا نمی‌شود',
+      checking: 'در حال بررسی سرور...',
+      checkingDetail: 'شناسایی PasarGuard، Marzban و Docker',
     },
     step1: {
       h2: 'انتخاب پنل مبدأ',
@@ -231,6 +235,8 @@ const I18N = {
       dockerCheck: 'Docker',
       dockerYes: 'Работает',
       dockerNo: 'Не запущен',
+      checking: 'Проверка сервера...',
+      checkingDetail: 'Определение PasarGuard, Marzban, Docker',
     },
     step1: {
       h2: 'Исходная панель',
@@ -398,17 +404,19 @@ function renderGlobalChecks() {
     const pgDetail = sys.pasarguard
       ? `${t('step0.pasarguardYes')}${sys.pasarguard_path ? ` — ${sys.pasarguard_path}` : ''}${sys.pasarguard_db ? ` (${sys.pasarguard_db})` : ''}`
       : t('step0.pasarguardNo');
-    html += `<div class="check-item"><span class="check-icon">${pgIcon}</span><div><div>${t('step0.pasarguardCheck')}</div><div class="check-detail">${pgDetail}</div></div></div>`;
+    html += `<div class="check-item check-live"><span class="check-icon">${pgIcon}</span><div><div><strong>${t('step0.pasarguardCheck')}</strong></div><div class="check-detail">${pgDetail}</div></div></div>`;
 
     const mzIcon = sys.marzban ? '✅' : '⚠️';
     const mzDetail = sys.marzban
       ? `${t('step0.marzbanYes')}${sys.marzban_path ? ` — ${sys.marzban_path}` : ''}${sys.marzban_db ? ` (${sys.marzban_db})` : ''}`
       : t('step0.marzbanNo');
-    html += `<div class="check-item"><span class="check-icon">${mzIcon}</span><div><div>${t('step0.marzbanCheck')}</div><div class="check-detail">${mzDetail}</div></div></div>`;
+    html += `<div class="check-item check-live"><span class="check-icon">${mzIcon}</span><div><div><strong>${t('step0.marzbanCheck')}</strong></div><div class="check-detail">${mzDetail}</div></div></div>`;
 
     const dkIcon = sys.docker ? '✅' : '❌';
     const dkDetail = sys.docker ? t('step0.dockerYes') : t('step0.dockerNo');
-    html += `<div class="check-item"><span class="check-icon">${dkIcon}</span><div><div>${t('step0.dockerCheck')}</div><div class="check-detail">${dkDetail}</div></div></div>`;
+    html += `<div class="check-item check-live"><span class="check-icon">${dkIcon}</span><div><div><strong>${t('step0.dockerCheck')}</strong></div><div class="check-detail">${dkDetail}</div></div></div>`;
+  } else {
+    html += `<div class="check-item"><span class="check-icon">⏳</span><div><div>${t('step0.checking')}</div><div class="check-detail">${t('step0.checkingDetail')}</div></div></div>`;
   }
 
   document.getElementById('globalChecks').innerHTML = html;

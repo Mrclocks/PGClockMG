@@ -7,7 +7,7 @@
 #
 set -eo pipefail
 
-readonly SCRIPT_VERSION="1.2.1"
+readonly SCRIPT_VERSION="1.2.2"
 readonly INSTALL_DIR="/opt/pg-migrator"
 readonly SERVICE_NAME="pg-migrator"
 readonly WEB_PORT=7000
@@ -99,30 +99,21 @@ install_uv() {
 }
 
 copy_app_files() {
-  info "Copying application files..."
+  info "Syncing application from GitHub..."
   mkdir -p "$INSTALL_DIR" "$TOOLS_DIR" "${INSTALL_DIR}/uploads" "${INSTALL_DIR}/backups" "${INSTALL_DIR}/logs"
 
-  if [[ -z "${PG_MIGRATOR_FROM_PIPE:-}" ]] && [[ -n "${BASH_SOURCE[0]:-}" ]]; then
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    if [[ -d "${script_dir}/app" ]]; then
-      mkdir -p "${INSTALL_DIR}/app"
-      cp -r "${script_dir}/app/." "${INSTALL_DIR}/app/"
-      cp -f "${script_dir}/requirements.txt" "${INSTALL_DIR}/" 2>/dev/null || true
-    fi
-  fi
+  local repo="${PG_MIGRATOR_REPO:-$DEFAULT_REPO}"
+  rm -rf /tmp/pg-migrator-src
+  git clone --depth 1 --branch main "$repo" /tmp/pg-migrator-src \
+    || fail "Could not clone ${repo}"
 
-  if [[ ! -f "${INSTALL_DIR}/app/main.py" ]]; then
-    local repo="${PG_MIGRATOR_REPO:-$DEFAULT_REPO}"
-    info "Cloning source from GitHub..."
-    rm -rf /tmp/pg-migrator-src
-    git clone --depth 1 "$repo" /tmp/pg-migrator-src
-    cp -r /tmp/pg-migrator-src/. "$INSTALL_DIR/"
-    rm -rf /tmp/pg-migrator-src
-  fi
+  cp -r /tmp/pg-migrator-src/app "${INSTALL_DIR}/"
+  cp -f /tmp/pg-migrator-src/requirements.txt "${INSTALL_DIR}/"
+  [[ -d /tmp/pg-migrator-src/tests ]] && cp -r /tmp/pg-migrator-src/tests "${INSTALL_DIR}/"
+  rm -rf /tmp/pg-migrator-src
 
-  [[ -f "${INSTALL_DIR}/app/main.py" ]] || fail "Application files not found."
-  ok "Files copied to ${INSTALL_DIR}"
+  [[ -f "${INSTALL_DIR}/app/main.py" ]] || fail "Application files not found after sync."
+  ok "Application synced to ${INSTALL_DIR}"
 }
 
 clone_migration_tools() {

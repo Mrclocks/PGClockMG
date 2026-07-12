@@ -39,9 +39,9 @@ function needsPasarguardInstall() {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
-  setLang(state.lang);
   await loadInfo();
-  await loadSystemCheck();
+  if (!state.systemCheck) await loadSystemCheck();
+  setLang(state.lang);
   document.getElementById('uploadDragText').textContent = t('step2.uploadDrag');
   document.getElementById('uploadSelectText').textContent = t('step2.uploadSelect');
   document.querySelector('#remnawaveFields .form-group:nth-child(1) label').textContent = t('step2.remnawaveUrl');
@@ -54,6 +54,18 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupUpload();
 });
 
+function applySystemCheck(sys) {
+  if (!sys) return;
+  state.systemCheck = sys;
+  state.detected = {
+    ...state.detected,
+    pasarguard: sys.pasarguard,
+    marzban: sys.marzban,
+    pasarguard_db: sys.pasarguard_db,
+    marzban_db: sys.marzban_db,
+  };
+}
+
 async function loadInfo() {
   try {
     const res = await fetch('/api/info');
@@ -63,6 +75,7 @@ async function loadInfo() {
     state.serverIp = data.server_ip;
     document.getElementById('serverIp').textContent = `${data.server_ip}:${data.web_port}`;
     if (data.version) document.getElementById('appVersion').textContent = `v${data.version}`;
+    if (data.system) applySystemCheck(data.system);
   } catch (e) {
     console.error(e);
   }
@@ -71,21 +84,20 @@ async function loadInfo() {
 async function loadSystemCheck() {
   try {
     const res = await fetch('/api/system-check');
-    state.systemCheck = await res.json();
-    state.detected = {
-      ...state.detected,
-      pasarguard: state.systemCheck.pasarguard,
-      marzban: state.systemCheck.marzban,
-      pasarguard_db: state.systemCheck.pasarguard_db,
-      marzban_db: state.systemCheck.marzban_db,
-    };
+    const data = await res.json();
+    applySystemCheck(data);
     renderGlobalChecks();
   } catch (e) {
     console.error(e);
+    const el = document.getElementById('globalChecks');
+    if (el) {
+      el.innerHTML += `<div class="check-item"><span class="check-icon">❌</span><div><div>Server check</div><div class="check-detail">${e.message}</div></div></div>`;
+    }
   }
 }
 
 function goStep(n) {
+  if (n === 0) loadSystemCheck();
   if (n === 1) renderPanels();
   if (n === 2) renderSourceDbs();
   if (n === 3) renderTargetDbs();
@@ -114,10 +126,12 @@ function renderPanels() {
         <div class="icon">${p.icon}</div>
         <div class="panel-card-head">
           <h3>${panelLatinName(p)}</h3>
-          <span class="support-badge ${supClass}">${sup}</span>
+          <div class="panel-card-tags">
+            <span class="support-badge ${supClass}">${sup}</span>
+            <span class="sub-preserve ${subClass}">${subText}</span>
+          </div>
         </div>
         <p>${tr(p.description, lang)}</p>
-        <div class="sub-preserve ${subClass}">${subText}</div>
       </div>`;
   }).join('');
 }

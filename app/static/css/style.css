@@ -280,9 +280,18 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
   margin: 0;
   flex: 1;
   min-width: 0;
+  text-align: start;
 }
 
-.panel-card p { font-size: 0.8rem; color: var(--text-muted); line-height: 1.5; }
+.panel-card-tags {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.panel-card p { font-size: 0.8rem; color: var(--text-muted); line-height: 1.5; margin-bottom: 0; }
 
 .support-badge {
   position: static;
@@ -300,16 +309,21 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
 .support-db_only { background: rgba(139, 92, 246, 0.15); color: #a78bfa; }
 
 .sub-preserve {
-  margin-top: 8px;
-  font-size: 0.75rem;
-  display: flex;
+  margin-top: 0;
+  font-size: 0.65rem;
+  display: inline-flex;
   align-items: center;
-  justify-content: flex-end;
   gap: 4px;
-  text-align: end;
+  white-space: nowrap;
 }
 
-.install-cmd-box {
+.check-item.check-live {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  background: var(--bg-elevated);
+}
+
   margin: 12px 0;
   padding: 12px 14px;
   background: var(--bg-elevated);

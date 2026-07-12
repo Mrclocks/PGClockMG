@@ -31,21 +31,25 @@ def _server_ip() -> str:
         return "127.0.0.1"
 
 
-@app.get("/", response_class=HTMLResponse)
-async def index():
-    return FileResponse(STATIC_DIR / "index.html")
-
-
 @app.get("/api/info")
 async def api_info():
     return {
-        "version": "1.2.1",
+        "version": "1.2.2",
         "server_ip": _server_ip(),
         "web_port": WEB_PORT,
         "panels": [p.model_dump() for p in PANELS.values()],
         "database_types": DATABASE_TYPES,
         "subscription_labels": SUBSCRIPTION_LABELS,
+        "system": get_system_status(),
     }
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    return FileResponse(
+        STATIC_DIR / "index.html",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 @app.get("/api/panels")
