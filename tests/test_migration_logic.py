@@ -197,12 +197,10 @@ def test_alembic_duplicate_heal_helpers():
     print("OK: alembic duplicate heal helpers")
 
 
-def test_alembic_env_flags_use_compose_network():
-    from app.services.pasarguard_ops import _alembic_env_flags
-    from unittest.mock import MagicMock
+def test_build_local_alembic_url_from_ops():
+    from app.services.pasarguard_ops import build_local_alembic_url
 
-    migrator = MagicMock()
-    migrator.params = {
+    params = {
         "target_db": "postgresql",
         "target_db_user": "pasarguard",
         "target_db_password": "secret",
@@ -210,10 +208,10 @@ def test_alembic_env_flags_use_compose_network():
         "target_db_host": "127.0.0.1",
         "target_db_port": "6432",
     }
-    flags = _alembic_env_flags(migrator)
-    assert flags[0] == "-e"
-    assert "postgresql+asyncpg://pasarguard:secret@postgresql:5432/pasarguard" in flags[1]
-    print("OK: alembic env flags compose network")
+    url = build_local_alembic_url(params)
+    assert ":5432/" in url
+    assert "127.0.0.1:5432" in url
+    print("OK: build_local_alembic_url (ops)")
 
 
 def test_resolve_pasarguard_service():
@@ -264,7 +262,7 @@ if __name__ == "__main__":
     test_parse_sqlalchemy_urls()
     test_read_sqlite_alembic_version()
     test_alembic_duplicate_heal_helpers()
-    test_alembic_env_flags_use_compose_network()
+    test_build_local_alembic_url_from_ops()
     test_resolve_pasarguard_service()
     test_pasarguard_install_dbs()
     test_import_migrators()

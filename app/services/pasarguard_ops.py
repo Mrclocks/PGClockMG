@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import re
-import shlex
 import sqlite3
 from pathlib import Path
 
 from app.config import PASARGUARD_DIR, PASARGUARD_ENV, PASARGUARD_DATA
-from app.services.db_credentials import get_target_connection, migration_port
+from app.services.db_credentials import get_target_connection, migration_port, migration_port
 
 STARTUP_MARKERS = (
     "Application startup complete",
@@ -419,86 +418,56 @@ async def _ensure_pasarguard_image(migrator, service: str | None = None) -> None
     await migrator._run_cmd(_compose_cmd("pull", svc), cwd=cwd, timeout=600)
 
 
-def _alembic_env_flags(migrator) -> list[str]:
-    """Override DB URL for one-shot alembic inside the compose network."""
-    target_db = migrator.params.get("target_db")
-    if target_db == "sqlite":
-        return []
+def resolve_pasarguard_image() -> str:
+    text = _compose_text()
+    svc = resolve_pasarguard_service()
+    block = re.search(rf"^\s*{re.escape(svc)}\s*:\s*\n((?:[ \t]+[^\n]+\n)*)", text, re.MULTILINE)
+    if block:
+        m = re.search(r"image:\s*['\"]?([^'\"\n]+)", block.group(1))
+        if m:
+            return m.group(1).strip()
+    return "pasarguard/panel:latest"
 
-    conn = _target_conn(migrator)
+
+def build_local_alembic_url(params: dict) -> str:
+    target_db = params["target_db"]
+    conn = get_target_connection(params)
     pwd = conn.get("password") or ""
     user = conn.get("user") or ("postgres" if target_db in ("postgresql", "timescaledb") else "root")
     db = conn.get("database") or "pasarguard"
-    service = resolve_db_service(target_db or "") or (
-        "postgresql" if target_db in ("postgresql", "timescaledb") else "mysql"
-    )
-
+    port = migration_port(conn, target_db)
     if target_db in ("postgresql", "timescaledb"):
-        port = migration_port(conn, target_db)
-        url = f"postgresql+asyncpg://{user}:{pwd}@{service}:{port}/{db}"
-    elif target_db in ("mysql", "mariadb"):
-        port = migration_port(conn, target_db)
-        url = f"mysql+asyncmy://{user}:{pwd}@{service}:{port}/{db}"
-    else:
-        return []
-
-    migrator.job.log(f"Alembic container DB URL: {user}@{service}:{port}/{db}")
-    return ["-e", f"SQLALCHEMY_DATABASE_URL={url}"]
-
-
-async def _run_compose_cmd(migrator, cmd: list[str], cwd: str, timeout: int = 300) -> tuple[bool, str]:
-    try:
-        return await migrator._run_cmd(cmd, cwd=cwd, timeout=timeout)
-    except FileNotFoundError:
-        return False, f"Command not found: {cmd[0]}"
+        return f"postgresql+asyncpg://{user}:{pwd}@127.0.0.1:{port}/{db}"
+    if target_db in ("mysql", "mariadb"):
+        return f"mysql+asyncmy://{user}:{pwd}@127.0.0.1:{port}/{db}"
+    path = conn.get("sqlite_path") or str(PASARGUARD_DATA / "db.sqlite3")
+    return f"sqlite+aiosqlite:///{path}"
 
 
 async def _run_pasarguard_alembic(migrator, *args: str) -> tuple[bool, str]:
-    """Run alembic in a one-shot container without starting the full PasarGuard panel."""
-    cwd = str(PASARGUARD_DIR)
-    svc = resolve_pasarguard_service()
-    await _ensure_pasarguard_image(migrator, svc)
+    """Run python -m alembic in panel image with host network (127.0.0.1:5432)."""
+    image = resolve_pasarguard_image()
+    url = build_local_alembic_url(migrator.params)
+    migrator.job.log(f"Host-network alembic: {' '.join(args)}")
+    migrator.job.log(f"Alembic DB URL: {url.split('@')[-1] if '@' in url else url}")
 
-    run_prefix = ("run", "--rm", "--no-deps", "-T")
-    env_flags = _alembic_env_flags(migrator)
-    quoted_args = " ".join(shlex.quote(a) for a in args)
-    py_cmd = f"cd /code && python -m alembic {quoted_args}"
-
-    def _attempts(profiles: list[str] | None = None) -> list[list[str]]:
-        return [
-            _compose_cmd(
-                *run_prefix, *env_flags, "--entrypoint", "python", svc,
-                "-m", "alembic", *args, profiles=profiles,
-            ),
-            _compose_cmd(
-                *run_prefix, *env_flags, "--workdir", "/code",
-                "--entrypoint", "python", svc, "-m", "alembic", *args, profiles=profiles,
-            ),
-            _compose_cmd(
-                *run_prefix, *env_flags, "--workdir", "/code",
-                "--entrypoint", "bash", svc, "-lc", py_cmd, profiles=profiles,
-            ),
-        ]
-
-    all_outputs: list[str] = []
-    profile_sets: list[list[str] | None] = [None]
-    for profile in _discover_compose_profiles():
-        profile_sets.append([profile])
-
-    for profiles in profile_sets:
-        for cmd in _attempts(profiles):
-            ok, out = await _run_compose_cmd(migrator, cmd, cwd=cwd, timeout=300)
-            if out:
-                all_outputs.append(out)
-            if ok or _alembic_output_indicates_success(out or ""):
-                return True, out or ""
-            if "is not running" in (out or "").lower():
-                continue
-            if "executable file not found" in (out or "").lower() and "uv" in (out or "").lower():
-                continue
-
-    combined = "\n".join(all_outputs)
-    return False, combined[-4000:]
+    cmd: list[str] = ["docker", "run", "--rm", "-T", "--network", "host"]
+    if PASARGUARD_ENV.exists():
+        cmd.extend(["--env-file", str(PASARGUARD_ENV)])
+    cmd.extend([
+        "-e", f"SQLALCHEMY_DATABASE_URL={url}",
+        "-v", f"{PASARGUARD_DATA}:/var/lib/pasarguard",
+        "-w", "/code",
+        "--entrypoint", "python",
+        image, "-m", "alembic", *args,
+    ])
+    try:
+        ok, out = await migrator._run_cmd(cmd, timeout=600)
+    except FileNotFoundError:
+        return False, "docker command not found"
+    if ok or _alembic_output_indicates_success(out or ""):
+        return True, out or ""
+    return False, out or ""
 
 
 async def get_alembic_head_revision(migrator) -> str | None:
@@ -595,9 +564,7 @@ async def sync_alembic_for_startup(migrator, target_db: str) -> None:
 
 
 async def safe_start_pasarguard(migrator) -> None:
-    """Sync Alembic, start PasarGuard, and fail if the panel does not become healthy."""
-    target_db = migrator.params.get("target_db", "sqlite")
-    await sync_alembic_for_startup(migrator, target_db)
+    """Start PasarGuard and fail if the panel does not become healthy."""
     cwd = str(PASARGUARD_DIR)
     migrator.job.log("Starting PasarGuard panel...")
     await migrator._run_cmd(["docker", "compose", "up", "-d", "pasarguard"], cwd=cwd, timeout=180)

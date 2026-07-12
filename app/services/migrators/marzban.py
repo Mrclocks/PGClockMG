@@ -10,7 +10,7 @@ from app.config import (
     PASARGUARD_ENV, BACKUP_DIR, TOOLS_DIR,
 )
 from app.services.migrators.base import BaseMigrator
-from app.services.db_migration import run_db_migration, build_target_url
+from app.services.native_migration import run_native_cross_db_migration
 from app.services.env_migration import (
     transform_marzban_env,
     transform_compose_marzban_to_pasarguard,
@@ -22,7 +22,6 @@ from app.services.env_migration import (
 )
 from app.services.db_credentials import build_app_sqlalchemy_url, get_source_connection, get_target_connection
 from app.services.pasarguard_ops import (
-    ensure_schema_initialized,
     safe_start_pasarguard,
     resolve_db_service,
 )
@@ -117,24 +116,22 @@ class MarzbanMigrator(BaseMigrator):
             await safe_start_pasarguard(self)
         else:
             self.job.set_progress(40, "Preparing cross-database migration...")
+            if source_db == "sqlite" and not source_sqlite:
+                raise RuntimeError("SQLite source file missing")
+            if source_db != "sqlite":
+                raise RuntimeError(
+                    f"Cross-DB from {source_db} is not supported by native migrator yet. "
+                    "Use SQLite source or same-DB migration."
+                )
             await self._ensure_target_database_stack(target_db)
             await self._update_env_paths(source_db, target_db)
-            await ensure_schema_initialized(
+            self.job.set_progress(55, f"Native cross-DB: {source_db} → {target_db}...")
+            await run_native_cross_db_migration(
                 self,
+                str(source_sqlite),
+                source_db,
                 target_db,
-                source_db=source_db,
-                source_path=source_sqlite if source_db == "sqlite" else source_sql,
             )
-            self.job.set_progress(55, f"Cross-DB import: {source_db} → {target_db}...")
-            if source_db == "sqlite":
-                if not source_sqlite:
-                    raise RuntimeError("SQLite source file missing")
-                migration_source = str(source_sqlite)
-            else:
-                migration_source = str(source_sql) if source_sql else ""
-                if not migration_source:
-                    raise RuntimeError("SQL dump missing for cross-DB migration")
-            await run_db_migration(self, migration_source, source_db, target_db)
             await self._update_env_paths(source_db, target_db)
             if extra_data_dir:
                 await self._copy_marzban_assets(extra_data_dir)
