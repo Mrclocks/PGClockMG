@@ -1,6 +1,6 @@
 # PG-Migrator
 
-**نسخه 1.2.0** — سیستم مهاجرت از پنل‌های مختلف به [PasarGuard](https://github.com/PasarGuard/panel) با ویزارد وب گرافیکی.
+**نسخه 1.6.2** — سیستم مهاجرت از پنل‌های مختلف به [PasarGuard](https://github.com/PasarGuard/panel) با ویزارد وب گرافیکی.
 
 **Languages:** Web UI — English · فارسی · Русский | Installer script — English only
 
@@ -19,7 +19,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 # یا دانلود و اجرای مستقیم
 curl -fsSL "https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh" -o /tmp/pg-install.sh
-grep SCRIPT_VERSION /tmp/pg-install.sh   # باید 1.2.0 باشد
+grep SCRIPT_VERSION /tmp/pg-install.sh   # باید 1.6.2 باشد
 sudo bash /tmp/pg-install.sh
 ```
 
@@ -205,6 +205,12 @@ systemctl disable pg-migrator
 ---
 
 ## Changelog
+
+### v1.6.2
+- رفع خودکار خطای `DuplicateColumnError` / `alembic_version` قبل از استارت PasarGuard
+- `safe_start_pasarguard`: sync Alembic با one-shot + heal SQL + بررسی سلامت پنل
+- فرم دستی credentials دیتابیس (بدون خواندن خودکار `.env`)
+- همه migratorها از استارت امن PasarGuard استفاده می‌کنند
 
 ### v1.5.0
 - Marzban: حذف روش **درجا (in-place)** — فقط مهاجرت با PasarGuard از قبل نصب‌شده
