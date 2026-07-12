@@ -9,7 +9,7 @@ import sqlite3
 from pathlib import Path
 
 from app.config import PASARGUARD_DIR, PASARGUARD_ENV, PASARGUARD_DATA
-from app.services.db_credentials import get_target_connection
+from app.services.db_credentials import get_target_connection, migration_port
 
 STARTUP_MARKERS = (
     "Application startup complete",
@@ -419,6 +419,40 @@ async def _ensure_pasarguard_image(migrator, service: str | None = None) -> None
     await migrator._run_cmd(_compose_cmd("pull", svc), cwd=cwd, timeout=600)
 
 
+def _alembic_env_flags(migrator) -> list[str]:
+    """Override DB URL for one-shot alembic inside the compose network."""
+    target_db = migrator.params.get("target_db")
+    if target_db == "sqlite":
+        return []
+
+    conn = _target_conn(migrator)
+    pwd = conn.get("password") or ""
+    user = conn.get("user") or ("postgres" if target_db in ("postgresql", "timescaledb") else "root")
+    db = conn.get("database") or "pasarguard"
+    service = resolve_db_service(target_db or "") or (
+        "postgresql" if target_db in ("postgresql", "timescaledb") else "mysql"
+    )
+
+    if target_db in ("postgresql", "timescaledb"):
+        port = migration_port(conn, target_db)
+        url = f"postgresql+asyncpg://{user}:{pwd}@{service}:{port}/{db}"
+    elif target_db in ("mysql", "mariadb"):
+        port = migration_port(conn, target_db)
+        url = f"mysql+asyncmy://{user}:{pwd}@{service}:{port}/{db}"
+    else:
+        return []
+
+    migrator.job.log(f"Alembic container DB URL: {user}@{service}:{port}/{db}")
+    return ["-e", f"SQLALCHEMY_DATABASE_URL={url}"]
+
+
+async def _run_compose_cmd(migrator, cmd: list[str], cwd: str, timeout: int = 300) -> tuple[bool, str]:
+    try:
+        return await migrator._run_cmd(cmd, cwd=cwd, timeout=timeout)
+    except FileNotFoundError:
+        return False, f"Command not found: {cmd[0]}"
+
+
 async def _run_pasarguard_alembic(migrator, *args: str) -> tuple[bool, str]:
     """Run alembic in a one-shot container without starting the full PasarGuard panel."""
     cwd = str(PASARGUARD_DIR)
@@ -426,25 +460,25 @@ async def _run_pasarguard_alembic(migrator, *args: str) -> tuple[bool, str]:
     await _ensure_pasarguard_image(migrator, svc)
 
     run_prefix = ("run", "--rm", "--no-deps", "-T")
+    env_flags = _alembic_env_flags(migrator)
     quoted_args = " ".join(shlex.quote(a) for a in args)
-    shell_cmd = f"uv run alembic {quoted_args}"
+    py_cmd = f"cd /code && python -m alembic {quoted_args}"
 
     def _attempts(profiles: list[str] | None = None) -> list[list[str]]:
-        cmds: list[list[str]] = [
-            _compose_cmd(*run_prefix, "--entrypoint", "uv", svc, "run", "alembic", *args, profiles=profiles),
-            _compose_cmd(*run_prefix, "--entrypoint", "", svc, "uv", "run", "alembic", *args, profiles=profiles),
+        return [
             _compose_cmd(
-                *run_prefix, "--entrypoint", "bash", svc, "-lc", f"cd /code && {shell_cmd}",
-                profiles=profiles,
+                *run_prefix, *env_flags, "--entrypoint", "python", svc,
+                "-m", "alembic", *args, profiles=profiles,
             ),
-            _compose_cmd(*run_prefix, "--entrypoint", "bash", svc, "-lc", shell_cmd, profiles=profiles),
-            _compose_cmd(*run_prefix, "bash", "-lc", shell_cmd, profiles=profiles),
+            _compose_cmd(
+                *run_prefix, *env_flags, "--workdir", "/code",
+                "--entrypoint", "python", svc, "-m", "alembic", *args, profiles=profiles,
+            ),
+            _compose_cmd(
+                *run_prefix, *env_flags, "--workdir", "/code",
+                "--entrypoint", "bash", svc, "-lc", py_cmd, profiles=profiles,
+            ),
         ]
-        legacy = []
-        for cmd in cmds[:3]:
-            if cmd[0] == "docker" and len(cmd) > 1 and cmd[1] == "compose":
-                legacy.append(["docker-compose", *cmd[2:]])
-        return cmds + legacy
 
     all_outputs: list[str] = []
     profile_sets: list[list[str] | None] = [None]
@@ -453,12 +487,14 @@ async def _run_pasarguard_alembic(migrator, *args: str) -> tuple[bool, str]:
 
     for profiles in profile_sets:
         for cmd in _attempts(profiles):
-            ok, out = await migrator._run_cmd(cmd, cwd=cwd, timeout=300)
+            ok, out = await _run_compose_cmd(migrator, cmd, cwd=cwd, timeout=300)
             if out:
                 all_outputs.append(out)
             if ok or _alembic_output_indicates_success(out or ""):
                 return True, out or ""
             if "is not running" in (out or "").lower():
+                continue
+            if "executable file not found" in (out or "").lower() and "uv" in (out or "").lower():
                 continue
 
     combined = "\n".join(all_outputs)

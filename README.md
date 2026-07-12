@@ -1,6 +1,6 @@
 # PG-Migrator
 
-**نسخه 1.6.3** — سیستم مهاجرت از پنل‌های مختلف به [PasarGuard](https://github.com/PasarGuard/panel) با ویزارد وب گرافیکی.
+**نسخه 1.6.4** — سیستم مهاجرت از پنل‌های مختلف به [PasarGuard](https://github.com/PasarGuard/panel) با ویزارد وب گرافیکی.
 
 **Languages:** Web UI — English · فارسی · Русский | Installer script — English only
 
@@ -19,7 +19,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 # یا دانلود و اجرای مستقیم
 curl -fsSL "https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh" -o /tmp/pg-install.sh
-grep SCRIPT_VERSION /tmp/pg-install.sh   # باید 1.6.3 باشد
+grep SCRIPT_VERSION /tmp/pg-install.sh   # باید 1.6.4 باشد
 sudo bash /tmp/pg-install.sh
 ```
 
@@ -205,6 +205,11 @@ systemctl disable pg-migrator
 ---
 
 ## Changelog
+
+### v1.6.4
+- اجرای Alembic با `python -m alembic` (مطابق image رسمی PasarGuard، بدون `uv`)
+- URL دیتابیس داخل کانتینر: `postgresql:5432` به‌جای `127.0.0.1:6432`
+- رفع crash هنگام نبودن `docker-compose` قدیمی
 
 ### v1.6.3
 - رفع خطای `service "pasarguard" is not running` هنگام `alembic upgrade`
