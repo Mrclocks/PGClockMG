@@ -9,6 +9,7 @@ from app.config import (
     MARZBAN_DIR, MARZBAN_DATA, XUI_DB_PATHS, HIDDIFY_DIR,
 )
 from app.panels import PANELS, DATABASE_TYPES, TARGET_DB_RECOMMENDATIONS
+from app.services.env_migration import extract_env_summary
 
 
 def _run(cmd: list[str], timeout: int = 30) -> tuple[bool, str]:
@@ -78,6 +79,13 @@ def get_marzban_db_type() -> str | None:
     return None
 
 
+def get_pasarguard_env_summary() -> dict | None:
+    if not PASARGUARD_ENV.exists():
+        return None
+    text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+    return extract_env_summary(text)
+
+
 def get_system_status() -> dict:
     """Server-wide detection for step 0 and install recheck."""
     pg = is_pasarguard_installed()
@@ -92,6 +100,7 @@ def get_system_status() -> dict:
         "marzban_db": get_marzban_db_type(),
         "pasarguard_path": str(PASARGUARD_DIR) if pg else None,
         "marzban_path": str(MARZBAN_DIR) if MARZBAN_DIR.exists() else None,
+        "pasarguard_env": get_pasarguard_env_summary(),
     }
 
 

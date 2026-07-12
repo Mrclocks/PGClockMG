@@ -66,6 +66,20 @@ def test_migration_request_marzban_mode():
     print("OK: MigrationRequest marzban_mode")
 
 
+def test_extract_env_summary():
+    from app.services.env_migration import extract_env_summary
+    text = '''
+SQLALCHEMY_DATABASE_URL = "mysql+asyncmy://root:secret123@127.0.0.1/pasarguard"
+MYSQL_ROOT_PASSWORD = secret123
+UVICORN_PORT = 8443
+'''
+    s = extract_env_summary(text)
+    assert s["db_type"] == "mysql"
+    assert s["db_password"] == "secret123"
+    assert s["panel_port"] == "8443"
+    print("OK: extract_env_summary")
+
+
 def test_pasarguard_install_dbs():
     from app.panels import PASARGUARD_INSTALL_DBS
     assert "sqlite" in PASARGUARD_INSTALL_DBS
@@ -98,6 +112,7 @@ if __name__ == "__main__":
     test_build_target_urls()
     test_suggest_marzban_mode()
     test_migration_request_marzban_mode()
+    test_extract_env_summary()
     test_pasarguard_install_dbs()
     test_import_migrators()
     test_system_status()

@@ -21,6 +21,8 @@ const state = {
   detected: {},
   prereqData: null,
   pasarguardInstallDbs: [],
+  sourceEnvSummary: null,
+  pasarguardEnvSummary: null,
   systemCheck: null,
 };
 
@@ -31,6 +33,136 @@ function panelLatinName(panel) {
 
 function getPgInstallCmd() {
   return 'sudo bash -c "$(curl -fsSL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh)" @ install';
+}
+
+function dbNeedsPassword(db) {
+  return ['mysql', 'mariadb', 'postgresql', 'timescaledb'].includes(db);
+}
+
+function getSourcePassword() {
+  return document.getElementById('sourcePassword')?.value?.trim()
+    || state.sourcePassword
+    || state.sourceEnvSummary?.db_password
+    || '';
+}
+
+function getTargetPassword() {
+  return document.getElementById('targetPassword')?.value?.trim()
+    || state.targetPassword
+    || state.pasarguardEnvSummary?.db_password
+    || state.systemCheck?.pasarguard_env?.db_password
+    || '';
+}
+
+function hasSourcePassword() {
+  if (!dbNeedsPassword(state.sourceDb)) return true;
+  if (getSourcePassword()) return true;
+  if (state.sourceEnvSummary?.has_password) return true;
+  if (state.bundleStatus?.analysis?.env_summary?.has_password) return true;
+  if (bundleHasEnvPassword()) return true;
+  return false;
+}
+
+function hasTargetPassword() {
+  if (!dbNeedsPassword(state.targetDb)) return true;
+  if (getTargetPassword()) return true;
+  if (state.sourceDb === state.targetDb && hasSourcePassword()) return true;
+  return false;
+}
+
+function maskPassword(pwd) {
+  if (!pwd) return '—';
+  if (pwd.length <= 2) return '••••';
+  return `${pwd.slice(0, 2)}${'•'.repeat(Math.min(pwd.length - 2, 8))}`;
+}
+
+function renderEnvSummaryHtml(summary, kind) {
+  if (!summary) return '';
+  const db = summary.db_type ? dbDisplayName(summary.db_type) : '—';
+  const user = summary.db_user || '—';
+  const pwd = summary.has_password ? maskPassword(summary.db_password) : '—';
+  const port = summary.panel_port || '8000';
+  const fromEnv = kind === 'source' ? t('envSummary.sourceFromBackup') : t('envSummary.targetFromPg');
+  return `
+    <p class="check-detail">${fromEnv}</p>
+    <div class="env-summary-grid">
+      <span><strong>${t('envSummary.db')}</strong> ${db}</span>
+      <span><strong>${t('envSummary.user')}</strong> ${user}</span>
+      <span><strong>${t('envSummary.password')}</strong> ${pwd}</span>
+      <span><strong>${t('envSummary.port')}</strong> ${port}</span>
+    </div>`;
+}
+
+function autoFillSourcePassword() {
+  const summary = state.sourceEnvSummary || state.bundleStatus?.analysis?.env_summary;
+  const el = document.getElementById('sourcePassword');
+  if (!el || el.value || !summary?.db_password) return;
+  el.value = summary.db_password;
+  state.sourcePassword = summary.db_password;
+  el.placeholder = t('upload.pwdFromEnv');
+}
+
+function autoFillTargetPassword() {
+  const summary = state.pasarguardEnvSummary || state.systemCheck?.pasarguard_env;
+  const el = document.getElementById('targetPassword');
+  if (!el || el.value || !summary?.db_password) return;
+  el.value = summary.db_password;
+  state.targetPassword = summary.db_password;
+  el.placeholder = t('upload.pwdFromEnv');
+}
+
+function updateSourceCredentialsVisibility() {
+  const el = document.getElementById('dbCredentials');
+  const box = document.getElementById('sourceEnvSummary');
+  if (!el) return;
+  const needs = dbNeedsPassword(state.sourceDb);
+  const hasAuto = state.sourceEnvSummary?.has_password || state.bundleStatus?.analysis?.env_summary?.has_password;
+  el.classList.toggle('hidden', !needs || state.selectedPanel?.id === 'remnawave');
+  if (box) {
+    const summary = state.sourceEnvSummary || state.bundleStatus?.analysis?.env_summary;
+    if (summary) {
+      box.classList.remove('hidden');
+      box.innerHTML = `<h4>${t('envSummary.sourceTitle')}</h4>${renderEnvSummaryHtml(summary, 'source')}`;
+      if (hasAuto) autoFillSourcePassword();
+    } else {
+      box.classList.add('hidden');
+      box.innerHTML = '';
+    }
+  }
+}
+
+function updateTargetCredentialsVisibility() {
+  const el = document.getElementById('targetCredentials');
+  const hint = document.getElementById('targetEnvHint');
+  if (!el) return;
+  const needs = dbNeedsPassword(state.targetDb);
+  const cross = state.sourceDb && state.targetDb && state.sourceDb !== state.targetDb;
+  const pg = state.pasarguardEnvSummary || state.systemCheck?.pasarguard_env;
+  const showField = needs && (cross || !pg?.has_password);
+  el.classList.toggle('hidden', !showField);
+  if (hint) {
+    if (pg && needs) {
+      hint.classList.remove('hidden');
+      hint.innerHTML = `<h4>${t('envSummary.targetTitle')}</h4>${renderEnvSummaryHtml(pg, 'target')}`;
+      autoFillTargetPassword();
+    } else {
+      hint.classList.add('hidden');
+      hint.innerHTML = '';
+    }
+  }
+}
+
+function setupCredentialListeners() {
+  ['sourcePassword', 'targetPassword'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el || el.dataset.bound) return;
+    el.dataset.bound = '1';
+    el.addEventListener('input', () => {
+      if (id === 'sourcePassword') state.sourcePassword = el.value;
+      if (id === 'targetPassword') state.targetPassword = el.value;
+      updateStepButtons();
+    });
+  });
 }
 
 function needsPasarguardInstall() {
@@ -72,12 +204,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('footerGithub').textContent = t('footer.github');
   document.getElementById('statusMsg').textContent = t('step5.preparing');
   setupUpload();
+  setupCredentialListeners();
   updateStepButtons();
 });
 
 function applySystemCheck(sys) {
   if (!sys) return;
   state.systemCheck = sys;
+  state.pasarguardEnvSummary = sys.pasarguard_env || null;
   state.detected = {
     ...state.detected,
     pasarguard: sys.pasarguard,
@@ -159,12 +293,10 @@ function canProceedStep2() {
     const token = document.getElementById('remnawaveToken')?.value?.trim();
     if (!url || !token) return t('block.remnawaveCreds');
   }
-  const needsPwd = ['mysql', 'mariadb', 'postgresql', 'timescaledb'].includes(state.sourceDb);
+  const needsPwd = dbNeedsPassword(state.sourceDb);
   const analysis = state.bundleStatus?.analysis || state.uploadInfo?.analysis;
-  if (needsPwd && panel?.id !== 'remnawave' && !document.getElementById('sourcePassword')?.value) {
-    if (!analysis?.mysql_password_found && !bundleHasEnvPassword()) {
-      return t('block.sourcePassword');
-    }
+  if (needsPwd && panel?.id !== 'remnawave' && !hasSourcePassword()) {
+    return t('block.sourcePassword');
   }
   if (!uploadSatisfied()) {
     return t('block.uploadsIncomplete');
@@ -189,12 +321,8 @@ function bundleHasEnvPassword() {
 
 function canProceedStep3() {
   if (!state.targetDb) return t('block.noTargetDb');
-  if (state.selectedPanel?.id === 'marzban' && !state.detected?.pasarguard) {
-    return t('block.pasarguardMissing');
-  }
   if (needsPasarguardInstall()) return t('block.pasarguardMissing');
-  const needsPwd = ['mysql', 'mariadb', 'postgresql', 'timescaledb'].includes(state.targetDb);
-  if (needsPwd && !document.getElementById('targetPassword')?.value) {
+  if (dbNeedsPassword(state.targetDb) && !hasTargetPassword()) {
     return t('block.targetPassword');
   }
   return null;
@@ -392,8 +520,8 @@ function renderMarzbanDetectedSource() {
   }
   if (db) state.sourceDb = db;
 
-  const needsPwd = ['mysql', 'mariadb', 'postgresql', 'timescaledb'].includes(db);
-  document.getElementById('dbCredentials')?.classList.toggle('hidden', !needsPwd);
+  const needsPwd = dbNeedsPassword(db);
+  updateSourceCredentialsVisibility();
 }
 
 function renderSourceDbs() {
@@ -437,8 +565,7 @@ function selectSourceDb(db) {
   document.querySelectorAll('#sourceDbGrid .db-card').forEach(c => {
     c.classList.toggle('selected', c.dataset.db === db);
   });
-  const needsPwd = ['mysql', 'mariadb', 'postgresql', 'timescaledb'].includes(db);
-  document.getElementById('dbCredentials').classList.toggle('hidden', !needsPwd || state.selectedPanel?.id === 'remnawave');
+  updateSourceCredentialsVisibility();
   renderUploadSection();
   updateStepButtons();
 }
@@ -446,7 +573,7 @@ function selectSourceDb(db) {
 async function renderTargetDbs() {
   const panel = state.selectedPanel;
   if (!panel || !state.sourceDb) return goStep(2);
-  state.sourcePassword = document.getElementById('sourcePassword').value;
+  state.sourcePassword = document.getElementById('sourcePassword')?.value || state.sourcePassword || '';
 
   const grid = document.getElementById('targetDbGrid');
   const crossEl = document.getElementById('crossDbWarning');
@@ -478,6 +605,7 @@ async function renderTargetDbs() {
     recEl?.classList.add('hidden');
     document.getElementById('installPgSection')?.classList.add('hidden');
     updateCrossDbWarning();
+    updateTargetCredentialsVisibility();
     updateStepButtons();
     return;
   }
@@ -516,6 +644,7 @@ async function renderTargetDbs() {
     const cmdEl = document.getElementById('installPgCmd');
     if (cmdEl) cmdEl.textContent = getPgInstallCmd();
   }
+  updateTargetCredentialsVisibility();
   updateStepButtons();
 }
 
@@ -538,9 +667,8 @@ function selectTargetDb(db) {
   document.querySelectorAll('#targetDbGrid .db-card').forEach(c => {
     c.classList.toggle('selected', c.dataset.db === db);
   });
-  const needsPwd = ['mysql', 'mariadb', 'postgresql', 'timescaledb'].includes(db);
-  document.getElementById('targetCredentials').classList.toggle('hidden', !needsPwd);
   updateCrossDbWarning();
+  updateTargetCredentialsVisibility();
   updateStepButtons();
 }
 
@@ -560,7 +688,7 @@ async function recheckPasarguard() {
 }
 
 function renderSummary() {
-  state.targetPassword = document.getElementById('targetPassword').value;
+  state.targetPassword = document.getElementById('targetPassword')?.value || state.targetPassword || '';
   const panel = state.selectedPanel;
   const lang = state.lang;
   const s = t('step4.summary');
@@ -660,7 +788,8 @@ function showSuccess(result) {
   document.getElementById('resultError').classList.add('hidden');
   document.querySelector('#resultSuccess h2').textContent = t('step6.success');
 
-  const panelUrl = result?.panel_url || `https://${state.serverIp}:8000/dashboard/`;
+  const panelUrl = result?.panel_url
+    || `https://${state.serverIp.split(':')[0]}:${result?.panel_port || state.pasarguardEnvSummary?.panel_port || state.systemCheck?.pasarguard_env?.panel_port || '8000'}/dashboard/`;
   document.getElementById('panelLink').href = panelUrl;
 
   const mode = result?.subscription_mode || state.selectedPanel?.subscription_mode;
@@ -872,10 +1001,18 @@ function applyBundleAnalysis(bs) {
   if (state.selectedPanel?.id === 'marzban') {
     renderMarzbanDetectedSource();
     if (a.detected_source_db) state.sourceDb = a.detected_source_db;
+    if (a.env_summary) state.sourceEnvSummary = a.env_summary;
+    updateSourceCredentialsVisibility();
   } else if (a.detected_source_db && document.querySelector('#sourceDbGrid .db-card')) {
     selectSourceDb(a.detected_source_db);
   }
-  if (a.mysql_password_found) {
+  if (a.env_summary) {
+    state.sourceEnvSummary = a.env_summary;
+    updateSourceCredentialsVisibility();
+  }
+  if (a.env_summary?.db_password) {
+    autoFillSourcePassword();
+  } else if (a.mysql_password_found) {
     const el = document.getElementById('sourcePassword');
     if (el && !el.value) el.placeholder = t('upload.pwdFromEnv');
   }

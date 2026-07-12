@@ -800,6 +800,18 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
 
 .hidden { display: none !important; }
 
+.env-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 16px;
+  margin-top: 10px;
+  font-size: 0.9rem;
+}
+
+.env-summary-grid span {
+  display: block;
+}
+
 /* Responsive */
 @media (max-width: 768px) {
   .panel-grid { grid-template-columns: repeat(2, 1fr); }

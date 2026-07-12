@@ -18,6 +18,72 @@ def read_env_var(text: str, key: str) -> str | None:
     return m.group(1).strip().strip('"')
 
 
+def detect_db_type_from_env(text: str) -> str | None:
+    """Detect database engine from .env content."""
+    url = read_env_var(text, "SQLALCHEMY_DATABASE_URL") or ""
+    low = (url + text).lower()
+    if "sqlite" in low:
+        return "sqlite"
+    if "mariadb" in low:
+        return "mariadb"
+    if "mysql" in low or "pymysql" in low or "asyncmy" in low:
+        return "mysql"
+    if "postgres" in low or "asyncpg" in low or "timescale" in low:
+        return "timescaledb" if "timescale" in low else "postgresql"
+    return None
+
+
+def _parse_db_user_from_url(url: str) -> str | None:
+    m = re.search(r"://([^:@/]+)", url or "")
+    return m.group(1) if m else None
+
+
+def extract_env_summary(text: str) -> dict:
+    """Extract DB credentials and panel port from a panel .env file."""
+    db_type = detect_db_type_from_env(text)
+    url = read_env_var(text, "SQLALCHEMY_DATABASE_URL") or ""
+    mysql_password = read_env_var(text, "MYSQL_ROOT_PASSWORD") or read_env_var(text, "MYSQL_PASSWORD")
+    postgres_password = read_env_var(text, "POSTGRES_PASSWORD")
+    db_password = None
+    db_user = None
+    if db_type in ("mysql", "mariadb"):
+        db_user = _parse_db_user_from_url(url) or "root"
+        db_password = mysql_password
+    elif db_type in ("postgresql", "timescaledb"):
+        db_user = _parse_db_user_from_url(url) or "postgres"
+        db_password = postgres_password
+    panel_port = read_env_var(text, "UVICORN_PORT") or "8000"
+    panel_host = read_env_var(text, "UVICORN_HOST") or "0.0.0.0"
+    return {
+        "db_type": db_type,
+        "db_user": db_user,
+        "db_password": db_password,
+        "mysql_password": mysql_password,
+        "postgres_password": postgres_password,
+        "panel_port": panel_port,
+        "panel_host": panel_host,
+        "has_password": bool(db_password),
+    }
+
+
+def get_panel_url_from_env(env_text: str | None = None, ip: str | None = None) -> str:
+    """Build PasarGuard dashboard URL using UVICORN_PORT from .env."""
+    import socket
+
+    port = "8000"
+    if env_text:
+        port = read_env_var(env_text, "UVICORN_PORT") or "8000"
+    if not ip:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+        except Exception:
+            ip = "127.0.0.1"
+    return f"https://{ip}:{port}/dashboard/"
+
+
 def transform_marzban_env(
     text: str,
     target_db: str,

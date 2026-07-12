@@ -17,6 +17,7 @@ from app.services.env_migration import (
     fix_mysql_dump_for_pasarguard,
     read_env_var,
     merge_marzban_env_into_pasarguard,
+    get_panel_url_from_env,
 )
 from app.services.pasarguard_ops import (
     ensure_schema_initialized,
@@ -377,20 +378,16 @@ class MarzbanMigrator(BaseMigrator):
         self.job.log(".env updated for target database")
 
     def _result(self, method: str, target_db: str) -> dict:
+        env_text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.exists() else None
+        port = read_env_var(env_text, "UVICORN_PORT") if env_text else None
         return {
             "panel_url": self._get_panel_url(),
+            "panel_port": port or "8000",
             "subscription_mode": "native",
             "method": method,
             "target_db": target_db,
         }
 
     def _get_panel_url(self) -> str:
-        import socket
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-        except Exception:
-            ip = "SERVER_IP"
-        return f"https://{ip}:8000/dashboard/"
+        env_text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.exists() else None
+        return get_panel_url_from_env(env_text)

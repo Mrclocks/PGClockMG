@@ -9,6 +9,8 @@ from app.services.env_migration import (
     read_env_var,
     transform_marzban_env,
     transform_xray_config,
+    detect_db_type_from_env,
+    extract_env_summary,
 )
 
 CATEGORY_RULES: list[tuple[str, tuple[str, ...]]] = [
@@ -110,17 +112,7 @@ def _categorize_file(path: Path) -> str:
 
 
 def detect_db_from_env(text: str) -> str | None:
-    url = read_env_var(text, "SQLALCHEMY_DATABASE_URL") or ""
-    low = (url + text).lower()
-    if "sqlite" in low:
-        return "sqlite"
-    if "mariadb" in low:
-        return "mariadb"
-    if "mysql" in low or "pymysql" in low or "asyncmy" in low:
-        return "mysql"
-    if "postgres" in low or "asyncpg" in low or "timescale" in low:
-        return "timescaledb" if "timescale" in low else "postgresql"
-    return None
+    return detect_db_type_from_env(text)
 
 
 def analyze_upload_directory(upload_dir: Path) -> dict:
@@ -187,14 +179,12 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
             low = paths["sql"].lower()
             detected_source_db = "mariadb" if "mariadb" in low else "mysql"
 
-    mysql_password = None
-    if env_text:
-        mysql_password = read_env_var(env_text, "MYSQL_ROOT_PASSWORD") or read_env_var(env_text, "MYSQL_PASSWORD")
+    env_summary = extract_env_summary(env_text) if env_text else None
 
     env_mapping: list[dict] = []
     if env_text and panel_hint == "marzban":
         target = detected_source_db or "sqlite"
-        transformed = transform_marzban_env(env_text, target, mysql_password)
+        transformed = transform_marzban_env(env_text, target, env_summary.get("db_password") if env_summary else None)
         env_mapping = _diff_env_paths(env_text, transformed)
 
     missing: list[dict] = []
@@ -208,7 +198,7 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
             backup_ok = paths["sql"] is not None
             if not backup_ok:
                 missing.append(_msg(".sql dump not found in zip", "فایل .sql در zip نیست", "Файл .sql не найден"))
-            if not mysql_password:
+            if not (env_summary and env_summary.get("has_password")):
                 missing.append(_msg(
                     "MYSQL_ROOT_PASSWORD not in backup .env — enter manually",
                     "رمز MySQL در .env بکاپ نیست — دستی وارد کنید",
@@ -238,7 +228,8 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
         "paths": {k: (str(Path(v).relative_to(upload_dir)).replace("\\", "/") if v else None) for k, v in paths.items()},
         "panel_hint": panel_hint,
         "detected_source_db": detected_source_db,
-        "mysql_password_found": bool(mysql_password),
+        "mysql_password_found": bool(env_summary and env_summary.get("has_password")),
+        "env_summary": env_summary,
         "env_mapping": env_mapping[:30],
         "backup_ok": backup_ok,
         "missing": missing,
