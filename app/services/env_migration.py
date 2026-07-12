@@ -109,3 +109,75 @@ def fix_mysql_dump_for_pasarguard(sql_text: str) -> str:
     sql_text = re.sub(r"(?m)^(CREATE DATABASE.*)\bmarzban\b", r"\1pasarguard", sql_text, flags=re.I)
     sql_text = re.sub(r"(?m)^(USE )\bmarzban\b", r"\1pasarguard", sql_text, flags=re.I)
     return sql_text.replace("marzban", "pasarguard")
+
+
+MIGRATE_ENV_KEYS = {
+    "XRAY_SUBSCRIPTION_TEMPLATE",
+    "V2RAY_SUBSCRIPTION_TEMPLATE",
+    "SUBSCRIPTION_URL_PREFIX",
+    "UVICORN_SSL_CERTFILE",
+    "UVICORN_SSL_KEYFILE",
+    "UVICORN_SSL_CA_TYPE",
+    "UVICORN_HOST",
+    "UVICORN_PORT",
+    "XRAY_EXECUTABLE_PATH",
+    "XRAY_JSON",
+    "SUDO_USERNAME",
+    "JWT_ACCESS_TOKEN_EXPIRE_MINUTES",
+    "DOCS",
+    "DEBUG",
+    "WEBHOOK_ADDRESS",
+    "TELEGRAM_API_TOKEN",
+    "TELEGRAM_ADMIN_ID",
+    "DISCORD_WEBHOOK_URL",
+}
+
+
+def _parse_env_lines(text: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, val = stripped.partition("=")
+        out[key.strip()] = val.strip()
+    return out
+
+
+def merge_marzban_env_into_pasarguard(
+    pg_env: str,
+    marzban_env: str,
+    target_db: str,
+    password_override: str | None = None,
+) -> str:
+    """Apply Marzban settings onto existing PasarGuard .env (fresh migration from backup)."""
+    transformed = transform_marzban_env(marzban_env, target_db, password_override)
+    pg_keys = _parse_env_lines(pg_env)
+    mz_keys = _parse_env_lines(transformed)
+
+    for key, val in mz_keys.items():
+        if key in MIGRATE_ENV_KEYS or key.startswith(("UVICORN_SSL_", "TELEGRAM_", "WEBHOOK_")):
+            pg_keys[key] = val
+
+    if "SQLALCHEMY_DATABASE_URL" in mz_keys:
+        pg_keys["SQLALCHEMY_DATABASE_URL"] = mz_keys["SQLALCHEMY_DATABASE_URL"]
+
+    lines = pg_env.splitlines()
+    seen: set[str] = set()
+    result: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key in pg_keys:
+                result.append(f"{key} = {pg_keys[key]}")
+                seen.add(key)
+                continue
+        result.append(line)
+
+    for key, val in pg_keys.items():
+        if key not in seen:
+            result.append(f"{key} = {val}")
+
+    return "\n".join(result) + "\n"
+

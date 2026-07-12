@@ -15,7 +15,7 @@ from app.services.prerequisites import (
     find_xui_db,
     get_marzban_db_type,
 )
-from app.services.upload import get_upload_path
+from app.services.upload import get_upload_path, get_upload_analysis
 
 
 def validate_migration(params: dict) -> dict:
@@ -41,9 +41,10 @@ def validate_migration(params: dict) -> dict:
     source_db = params.get("source_db")
     target_db = params.get("target_db")
     upload_path = get_upload_path(params["upload_id"]) if params.get("upload_id") else None
+    upload_analysis = get_upload_analysis(params["upload_id"]) if params.get("upload_id") else None
 
     if panel_id == "marzban":
-        errors.extend(_validate_marzban(params, marzban_mode, source_db, target_db, upload_path))
+        errors.extend(_validate_marzban(params, marzban_mode, source_db, target_db, upload_path, upload_analysis))
     elif panel_id == "3x-ui":
         errors.extend(_validate_xui(upload_path))
     elif panel_id == "remnawave":
@@ -72,7 +73,7 @@ def validate_migration(params: dict) -> dict:
     return {"ok": len(errors) == 0, "errors": errors}
 
 
-def _validate_marzban(params, mode, source_db, target_db, upload_path) -> list:
+def _validate_marzban(params, mode, source_db, target_db, upload_path, upload_analysis=None) -> list:
     errors = []
     if mode == "auto":
         if upload_path:
@@ -105,7 +106,22 @@ def _validate_marzban(params, mode, source_db, target_db, upload_path) -> list:
         has_source = bool(upload_path) or (is_marzban_installed() and source_db == "sqlite" and (MARZBAN_DATA / "db.sqlite3").exists())
         if source_db in ("mysql", "mariadb"):
             has_source = has_source or bool(upload_path) or is_marzban_installed()
-        if not has_source:
+        if upload_analysis:
+            if not upload_analysis.get("backup_ok"):
+                for m in upload_analysis.get("missing", []):
+                    errors.append(m)
+            elif upload_analysis.get("detected_source_db") and source_db:
+                if upload_analysis["detected_source_db"] != source_db:
+                    errors.append(_msg(
+                        f"Backup contains {upload_analysis['detected_source_db']} but you selected {source_db}",
+                        f"بکاپ {upload_analysis['detected_source_db']} است ولی شما {source_db} انتخاب کردید",
+                        f"В копии {upload_analysis['detected_source_db']}, выбрано {source_db}",
+                    ))
+            if source_db in ("mysql", "mariadb") and not upload_analysis.get("mysql_password_found"):
+                pwd = params.get("source_db_password") or params.get("target_db_password")
+                if not pwd:
+                    errors.append(_msg("Database password required", "رمز دیتابیس لازم است", "Нужен пароль БД"))
+        elif not has_source:
             errors.append(_msg("Marzban backup or live database required", "بکاپ یا دیتابیس Marzban لازم است", "Нужна копия или БД Marzban"))
 
     return errors

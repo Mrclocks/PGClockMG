@@ -101,7 +101,7 @@ def _suggest_marzban_mode(marzban_installed: bool, pg_installed: bool) -> str:
     return "fresh"
 
 
-def check_prerequisites(panel_id: str, marzban_mode: str | None = None) -> dict:
+def check_prerequisites(panel_id: str, marzban_mode: str | None = None, upload_id: str | None = None) -> dict:
     panel = PANELS.get(panel_id)
     if not panel:
         return {"ok": False, "checks": [], "message": {"en": "Invalid panel", "fa": "پنل نامعتبر", "ru": "Неверная панель"}}
@@ -137,6 +137,11 @@ def check_prerequisites(panel_id: str, marzban_mode: str | None = None) -> dict:
     marzban_installed = is_marzban_installed()
     hiddify_installed = is_hiddify_installed()
     xui_db = find_xui_db()
+
+    upload_analysis = None
+    if upload_id:
+        from app.services.upload import get_upload_analysis
+        upload_analysis = get_upload_analysis(upload_id)
 
     # PasarGuard requirement
     if prereq.pasarguard_required:
@@ -197,15 +202,28 @@ def check_prerequisites(panel_id: str, marzban_mode: str | None = None) -> dict:
             },
         })
         has_marzban_data = marzban_installed or (MARZBAN_DATA / "db.sqlite3").exists()
+        backup_ok = upload_analysis.get("backup_ok") if upload_analysis else False
         checks.append({
             "id": "marzban_source",
             "label": {"en": "Marzban data or backup", "fa": "داده Marzban یا بکاپ", "ru": "Данные Marzban или копия"},
-            "ok": has_marzban_data,
-            "optional": True,
+            "ok": has_marzban_data or backup_ok,
+            "optional": not has_marzban_data and not backup_ok,
             "detail": {
-                "en": "Live Marzban found" if has_marzban_data else "Upload backup in step 2 if Marzban not on server",
-                "fa": "Marzban روی سرور" if has_marzban_data else "در مرحله ۲ بکاپ آپلود کنید",
-                "ru": "Marzban на сервере" if has_marzban_data else "Загрузите копию на шаге 2",
+                "en": (
+                    f"Backup OK ({upload_analysis['total_files']} files)" if backup_ok
+                    else "Live Marzban found" if has_marzban_data
+                    else "Upload backup in step 2 if Marzban not on server"
+                ),
+                "fa": (
+                    f"بکاپ تأیید شد ({upload_analysis['total_files']} فایل)" if backup_ok
+                    else "Marzban روی سرور" if has_marzban_data
+                    else "در مرحله ۲ بکاپ آپلود کنید"
+                ),
+                "ru": (
+                    f"Копия OK ({upload_analysis['total_files']} файлов)" if backup_ok
+                    else "Marzban на сервере" if has_marzban_data
+                    else "Загрузите копию на шаге 2",
+                ),
             },
         })
     elif not prereq.pasarguard_required and panel_id == "marzban":
@@ -273,6 +291,8 @@ def check_prerequisites(panel_id: str, marzban_mode: str | None = None) -> dict:
             "pasarguard_db": get_pasarguard_db_type(),
             "marzban_db": get_marzban_db_type(),
             "suggested_marzban_mode": _suggest_marzban_mode(marzban_installed, pg_installed) if panel_id == "marzban" else None,
+            "upload_backup_ok": upload_analysis.get("backup_ok") if upload_analysis else None,
+            "upload_source_db": upload_analysis.get("detected_source_db") if upload_analysis else None,
         },
     }
 

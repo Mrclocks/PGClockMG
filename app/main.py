@@ -35,7 +35,7 @@ def _server_ip() -> str:
 @app.get("/api/info")
 async def api_info():
     return {
-        "version": "1.3.0",
+        "version": "1.3.1",
         "server_ip": _server_ip(),
         "web_port": WEB_PORT,
         "panels": [p.model_dump() for p in PANELS.values()],
@@ -64,10 +64,19 @@ async def api_system_check():
 
 
 @app.get("/api/prerequisites/{panel_id}")
-async def api_prerequisites(panel_id: str, marzban_mode: str | None = None):
+async def api_prerequisites(panel_id: str, marzban_mode: str | None = None, upload_id: str | None = None):
     if panel_id not in PANELS:
         raise HTTPException(404, "پنل یافت نشد")
-    return check_prerequisites(panel_id, marzban_mode=marzban_mode)
+    return check_prerequisites(panel_id, marzban_mode=marzban_mode, upload_id=upload_id)
+
+
+@app.get("/api/upload/{upload_id}/analysis")
+async def api_upload_analysis(upload_id: str):
+    from app.services.upload import get_upload_analysis
+    analysis = get_upload_analysis(upload_id)
+    if not analysis:
+        raise HTTPException(404, "Upload not found")
+    return analysis
 
 
 @app.get("/api/recommendations/{panel_id}/{source_db}")

@@ -503,6 +503,65 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
   color: var(--success);
 }
 
+.upload-inventory {
+  margin-top: 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.upload-inventory h4 {
+  margin: 0 0 10px;
+  font-size: 0.95rem;
+}
+
+.upload-inventory .inv-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.upload-inventory .inv-badge {
+  font-size: 0.75rem;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+}
+
+.upload-inventory .inv-badge.ok { border-color: rgba(16,185,129,0.4); color: var(--success); }
+.upload-inventory .inv-badge.warn { border-color: rgba(245,158,11,0.4); color: var(--warning); }
+
+.upload-inventory table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.upload-inventory th,
+.upload-inventory td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.upload-inventory th { color: var(--text-dim); font-weight: 500; }
+
+.upload-inventory .inv-map {
+  margin-top: 12px;
+  padding: 10px;
+  background: var(--bg-elevated);
+  border-radius: var(--radius-sm);
+  font-size: 0.8rem;
+}
+
+.upload-inventory .inv-map li { margin: 4px 0; }
+
 /* Info / Warning boxes */
 .info-box, .warnings-box, .warning-card, .option-card, .summary-card {
   background: var(--bg-card);

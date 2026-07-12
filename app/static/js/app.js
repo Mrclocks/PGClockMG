@@ -127,7 +127,11 @@ function canProceedStep1() {
 }
 
 function canProceedStep2() {
-  if (!state.sourceDb) return t('block.noSourceDb');
+  const analysis = state.uploadInfo?.analysis;
+  if (!state.sourceDb) {
+    if (analysis?.detected_source_db) return t('block.selectDetectedDb');
+    return t('block.noSourceDb');
+  }
   const panel = state.selectedPanel;
   if (panel?.id === 'remnawave') {
     const url = document.getElementById('remnawaveUrl')?.value?.trim();
@@ -136,13 +140,24 @@ function canProceedStep2() {
   }
   const needsPwd = ['mysql', 'mariadb', 'postgresql', 'timescaledb'].includes(state.sourceDb);
   if (needsPwd && panel?.id !== 'remnawave' && !document.getElementById('sourcePassword')?.value) {
-    return t('block.sourcePassword');
+    if (analysis?.mysql_password_found) {
+      // password will be read from backup .env during migration
+    } else {
+      return t('block.sourcePassword');
+    }
   }
   if (panel?.id === 'marzban' && state.marzbanMode === 'fresh' && !state.detected?.marzban && !state.uploadId) {
     return t('block.marzbanBackup');
   }
+  if (panel?.id === 'marzban' && state.uploadId && analysis && !analysis.backup_ok) {
+    const miss = analysis.missing?.[0];
+    return miss ? tr(miss, state.lang) : t('block.backupIncomplete');
+  }
   if (panel?.id === '3x-ui' && !state.detected?.xui_db && !state.uploadId) {
     return t('block.xuiDb');
+  }
+  if (analysis?.detected_source_db && state.sourceDb !== analysis.detected_source_db) {
+    return t('block.dbMismatch');
   }
   return null;
 }
@@ -306,8 +321,11 @@ async function renderPanelPrereqs(id) {
   prereqEl.innerHTML = '<div style="text-align:center;padding:12px;color:var(--text-dim)">...</div>';
 
   try {
-    const modeQ = state.marzbanMode ? `?marzban_mode=${encodeURIComponent(state.marzbanMode)}` : '';
-    const res = await fetch(`/api/prerequisites/${id}${modeQ}`);
+    const params = new URLSearchParams();
+    if (state.marzbanMode) params.set('marzban_mode', state.marzbanMode);
+    if (state.uploadId) params.set('upload_id', state.uploadId);
+    const qs = params.toString() ? `?${params}` : '';
+    const res = await fetch(`/api/prerequisites/${id}${qs}`);
     const data = await res.json();
     state.prereqData = data;
     state.detected = data.detected || {};
@@ -393,6 +411,7 @@ function renderSourceDbs() {
   }).join('');
 
   if (state.detected?.marzban_db) selectSourceDb(state.detected.marzban_db);
+  else if (state.uploadInfo?.analysis?.detected_source_db) selectSourceDb(state.uploadInfo.analysis.detected_source_db);
   else if (state.detected?.pasarguard_db && panel.id === 'pasarguard') selectSourceDb(state.detected.pasarguard_db);
   else if (panel.supported_source_dbs.length === 1) selectSourceDb(panel.supported_source_dbs[0]);
 }
@@ -623,7 +642,9 @@ function setupUpload() {
 
 async function uploadFile(file) {
   const status = document.getElementById('uploadStatus');
+  const inventory = document.getElementById('uploadInventory');
   status.classList.remove('hidden');
+  inventory.classList.add('hidden');
   status.textContent = `${t('uploading')} ${file.name}...`;
 
   const form = new FormData();
@@ -634,15 +655,91 @@ async function uploadFile(file) {
     const data = await res.json();
     state.uploadId = data.upload_id;
     state.uploadInfo = data;
+    const a = data.analysis || {};
     let hint = data.detected?.panel_hint ? ` — ${t('detected')}: ${data.detected.panel_hint}` : '';
-    status.textContent = `✅ ${file.name} ${t('uploaded')} (${(data.size / 1024).toFixed(0)} KB)${hint}`;
-    status.style.background = 'var(--success-bg)';
-    status.style.color = 'var(--success)';
-    document.getElementById('btnStep1').disabled = false;
-    if (state.selectedPanel?.id === 'marzban') renderMarzbanModes();
+    if (a.detected_source_db) hint += ` — DB: ${a.detected_source_db}`;
+    const okLabel = a.backup_ok ? '✅' : '⚠️';
+    status.textContent = `${okLabel} ${file.name} ${t('uploaded')} (${(data.size / 1024).toFixed(0)} KB)${hint}`;
+    status.style.background = a.backup_ok ? 'var(--success-bg)' : 'var(--warning-bg)';
+    status.style.color = a.backup_ok ? 'var(--success)' : 'var(--warning)';
+
+    applyUploadAnalysis(data);
+    renderUploadInventory(data);
+    if (state.selectedPanel) await renderPanelPrereqs(state.selectedPanel.id);
+    updateStepButtons();
   } catch (e) {
     status.textContent = `❌ ${t('uploadErr')}: ${e.message}`;
     status.style.background = 'var(--error-bg)';
     status.style.color = 'var(--error)';
   }
+}
+
+function applyUploadAnalysis(data) {
+  const a = data.analysis;
+  if (!a) return;
+
+  if (a.panel_hint === 'marzban' && state.selectedPanel?.id === 'marzban') {
+    if (!state.marzbanMode || state.marzbanMode === 'inplace') {
+      state.marzbanMode = 'fresh';
+      selectMarzbanMode('fresh');
+    }
+  }
+
+  if (a.detected_source_db) {
+    if (document.querySelector('#sourceDbGrid .db-card')) {
+      selectSourceDb(a.detected_source_db);
+    } else {
+      state.sourceDb = a.detected_source_db;
+    }
+  }
+
+  if (a.mysql_password_found && a.paths?.env) {
+    const el = document.getElementById('sourcePassword');
+    if (el && !el.value) {
+      el.placeholder = t('upload.pwdFromEnv');
+    }
+  }
+}
+
+function renderUploadInventory(data) {
+  const el = document.getElementById('uploadInventory');
+  const a = data.analysis;
+  if (!el || !a) return;
+
+  const lang = state.lang;
+  const catLabel = (c) => t(`upload.cat.${c}`) || c;
+  const fmtSize = (n) => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+
+  const badges = Object.entries(a.categories || {}).map(([k, v]) =>
+    `<span class="inv-badge">${catLabel(k)}: ${v}</span>`
+  ).join('');
+  const okBadge = `<span class="inv-badge ${a.backup_ok ? 'ok' : 'warn'}">${a.backup_ok ? t('upload.backupOk') : t('upload.backupIncomplete')}</span>`;
+
+  const rows = (a.inventory || []).map(item => `
+    <tr>
+      <td>${catLabel(item.category)}</td>
+      <td><code>${item.path}</code></td>
+      <td>${fmtSize(item.size)}</td>
+      <td>${item.pasarguard_note ? `<span class="check-detail">${item.pasarguard_note}</span>` : '—'}</td>
+    </tr>`).join('');
+
+  const mapping = (a.env_mapping || []).map(m =>
+    `<li><code>${m.from}</code> → <code>${m.to}</code></li>`
+  ).join('');
+
+  const warnings = (a.warnings || []).map(w => `<p class="check-detail">⚠️ ${tr(w, lang)}</p>`).join('');
+  const missing = (a.missing || []).map(m => `<p class="check-detail">❌ ${tr(m, lang)}</p>`).join('');
+
+  el.innerHTML = `
+    <h4>${t('upload.inventoryTitle')}</h4>
+    <div class="inv-summary">${okBadge}<span class="inv-badge">${t('upload.fileCount')}: ${a.total_files}</span>${badges}</div>
+    ${a.extract_root && a.extract_root !== '.' ? `<p class="check-detail">${t('upload.extractRoot')}: <code>${a.extract_root}</code></p>` : ''}
+    ${missing}${warnings}
+    ${mapping ? `<div class="inv-map"><strong>${t('upload.envMapping')}</strong><ul>${mapping}</ul></div>` : ''}
+    <table>
+      <thead><tr><th>${t('upload.colType')}</th><th>${t('upload.colPath')}</th><th>${t('upload.colSize')}</th><th>${t('upload.colPgPath')}</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${a.inventory_truncated ? `<p class="check-detail">${t('upload.truncated')}</p>` : ''}`;
+  el.classList.remove('hidden');
 }

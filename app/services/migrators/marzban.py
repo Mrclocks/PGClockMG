@@ -16,7 +16,9 @@ from app.services.env_migration import (
     transform_xray_config,
     fix_mysql_dump_for_pasarguard,
     read_env_var,
+    merge_marzban_env_into_pasarguard,
 )
+from app.services.backup_analyzer import resolve_extract_root, find_file_in_upload
 
 
 class MarzbanMigrator(BaseMigrator):
@@ -147,6 +149,7 @@ class MarzbanMigrator(BaseMigrator):
             source_sqlite, source_sql, extra_data_dir = await self._extract_upload(
                 upload_path, work_dir, source_db,
             )
+            await self._apply_backup_env_and_assets(work_dir, source_db, target_db, password)
         elif marzban_exists and source_db == "sqlite":
             src = MARZBAN_DATA / "db.sqlite3"
             if not src.exists():
@@ -226,29 +229,59 @@ class MarzbanMigrator(BaseMigrator):
 
     async def _extract_upload(self, upload_path: str, work_dir: Path, source_db: str):
         upload = Path(upload_path)
-        if upload.suffix == ".zip":
-            ok, _ = await self._run_cmd(["unzip", "-o", str(upload), "-d", str(work_dir)])
-            if not ok:
-                raise RuntimeError("Failed to extract zip backup")
+        upload_dir = upload.parent
+
+        if upload.suffix.lower() == ".zip":
+            extract_root = resolve_extract_root(upload_dir)
+            if extract_root.exists():
+                for p in extract_root.rglob("*"):
+                    if p.is_file():
+                        rel = p.relative_to(extract_root)
+                        dest = work_dir / rel
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(p, dest)
+                self.job.log(f"Using pre-extracted backup ({len(list(work_dir.rglob('*')))} items)")
+            else:
+                ok, _ = await self._run_cmd(["unzip", "-o", str(upload), "-d", str(work_dir)])
+                if not ok:
+                    raise RuntimeError("Failed to extract zip backup")
         else:
             shutil.copy2(upload, work_dir / upload.name)
 
-        source_sqlite = None
-        source_sql = None
-        extra = None
+        source_sqlite = find_file_in_upload(upload_dir, ("db.sqlite3", "marzban.db"))
+        if source_sqlite and source_sqlite.parent != work_dir:
+            dest = work_dir / source_sqlite.name
+            if not dest.exists():
+                shutil.copy2(source_sqlite, dest)
+            source_sqlite = dest
+        else:
+            source_sqlite = None
+            for name in ("db.sqlite3", "marzban.db"):
+                for p in work_dir.rglob(name):
+                    source_sqlite = p
+                    break
+                if source_sqlite:
+                    break
 
-        for name in ("db.sqlite3", "marzban.db"):
-            for p in work_dir.rglob(name):
-                source_sqlite = p
+        source_sql = find_file_in_upload(upload_dir, ("marzban.sql",))
+        if not source_sql:
+            for p in sorted(work_dir.rglob("*.sql")):
+                source_sql = p
                 break
-        for p in work_dir.rglob("*.sql"):
-            source_sql = p
-            break
+        if not source_sql and upload.suffix.lower() == ".sql":
+            source_sql = work_dir / upload.name
 
-        for sub in ("certs", "templates", "xray_config.json"):
-            for p in work_dir.rglob(sub):
-                if p.is_dir() or p.name == "xray_config.json":
-                    extra = p.parent
+        extra = None
+        for p in work_dir.rglob("xray_config.json"):
+            extra = p.parent
+            break
+        if not extra:
+            for name in ("certs", "templates"):
+                for p in work_dir.rglob(name):
+                    if p.is_dir():
+                        extra = p.parent
+                        break
+                if extra:
                     break
 
         if source_db == "sqlite" and not source_sqlite:
@@ -256,8 +289,46 @@ class MarzbanMigrator(BaseMigrator):
         if source_db in ("mysql", "mariadb") and not source_sql:
             raise RuntimeError("No .sql dump found in backup")
 
-        self.job.log(f"Backup extracted: sqlite={source_sqlite}, sql={source_sql}")
+        self.job.log(f"Backup parsed: sqlite={source_sqlite}, sql={source_sql}, assets={extra}")
         return source_sqlite, source_sql, extra
+
+    async def _apply_backup_env_and_assets(self, work_dir: Path, source_db: str, target_db: str, password: str | None):
+        """Map Marzban backup settings to PasarGuard per official docs."""
+        env_file = None
+        for p in work_dir.rglob(".env"):
+            env_file = p
+            break
+        if env_file and PASARGUARD_ENV.exists():
+            marzban_env = env_file.read_text(encoding="utf-8", errors="ignore")
+            pg_env = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+            pwd = password or read_env_var(marzban_env, "MYSQL_ROOT_PASSWORD")
+            merged = merge_marzban_env_into_pasarguard(pg_env, marzban_env, target_db, pwd)
+            self._backup_file(PASARGUARD_ENV, BACKUP_DIR)
+            PASARGUARD_ENV.write_text(merged, encoding="utf-8")
+            self.job.log("Merged Marzban .env settings into PasarGuard .env")
+
+        compose_file = None
+        for name in ("docker-compose.yml", "docker-compose.yaml"):
+            for p in work_dir.rglob(name):
+                compose_file = p
+                break
+        pg_compose = PASARGUARD_DIR / "docker-compose.yml"
+        if pg_compose.exists():
+            text = pg_compose.read_text(encoding="utf-8", errors="ignore")
+            if "marzban" in text.lower():
+                self._backup_file(pg_compose, BACKUP_DIR)
+                pg_compose.write_text(transform_compose_marzban_to_pasarguard(text), encoding="utf-8")
+                self.job.log("Fixed marzban paths in PasarGuard docker-compose.yml")
+        elif compose_file:
+            text = transform_compose_marzban_to_pasarguard(compose_file.read_text(encoding="utf-8", errors="ignore"))
+            pg_compose.write_text(text, encoding="utf-8")
+            self.job.log("Wrote docker-compose.yml from backup mapping")
+
+        data_src = work_dir
+        for candidate in work_dir.rglob("xray_config.json"):
+            data_src = candidate.parent
+            break
+        await self._copy_marzban_assets(data_src)
 
     async def _ensure_target_database_stack(self, target_db: str, password: str | None):
         """Start target DB services before cross-DB migration."""
@@ -315,16 +386,28 @@ class MarzbanMigrator(BaseMigrator):
         PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
         for item in ("certs", "templates"):
             src = source_data / item
+            if not src.exists():
+                for p in source_data.rglob(item):
+                    if p.is_dir():
+                        src = p
+                        break
             dst = PASARGUARD_DATA / item
-            if src.exists() and not dst.exists():
+            if src.exists():
+                if dst.exists():
+                    shutil.rmtree(dst, ignore_errors=True)
                 shutil.copytree(src, dst)
-                self.job.log(f"Copied {item}/")
-        xray = source_data / "xray_config.json"
-        if xray.exists():
+                self.job.log(f"Copied {item}/ → /var/lib/pasarguard/{item}/")
+        v2ray = PASARGUARD_DATA / "templates" / "v2ray"
+        xray = PASARGUARD_DATA / "templates" / "xray"
+        if v2ray.exists() and not xray.exists():
+            v2ray.rename(xray)
+            self.job.log("Renamed templates/v2ray → templates/xray")
+        for p in source_data.rglob("xray_config.json"):
+            text = transform_xray_config(p.read_text(encoding="utf-8", errors="ignore"))
             dst = PASARGUARD_DATA / "xray_config.json"
-            text = transform_xray_config(xray.read_text(encoding="utf-8", errors="ignore"))
             dst.write_text(text, encoding="utf-8")
-            self.job.log("Copied xray_config.json")
+            self.job.log("Copied xray_config.json → /var/lib/pasarguard/")
+            break
 
     async def _rename_mysql_database(self, password: str | None, db_engine: str = "mysql"):
         env_path = PASARGUARD_DIR / ".env"
