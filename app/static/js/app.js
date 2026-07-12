@@ -125,7 +125,6 @@ function renderPanels() {
     return `
       <div class="panel-card" data-id="${p.id}" onclick="selectPanel('${p.id}')">
         <div class="panel-card-top">
-          <span class="panel-icon">${p.icon}</span>
           <h3>${panelLatinName(p)}</h3>
           <span class="support-badge ${supClass}">${sup}</span>
         </div>
