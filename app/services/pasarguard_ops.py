@@ -17,12 +17,15 @@ STARTUP_MARKERS = (
 
 FAIL_LOG_PATTERNS = (
     "Database migrations failed",
+    "ERROR: Database migrations failed",
     "sqlalchemy.exc.",
+    "asyncpg.exceptions.DuplicateColumnError",
     "DuplicateColumnError",
     "ProgrammingError",
     "Traceback (most recent call last)",
     "FATAL:",
     "could not connect",
+    "column \"user_template_id\" of relation \"next_plans\" already exists",
 )
 
 DB_SERVICES = {
@@ -67,59 +70,85 @@ def _extract_failure_snippet(output: str) -> str:
     return (output or "")[-2000:]
 
 
-async def fetch_pasarguard_logs(migrator, tail: int = 150) -> str:
+async def fetch_compose_logs(migrator, services: list[str], tail: int = 200) -> str:
     cwd = str(PASARGUARD_DIR)
     ok, out = await migrator._run_cmd(
-        ["docker", "compose", "logs", "--no-color", "--tail", str(tail), "pasarguard"],
+        ["docker", "compose", "logs", "--no-color", "--tail", str(tail), *services],
         cwd=cwd,
-        timeout=25,
+        timeout=30,
     )
     return out if ok else ""
 
 
-async def verify_pasarguard_healthy(migrator, max_wait: int = 90) -> None:
-    """Fail migration if PasarGuard container logs show startup/migration errors."""
-    migrator.job.log("Verifying PasarGuard started without errors...")
-    cwd = str(PASARGUARD_DIR)
+async def fetch_pasarguard_logs(migrator, tail: int = 150) -> str:
+    pg = await fetch_compose_logs(migrator, ["pasarguard"], tail=tail)
+    target_db = migrator.params.get("target_db")
+    db_svc = resolve_db_service(target_db) if target_db else None
+    if db_svc:
+        db_logs = await fetch_compose_logs(migrator, [db_svc], tail=min(tail, 80))
+        return f"{pg}\n{db_logs}"
+    return pg
 
-    for attempt in range(max(1, max_wait // 3)):
-        out = await fetch_pasarguard_logs(migrator, tail=180)
+
+def _check_logs_for_failure(output: str) -> str | None:
+    for pattern in FAIL_LOG_PATTERNS:
+        if pattern in (output or ""):
+            return pattern
+    return None
+
+
+async def _pasarguard_container_running(migrator) -> bool:
+    cwd = str(PASARGUARD_DIR)
+    ok, running = await migrator._run_cmd(
+        ["docker", "compose", "ps", "--status", "running", "-q", "pasarguard"],
+        cwd=cwd,
+        timeout=15,
+    )
+    return bool(ok and running.strip())
+
+
+async def verify_pasarguard_healthy(migrator, max_wait: int = 120) -> None:
+    """Fail unless PasarGuard logs show a clean startup (no migration errors)."""
+    migrator.job.log("Verifying PasarGuard started without errors...")
+    await asyncio.sleep(12)
+
+    stable_ready = 0
+    attempts = max(8, max_wait // 4)
+    for _ in range(attempts):
+        out = await fetch_pasarguard_logs(migrator, tail=300)
         _log_failures_from_output(migrator, out)
 
-        for pattern in FAIL_LOG_PATTERNS:
-            if pattern in (out or ""):
-                snippet = _extract_failure_snippet(out)
-                raise RuntimeError(
-                    "PasarGuard failed after migration — container logs contain errors. "
-                    f"Check: {pattern}\n{snippet}"
-                )
+        hit = _check_logs_for_failure(out)
+        if hit:
+            raise RuntimeError(
+                "PasarGuard failed to start — see container logs.\n"
+                + _extract_failure_snippet(out)
+            )
+
+        if not await _pasarguard_container_running(migrator):
+            raise RuntimeError(
+                "PasarGuard container is not running.\n" + _extract_failure_snippet(out)
+            )
 
         if any(marker in (out or "") for marker in STARTUP_MARKERS):
-            migrator.job.log("PasarGuard healthy — no errors in container logs")
-            return
+            stable_ready += 1
+            if stable_ready >= 2:
+                migrator.job.log("PasarGuard healthy — application startup confirmed")
+                return
+        else:
+            stable_ready = 0
 
-        ok_run, running = await migrator._run_cmd(
-            ["docker", "compose", "ps", "--status", "running", "-q", "pasarguard"],
-            cwd=cwd,
-            timeout=15,
+        await asyncio.sleep(4)
+
+    out = await fetch_pasarguard_logs(migrator, tail=350)
+    hit = _check_logs_for_failure(out)
+    if hit:
+        raise RuntimeError(
+            "PasarGuard startup failed.\n" + _extract_failure_snippet(out)
         )
-        if ok_run and running.strip() and attempt >= 5:
-            out2 = await fetch_pasarguard_logs(migrator, tail=180)
-            for pattern in FAIL_LOG_PATTERNS:
-                if pattern in (out2 or ""):
-                    snippet = _extract_failure_snippet(out2)
-                    raise RuntimeError(
-                        "PasarGuard container is running but logs contain errors.\n" + snippet
-                    )
-            migrator.job.log("PasarGuard container running")
-            return
-
-        await asyncio.sleep(3)
-
-    out = await fetch_pasarguard_logs(migrator, tail=200)
-    snippet = _extract_failure_snippet(out)
     raise RuntimeError(
-        "PasarGuard did not become healthy within timeout. Recent logs:\n" + snippet
+        "PasarGuard did not reach ready state (no 'Application startup complete' in logs).\n"
+        + _extract_failure_snippet(out)
     )
 
 
@@ -207,8 +236,8 @@ async def wait_pasarguard_ready(migrator, max_wait: int = 90, strict: bool = Fal
             timeout=15,
         )
         if ok_run and running.strip() and attempt >= 4:
-            migrator.job.log("PasarGuard container running — proceeding")
-            return True
+            migrator.job.log("PasarGuard container running — waiting for application startup...")
+            # Do not return True here — caller must use verify_pasarguard_healthy
 
         await asyncio.sleep(3)
 
@@ -248,7 +277,7 @@ async def restart_pasarguard(migrator, wait: bool = True) -> None:
             timeout=180,
         )
     if wait:
-        await wait_pasarguard_ready(migrator, max_wait=60)
+        await wait_pasarguard_ready(migrator, max_wait=30, strict=False)
 
 
 async def _wait_db_service(migrator, target_db: str, service: str, attempts: int = 20) -> None:
@@ -328,21 +357,114 @@ async def read_target_alembic_version(migrator, target_db: str) -> str | None:
 
 
 async def run_alembic_upgrade(migrator) -> bool:
+    ok, out = await _run_pasarguard_alembic(migrator, "upgrade", "head")
+    if ok:
+        migrator.job.log("Alembic upgrade head completed")
+        return True
+    if out and "already at head" in out.lower():
+        return True
+    return False
+
+
+async def _run_pasarguard_alembic(migrator, *args: str) -> tuple[bool, str]:
+    """Run alembic inside one-shot pasarguard container (avoids all-in-one startup)."""
     cwd = str(PASARGUARD_DIR)
+    quoted = " ".join(args)
     commands = [
-        ["docker", "compose", "exec", "-T", "pasarguard", "alembic", "upgrade", "head"],
-        ["docker", "compose", "exec", "-T", "pasarguard", "uv", "run", "alembic", "upgrade", "head"],
-        ["docker", "compose", "exec", "-T", "pasarguard", "bash", "-lc", "uv run alembic upgrade head"],
-        ["docker", "compose", "exec", "-T", "pasarguard", "bash", "-lc", "cd /code && uv run alembic upgrade head"],
+        ["docker", "compose", "run", "--rm", "--no-deps", "pasarguard", "bash", "-lc", f"uv run alembic {quoted}"],
+        ["docker", "compose", "run", "--rm", "--no-deps", "pasarguard", "bash", "-lc", f"cd /code && uv run alembic {quoted}"],
+        ["docker", "compose", "exec", "-T", "pasarguard", "bash", "-lc", f"uv run alembic {quoted}"],
     ]
+    last_out = ""
     for cmd in commands:
         ok, out = await migrator._run_cmd(cmd, cwd=cwd, timeout=300)
+        last_out = out or last_out
         if ok:
-            migrator.job.log("Alembic upgrade head completed")
-            return True
-        if out and "already at head" in out.lower():
-            return True
+            return True, last_out
+    return False, last_out
+
+
+async def stamp_alembic_head(migrator) -> bool:
+    ok, out = await _run_pasarguard_alembic(migrator, "stamp", "head")
+    if ok:
+        migrator.job.log("Alembic stamped to head")
+        return True
+    migrator.job.log(f"alembic stamp head failed: {(out or '')[-500:]}")
     return False
+
+
+async def _pg_column_exists(migrator, table: str, column: str) -> bool:
+    target_db = migrator.params.get("target_db")
+    service = resolve_db_service(target_db or "")
+    if not service:
+        return False
+    conn = _target_conn(migrator)
+    user = conn.get("user") or "postgres"
+    pwd = conn.get("password") or ""
+    db = conn.get("database") or "pasarguard"
+    cwd = str(PASARGUARD_DIR)
+    sql = (
+        "SELECT 1 FROM information_schema.columns "
+        f"WHERE table_name='{table}' AND column_name='{column}' LIMIT 1"
+    )
+    cmd = (
+        f'cd "{cwd}" && docker compose exec -T {service} '
+        f'env PGPASSWORD="{pwd}" psql -U {user} -d {db} -tAc "{sql}"'
+    )
+    proc = await asyncio.create_subprocess_shell(
+        cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return False
+    return (stdout or b"").decode("utf-8", errors="ignore").strip() == "1"
+
+
+async def _target_has_public_tables(migrator, target_db: str) -> bool:
+    service = resolve_db_service(target_db)
+    if not service:
+        return False
+    conn = _target_conn(migrator)
+    user = conn.get("user") or "postgres"
+    pwd = conn.get("password") or ""
+    db = conn.get("database") or "pasarguard"
+    cwd = str(PASARGUARD_DIR)
+    sql = (
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_schema='public' AND table_type='BASE TABLE' LIMIT 1"
+    )
+    cmd = (
+        f'cd "{cwd}" && docker compose exec -T {service} '
+        f'env PGPASSWORD="{pwd}" psql -U {user} -d {db} -tAc "{sql}"'
+    )
+    proc = await asyncio.create_subprocess_shell(
+        cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return False
+    return (stdout or b"").decode("utf-8", errors="ignore").strip() == "1"
+
+
+async def finalize_target_alembic_after_import(migrator, target_db: str) -> None:
+    """
+    After db-migrations: if schema already has columns from a prior head-migration
+    but alembic_version is still at Marzban revision, stamp head to prevent
+    DuplicateColumnError on PasarGuard restart.
+    """
+    if target_db not in ("postgresql", "timescaledb"):
+        return
+
+    if await _pg_column_exists(migrator, "next_plans", "user_template_id"):
+        current = await read_target_alembic_version(migrator, target_db)
+        migrator.job.log(
+            f"Schema already has PasarGuard columns (alembic={current or 'none'}) — stamping head"
+        )
+        if not await stamp_alembic_head(migrator):
+            raise RuntimeError(
+                "Database schema is ahead of alembic_version but 'alembic stamp head' failed. "
+                "Drop/recreate the target database or fix alembic_version manually."
+            )
 
 
 async def set_target_alembic_version(
@@ -417,8 +539,8 @@ async def ensure_schema_initialized(
     source_path: str | Path | None = None,
 ) -> str | None:
     """
-    Boot PasarGuard on the target DB so Alembic creates schema (all DB types),
-    then align alembic_version with source when needed for db-migrations.
+    Prepare target DB schema at source Alembic revision for db-migrations.
+    Uses one-shot `alembic upgrade` (not full PasarGuard all-in-one startup).
     """
     cwd = str(PASARGUARD_DIR)
     conn = _target_conn(migrator)
@@ -446,31 +568,33 @@ async def ensure_schema_initialized(
     migrator.job.log("Stopping PasarGuard before schema init...")
     await migrator._run_cmd(["docker", "compose", "stop", "pasarguard"], cwd=cwd, timeout=120)
 
-    migrator.job.log("Starting PasarGuard on target database (force recreate)...")
-    await start_pasarguard(migrator, wait=True, recreate=True)
-    await asyncio.sleep(8)
+    if target_db in ("postgresql", "timescaledb") and await _pg_column_exists(
+        migrator, "next_plans", "user_template_id"
+    ):
+        migrator.job.log("Target DB already has PasarGuard schema from a previous attempt")
+        if not await stamp_alembic_head(migrator):
+            raise RuntimeError(
+                "Target database schema exists but alembic_version is out of sync. "
+                "Use a fresh empty database or run: docker compose exec pasarguard uv run alembic stamp head"
+            )
+        target_version = await read_target_alembic_version(migrator, target_db)
+        migrator.job.log(f"Target Alembic version after heal: {target_version}")
+        return target_version
+
+    revision = source_version or "head"
+    migrator.job.log(f"Running alembic upgrade {revision} (one-shot, no panel startup)...")
+    ok, out = await _run_pasarguard_alembic(migrator, "upgrade", revision)
+    if not ok:
+        raise RuntimeError(
+            f"Failed to initialize target schema with alembic upgrade {revision}:\n{(out or '')[-3000:]}"
+        )
 
     target_version = await read_target_alembic_version(migrator, target_db)
     if not target_version:
-        migrator.job.log("Target schema empty — running Alembic upgrade...")
-        await run_alembic_upgrade(migrator)
-        await asyncio.sleep(5)
-        await start_pasarguard(migrator, wait=True, recreate=True)
-        target_version = await read_target_alembic_version(migrator, target_db)
-
-    if not target_version:
         raise RuntimeError(
-            f"Target database ({target_db}) has no Alembic schema. "
+            f"Target database ({target_db}) has no Alembic schema after upgrade. "
             f"Check credentials: database '{conn.get('database')}', user '{conn.get('user')}'."
         )
 
     migrator.job.log(f"Target Alembic version after init: {target_version}")
-
-    if source_version and source_version != target_version:
-        migrator.job.log(
-            f"Aligning target alembic_version {target_version} → {source_version} for db-migrations"
-        )
-        if await set_target_alembic_version(migrator, target_db, source_version):
-            target_version = source_version
-
     return target_version

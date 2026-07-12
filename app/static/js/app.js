@@ -700,8 +700,8 @@ function connectWebSocket(jobId) {
       if (msg.message) document.getElementById('statusMsg').textContent = msg.message;
     }
     if (msg.type === 'done') {
-      if (msg.status === 'success') showSuccess(msg.result);
-      else showError(msg.result?.error || 'Error', terminal.textContent);
+      if (msg.status === 'success' && !msg.result?.error) showSuccess(msg.result);
+      else showError(msg.result?.error || msg.message || 'Error', terminal.textContent);
     }
   };
   ws.onerror = () => pollStatus(jobId);
@@ -717,8 +717,11 @@ async function pollStatus(jobId) {
       document.getElementById('progressText').textContent = data.progress + '%';
       if (data.message) document.getElementById('statusMsg').textContent = data.message;
       terminal.textContent = data.logs.join('\n');
-      if (data.status === 'success') { clearInterval(interval); showSuccess(data.result); }
-      if (data.status === 'error') { clearInterval(interval); showError(data.result?.error, data.logs.join('\n')); }
+      if (data.status === 'success' && !data.result?.error) { clearInterval(interval); showSuccess(data.result); }
+      if (data.status === 'error' || data.result?.error) {
+        clearInterval(interval);
+        showError(data.result?.error || data.message, data.logs.join('\n'));
+      }
     } catch (e) { /* retry */ }
   }, 2000);
 }

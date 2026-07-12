@@ -26,6 +26,7 @@ from app.services.pasarguard_ops import (
     restart_pasarguard,
     resolve_db_service,
     verify_pasarguard_healthy,
+    finalize_target_alembic_after_import,
 )
 from app.services.backup_analyzer import resolve_extract_root, find_file_in_upload
 
@@ -138,6 +139,7 @@ class MarzbanMigrator(BaseMigrator):
                 if not migration_source:
                     raise RuntimeError("SQL dump missing for cross-DB migration")
             await run_db_migration(self, migration_source, source_db, target_db)
+            await finalize_target_alembic_after_import(self, target_db)
             await self._update_env_paths(source_db, target_db)
             if extra_data_dir:
                 await self._copy_marzban_assets(extra_data_dir)
