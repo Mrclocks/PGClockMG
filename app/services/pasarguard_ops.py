@@ -8,11 +8,21 @@ import sqlite3
 from pathlib import Path
 
 from app.config import PASARGUARD_DIR, PASARGUARD_ENV, PASARGUARD_DATA
-from app.services.env_migration import get_pasarguard_target_connection
+from app.services.db_credentials import get_target_connection
 
 STARTUP_MARKERS = (
     "Application startup complete",
     "Uvicorn running",
+)
+
+FAIL_LOG_PATTERNS = (
+    "Database migrations failed",
+    "sqlalchemy.exc.",
+    "DuplicateColumnError",
+    "ProgrammingError",
+    "Traceback (most recent call last)",
+    "FATAL:",
+    "could not connect",
 )
 
 DB_SERVICES = {
@@ -39,8 +49,78 @@ def resolve_db_service(target_db: str) -> str | None:
     return DB_SERVICES.get(target_db, (None,))[0]
 
 
-def _target_conn(target_db: str, password: str | None = None) -> dict:
-    return get_pasarguard_target_connection(target_db, password)
+def _target_conn(migrator) -> dict:
+    return get_target_connection(migrator.params)
+
+
+def _log_failures_from_output(migrator, output: str) -> None:
+    for line in (output or "").splitlines():
+        if any(p in line for p in FAIL_LOG_PATTERNS):
+            migrator.job.log(line)
+
+
+def _extract_failure_snippet(output: str) -> str:
+    lines = (output or "").splitlines()
+    hits = [ln for ln in lines if any(p in ln for p in FAIL_LOG_PATTERNS)]
+    if hits:
+        return "\n".join(hits[-12:])
+    return (output or "")[-2000:]
+
+
+async def fetch_pasarguard_logs(migrator, tail: int = 150) -> str:
+    cwd = str(PASARGUARD_DIR)
+    ok, out = await migrator._run_cmd(
+        ["docker", "compose", "logs", "--no-color", "--tail", str(tail), "pasarguard"],
+        cwd=cwd,
+        timeout=25,
+    )
+    return out if ok else ""
+
+
+async def verify_pasarguard_healthy(migrator, max_wait: int = 90) -> None:
+    """Fail migration if PasarGuard container logs show startup/migration errors."""
+    migrator.job.log("Verifying PasarGuard started without errors...")
+    cwd = str(PASARGUARD_DIR)
+
+    for attempt in range(max(1, max_wait // 3)):
+        out = await fetch_pasarguard_logs(migrator, tail=180)
+        _log_failures_from_output(migrator, out)
+
+        for pattern in FAIL_LOG_PATTERNS:
+            if pattern in (out or ""):
+                snippet = _extract_failure_snippet(out)
+                raise RuntimeError(
+                    "PasarGuard failed after migration — container logs contain errors. "
+                    f"Check: {pattern}\n{snippet}"
+                )
+
+        if any(marker in (out or "") for marker in STARTUP_MARKERS):
+            migrator.job.log("PasarGuard healthy — no errors in container logs")
+            return
+
+        ok_run, running = await migrator._run_cmd(
+            ["docker", "compose", "ps", "--status", "running", "-q", "pasarguard"],
+            cwd=cwd,
+            timeout=15,
+        )
+        if ok_run and running.strip() and attempt >= 5:
+            out2 = await fetch_pasarguard_logs(migrator, tail=180)
+            for pattern in FAIL_LOG_PATTERNS:
+                if pattern in (out2 or ""):
+                    snippet = _extract_failure_snippet(out2)
+                    raise RuntimeError(
+                        "PasarGuard container is running but logs contain errors.\n" + snippet
+                    )
+            migrator.job.log("PasarGuard container running")
+            return
+
+        await asyncio.sleep(3)
+
+    out = await fetch_pasarguard_logs(migrator, tail=200)
+    snippet = _extract_failure_snippet(out)
+    raise RuntimeError(
+        "PasarGuard did not become healthy within timeout. Recent logs:\n" + snippet
+    )
 
 
 def read_sqlite_alembic_version(sqlite_path: str | Path) -> str | None:
@@ -59,11 +139,11 @@ def read_sqlite_alembic_version(sqlite_path: str | Path) -> str | None:
         return None
 
 
-async def read_mysql_alembic_version(migrator, target_db: str, password: str | None) -> str | None:
+async def read_mysql_alembic_version(migrator, target_db: str) -> str | None:
     service = resolve_db_service(target_db)
     if not service:
         return None
-    conn = _target_conn(target_db, password)
+    conn = _target_conn(migrator)
     user = conn.get("user") or "root"
     pwd = conn.get("password") or "password"
     host = conn.get("host") or "127.0.0.1"
@@ -103,18 +183,21 @@ async def docker_compose_up(migrator, services: list[str] | None = None) -> bool
     return ok
 
 
-async def wait_pasarguard_ready(migrator, max_wait: int = 90) -> bool:
+async def wait_pasarguard_ready(migrator, max_wait: int = 90, strict: bool = False) -> bool:
     cwd = str(PASARGUARD_DIR)
     migrator.job.log("Waiting for PasarGuard to become ready...")
 
     for attempt in range(max(1, max_wait // 3)):
-        ok, out = await migrator._run_cmd(
-            ["docker", "compose", "logs", "--no-color", "--tail", "80", "pasarguard"],
-            cwd=cwd,
-            timeout=25,
-        )
-        combined = out or ""
-        if any(marker in combined for marker in STARTUP_MARKERS):
+        out = await fetch_pasarguard_logs(migrator, tail=100)
+        for pattern in FAIL_LOG_PATTERNS:
+            if pattern in (out or ""):
+                if strict:
+                    raise RuntimeError(
+                        "PasarGuard startup error:\n" + _extract_failure_snippet(out)
+                    )
+                migrator.job.log(f"Detected PasarGuard log error: {pattern}")
+
+        if any(marker in (out or "") for marker in STARTUP_MARKERS):
             migrator.job.log("PasarGuard ready")
             return True
 
@@ -129,8 +212,13 @@ async def wait_pasarguard_ready(migrator, max_wait: int = 90) -> bool:
 
         await asyncio.sleep(3)
 
-    migrator.job.log("PasarGuard readiness timeout — continuing migration")
-    return True
+    if strict:
+        out = await fetch_pasarguard_logs(migrator, tail=120)
+        raise RuntimeError(
+            "PasarGuard readiness timeout.\n" + _extract_failure_snippet(out)
+        )
+    migrator.job.log("PasarGuard readiness timeout — continuing")
+    return False
 
 
 async def start_pasarguard(migrator, wait: bool = True, recreate: bool = False) -> None:
@@ -163,9 +251,9 @@ async def restart_pasarguard(migrator, wait: bool = True) -> None:
         await wait_pasarguard_ready(migrator, max_wait=60)
 
 
-async def _wait_db_service(migrator, target_db: str, service: str, password: str | None, attempts: int = 20) -> None:
+async def _wait_db_service(migrator, target_db: str, service: str, attempts: int = 20) -> None:
     cwd = str(PASARGUARD_DIR)
-    conn = _target_conn(target_db, password)
+    conn = _target_conn(migrator)
     user = conn.get("user") or ("postgres" if service in ("postgresql", "timescaledb") else "root")
     pwd = conn.get("password") or "password"
     db = conn.get("database") or "pasarguard"
@@ -197,9 +285,9 @@ async def _wait_db_service(migrator, target_db: str, service: str, password: str
     migrator.job.log(f"Warning: {service} readiness check timed out — continuing")
 
 
-async def read_target_alembic_version(migrator, target_db: str, password: str | None) -> str | None:
+async def read_target_alembic_version(migrator, target_db: str) -> str | None:
     if target_db == "sqlite":
-        conn = _target_conn("sqlite", password)
+        conn = _target_conn(migrator)
         path = conn.get("sqlite_path") or str(PASARGUARD_DATA / "db.sqlite3")
         return read_sqlite_alembic_version(path)
 
@@ -207,7 +295,7 @@ async def read_target_alembic_version(migrator, target_db: str, password: str | 
     if not service:
         return None
 
-    conn = _target_conn(target_db, password)
+    conn = _target_conn(migrator)
     user = conn.get("user") or ("postgres" if service in ("postgresql", "timescaledb") else "root")
     pwd = conn.get("password") or "password"
     db = conn.get("database") or "pasarguard"
@@ -258,13 +346,13 @@ async def run_alembic_upgrade(migrator) -> bool:
 
 
 async def set_target_alembic_version(
-    migrator, target_db: str, version: str, password: str | None,
+    migrator, target_db: str, version: str,
 ) -> bool:
     if not version:
         return False
 
     if target_db == "sqlite":
-        conn = _target_conn("sqlite", password)
+        conn = _target_conn(migrator)
         path = Path(conn.get("sqlite_path") or PASARGUARD_DATA / "db.sqlite3")
         if not path.parent.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -284,7 +372,7 @@ async def set_target_alembic_version(
     if not service:
         return False
 
-    conn = _target_conn(target_db, password)
+    conn = _target_conn(migrator)
     user = conn.get("user") or ("postgres" if service in ("postgresql", "timescaledb") else "root")
     pwd = conn.get("password") or "password"
     db = conn.get("database") or "pasarguard"
@@ -325,7 +413,6 @@ async def set_target_alembic_version(
 async def ensure_schema_initialized(
     migrator,
     target_db: str,
-    password: str | None = None,
     source_db: str | None = None,
     source_path: str | Path | None = None,
 ) -> str | None:
@@ -334,14 +421,14 @@ async def ensure_schema_initialized(
     then align alembic_version with source when needed for db-migrations.
     """
     cwd = str(PASARGUARD_DIR)
-    conn = _target_conn(target_db, password)
+    conn = _target_conn(migrator)
     migrator.job.log(
-        f"Target DB connection from PasarGuard .env: "
+        f"Target DB connection (user input): "
         f"type={target_db}, user={conn.get('user')}, database={conn.get('database')}, "
         f"host={conn.get('host')}, port={conn.get('port') or 'default'}"
     )
 
-    source_version = read_source_alembic_version(source_db or "sqlite", source_path, password)
+    source_version = read_source_alembic_version(source_db or "sqlite", source_path)
     if source_version:
         migrator.job.log(f"Source Alembic version: {source_version}")
 
@@ -349,7 +436,7 @@ async def ensure_schema_initialized(
     if service:
         migrator.job.log(f"Ensuring DB service {service} is running...")
         await docker_compose_up(migrator, [service])
-        await _wait_db_service(migrator, target_db, service, password)
+        await _wait_db_service(migrator, target_db, service)
     elif target_db == "sqlite":
         PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
         sqlite_path = Path(conn.get("sqlite_path") or PASARGUARD_DATA / "db.sqlite3")
@@ -363,19 +450,18 @@ async def ensure_schema_initialized(
     await start_pasarguard(migrator, wait=True, recreate=True)
     await asyncio.sleep(8)
 
-    target_version = await read_target_alembic_version(migrator, target_db, password)
+    target_version = await read_target_alembic_version(migrator, target_db)
     if not target_version:
         migrator.job.log("Target schema empty — running Alembic upgrade...")
         await run_alembic_upgrade(migrator)
         await asyncio.sleep(5)
         await start_pasarguard(migrator, wait=True, recreate=True)
-        target_version = await read_target_alembic_version(migrator, target_db, password)
+        target_version = await read_target_alembic_version(migrator, target_db)
 
     if not target_version:
         raise RuntimeError(
             f"Target database ({target_db}) has no Alembic schema. "
-            f"Start PasarGuard manually once on database '{conn.get('database')}' "
-            f"with user '{conn.get('user')}', wait for migrations, then retry."
+            f"Check credentials: database '{conn.get('database')}', user '{conn.get('user')}'."
         )
 
     migrator.job.log(f"Target Alembic version after init: {target_version}")
@@ -384,7 +470,7 @@ async def ensure_schema_initialized(
         migrator.job.log(
             f"Aligning target alembic_version {target_version} → {source_version} for db-migrations"
         )
-        if await set_target_alembic_version(migrator, target_db, source_version, password):
+        if await set_target_alembic_version(migrator, target_db, source_version):
             target_version = source_version
 
     return target_version

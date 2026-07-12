@@ -37,8 +37,9 @@ class MigrationJob:
 
 
 class BaseMigrator(ABC):
-    def __init__(self, job: MigrationJob):
+    def __init__(self, job: MigrationJob, params: dict | None = None):
         self.job = job
+        self.params = params or {}
 
     @abstractmethod
     async def run(self, params: dict) -> dict:

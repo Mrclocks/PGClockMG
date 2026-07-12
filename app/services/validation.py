@@ -3,9 +3,10 @@
 from pathlib import Path
 
 from app.config import (
-    MARZBAN_DIR, MARZBAN_DATA, PASARGUARD_DIR, PASARGUARD_ENV, PASARGUARD_DATA, TOOLS_DIR,
+    MARZBAN_DIR, MARZBAN_DATA, PASARGUARD_DIR, PASARGUARD_DATA, TOOLS_DIR,
 )
 from app.panels import PANELS
+from app.services.db_credentials import validate_db_credentials
 from app.services.prerequisites import (
     check_prerequisites,
     is_docker_running,
@@ -14,56 +15,10 @@ from app.services.prerequisites import (
     is_marzban_installed,
     find_xui_db,
     get_marzban_db_type,
-    get_pasarguard_env_summary,
 )
 from app.services.upload import get_upload_path, get_upload_analysis
 from app.services.upload_bundle import get_bundle_status
 from app.services.upload_requirements import get_upload_requirements
-from app.services.env_migration import extract_env_summary, get_pasarguard_target_connection
-
-
-def _db_needs_password(db: str | None) -> bool:
-    return db in ("mysql", "mariadb", "postgresql", "timescaledb")
-
-
-def _resolve_source_password(params: dict, upload_analysis, bundle_status) -> str | None:
-    pwd = params.get("source_db_password")
-    if pwd:
-        return pwd
-    if upload_analysis and upload_analysis.get("env_summary"):
-        pwd = upload_analysis["env_summary"].get("db_password")
-        if pwd:
-            return pwd
-    if is_marzban_installed():
-        env_path = MARZBAN_DIR / ".env"
-        if env_path.exists():
-            summary = extract_env_summary(env_path.read_text(encoding="utf-8", errors="ignore"))
-            if summary.get("db_password"):
-                return summary["db_password"]
-    if bundle_status:
-        for slot in bundle_status.get("slots", []):
-            if slot.get("id") == "env" and slot.get("ok"):
-                return "__env_slot__"
-    if upload_analysis and upload_analysis.get("mysql_password_found"):
-        return "__env_backup__"
-    return None
-
-
-def _resolve_target_password(params: dict, upload_analysis, source_pwd: str | None) -> str | None:
-    pwd = params.get("target_db_password")
-    if pwd:
-        return pwd
-    target_db = params.get("target_db")
-    if target_db:
-        conn = get_pasarguard_target_connection(target_db, params.get("target_db_password"))
-        if conn.get("password"):
-            return conn["password"]
-    pg = get_pasarguard_env_summary()
-    if pg and pg.get("db_password"):
-        return pg["db_password"]
-    if params.get("source_db") == params.get("target_db") and source_pwd:
-        return source_pwd
-    return None
 
 
 def validate_migration(params: dict) -> dict:
@@ -118,22 +73,8 @@ def validate_migration(params: dict) -> dict:
         if not db_migrations.exists():
             errors.append(_msg("db-migrations tool missing — re-run install.sh", "ابزار db-migrations نیست — install.sh را اجرا کنید", "Нет db-migrations — переустановите"))
 
-    source_pwd = _resolve_source_password(params, upload_analysis, bundle_status)
-    if _db_needs_password(source_db) and not source_pwd:
-        errors.append(_msg(
-            "Source database password required (or upload .env in backup)",
-            "رمز دیتابیس مبدأ لازم است (یا .env را در بکاپ آپلود کنید)",
-            "Нужен пароль БД источника (или .env в копии)",
-        ))
-
-    target_pwd = _resolve_target_password(params, upload_analysis, source_pwd)
-    cross_db = source_db != target_db
-    if cross_db and _db_needs_password(target_db) and not target_pwd:
-        errors.append(_msg(
-            "Target database password required (read from PasarGuard .env or enter manually)",
-            "رمز دیتابیس مقصد لازم است (از .env پاسارگارد یا دستی)",
-            "Нужен пароль целевой БД (из .env PasarGuard или вручную)",
-        ))
+    errors.extend(validate_db_credentials(params, "source"))
+    errors.extend(validate_db_credentials(params, "target"))
 
     return {"ok": len(errors) == 0, "errors": errors}
 

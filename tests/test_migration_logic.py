@@ -46,9 +46,26 @@ def test_target_recommendations():
 
 
 def test_build_target_urls():
-    assert "sqlite" in build_target_url("sqlite", None)
-    assert "asyncpg" in build_target_url("timescaledb", "pass")
-    assert "pymysql" in build_target_url("mysql", "pass")
+    params = {
+        "target_db": "sqlite",
+        "target_db_user": None,
+        "target_db_name": None,
+        "target_db_password": None,
+        "target_db_host": "127.0.0.1",
+    }
+    assert "sqlite" in build_target_url(params)
+    params_pg = {
+        "target_db": "timescaledb",
+        "target_db_user": "pguser",
+        "target_db_name": "mydb",
+        "target_db_password": "pass",
+        "target_db_host": "127.0.0.1",
+        "target_db_port": 5432,
+    }
+    url = build_target_url(params_pg)
+    assert "asyncpg" in url
+    assert "pguser" in url
+    assert "mydb" in url
 
 
 def test_suggest_marzban_mode():

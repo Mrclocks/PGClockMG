@@ -6,7 +6,7 @@
   <title>PG-Migrator</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/css/style.css?v=1.5.4">
+  <link rel="stylesheet" href="/static/css/style.css?v=1.6.0">
 </head>
 <body>
   <div class="bg-grid"></div>
@@ -27,7 +27,7 @@
           <button class="lang-btn" data-lang="ru" onclick="setLang('ru')">RU</button>
         </div>
         <span class="badge" id="serverIp">—</span>
-        <span class="version" id="appVersion">v1.5.4</span>
+        <span class="version" id="appVersion">v1.6.0</span>
       </div>
     </header>
 
@@ -92,11 +92,24 @@
           </div>
         </div>
 
-        <div id="sourceEnvSummary" class="info-box hidden"></div>
-
-        <div id="dbCredentials" class="form-group hidden">
-          <label></label>
-          <input type="password" id="sourcePassword" autocomplete="off">
+        <div id="sourceDbCredentials" class="db-credentials hidden">
+          <div class="info-box cred-hint-box">
+            <p id="sourceCredHint"></p>
+            <div class="install-cmd-box"><code id="sourceEnvCmd">nano /opt/marzban/.env</code></div>
+          </div>
+          <div class="db-cred-grid">
+            <div class="form-group"><label id="lblSourceDbUser"></label><input type="text" id="sourceDbUser" autocomplete="off"></div>
+            <div class="form-group"><label id="lblSourceDbName"></label><input type="text" id="sourceDbName" autocomplete="off"></div>
+            <div class="form-group"><label id="lblSourceDbHost"></label><input type="text" id="sourceDbHost" value="127.0.0.1" autocomplete="off"></div>
+            <div class="form-group"><label id="lblSourceDbPort"></label><input type="text" id="sourceDbPort" autocomplete="off" placeholder="3306 / 5432"></div>
+            <div class="form-group span-2">
+              <label id="lblSourceDbPassword"></label>
+              <div class="password-field">
+                <input type="password" id="sourceDbPassword" autocomplete="off">
+                <button type="button" class="pwd-toggle" onclick="togglePassword('sourceDbPassword', this)" aria-label="Show password">👁</button>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div id="uploadSection" class="upload-section hidden">
@@ -140,11 +153,24 @@
         <div class="db-grid" id="targetDbGrid"></div>
         <div id="targetRecommendation" class="info-box hidden"></div>
         <div id="crossDbWarning" class="warning-card hidden"></div>
-        <div id="targetEnvHint" class="info-box hidden"></div>
-
-        <div id="targetCredentials" class="form-group hidden">
-          <label></label>
-          <input type="password" id="targetPassword" autocomplete="off">
+        <div id="targetDbCredentials" class="db-credentials hidden">
+          <div class="info-box cred-hint-box">
+            <p id="targetCredHint"></p>
+            <div class="install-cmd-box"><code>sudo nano /opt/pasarguard/.env</code></div>
+          </div>
+          <div class="db-cred-grid">
+            <div class="form-group"><label id="lblTargetDbUser"></label><input type="text" id="targetDbUser" autocomplete="off"></div>
+            <div class="form-group"><label id="lblTargetDbName"></label><input type="text" id="targetDbName" autocomplete="off"></div>
+            <div class="form-group"><label id="lblTargetDbHost"></label><input type="text" id="targetDbHost" value="127.0.0.1" autocomplete="off"></div>
+            <div class="form-group"><label id="lblTargetDbPort"></label><input type="text" id="targetDbPort" autocomplete="off" placeholder="6432 / 5432 / 3306"></div>
+            <div class="form-group span-2">
+              <label id="lblTargetDbPassword"></label>
+              <div class="password-field">
+                <input type="password" id="targetDbPassword" autocomplete="off">
+                <button type="button" class="pwd-toggle" onclick="togglePassword('targetDbPassword', this)" aria-label="Show password">👁</button>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div id="installPgSection" class="warning-card hidden">
@@ -218,7 +244,7 @@
     </footer>
   </div>
 
-  <script src="/static/js/i18n.js?v=1.5.4"></script>
-  <script src="/static/js/app.js?v=1.5.4"></script>
+  <script src="/static/js/i18n.js?v=1.6.0"></script>
+  <script src="/static/js/app.js?v=1.6.0"></script>
 </body>
 </html>

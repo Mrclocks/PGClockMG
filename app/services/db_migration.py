@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
-from app.config import PASARGUARD_DATA, BACKUP_DIR, TOOLS_DIR
-from app.services.env_migration import build_db_migration_target_url, get_pasarguard_target_connection
+from app.config import BACKUP_DIR, TOOLS_DIR
+from app.services.db_credentials import build_migration_url, get_target_connection
 
 
 def map_db_type(db_type: str) -> str:
@@ -12,9 +12,9 @@ def map_db_type(db_type: str) -> str:
     return db_type
 
 
-def build_target_url(db_type: str, password: str | None) -> str:
-    """Build target URL from installed PasarGuard .env (user, database, host, port)."""
-    return build_db_migration_target_url(db_type, password)
+def build_target_url(params: dict) -> str:
+    """Build target URL from user-provided credentials."""
+    return build_migration_url(params)
 
 
 def write_migration_config(
@@ -49,7 +49,7 @@ exclude_tables:
     return config_path
 
 
-async def run_db_migration(migrator, source_path: str, source_db: str, target_db: str, password: str | None) -> None:
+async def run_db_migration(migrator, source_path: str, source_db: str, target_db: str) -> None:
     """Run official db-migrations non-interactively."""
     db_migrations = TOOLS_DIR / "db-migrations"
     if not db_migrations.exists():
@@ -58,8 +58,9 @@ async def run_db_migration(migrator, source_path: str, source_db: str, target_db
     if not Path(source_path).exists():
         raise RuntimeError(f"Source database not found: {source_path}")
 
-    target_url = build_target_url(target_db, password)
-    conn = get_pasarguard_target_connection(target_db, password)
+    params = migrator.params
+    target_url = build_target_url(params)
+    conn = get_target_connection(params)
     migrator.job.log(
         f"Target connection: user={conn.get('user')}, database={conn.get('database')}, "
         f"host={conn.get('host')}, port={conn.get('port') or 'default'}"

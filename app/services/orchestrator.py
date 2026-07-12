@@ -43,7 +43,7 @@ async def start_migration(params: dict, on_log: Callable | None = None) -> Migra
         try:
             job.status = "running"
             job.set_progress(0, "Starting migration...")
-            migrator = migrator_cls(job)
+            migrator = migrator_cls(job, params)
             result = await migrator.run(params)
             job.result = result
             job.status = "success"

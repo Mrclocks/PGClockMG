@@ -115,17 +115,15 @@ const I18N = {
     uploaded: 'uploaded',
     uploadErr: 'Upload error',
     detected: 'Detected',
-    envSummary: {
-      sourceTitle: 'Detected from your backup .env',
-      targetTitle: 'Detected from PasarGuard .env on server',
-      sourceFromBackup: 'Read from uploaded backup .env',
-      targetFromPg: 'Read from /opt/pasarguard/.env',
-      db: 'Database',
+    dbCred: {
+      sourceHint: 'Open your Marzban .env on the server, copy DB values, and paste them below.',
+      targetHint: 'Open PasarGuard .env with nano, copy DB_USER / DB_NAME / DB_PASSWORD, and enter them here.',
+      sourceCmd: 'nano /opt/marzban/.env',
+      user: 'DB user',
       dbName: 'DB name',
-      user: 'User',
       host: 'DB host',
-      password: 'Password',
-      port: 'Panel port',
+      port: 'DB port',
+      password: 'DB password',
     },
     upload: {
       inventoryTitle: 'Backup contents',
@@ -171,8 +169,10 @@ const I18N = {
       noSourceDb: 'Select source database type',
       selectDetectedDb: 'Confirm source database type (detected from backup)',
       noTargetDb: 'Select target database type',
-      sourcePassword: 'Enter source database password',
-      targetPassword: 'Enter target DB password (or ensure PasarGuard .env has it)',
+      sourcePassword: 'Enter all source database credentials',
+      targetPassword: 'Enter all target database credentials',
+      sourceCredsIncomplete: 'Fill DB user, name, and password for source',
+      targetCredsIncomplete: 'Fill DB user, name, and password for target',
       pasarguardMissing: 'Install PasarGuard manually, then click Recheck',
       marzbanBackup: 'Upload Marzban backup or use server with Marzban data',
       backupIncomplete: 'Backup zip is missing required files — see list below',
@@ -294,17 +294,15 @@ const I18N = {
     uploaded: 'آپلود شد',
     uploadErr: 'خطا',
     detected: 'تشخیص',
-    envSummary: {
-      sourceTitle: 'اطلاعات خوانده‌شده از .env بکاپ',
-      targetTitle: 'اطلاعات خوانده‌شده از .env پاسارگارد روی سرور',
-      sourceFromBackup: 'از فایل .env بکاپ آپلودشده',
-      targetFromPg: 'از /opt/pasarguard/.env',
-      db: 'دیتابیس',
+    dbCred: {
+      sourceHint: 'فایل .env مرزبان را با nano باز کنید، مقادیر دیتابیس را کپی و در فیلدهای زیر وارد کنید.',
+      targetHint: 'فایل .env پاسارگارد را با nano باز کنید (DB_USER / DB_NAME / DB_PASSWORD) و مقادیر را دستی وارد کنید.',
+      sourceCmd: 'nano /opt/marzban/.env',
+      user: 'کاربر DB',
       dbName: 'نام DB',
-      user: 'کاربر',
       host: 'هاست DB',
-      password: 'رمز',
-      port: 'پورت پنل',
+      port: 'پورت DB',
+      password: 'رمز DB',
     },
     upload: {
       inventoryTitle: 'محتوای بکاپ',
@@ -350,8 +348,10 @@ const I18N = {
       noSourceDb: 'نوع دیتابیس مبدأ را انتخاب کنید',
       selectDetectedDb: 'نوع دیتابیس را تأیید کنید (از بکاپ شناسایی شد)',
       noTargetDb: 'نوع دیتابیس مقصد را انتخاب کنید',
-      sourcePassword: 'رمز دیتابیس مبدأ را وارد کنید',
-      targetPassword: 'رمز دیتابیس مقصد را وارد کنید',
+      sourcePassword: 'اطلاعات کامل دیتابیس مبدأ را وارد کنید',
+      targetPassword: 'اطلاعات کامل دیتابیس مقصد را وارد کنید',
+      sourceCredsIncomplete: 'کاربر، نام و رمز دیتابیس مبدأ را پر کنید',
+      targetCredsIncomplete: 'کاربر، نام و رمز دیتابیس مقصد را پر کنید',
       pasarguardMissing: 'PasarGuard را دستی نصب کنید و بررسی مجدد بزنید',
       marzbanBackup: 'بکاپ Marzban آپلود کنید یا Marzban روی سرور باشد',
       backupIncomplete: 'فایل zip فاقد فایل‌های لازم است — لیست زیر را ببینید',
@@ -473,17 +473,15 @@ const I18N = {
     uploaded: 'загружено',
     uploadErr: 'Ошибка',
     detected: 'Определено',
-    envSummary: {
-      sourceTitle: 'Данные из .env загруженной копии',
-      targetTitle: 'Данные из .env PasarGuard на сервере',
-      sourceFromBackup: 'Из .env загруженной копии',
-      targetFromPg: 'Из /opt/pasarguard/.env',
-      db: 'База данных',
+    dbCred: {
+      sourceHint: 'Откройте .env Marzban через nano, скопируйте данные БД и введите ниже.',
+      targetHint: 'Откройте .env PasarGuard (nano), скопируйте DB_USER / DB_NAME / DB_PASSWORD и введите вручную.',
+      sourceCmd: 'nano /opt/marzban/.env',
+      user: 'Пользователь БД',
       dbName: 'Имя БД',
-      user: 'Пользователь',
       host: 'Хост БД',
-      password: 'Пароль',
-      port: 'Порт панели',
+      port: 'Порт БД',
+      password: 'Пароль БД',
     },
     upload: {
       inventoryTitle: 'Содержимое копии',
@@ -529,8 +527,10 @@ const I18N = {
       noSourceDb: 'Выберите БД источника',
       selectDetectedDb: 'Подтвердите тип БД (определён из копии)',
       noTargetDb: 'Выберите целевую БД',
-      sourcePassword: 'Введите пароль БД источника',
-      targetPassword: 'Введите пароль целевой БД',
+      sourcePassword: 'Введите все данные БД источника',
+      targetPassword: 'Введите все данные целевой БД',
+      sourceCredsIncomplete: 'Заполните пользователя, имя и пароль БД источника',
+      targetCredsIncomplete: 'Заполните пользователя, имя и пароль целевой БД',
       pasarguardMissing: 'Установите PasarGuard вручную и нажмите Проверить',
       marzbanBackup: 'Загрузите копию Marzban или используйте сервер с Marzban',
       backupIncomplete: 'В zip нет нужных файлов — см. список ниже',
@@ -580,10 +580,10 @@ function applyI18n() {
     'step0.start': '#btnStep0',
     'step1.h2': '#step1 h2', 'step1.desc': '#step1 .desc', 'step1.back': '#step1 .btn-ghost',
     'step1.next': '#btnStep1',
-    'step2.h2': '#step2 h2', 'step2.desc': '#step2 .desc', 'step2.password': '#dbCredentials label',
+    'step2.h2': '#step2 h2', 'step2.desc': '#step2 .desc',
     'step2.uploadH3': '.upload-section h3', 'step2.uploadDesc': '.upload-section .desc-sm',
     'step2.back': '#step2 .btn-ghost', 'step2.next': '#btnStep2',
-    'step3.h2': '#step3 h2', 'step3.desc': '#step3 .desc', 'step3.password': '#targetCredentials label',
+    'step3.h2': '#step3 h2', 'step3.desc': '#step3 .desc',
     'step3.pgMissing': '#installPgSection h4', 'step3.pgMissingDesc': '#installPgSection > p:first-of-type',
     'step3.pgInstallHint': '#installPgHint',
     'step3.recheckPg': '#btnRecheckPg', 'step3.back': '#step3 .btn-ghost', 'step3.next': '#btnStep3',
@@ -599,8 +599,22 @@ function applyI18n() {
   document.querySelector('#redirectOption span') && (document.querySelector('#redirectOption span').textContent = t('step4.redirect'));
   document.querySelector('#step6 h2.success-title') && (document.querySelector('#step6 .result-card.success h2').textContent = t('step6.success'));
   document.querySelector('#resultError h2') && (document.querySelector('#resultError h2').textContent = t('step6.error'));
-  document.getElementById('sourcePassword').placeholder = t('step2.passwordPh');
-  document.getElementById('targetPassword').placeholder = t('step3.passwordPh');
+  const credLabels = [
+    ['lblSourceDbUser', 'dbCred.user'], ['lblSourceDbName', 'dbCred.dbName'], ['lblSourceDbHost', 'dbCred.host'],
+    ['lblSourceDbPort', 'dbCred.port'], ['lblSourceDbPassword', 'dbCred.password'],
+    ['lblTargetDbUser', 'dbCred.user'], ['lblTargetDbName', 'dbCred.dbName'], ['lblTargetDbHost', 'dbCred.host'],
+    ['lblTargetDbPort', 'dbCred.port'], ['lblTargetDbPassword', 'dbCred.password'],
+  ];
+  credLabels.forEach(([id, key]) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = t(key);
+  });
+  const srcHint = document.getElementById('sourceCredHint');
+  const tgtHint = document.getElementById('targetCredHint');
+  if (srcHint) srcHint.textContent = t('dbCred.sourceHint');
+  if (tgtHint) tgtHint.textContent = t('dbCred.targetHint');
+  const srcCmd = document.getElementById('sourceEnvCmd');
+  if (srcCmd) srcCmd.textContent = t('dbCred.sourceCmd');
   document.title = `${t('title')} — ${t('subtitle')}`;
   renderSteps();
   renderGlobalChecks();

@@ -464,6 +464,60 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
   box-shadow: 0 0 0 3px var(--primary-glow);
 }
 
+.db-credentials {
+  margin: 20px 0;
+}
+
+.cred-hint-box p {
+  margin: 0 0 10px;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+.db-cred-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px 16px;
+  margin-top: 14px;
+}
+
+.db-cred-grid .span-2 {
+  grid-column: 1 / -1;
+}
+
+.password-field {
+  position: relative;
+}
+
+.password-field input {
+  width: 100%;
+  padding-right: 44px;
+}
+
+.pwd-toggle {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 4px 6px;
+}
+
+.pwd-toggle:hover {
+  color: var(--text);
+}
+
+@media (max-width: 640px) {
+  .db-cred-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Upload */
 .upload-section {
   margin-top: 28px;

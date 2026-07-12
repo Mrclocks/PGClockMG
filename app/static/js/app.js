@@ -39,133 +39,72 @@ function dbNeedsPassword(db) {
   return ['mysql', 'mariadb', 'postgresql', 'timescaledb'].includes(db);
 }
 
-function getSourcePassword() {
-  return document.getElementById('sourcePassword')?.value?.trim()
-    || state.sourcePassword
-    || state.sourceEnvSummary?.db_password
-    || '';
+function defaultDbPort(db) {
+  if (db === 'mysql' || db === 'mariadb') return '3306';
+  if (db === 'postgresql' || db === 'timescaledb') return '6432';
+  return '';
 }
 
-function getTargetPassword() {
-  return document.getElementById('targetPassword')?.value?.trim()
-    || state.targetPassword
-    || state.pasarguardEnvSummary?.db_password
-    || state.systemCheck?.pasarguard_env?.db_password
-    || '';
+function togglePassword(inputId, btn) {
+  const el = document.getElementById(inputId);
+  if (!el) return;
+  const show = el.type === 'password';
+  el.type = show ? 'text' : 'password';
+  btn.textContent = show ? '🙈' : '👁';
 }
 
-function hasSourcePassword() {
-  if (!dbNeedsPassword(state.sourceDb)) return true;
-  if (getSourcePassword()) return true;
-  if (state.sourceEnvSummary?.has_password) return true;
-  if (state.bundleStatus?.analysis?.env_summary?.has_password) return true;
-  if (bundleHasEnvPassword()) return true;
-  return false;
+function readDbCredentials(role) {
+  const p = role === 'source' ? 'source' : 'target';
+  const portRaw = document.getElementById(`${p}DbPort`)?.value?.trim();
+  const port = portRaw ? parseInt(portRaw, 10) : null;
+  return {
+    [`${p}_db_user`]: document.getElementById(`${p}DbUser`)?.value?.trim() || null,
+    [`${p}_db_name`]: document.getElementById(`${p}DbName`)?.value?.trim() || null,
+    [`${p}_db_host`]: document.getElementById(`${p}DbHost`)?.value?.trim() || '127.0.0.1',
+    [`${p}_db_port`]: Number.isFinite(port) ? port : null,
+    [`${p}_db_password`]: document.getElementById(`${p}DbPassword`)?.value || null,
+  };
 }
 
-function hasTargetPassword() {
-  if (!dbNeedsPassword(state.targetDb)) return true;
-  if (getTargetPassword()) return true;
-  if (state.sourceDb === state.targetDb && hasSourcePassword()) return true;
-  return false;
-}
-
-function maskPassword(pwd) {
-  if (!pwd) return '—';
-  if (pwd.length <= 2) return '••••';
-  return `${pwd.slice(0, 2)}${'•'.repeat(Math.min(pwd.length - 2, 8))}`;
-}
-
-function renderEnvSummaryHtml(summary, kind) {
-  if (!summary) return '';
-  const db = summary.db_type ? dbDisplayName(summary.db_type) : '—';
-  const user = summary.db_user || '—';
-  const dbName = summary.db_name || '—';
-  const host = summary.db_host ? `${summary.db_host}${summary.db_port ? ':' + summary.db_port : ''}` : '—';
-  const pwd = summary.has_password ? maskPassword(summary.db_password) : '—';
-  const port = summary.panel_port || '8000';
-  const fromEnv = kind === 'source' ? t('envSummary.sourceFromBackup') : t('envSummary.targetFromPg');
-  return `
-    <p class="check-detail">${fromEnv}</p>
-    <div class="env-summary-grid">
-      <span><strong>${t('envSummary.db')}</strong> ${db}</span>
-      <span><strong>${t('envSummary.dbName')}</strong> ${dbName}</span>
-      <span><strong>${t('envSummary.user')}</strong> ${user}</span>
-      <span><strong>${t('envSummary.host')}</strong> ${host}</span>
-      <span><strong>${t('envSummary.password')}</strong> ${pwd}</span>
-      <span><strong>${t('envSummary.port')}</strong> ${port}</span>
-    </div>`;
-}
-
-function autoFillSourcePassword() {
-  const summary = state.sourceEnvSummary || state.bundleStatus?.analysis?.env_summary;
-  const el = document.getElementById('sourcePassword');
-  if (!el || el.value || !summary?.db_password) return;
-  el.value = summary.db_password;
-  state.sourcePassword = summary.db_password;
-  el.placeholder = t('upload.pwdFromEnv');
-}
-
-function autoFillTargetPassword() {
-  const summary = state.pasarguardEnvSummary || state.systemCheck?.pasarguard_env;
-  const el = document.getElementById('targetPassword');
-  if (!el || el.value || !summary?.db_password) return;
-  el.value = summary.db_password;
-  state.targetPassword = summary.db_password;
-  el.placeholder = t('upload.pwdFromEnv');
+function hasDbCredentials(role) {
+  const db = role === 'source' ? state.sourceDb : state.targetDb;
+  if (!dbNeedsPassword(db)) return true;
+  const c = readDbCredentials(role);
+  const prefix = role === 'source' ? 'source' : 'target';
+  return !!(c[`${prefix}_db_user`] && c[`${prefix}_db_name`] && c[`${prefix}_db_password`]);
 }
 
 function updateSourceCredentialsVisibility() {
-  const el = document.getElementById('dbCredentials');
-  const box = document.getElementById('sourceEnvSummary');
-  if (!el) return;
-  const needs = dbNeedsPassword(state.sourceDb);
-  const hasAuto = state.sourceEnvSummary?.has_password || state.bundleStatus?.analysis?.env_summary?.has_password;
-  el.classList.toggle('hidden', !needs || state.selectedPanel?.id === 'remnawave');
-  if (box) {
-    const summary = state.sourceEnvSummary || state.bundleStatus?.analysis?.env_summary;
-    if (summary) {
-      box.classList.remove('hidden');
-      box.innerHTML = `<h4>${t('envSummary.sourceTitle')}</h4>${renderEnvSummaryHtml(summary, 'source')}`;
-      if (hasAuto) autoFillSourcePassword();
-    } else {
-      box.classList.add('hidden');
-      box.innerHTML = '';
-    }
+  const box = document.getElementById('sourceDbCredentials');
+  if (!box) return;
+  const needs = dbNeedsPassword(state.sourceDb) && state.selectedPanel?.id !== 'remnawave';
+  box.classList.toggle('hidden', !needs);
+  if (needs) {
+    const portEl = document.getElementById('sourceDbPort');
+    if (portEl && !portEl.value) portEl.placeholder = defaultDbPort(state.sourceDb);
   }
 }
 
 function updateTargetCredentialsVisibility() {
-  const el = document.getElementById('targetCredentials');
-  const hint = document.getElementById('targetEnvHint');
-  if (!el) return;
+  const box = document.getElementById('targetDbCredentials');
+  if (!box) return;
   const needs = dbNeedsPassword(state.targetDb);
-  const cross = state.sourceDb && state.targetDb && state.sourceDb !== state.targetDb;
-  const pg = state.pasarguardEnvSummary || state.systemCheck?.pasarguard_env;
-  const showField = needs && (cross || !pg?.has_password);
-  el.classList.toggle('hidden', !showField);
-  if (hint) {
-    if (pg && needs) {
-      hint.classList.remove('hidden');
-      hint.innerHTML = `<h4>${t('envSummary.targetTitle')}</h4>${renderEnvSummaryHtml(pg, 'target')}`;
-      autoFillTargetPassword();
-    } else {
-      hint.classList.add('hidden');
-      hint.innerHTML = '';
-    }
+  box.classList.toggle('hidden', !needs);
+  if (needs) {
+    const portEl = document.getElementById('targetDbPort');
+    if (portEl && !portEl.value) portEl.placeholder = defaultDbPort(state.targetDb);
   }
 }
 
 function setupCredentialListeners() {
-  ['sourcePassword', 'targetPassword'].forEach((id) => {
+  [
+    'sourceDbUser', 'sourceDbName', 'sourceDbHost', 'sourceDbPort', 'sourceDbPassword',
+    'targetDbUser', 'targetDbName', 'targetDbHost', 'targetDbPort', 'targetDbPassword',
+  ].forEach((id) => {
     const el = document.getElementById(id);
     if (!el || el.dataset.bound) return;
     el.dataset.bound = '1';
-    el.addEventListener('input', () => {
-      if (id === 'sourcePassword') state.sourcePassword = el.value;
-      if (id === 'targetPassword') state.targetPassword = el.value;
-      updateStepButtons();
-    });
+    el.addEventListener('input', () => updateStepButtons());
   });
 }
 
@@ -215,7 +154,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 function applySystemCheck(sys) {
   if (!sys) return;
   state.systemCheck = sys;
-  state.pasarguardEnvSummary = sys.pasarguard_env || null;
+  state.pasarguardEnvSummary = null;
   state.detected = {
     ...state.detected,
     pasarguard: sys.pasarguard,
@@ -299,8 +238,8 @@ function canProceedStep2() {
   }
   const needsPwd = dbNeedsPassword(state.sourceDb);
   const analysis = state.bundleStatus?.analysis || state.uploadInfo?.analysis;
-  if (needsPwd && panel?.id !== 'remnawave' && !hasSourcePassword()) {
-    return t('block.sourcePassword');
+  if (needsPwd && panel?.id !== 'remnawave' && !hasDbCredentials('source')) {
+    return t('block.sourceCredsIncomplete');
   }
   if (!uploadSatisfied()) {
     return t('block.uploadsIncomplete');
@@ -326,8 +265,8 @@ function bundleHasEnvPassword() {
 function canProceedStep3() {
   if (!state.targetDb) return t('block.noTargetDb');
   if (needsPasarguardInstall()) return t('block.pasarguardMissing');
-  if (dbNeedsPassword(state.targetDb) && !hasTargetPassword()) {
-    return t('block.targetPassword');
+  if (dbNeedsPassword(state.targetDb) && !hasDbCredentials('target')) {
+    return t('block.targetCredsIncomplete');
   }
   return null;
 }
@@ -354,11 +293,9 @@ async function goStep(n) {
     if (n >= 1) block = canProceedStep0();
     if (!block && n >= 2) block = canProceedStep1();
     if (!block && n >= 3) {
-      state.sourcePassword = document.getElementById('sourcePassword')?.value || '';
       block = canProceedStep2();
     }
     if (!block && n >= 4) {
-      state.sourcePassword = document.getElementById('sourcePassword')?.value || '';
       block = canProceedStep2() || canProceedStep3();
     }
     if (!block && n >= 5) {
@@ -405,12 +342,14 @@ async function validateMigrationRequest() {
 }
 
 function buildMigrationBody() {
+  const src = readDbCredentials('source');
+  const tgt = readDbCredentials('target');
   return {
     source_panel: state.selectedPanel?.id,
     source_db: state.sourceDb,
     target_db: state.targetDb,
-    source_db_password: state.sourcePassword || document.getElementById('sourcePassword')?.value || null,
-    target_db_password: state.targetPassword || document.getElementById('targetPassword')?.value || null,
+    ...src,
+    ...tgt,
     upload_id: state.uploadId,
     upload_bundle_id: state.uploadBundleId,
     install_redirect: document.getElementById('installRedirect')?.checked ?? true,
@@ -577,7 +516,6 @@ function selectSourceDb(db) {
 async function renderTargetDbs() {
   const panel = state.selectedPanel;
   if (!panel || !state.sourceDb) return goStep(2);
-  state.sourcePassword = document.getElementById('sourcePassword')?.value || state.sourcePassword || '';
 
   const grid = document.getElementById('targetDbGrid');
   const crossEl = document.getElementById('crossDbWarning');
@@ -692,7 +630,6 @@ async function recheckPasarguard() {
 }
 
 function renderSummary() {
-  state.targetPassword = document.getElementById('targetPassword')?.value || state.targetPassword || '';
   const panel = state.selectedPanel;
   const lang = state.lang;
   const s = t('step4.summary');
@@ -1005,21 +942,11 @@ function applyBundleAnalysis(bs) {
   if (state.selectedPanel?.id === 'marzban') {
     renderMarzbanDetectedSource();
     if (a.detected_source_db) state.sourceDb = a.detected_source_db;
-    if (a.env_summary) state.sourceEnvSummary = a.env_summary;
     updateSourceCredentialsVisibility();
   } else if (a.detected_source_db && document.querySelector('#sourceDbGrid .db-card')) {
     selectSourceDb(a.detected_source_db);
   }
-  if (a.env_summary) {
-    state.sourceEnvSummary = a.env_summary;
-    updateSourceCredentialsVisibility();
-  }
-  if (a.env_summary?.db_password) {
-    autoFillSourcePassword();
-  } else if (a.mysql_password_found) {
-    const el = document.getElementById('sourcePassword');
-    if (el && !el.value) el.placeholder = t('upload.pwdFromEnv');
-  }
+  updateSourceCredentialsVisibility();
 }
 
 function renderBundleStatus(bs) {

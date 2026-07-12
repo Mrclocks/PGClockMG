@@ -25,11 +25,17 @@ class PanelInfo(BaseModel):
 class MigrationRequest(BaseModel):
     source_panel: str
     source_db: str
+    source_db_user: Optional[str] = None
+    source_db_name: Optional[str] = None
     source_db_password: Optional[str] = None
     source_db_host: str = "127.0.0.1"
     source_db_port: Optional[int] = None
     target_db: str
+    target_db_user: Optional[str] = None
+    target_db_name: Optional[str] = None
     target_db_password: Optional[str] = None
+    target_db_host: str = "127.0.0.1"
+    target_db_port: Optional[int] = None
     upload_id: Optional[str] = None
     upload_bundle_id: Optional[str] = None
     install_redirect: bool = True

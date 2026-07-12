@@ -1,6 +1,7 @@
 """Marzban → PasarGuard migration (fresh install only — PasarGuard must be pre-installed)."""
 
 import asyncio
+import re
 import shutil
 from pathlib import Path
 
@@ -18,12 +19,13 @@ from app.services.env_migration import (
     read_env_var,
     merge_marzban_env_into_pasarguard,
     get_panel_url_from_env,
-    get_pasarguard_target_connection,
 )
+from app.services.db_credentials import build_app_sqlalchemy_url, get_source_connection, get_target_connection
 from app.services.pasarguard_ops import (
     ensure_schema_initialized,
     restart_pasarguard,
     resolve_db_service,
+    verify_pasarguard_healthy,
 )
 from app.services.backup_analyzer import resolve_extract_root, find_file_in_upload
 
@@ -34,7 +36,6 @@ class MarzbanMigrator(BaseMigrator):
     async def run(self, params: dict) -> dict:
         source_db = params["source_db"]
         target_db = params["target_db"]
-        password = params.get("target_db_password") or params.get("source_db_password")
         upload_path = params.get("upload_path")
         upload_work_dir = params.get("upload_work_dir")
         marzban_exists = MARZBAN_DIR.exists() or MARZBAN_DATA.exists()
@@ -43,11 +44,11 @@ class MarzbanMigrator(BaseMigrator):
         self.job.set_progress(5, "Starting Marzban → PasarGuard migration...")
 
         return await self._migrate(
-            source_db, target_db, password, upload_path, marzban_exists, upload_work_dir,
+            source_db, target_db, upload_path, marzban_exists, upload_work_dir,
         )
 
     async def _migrate(
-        self, source_db: str, target_db: str, password: str | None,
+        self, source_db: str, target_db: str,
         upload_path: str | None, marzban_exists: bool, upload_work_dir: str | None = None,
     ) -> dict:
         self.job.set_progress(10, "Preparing fresh PasarGuard installation...")
@@ -62,13 +63,13 @@ class MarzbanMigrator(BaseMigrator):
             bundled = Path(upload_work_dir)
             shutil.copytree(bundled, work_dir, dirs_exist_ok=True)
             source_sqlite, source_sql, extra_data_dir = self._parse_work_dir(work_dir, source_db)
-            await self._apply_backup_env_and_assets(work_dir, source_db, target_db, password)
+            await self._apply_backup_env_and_assets(work_dir, source_db, target_db)
             self.job.log(f"Using upload bundle workspace ({len(list(work_dir.rglob('*')))} items)")
         elif upload_path:
             source_sqlite, source_sql, extra_data_dir = await self._extract_upload(
                 upload_path, work_dir, source_db,
             )
-            await self._apply_backup_env_and_assets(work_dir, source_db, target_db, password)
+            await self._apply_backup_env_and_assets(work_dir, source_db, target_db)
         elif marzban_exists and source_db == "sqlite":
             src = MARZBAN_DATA / "db.sqlite3"
             if not src.exists():
@@ -78,7 +79,7 @@ class MarzbanMigrator(BaseMigrator):
             extra_data_dir = MARZBAN_DATA
             self.job.log(f"Using live Marzban database: {src}")
         elif marzban_exists and source_db in ("mysql", "mariadb"):
-            source_sql = await self._dump_marzban_mysql(work_dir, password)
+            source_sql = await self._dump_marzban_mysql(work_dir)
         else:
             raise RuntimeError(
                 "Marzban backup required — upload ZIP or separate files in the wizard."
@@ -105,24 +106,25 @@ class MarzbanMigrator(BaseMigrator):
                 await self._copy_marzban_assets(extra_data_dir)
             self.job.set_progress(85, "Starting PasarGuard with migrated database...")
             await restart_pasarguard(self)
+            await verify_pasarguard_healthy(self)
         elif source_db == target_db:
             if source_db in ("mysql", "mariadb") and source_sql:
                 self.job.set_progress(45, "Importing MySQL/MariaDB dump...")
-                await self._import_mysql_dump(source_sql, password)
+                await self._import_mysql_dump(source_sql)
             else:
                 raise RuntimeError("Source database file missing for fresh migration")
             if extra_data_dir:
                 await self._copy_marzban_assets(extra_data_dir)
             self.job.set_progress(85, "Starting PasarGuard...")
             await restart_pasarguard(self)
+            await verify_pasarguard_healthy(self)
         else:
             self.job.set_progress(40, "Preparing cross-database migration...")
-            await self._ensure_target_database_stack(target_db, password)
-            await self._update_env_paths(source_db, target_db, password)
+            await self._ensure_target_database_stack(target_db)
+            await self._update_env_paths(source_db, target_db)
             await ensure_schema_initialized(
                 self,
                 target_db,
-                password,
                 source_db=source_db,
                 source_path=source_sqlite if source_db == "sqlite" else source_sql,
             )
@@ -135,12 +137,13 @@ class MarzbanMigrator(BaseMigrator):
                 migration_source = str(source_sql) if source_sql else ""
                 if not migration_source:
                     raise RuntimeError("SQL dump missing for cross-DB migration")
-            await run_db_migration(self, migration_source, source_db, target_db, password)
-            await self._update_env_paths(source_db, target_db, password)
+            await run_db_migration(self, migration_source, source_db, target_db)
+            await self._update_env_paths(source_db, target_db)
             if extra_data_dir:
                 await self._copy_marzban_assets(extra_data_dir)
             self.job.set_progress(90, "Starting PasarGuard...")
             await restart_pasarguard(self)
+            await verify_pasarguard_healthy(self)
 
         self.job.set_progress(100, "Marzban migration completed")
         return self._result("fresh", target_db)
@@ -244,7 +247,7 @@ class MarzbanMigrator(BaseMigrator):
         self.job.log(f"Backup parsed: sqlite={source_sqlite}, sql={source_sql}, assets={extra}")
         return source_sqlite, source_sql, extra
 
-    async def _apply_backup_env_and_assets(self, work_dir: Path, source_db: str, target_db: str, password: str | None):
+    async def _apply_backup_env_and_assets(self, work_dir: Path, source_db: str, target_db: str):
         """Map Marzban backup settings to PasarGuard per official docs."""
         env_file = work_dir / ".env"
         if not env_file.exists():
@@ -254,7 +257,7 @@ class MarzbanMigrator(BaseMigrator):
         if env_file and env_file.exists() and PASARGUARD_ENV.exists():
             marzban_env = env_file.read_text(encoding="utf-8", errors="ignore")
             pg_env = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
-            pwd = password or read_env_var(marzban_env, "MYSQL_ROOT_PASSWORD")
+            pwd = get_source_connection(self.params).get("password") or read_env_var(marzban_env, "MYSQL_ROOT_PASSWORD")
             merged = merge_marzban_env_into_pasarguard(pg_env, marzban_env, target_db, pwd)
             self._backup_file(PASARGUARD_ENV, BACKUP_DIR)
             PASARGUARD_ENV.write_text(merged, encoding="utf-8")
@@ -283,7 +286,7 @@ class MarzbanMigrator(BaseMigrator):
             break
         await self._copy_marzban_assets(data_src)
 
-    async def _ensure_target_database_stack(self, target_db: str, password: str | None):
+    async def _ensure_target_database_stack(self, target_db: str):
         """Start target DB services before cross-DB migration."""
         if target_db == "sqlite":
             return
@@ -347,8 +350,9 @@ class MarzbanMigrator(BaseMigrator):
             self.job.log("Copied xray_config.json → /var/lib/pasarguard/")
             break
 
-    async def _dump_marzban_mysql(self, work_dir: Path, password: str | None) -> Path:
-        pwd = password or ""
+    async def _dump_marzban_mysql(self, work_dir: Path) -> Path:
+        conn = get_source_connection(self.params)
+        pwd = conn.get("password") or ""
         dump_path = work_dir / "marzban.sql"
         if MARZBAN_DIR.exists():
             proc = await asyncio.create_subprocess_shell(
@@ -362,10 +366,10 @@ class MarzbanMigrator(BaseMigrator):
         dump_path.write_text(text, encoding="utf-8")
         return dump_path
 
-    async def _import_mysql_dump(self, dump_file: Path, password: str | None):
-        conn = get_pasarguard_target_connection("mysql", password)
+    async def _import_mysql_dump(self, dump_file: Path):
+        conn = get_target_connection(self.params)
         user = conn.get("user") or "root"
-        pwd = conn.get("password") or password or ""
+        pwd = conn.get("password") or ""
         db = conn.get("database") or "pasarguard"
         host = conn.get("host") or "127.0.0.1"
         fixed = dump_file.parent / "fixed_import.sql"
@@ -380,13 +384,24 @@ class MarzbanMigrator(BaseMigrator):
         )
         await proc.wait()
 
-    async def _update_env_paths(self, source_db: str, target_db: str, password: str | None = None):
+    async def _update_env_paths(self, source_db: str, target_db: str):
         env_path = PASARGUARD_DIR / ".env"
         if not env_path.exists():
             raise RuntimeError(".env not found at /opt/pasarguard — cannot migrate settings")
         self._backup_file(env_path, BACKUP_DIR)
         original = env_path.read_text(encoding="utf-8", errors="ignore")
-        text = transform_marzban_env(original, target_db, password)
+        sqlalchemy_url = build_app_sqlalchemy_url(self.params)
+        db_url = f'SQLALCHEMY_DATABASE_URL = "{sqlalchemy_url}"'
+        text = original
+        if re.search(r"SQLALCHEMY_DATABASE_URL", text, re.I):
+            text = re.sub(
+                r'#\s*SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"|SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"',
+                db_url,
+                text,
+                count=1,
+            )
+        else:
+            text = text.rstrip() + f"\n{db_url}\n"
         env_path.write_text(text, encoding="utf-8")
         self.job.log(".env updated for target database")
 
