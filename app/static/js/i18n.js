@@ -5,6 +5,7 @@ const I18N = {
     title: 'MrClock-MG',
     subtitle: 'Migrate to PasarGuard',
     copied: 'Copied!',
+    copyFailed: 'Copy failed',
     steps: ['Start', 'Panel', 'Source', 'Target', 'Confirm', 'Run', 'Done'],
     step0: {
       h2: 'Welcome',
@@ -128,7 +129,9 @@ const I18N = {
     detected: 'Detected',
     dbCred: {
       sourceHint: 'Open your Marzban .env on the server, copy DB values, and paste them below.',
-      targetHint: 'Copy DB_PASSWORD from PasarGuard .env and paste it below.',
+      targetHint: 'Passwords were read from PasarGuard .env — confirm each value below.',
+      confirmTitle: 'Passwords found in .env — confirm each one',
+      confirmHint: 'Check every password you see in .env to confirm it is correct.',
       sourceCmd: 'nano /opt/marzban/.env',
       targetCmd: 'sudo nano /opt/pasarguard/.env',
       user: 'DB user',
@@ -186,6 +189,7 @@ const I18N = {
       targetPassword: 'Enter all target database credentials',
       sourceCredsIncomplete: 'Fill DB user, name, and password for source',
       targetCredsIncomplete: 'Enter DB password from PasarGuard .env',
+      passwordNotConfirmed: 'Confirm all passwords read from .env',
       pasarguardMissing: 'Install PasarGuard manually, then click Recheck',
       marzbanBackup: 'Upload Marzban backup or use server with Marzban data',
       backupIncomplete: 'Backup zip is missing required files — see list below',
@@ -200,6 +204,7 @@ const I18N = {
     title: 'MrClock-MG',
     subtitle: 'مهاجرت به PasarGuard',
     copied: 'کپی شد!',
+    copyFailed: 'کپی نشد',
     steps: ['شروع', 'پنل', 'مبدأ', 'مقصد', 'تأیید', 'اجرا', 'نتیجه'],
     step0: {
       h2: 'خوش آمدید',
@@ -320,7 +325,9 @@ const I18N = {
     detected: 'تشخیص',
     dbCred: {
       sourceHint: 'فایل .env مرزبان را با nano باز کنید، مقادیر دیتابیس را کپی و در فیلدهای زیر وارد کنید.',
-      targetHint: 'رمز DB_PASSWORD را از .env پاسارگارد کپی و اینجا وارد کنید.',
+      targetHint: 'رمزها از .env پاسارگارد خوانده شد — هر کدام را تأیید کنید.',
+      confirmTitle: 'رمزهای یافت‌شده در .env — هر کدام را تأیید کنید',
+      confirmHint: 'هر رمزی که در .env می‌بینید را تیک بزنید تا درست بودنش را تأیید کنید.',
       sourceCmd: 'nano /opt/marzban/.env',
       targetCmd: 'sudo nano /opt/pasarguard/.env',
       user: 'کاربر DB',
@@ -378,6 +385,7 @@ const I18N = {
       targetPassword: 'اطلاعات کامل دیتابیس مقصد را وارد کنید',
       sourceCredsIncomplete: 'کاربر، نام و رمز دیتابیس مبدأ را پر کنید',
       targetCredsIncomplete: 'رمز دیتابیس را از .env پاسارگارد وارد کنید',
+      passwordNotConfirmed: 'همه رمزهای خوانده‌شده از .env را تأیید کنید',
       pasarguardMissing: 'PasarGuard را دستی نصب کنید و بررسی مجدد بزنید',
       marzbanBackup: 'بکاپ Marzban آپلود کنید یا Marzban روی سرور باشد',
       backupIncomplete: 'فایل zip فاقد فایل‌های لازم است — لیست زیر را ببینید',
@@ -392,6 +400,7 @@ const I18N = {
     title: 'MrClock-MG',
     subtitle: 'Миграция в PasarGuard',
     copied: 'Скопировано!',
+    copyFailed: 'Не удалось скопировать',
     steps: ['Старт', 'Панель', 'Источник', 'Цель', 'Проверка', 'Запуск', 'Итог'],
     step0: {
       h2: 'Добро пожаловать',
@@ -512,7 +521,9 @@ const I18N = {
     detected: 'Определено',
     dbCred: {
       sourceHint: 'Откройте .env Marzban через nano, скопируйте данные БД и введите ниже.',
-      targetHint: 'Скопируйте DB_PASSWORD из .env PasarGuard и вставьте ниже.',
+      targetHint: 'Пароли прочитаны из .env PasarGuard — подтвердите каждый.',
+      confirmTitle: 'Пароли в .env — подтвердите каждый',
+      confirmHint: 'Отметьте каждый пароль из .env, чтобы подтвердить правильность.',
       sourceCmd: 'nano /opt/marzban/.env',
       targetCmd: 'sudo nano /opt/pasarguard/.env',
       user: 'Пользователь БД',
@@ -570,6 +581,7 @@ const I18N = {
       targetPassword: 'Введите все данные целевой БД',
       sourceCredsIncomplete: 'Заполните пользователя, имя и пароль БД источника',
       targetCredsIncomplete: 'Введите пароль БД из .env PasarGuard',
+      passwordNotConfirmed: 'Подтвердите все пароли из .env',
       pasarguardMissing: 'Установите PasarGuard вручную и нажмите Проверить',
       marzbanBackup: 'Загрузите копию Marzban или используйте сервер с Marzban',
       backupIncomplete: 'В zip нет нужных файлов — см. список ниже',
@@ -657,9 +669,11 @@ function applyI18n() {
   if (tgtHint) tgtHint.textContent = t('dbCred.targetHint');
   const srcCmd = document.getElementById('sourceEnvCmd');
   const tgtCmd = document.getElementById('targetEnvCmd');
+  const copySrc = document.getElementById('btnCopySourceEnv');
   const copyBtn = document.getElementById('btnCopyTargetEnv');
   if (srcCmd) srcCmd.textContent = t('dbCred.sourceCmd');
   if (tgtCmd) tgtCmd.textContent = t('dbCred.targetCmd');
+  if (copySrc) copySrc.textContent = t('step3.copyCmd');
   if (copyBtn) copyBtn.textContent = t('step3.copyCmd');
   document.title = `${t('title')} — ${t('subtitle')}`;
   renderSteps();

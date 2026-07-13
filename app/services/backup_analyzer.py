@@ -11,6 +11,7 @@ from app.services.env_migration import (
     transform_xray_config,
     detect_db_type_from_env,
     extract_env_summary,
+    extract_env_password_candidates,
 )
 
 CATEGORY_RULES: list[tuple[str, tuple[str, ...]]] = [
@@ -180,6 +181,9 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
             detected_source_db = "mariadb" if "mariadb" in low else "mysql"
 
     env_summary = extract_env_summary(env_text) if env_text else None
+    password_candidates = (
+        extract_env_password_candidates(env_text, detected_source_db) if env_text else []
+    )
 
     env_mapping: list[dict] = []
     if env_text and panel_hint == "marzban":
@@ -198,9 +202,9 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
             backup_ok = paths["sql"] is not None
             if not backup_ok:
                 missing.append(_msg(".sql dump not found in zip", "فایل .sql در zip نیست", "Файл .sql не найден"))
-            if not (env_summary and env_summary.get("has_password")):
+            if not password_candidates:
                 missing.append(_msg(
-                    "MYSQL_ROOT_PASSWORD not in backup .env — enter manually",
+                    "MYSQL_ROOT_PASSWORD / DB_PASSWORD not in backup .env — enter manually",
                     "رمز MySQL در .env بکاپ نیست — دستی وارد کنید",
                     "Пароль MySQL не в .env — введите вручную",
                 ))
@@ -228,8 +232,9 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
         "paths": {k: (str(Path(v).relative_to(upload_dir)).replace("\\", "/") if v else None) for k, v in paths.items()},
         "panel_hint": panel_hint,
         "detected_source_db": detected_source_db,
-        "mysql_password_found": bool(env_summary and env_summary.get("has_password")),
+        "mysql_password_found": bool(password_candidates),
         "env_summary": env_summary,
+        "password_candidates": password_candidates,
         "env_mapping": env_mapping[:30],
         "backup_ok": backup_ok,
         "missing": missing,

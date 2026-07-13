@@ -14,11 +14,74 @@ PATH_REPLACEMENTS = [
 
 
 def read_env_var(text: str, key: str) -> str | None:
-    pattern = rf'^\s*{re.escape(key)}\s*=\s*["\']?([^"\'#\n]+)["\']?'
+    pattern = rf'^\s*{re.escape(key)}\s*=\s*(.+?)\s*$'
     m = re.search(pattern, text, re.MULTILINE | re.IGNORECASE)
     if not m:
         return None
-    return m.group(1).strip().strip('"')
+    raw = m.group(1).strip()
+    if not raw or raw.startswith("#"):
+        return None
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ('"', "'"):
+        return raw[1:-1]
+    if "#" in raw:
+        raw = raw.split("#", 1)[0].strip()
+    return raw.strip().strip('"').strip("'") or None
+
+
+def mask_password(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 2:
+        return "•" * len(value)
+    return value[0] + ("•" * (len(value) - 2)) + value[-1]
+
+
+def extract_env_password_candidates(text: str, db_type: str | None = None) -> list[dict]:
+    """Return distinct password keys/values found in a panel .env file."""
+    if not text:
+        return []
+
+    keys: list[str] = []
+    if db_type in ("mysql", "mariadb"):
+        keys = ["MYSQL_ROOT_PASSWORD", "MYSQL_PASSWORD", "DB_PASSWORD"]
+    elif db_type in ("postgresql", "timescaledb"):
+        keys = ["POSTGRES_PASSWORD", "DB_PASSWORD"]
+    else:
+        keys = ["DB_PASSWORD", "MYSQL_ROOT_PASSWORD", "MYSQL_PASSWORD", "POSTGRES_PASSWORD"]
+
+    seen_vals: set[str] = set()
+    candidates: list[dict] = []
+    for key in keys:
+        val = read_env_var(text, key)
+        if not val:
+            continue
+        dup = val in seen_vals
+        seen_vals.add(val)
+        candidates.append({
+            "key": key,
+            "value": val,
+            "masked": mask_password(val),
+            "quoted_preview": f'"{mask_password(val)}"',
+            "duplicate_value": dup,
+        })
+    return candidates
+
+
+def pick_primary_env_password(candidates: list[dict], db_type: str | None) -> str | None:
+    if not candidates:
+        return None
+    order: list[str]
+    if db_type in ("mysql", "mariadb"):
+        order = ["MYSQL_ROOT_PASSWORD", "MYSQL_PASSWORD", "DB_PASSWORD"]
+    elif db_type in ("postgresql", "timescaledb"):
+        order = ["POSTGRES_PASSWORD", "DB_PASSWORD"]
+    else:
+        order = ["DB_PASSWORD", "MYSQL_ROOT_PASSWORD", "MYSQL_PASSWORD", "POSTGRES_PASSWORD"]
+    by_key = {c["key"]: c["value"] for c in candidates}
+    for key in order:
+        if key in by_key:
+            return by_key[key]
+    return candidates[0]["value"]
 
 
 def read_compose_db_credentials(text: str) -> dict:

@@ -6,7 +6,7 @@
   <title>MrClock-MG</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/css/style.css?v=2.0.5">
+  <link rel="stylesheet" href="/static/css/style.css?v=2.0.6">
 </head>
 <body>
   <div class="bg-grid"></div>
@@ -101,8 +101,12 @@
         <div id="sourceDbCredentials" class="db-credentials hidden">
           <div class="info-box cred-hint-box">
             <p id="sourceCredHint"></p>
-            <div class="install-cmd-box"><code id="sourceEnvCmd">nano /opt/marzban/.env</code></div>
+            <div class="install-cmd-row">
+              <div class="install-cmd-box"><code id="sourceEnvCmd">nano /opt/marzban/.env</code></div>
+              <button type="button" class="btn btn-copy" id="btnCopySourceEnv" onclick="copyEnvCmd('source')"></button>
+            </div>
           </div>
+          <div id="sourcePasswordCandidates" class="pwd-candidates hidden"></div>
           <div class="db-cred-grid">
             <div class="form-group"><label id="lblSourceDbUser"></label><input type="text" id="sourceDbUser" autocomplete="off"></div>
             <div class="form-group"><label id="lblSourceDbName"></label><input type="text" id="sourceDbName" autocomplete="off"></div>
@@ -163,9 +167,10 @@
             <p id="targetCredHint"></p>
             <div class="install-cmd-row">
               <div class="install-cmd-box"><code id="targetEnvCmd">sudo nano /opt/pasarguard/.env</code></div>
-              <button type="button" class="btn btn-copy" id="btnCopyTargetEnv" onclick="copyTargetEnvCmd()"></button>
+              <button type="button" class="btn btn-copy" id="btnCopyTargetEnv" onclick="copyEnvCmd('target')"></button>
             </div>
           </div>
+          <div id="targetPasswordCandidates" class="pwd-candidates hidden"></div>
           <div class="db-cred-grid db-cred-single">
             <div class="form-group span-2">
               <label id="lblTargetDbPassword"></label>
@@ -252,7 +257,7 @@
     </footer>
   </div>
 
-  <script src="/static/js/i18n.js?v=2.0.5"></script>
-  <script src="/static/js/app.js?v=2.0.5"></script>
+  <script src="/static/js/i18n.js?v=2.0.6"></script>
+  <script src="/static/js/app.js?v=2.0.6"></script>
 </body>
 </html>

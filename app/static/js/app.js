@@ -24,6 +24,10 @@ const state = {
   sourceEnvSummary: null,
   pasarguardEnvSummary: null,
   systemCheck: null,
+  sourcePasswordCandidates: [],
+  targetPasswordCandidates: [],
+  sourcePwdConfirmed: {},
+  targetPwdConfirmed: {},
 };
 
 function panelLatinName(panel) {
@@ -81,12 +85,148 @@ function readDbCredentials(role) {
 function hasDbCredentials(role) {
   const db = role === 'source' ? state.sourceDb : state.targetDb;
   if (!dbNeedsPassword(db)) return true;
+  if (!passwordCandidatesConfirmed(role)) return false;
   const c = readDbCredentials(role);
   const prefix = role === 'source' ? 'source' : 'target';
   if (role === 'target') {
     return !!c.target_db_password;
   }
   return !!(c[`${prefix}_db_user`] && c[`${prefix}_db_name`] && c[`${prefix}_db_password`]);
+}
+
+function getSourcePasswordCandidates() {
+  const analysis = state.bundleStatus?.analysis || state.uploadInfo?.analysis;
+  if (analysis?.password_candidates?.length) return analysis.password_candidates;
+  if (state.systemCheck?.marzban_password_candidates?.length) {
+    return state.systemCheck.marzban_password_candidates;
+  }
+  return [];
+}
+
+function getTargetPasswordCandidates() {
+  if (state.systemCheck?.pasarguard_password_candidates?.length) {
+    return state.systemCheck.pasarguard_password_candidates;
+  }
+  return [];
+}
+
+function pickPrimaryPassword(candidates, dbType) {
+  if (!candidates?.length) return null;
+  const order = dbType === 'mysql' || dbType === 'mariadb'
+    ? ['MYSQL_ROOT_PASSWORD', 'MYSQL_PASSWORD', 'DB_PASSWORD']
+    : dbType === 'postgresql' || dbType === 'timescaledb'
+      ? ['POSTGRES_PASSWORD', 'DB_PASSWORD']
+      : ['DB_PASSWORD', 'MYSQL_ROOT_PASSWORD', 'MYSQL_PASSWORD', 'POSTGRES_PASSWORD'];
+  const byKey = Object.fromEntries(candidates.map(c => [c.key, c.value]));
+  for (const key of order) {
+    if (byKey[key]) return { key, value: byKey[key] };
+  }
+  return { key: candidates[0].key, value: candidates[0].value };
+}
+
+function passwordCandidatesConfirmed(role) {
+  const candidates = role === 'source' ? state.sourcePasswordCandidates : state.targetPasswordCandidates;
+  if (!candidates?.length) return true;
+  const confirmed = role === 'source' ? state.sourcePwdConfirmed : state.targetPwdConfirmed;
+  return candidates.every(c => confirmed[c.key]);
+}
+
+function renderPasswordCandidates(role) {
+  const isSource = role === 'source';
+  const container = document.getElementById(isSource ? 'sourcePasswordCandidates' : 'targetPasswordCandidates');
+  const pwdInput = document.getElementById(isSource ? 'sourceDbPassword' : 'targetDbPassword');
+  if (!container) return;
+
+  const db = isSource ? state.sourceDb : getDetectedTargetDb();
+  const candidates = isSource ? getSourcePasswordCandidates() : getTargetPasswordCandidates();
+  if (isSource) state.sourcePasswordCandidates = candidates;
+  else state.targetPasswordCandidates = candidates;
+
+  if (!candidates.length) {
+    container.classList.add('hidden');
+    container.innerHTML = '';
+    return;
+  }
+
+  const confirmed = isSource ? state.sourcePwdConfirmed : state.targetPwdConfirmed;
+  container.innerHTML = `
+    <div class="pwd-candidates-title">${t('dbCred.confirmTitle')}</div>
+    ${candidates.map(c => `
+      <label class="pwd-candidate-row">
+        <input type="checkbox" data-role="${role}" data-key="${c.key}"
+          ${confirmed[c.key] ? 'checked' : ''}
+          onchange="onPasswordCandidateConfirm('${role}', '${c.key}')">
+        <span class="pwd-candidate-key">${c.key}</span>
+        <code class="pwd-candidate-val">${c.quoted_preview || `"${c.masked}"`}</code>
+      </label>`).join('')}
+    <p class="check-detail" style="margin-top:8px">${t('dbCred.confirmHint')}</p>`;
+  container.classList.remove('hidden');
+
+  const primary = pickPrimaryPassword(candidates, db);
+  if (primary && pwdInput && !pwdInput.dataset.userEdited) {
+    pwdInput.value = primary.value;
+  }
+}
+
+function onPasswordCandidateConfirm(role, key) {
+  const confirmed = role === 'source' ? state.sourcePwdConfirmed : state.targetPwdConfirmed;
+  const cb = document.querySelector(`input[data-role="${role}"][data-key="${key}"]`);
+  confirmed[key] = !!cb?.checked;
+
+  const candidates = role === 'source' ? state.sourcePasswordCandidates : state.targetPasswordCandidates;
+  const db = role === 'source' ? state.sourceDb : getDetectedTargetDb();
+  const primary = pickPrimaryPassword(candidates, db);
+  const pwdInput = document.getElementById(role === 'source' ? 'sourceDbPassword' : 'targetDbPassword');
+  if (pwdInput && primary && passwordCandidatesConfirmed(role)) {
+    pwdInput.value = primary.value;
+    pwdInput.dataset.userEdited = '';
+  }
+  updateStepButtons();
+}
+
+function copyTextToClipboard(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text);
+  }
+  return new Promise((resolve, reject) => {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand('copy');
+      resolve();
+    } catch (e) {
+      reject(e);
+    } finally {
+      document.body.removeChild(ta);
+    }
+  });
+}
+
+function copyEnvCmd(role) {
+  const cmdEl = document.getElementById(role === 'source' ? 'sourceEnvCmd' : 'targetEnvCmd');
+  const btn = document.getElementById(role === 'source' ? 'btnCopySourceEnv' : 'btnCopyTargetEnv');
+  const cmd = cmdEl?.textContent?.trim() || '';
+  if (!cmd) return;
+  copyTextToClipboard(cmd).then(() => {
+    if (!btn) return;
+    const orig = btn.textContent;
+    btn.textContent = t('copied');
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.textContent = orig;
+      btn.classList.remove('copied');
+    }, 1600);
+  }).catch(() => {
+    if (btn) {
+      btn.textContent = t('copyFailed');
+      setTimeout(() => { btn.textContent = t('step3.copyCmd'); }, 2000);
+    }
+  });
 }
 
 function updateSourceCredentialsVisibility() {
@@ -97,6 +237,8 @@ function updateSourceCredentialsVisibility() {
   if (needs) {
     const portEl = document.getElementById('sourceDbPort');
     if (portEl && !portEl.value) portEl.placeholder = defaultDbPort(state.sourceDb);
+    applySourceEnvDefaults();
+    renderPasswordCandidates('source');
   }
 }
 
@@ -106,6 +248,24 @@ function updateTargetCredentialsVisibility() {
   const db = getDetectedTargetDb();
   const needs = db && dbNeedsPassword(db) && !needsPasarguardInstall();
   box.classList.toggle('hidden', !needs);
+  if (needs) {
+    applyTargetEnvDefaults();
+    renderPasswordCandidates('target');
+  }
+}
+
+function applySourceEnvDefaults() {
+  const analysis = state.bundleStatus?.analysis || state.uploadInfo?.analysis;
+  const env = analysis?.env_summary || state.systemCheck?.marzban_env;
+  if (!env) return;
+  const userEl = document.getElementById('sourceDbUser');
+  const nameEl = document.getElementById('sourceDbName');
+  const hostEl = document.getElementById('sourceDbHost');
+  const portEl = document.getElementById('sourceDbPort');
+  if (userEl && env.db_user && !userEl.value) userEl.value = env.db_user;
+  if (nameEl && env.db_name && !nameEl.value) nameEl.value = env.db_name;
+  if (hostEl && env.db_host) hostEl.value = env.db_host;
+  if (portEl && env.db_port) portEl.value = env.db_port;
 }
 
 function setupCredentialListeners() {
@@ -116,7 +276,10 @@ function setupCredentialListeners() {
     const el = document.getElementById(id);
     if (!el || el.dataset.bound) return;
     el.dataset.bound = '1';
-    el.addEventListener('input', () => updateStepButtons());
+    el.addEventListener('input', () => {
+      if (id.includes('Password')) el.dataset.userEdited = '1';
+      updateStepButtons();
+    });
   });
 }
 
@@ -252,6 +415,9 @@ function canProceedStep2() {
   const needsPwd = dbNeedsPassword(state.sourceDb);
   const analysis = state.bundleStatus?.analysis || state.uploadInfo?.analysis;
   if (needsPwd && panel?.id !== 'remnawave' && !hasDbCredentials('source')) {
+    if (!passwordCandidatesConfirmed('source') && state.sourcePasswordCandidates.length) {
+      return t('block.passwordNotConfirmed');
+    }
     return t('block.sourceCredsIncomplete');
   }
   if (!uploadSatisfied()) {
@@ -281,6 +447,9 @@ function canProceedStep3() {
   state.targetDb = db;
   if (needsPasarguardInstall()) return t('block.pasarguardMissing');
   if (dbNeedsPassword(db) && !hasDbCredentials('target')) {
+    if (!passwordCandidatesConfirmed('target') && state.targetPasswordCandidates.length) {
+      return t('block.passwordNotConfirmed');
+    }
     return t('block.targetCredsIncomplete');
   }
   return null;
@@ -330,22 +499,7 @@ function renderDetectedTargetDb() {
     <div class="detected-db-row"><span class="label">${s.port}</span><span class="value">${port}</span></div>
   `;
   card.classList.remove('hidden');
-}
-
-function copyTargetEnvCmd() {
-  const cmd = document.getElementById('targetEnvCmd')?.textContent?.trim()
-    || 'sudo nano /opt/pasarguard/.env';
-  const btn = document.getElementById('btnCopyTargetEnv');
-  navigator.clipboard.writeText(cmd).then(() => {
-    if (!btn) return;
-    const orig = btn.textContent;
-    btn.textContent = t('copied');
-    btn.classList.add('copied');
-    setTimeout(() => {
-      btn.textContent = orig;
-      btn.classList.remove('copied');
-    }, 1600);
-  }).catch(() => {});
+  renderPasswordCandidates('target');
 }
 
 function updateStepButtons() {

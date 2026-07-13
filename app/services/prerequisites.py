@@ -9,7 +9,7 @@ from app.config import (
     MARZBAN_DIR, MARZBAN_DATA, XUI_DB_PATHS, HIDDIFY_DIR,
 )
 from app.panels import PANELS, DATABASE_TYPES, TARGET_DB_RECOMMENDATIONS
-from app.services.env_migration import extract_env_summary, detect_db_type_from_env
+from app.services.env_migration import extract_env_summary, detect_db_type_from_env, extract_env_password_candidates
 
 
 def _run(cmd: list[str], timeout: int = 30) -> tuple[bool, str]:
@@ -78,21 +78,35 @@ def get_pasarguard_env_summary() -> dict | None:
     return extract_env_summary(text)
 
 
+def _password_candidates_from_env(path: Path, db_type: str | None) -> list[dict]:
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    return extract_env_password_candidates(text, db_type)
+
+
 def get_system_status() -> dict:
     """Server-wide detection for step 0 and install recheck."""
     pg = is_pasarguard_installed()
     marzban = is_marzban_installed()
+    pg_db = get_pasarguard_db_type()
+    mz_db = get_marzban_db_type()
     return {
         "pasarguard": pg,
         "marzban": marzban,
         "hiddify": is_hiddify_installed(),
         "docker": is_docker_running(),
         "root": is_root(),
-        "pasarguard_db": get_pasarguard_db_type(),
-        "marzban_db": get_marzban_db_type(),
+        "pasarguard_db": pg_db,
+        "marzban_db": mz_db,
         "pasarguard_path": str(PASARGUARD_DIR) if pg else None,
         "marzban_path": str(MARZBAN_DIR) if MARZBAN_DIR.exists() else None,
         "pasarguard_env": get_pasarguard_env_summary(),
+        "pasarguard_password_candidates": _password_candidates_from_env(PASARGUARD_ENV, pg_db) if pg else [],
+        "marzban_env": extract_env_summary(
+            (MARZBAN_DIR / ".env").read_text(encoding="utf-8", errors="ignore")
+        ) if marzban and (MARZBAN_DIR / ".env").exists() else None,
+        "marzban_password_candidates": _password_candidates_from_env(MARZBAN_DIR / ".env", mz_db) if marzban else [],
     }
 
 

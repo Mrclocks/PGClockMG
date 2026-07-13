@@ -11,6 +11,8 @@ from app.services.env_migration import (
     transform_compose_marzban_to_pasarguard,
     fix_mysql_dump_for_pasarguard,
     read_env_var,
+    extract_env_password_candidates,
+    pick_primary_env_password,
 )
 
 
@@ -56,9 +58,23 @@ def test_mysql_dump_fix():
 
 
 def test_read_env_var():
-    text = 'MYSQL_ROOT_PASSWORD = "abc"\n'
+    text = 'MYSQL_ROOT_PASSWORD = "abc"\nDB_PASSWORD = "secret"\n'
     assert read_env_var(text, "MYSQL_ROOT_PASSWORD") == "abc"
+    assert read_env_var(text, "DB_PASSWORD") == "secret"
     print("OK: read env var")
+
+
+def test_extract_env_password_candidates():
+    text = '''
+DB_PASSWORD = "apppass"
+MYSQL_ROOT_PASSWORD = "rootpass"
+'''
+    cands = extract_env_password_candidates(text, "mysql")
+    keys = [c["key"] for c in cands]
+    assert "MYSQL_ROOT_PASSWORD" in keys
+    assert "DB_PASSWORD" in keys
+    assert pick_primary_env_password(cands, "mysql") == "rootpass"
+    print("OK: password candidates")
 
 
 if __name__ == "__main__":
@@ -67,4 +83,5 @@ if __name__ == "__main__":
     test_compose_transform()
     test_mysql_dump_fix()
     test_read_env_var()
+    test_extract_env_password_candidates()
     print("\nAll env migration tests passed.")
