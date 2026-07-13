@@ -47,6 +47,10 @@ def test_sqlite_column_intersection():
         assert "exclude_inbounds_association" in TABLE_ORDER
         assert "exclude_inbounds_association" not in SKIP_TABLES
         assert "users" in TABLE_ORDER
+        assert TABLE_ORDER.index("core_configs") < TABLE_ORDER.index("nodes")
+        assert TABLE_ORDER.index("groups") < TABLE_ORDER.index("users_groups_association")
+        assert "settings" in TABLE_ORDER
+        assert "client_templates" in TABLE_ORDER
         conn.close()
         print("OK: sqlite column helpers")
     finally:

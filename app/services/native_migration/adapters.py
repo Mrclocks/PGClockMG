@@ -455,7 +455,9 @@ def copy_tables_universal(
     source_tables = reader.source_tables()
     source_counts: dict[str, int] = {}
 
-    for table in ("users", "admins", "hosts"):
+    for table in (
+        "users", "admins", "hosts", "nodes", "core_configs", "groups",
+    ):
         if table in source_tables:
             try:
                 source_counts[table] = sum(1 for _ in reader.fetch_rows(table, ["id"]))
@@ -534,13 +536,27 @@ def copy_tables_universal(
         writer.commit()
 
     if fail_hard:
-        for critical in ("users", "admins", "hosts"):
+        for critical in ("users", "admins", "hosts", "core_configs", "groups"):
             src_n = source_counts.get(critical, 0)
             dst_n = stats.get(critical, 0)
             if src_n > 0 and dst_n == 0:
                 raise RuntimeError(
                     f"Migration failed: source has {src_n} {critical} but "
                     f"0 were copied to target. Check row-skip errors above."
+                )
+        src_nodes = source_counts.get("nodes", 0)
+        dst_nodes = stats.get("nodes", 0)
+        if src_nodes > 0 and dst_nodes == 0:
+            raise RuntimeError(
+                f"Migration failed: source has {src_nodes} nodes but "
+                f"0 were copied to target. Check row-skip errors above."
+            )
+        if src_nodes > 0 and stats.get("core_configs", 0) == 0:
+            src_cc = source_counts.get("core_configs", 0)
+            if src_cc > 0:
+                raise RuntimeError(
+                    f"Migration failed: source has {src_cc} core_configs required "
+                    f"by {src_nodes} nodes but none were copied."
                 )
 
     return stats

@@ -2,19 +2,20 @@
 
 const I18N = {
   en: {
-    title: 'PG-Migrator',
+    title: 'MrClock-MG',
     subtitle: 'Migrate to PasarGuard',
-    steps: ['Prerequisites', 'Source Panel', 'Source DB', 'Target DB', 'Confirm', 'Migrate', 'Result'],
+    copied: 'Copied!',
+    steps: ['Start', 'Panel', 'Source', 'Target', 'Confirm', 'Run', 'Done'],
     step0: {
-      h2: 'Before You Start',
-      desc: 'Read what must be installed on this server BEFORE migration.',
-      info: 'This wizard runs on your Ubuntu server with root access. What you need depends on the source panel — details appear after you select one.',
+      h2: 'Welcome',
+      desc: 'Migration wizard for PasarGuard — check your server is ready.',
+      info: 'Runs on your Ubuntu server with root access. Panel-specific requirements appear after you choose a source.',
       checks: [
-        ['🖥️', 'Ubuntu server', 'This wizard runs on port 7000'],
-        ['🔑', 'Root access', 'Required to modify .env and Docker'],
+        ['🖥️', 'Ubuntu server', 'Wizard on port 7000'],
+        ['🔑', 'Root access', 'Required for .env & Docker'],
         ['💾', 'Backup', 'Always backup before migrating'],
       ],
-      start: 'Continue →',
+      start: 'Get Started',
       pasarguardCheck: 'PasarGuard on server',
       pasarguardYes: 'Installed',
       pasarguardNo: 'Not installed — install manually before migration (if required)',
@@ -65,10 +66,20 @@ const I18N = {
       remnawaveTokenPh: 'Bearer token from Remnawave dashboard',
     },
     step3: {
-      h2: 'PasarGuard Target Database',
+      h2: 'PasarGuard Database',
       desc: 'Which database should PasarGuard use?',
-      marzbanH2: 'PasarGuard Install Database',
+      descAuto: 'Detected from your installed PasarGuard — no manual selection needed.',
+      marzbanH2: 'PasarGuard Database',
       marzbanDesc: 'Which database did you choose when installing PasarGuard on this server?',
+      marzbanDescAuto: 'Auto-detected from your PasarGuard installation.',
+      detected: {
+        title: 'Detected database',
+        user: 'DB user',
+        dbName: 'DB name',
+        host: 'Host',
+        port: 'Port',
+      },
+      copyCmd: 'Copy',
       crossDbWarning: 'Cross-DB: {source} → {target}. Two-phase engine (head→head copy).',
       password: 'Target database password',
       passwordPh: 'New or existing password',
@@ -117,8 +128,9 @@ const I18N = {
     detected: 'Detected',
     dbCred: {
       sourceHint: 'Open your Marzban .env on the server, copy DB values, and paste them below.',
-      targetHint: 'Open PasarGuard .env with nano, copy DB_USER / DB_NAME / DB_PASSWORD, and enter them here.',
+      targetHint: 'Copy DB_PASSWORD from PasarGuard .env and paste it below.',
       sourceCmd: 'nano /opt/marzban/.env',
+      targetCmd: 'sudo nano /opt/pasarguard/.env',
       user: 'DB user',
       dbName: 'DB name',
       host: 'DB host',
@@ -169,10 +181,11 @@ const I18N = {
       noSourceDb: 'Select source database type',
       selectDetectedDb: 'Confirm source database type (detected from backup)',
       noTargetDb: 'Select target database type',
+      noTargetDbDetected: 'Could not detect PasarGuard database — check /opt/pasarguard/.env',
       sourcePassword: 'Enter all source database credentials',
       targetPassword: 'Enter all target database credentials',
       sourceCredsIncomplete: 'Fill DB user, name, and password for source',
-      targetCredsIncomplete: 'Fill DB user, name, and password for target',
+      targetCredsIncomplete: 'Enter DB password from PasarGuard .env',
       pasarguardMissing: 'Install PasarGuard manually, then click Recheck',
       marzbanBackup: 'Upload Marzban backup or use server with Marzban data',
       backupIncomplete: 'Backup zip is missing required files — see list below',
@@ -184,19 +197,20 @@ const I18N = {
     },
   },
   fa: {
-    title: 'PG-Migrator',
+    title: 'MrClock-MG',
     subtitle: 'مهاجرت به PasarGuard',
-    steps: ['پیش‌نیازها', 'پنل مبدأ', 'دیتابیس مبدأ', 'دیتابیس مقصد', 'تأیید', 'مهاجرت', 'نتیجه'],
+    copied: 'کپی شد!',
+    steps: ['شروع', 'پنل', 'مبدأ', 'مقصد', 'تأیید', 'اجرا', 'نتیجه'],
     step0: {
-      h2: 'قبل از شروع',
-      desc: 'بخوانید چه چیزهایی باید قبل از مهاجرت روی سرور نصب باشد.',
-      info: 'این ویزارد روی سرور Ubuntu با دسترسی root اجرا می‌شود. نیازمندی‌ها بعد از انتخاب پنل مبدأ نمایش داده می‌شوند.',
+      h2: 'خوش آمدید',
+      desc: 'ویزارد مهاجرت به PasarGuard — آمادگی سرور را بررسی کنید.',
+      info: 'روی سرور Ubuntu با دسترسی root اجرا می‌شود. نیازمندی‌های هر پنل پس از انتخاب مبدأ نمایش داده می‌شود.',
       checks: [
         ['🖥️', 'سرور Ubuntu', 'ویزارد روی پورت ۷۰۰۰'],
-        ['🔑', 'دسترسی root', 'برای تغییر .env و Docker'],
+        ['🔑', 'دسترسی root', 'برای .env و Docker'],
         ['💾', 'بکاپ', 'قبل از مهاجرت حتماً بکاپ بگیرید'],
       ],
-      start: 'ادامه ←',
+      start: 'شروع',
       pasarguardCheck: 'PasarGuard روی سرور',
       pasarguardYes: 'نصب شده',
       pasarguardNo: 'نصب نیست — در صورت نیاز قبل از مهاجرت دستی نصب کنید',
@@ -247,10 +261,20 @@ const I18N = {
       remnawaveTokenPh: 'توکن از داشبورد Remnawave',
     },
     step3: {
-      h2: 'دیتابیس مقصد PasarGuard',
+      h2: 'دیتابیس PasarGuard',
       desc: 'PasarGuard روی کدام دیتابیس اجرا شود؟',
-      marzbanH2: 'دیتابیس نصب PasarGuard',
+      descAuto: 'از نصب PasarGuard شما تشخیص داده شد — نیازی به انتخاب دستی نیست.',
+      marzbanH2: 'دیتابیس PasarGuard',
       marzbanDesc: 'هنگام نصب PasarGuard روی این سرور، کدام دیتابیس را انتخاب کردید؟',
+      marzbanDescAuto: 'خودکار از نصب PasarGuard شما تشخیص داده شد.',
+      detected: {
+        title: 'دیتابیس تشخیص‌داده‌شده',
+        user: 'کاربر DB',
+        dbName: 'نام DB',
+        host: 'هاست',
+        port: 'پورت',
+      },
+      copyCmd: 'کپی',
       crossDbWarning: 'مهاجرت DB: {source} → {target}. موتور دو‌فازی (کپی head→head).',
       password: 'رمز دیتابیس مقصد',
       passwordPh: 'رمز جدید یا موجود',
@@ -296,8 +320,9 @@ const I18N = {
     detected: 'تشخیص',
     dbCred: {
       sourceHint: 'فایل .env مرزبان را با nano باز کنید، مقادیر دیتابیس را کپی و در فیلدهای زیر وارد کنید.',
-      targetHint: 'فایل .env پاسارگارد را با nano باز کنید (DB_USER / DB_NAME / DB_PASSWORD) و مقادیر را دستی وارد کنید.',
+      targetHint: 'رمز DB_PASSWORD را از .env پاسارگارد کپی و اینجا وارد کنید.',
       sourceCmd: 'nano /opt/marzban/.env',
+      targetCmd: 'sudo nano /opt/pasarguard/.env',
       user: 'کاربر DB',
       dbName: 'نام DB',
       host: 'هاست DB',
@@ -348,10 +373,11 @@ const I18N = {
       noSourceDb: 'نوع دیتابیس مبدأ را انتخاب کنید',
       selectDetectedDb: 'نوع دیتابیس را تأیید کنید (از بکاپ شناسایی شد)',
       noTargetDb: 'نوع دیتابیس مقصد را انتخاب کنید',
+      noTargetDbDetected: 'دیتابیس PasarGuard تشخیص داده نشد — فایل /opt/pasarguard/.env را بررسی کنید',
       sourcePassword: 'اطلاعات کامل دیتابیس مبدأ را وارد کنید',
       targetPassword: 'اطلاعات کامل دیتابیس مقصد را وارد کنید',
       sourceCredsIncomplete: 'کاربر، نام و رمز دیتابیس مبدأ را پر کنید',
-      targetCredsIncomplete: 'کاربر، نام و رمز دیتابیس مقصد را پر کنید',
+      targetCredsIncomplete: 'رمز دیتابیس را از .env پاسارگارد وارد کنید',
       pasarguardMissing: 'PasarGuard را دستی نصب کنید و بررسی مجدد بزنید',
       marzbanBackup: 'بکاپ Marzban آپلود کنید یا Marzban روی سرور باشد',
       backupIncomplete: 'فایل zip فاقد فایل‌های لازم است — لیست زیر را ببینید',
@@ -363,19 +389,20 @@ const I18N = {
     },
   },
   ru: {
-    title: 'PG-Migrator',
+    title: 'MrClock-MG',
     subtitle: 'Миграция в PasarGuard',
-    steps: ['Условия', 'Панель', 'БД источник', 'БД цель', 'Проверка', 'Миграция', 'Результат'],
+    copied: 'Скопировано!',
+    steps: ['Старт', 'Панель', 'Источник', 'Цель', 'Проверка', 'Запуск', 'Итог'],
     step0: {
-      h2: 'Перед началом',
-      desc: 'Узнайте, что должно быть установлено ДО миграции.',
-      info: 'Мастер работает на Ubuntu с root. Требования зависят от исходной панели.',
+      h2: 'Добро пожаловать',
+      desc: 'Мастер миграции в PasarGuard — проверьте готовность сервера.',
+      info: 'Работает на Ubuntu с root. Требования панели появятся после выбора источника.',
       checks: [
         ['🖥️', 'Сервер Ubuntu', 'Порт 7000'],
         ['🔑', 'Root доступ', 'Для .env и Docker'],
         ['💾', 'Резервная копия', 'Сделайте бэкап'],
       ],
-      start: 'Далее →',
+      start: 'Начать',
       pasarguardCheck: 'PasarGuard на сервере',
       pasarguardYes: 'Установлен',
       pasarguardNo: 'Не установлен — установите вручную перед миграцией (если требуется)',
@@ -426,10 +453,20 @@ const I18N = {
       remnawaveTokenPh: 'Токен из дашборда Remnawave',
     },
     step3: {
-      h2: 'Целевая БД PasarGuard',
+      h2: 'БД PasarGuard',
       desc: 'Какую БД использовать для PasarGuard?',
-      marzbanH2: 'БД установки PasarGuard',
+      descAuto: 'Определено из установленного PasarGuard — выбор не требуется.',
+      marzbanH2: 'БД PasarGuard',
       marzbanDesc: 'Какую БД вы выбрали при установке PasarGuard на этом сервере?',
+      marzbanDescAuto: 'Автоопределение из установки PasarGuard.',
+      detected: {
+        title: 'Определённая БД',
+        user: 'Пользователь',
+        dbName: 'Имя БД',
+        host: 'Хост',
+        port: 'Порт',
+      },
+      copyCmd: 'Копировать',
       crossDbWarning: 'Миграция БД: {source} → {target}. Двухфазный движок (head→head).',
       password: 'Пароль целевой БД',
       passwordPh: 'Новый или существующий пароль',
@@ -475,8 +512,9 @@ const I18N = {
     detected: 'Определено',
     dbCred: {
       sourceHint: 'Откройте .env Marzban через nano, скопируйте данные БД и введите ниже.',
-      targetHint: 'Откройте .env PasarGuard (nano), скопируйте DB_USER / DB_NAME / DB_PASSWORD и введите вручную.',
+      targetHint: 'Скопируйте DB_PASSWORD из .env PasarGuard и вставьте ниже.',
       sourceCmd: 'nano /opt/marzban/.env',
+      targetCmd: 'sudo nano /opt/pasarguard/.env',
       user: 'Пользователь БД',
       dbName: 'Имя БД',
       host: 'Хост БД',
@@ -527,10 +565,11 @@ const I18N = {
       noSourceDb: 'Выберите БД источника',
       selectDetectedDb: 'Подтвердите тип БД (определён из копии)',
       noTargetDb: 'Выберите целевую БД',
+      noTargetDbDetected: 'Не удалось определить БД PasarGuard — проверьте /opt/pasarguard/.env',
       sourcePassword: 'Введите все данные БД источника',
       targetPassword: 'Введите все данные целевой БД',
       sourceCredsIncomplete: 'Заполните пользователя, имя и пароль БД источника',
-      targetCredsIncomplete: 'Заполните пользователя, имя и пароль целевой БД',
+      targetCredsIncomplete: 'Введите пароль БД из .env PasarGuard',
       pasarguardMissing: 'Установите PasarGuard вручную и нажмите Проверить',
       marzbanBackup: 'Загрузите копию Marzban или используйте сервер с Marzban',
       backupIncomplete: 'В zip нет нужных файлов — см. список ниже',
@@ -574,9 +613,13 @@ function setLang(lang) {
 }
 
 function applyI18n() {
+  const brandTitle = document.querySelector('.header h1');
+  if (brandTitle) brandTitle.textContent = t('title');
   const map = {
     subtitle: '.subtitle',
-    'step0.h2': '#step0 h2', 'step0.desc': '#step0 .desc', 'step0.info': '#step0 .info-box p',
+    'step0.h2': '#step0 .welcome-header h2',
+    'step0.desc': '#step0 .welcome-header .desc',
+    'step0.info': '#step0 .welcome-note',
     'step0.start': '#btnStep0',
     'step1.h2': '#step1 h2', 'step1.desc': '#step1 .desc', 'step1.back': '#step1 .btn-ghost',
     'step1.next': '#btnStep1',
@@ -602,8 +645,7 @@ function applyI18n() {
   const credLabels = [
     ['lblSourceDbUser', 'dbCred.user'], ['lblSourceDbName', 'dbCred.dbName'], ['lblSourceDbHost', 'dbCred.host'],
     ['lblSourceDbPort', 'dbCred.port'], ['lblSourceDbPassword', 'dbCred.password'],
-    ['lblTargetDbUser', 'dbCred.user'], ['lblTargetDbName', 'dbCred.dbName'], ['lblTargetDbHost', 'dbCred.host'],
-    ['lblTargetDbPort', 'dbCred.port'], ['lblTargetDbPassword', 'dbCred.password'],
+    ['lblTargetDbPassword', 'dbCred.password'],
   ];
   credLabels.forEach(([id, key]) => {
     const el = document.getElementById(id);
@@ -614,10 +656,15 @@ function applyI18n() {
   if (srcHint) srcHint.textContent = t('dbCred.sourceHint');
   if (tgtHint) tgtHint.textContent = t('dbCred.targetHint');
   const srcCmd = document.getElementById('sourceEnvCmd');
+  const tgtCmd = document.getElementById('targetEnvCmd');
+  const copyBtn = document.getElementById('btnCopyTargetEnv');
   if (srcCmd) srcCmd.textContent = t('dbCred.sourceCmd');
+  if (tgtCmd) tgtCmd.textContent = t('dbCred.targetCmd');
+  if (copyBtn) copyBtn.textContent = t('step3.copyCmd');
   document.title = `${t('title')} — ${t('subtitle')}`;
   renderSteps();
   renderGlobalChecks();
+  if (state.currentStep === 3) renderDetectedTargetDb();
   updateStepButtons();
 }
 
@@ -628,7 +675,7 @@ function renderSteps() {
     const label = el.querySelector('.step-label');
     const num = el.querySelector('.step-num');
     if (label) label.textContent = steps[i];
-    if (num) num.textContent = state.lang === 'fa' ? String(i) : String(i);
+    if (num) num.textContent = String(i);
   });
 }
 

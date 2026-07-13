@@ -55,6 +55,18 @@ function togglePassword(inputId, btn) {
 
 function readDbCredentials(role) {
   const p = role === 'source' ? 'source' : 'target';
+  if (p === 'target') {
+    const env = state.systemCheck?.pasarguard_env || state.pasarguardEnvSummary;
+    const portRaw = env?.db_port || document.getElementById('targetDbPort')?.value?.trim();
+    const port = portRaw ? parseInt(portRaw, 10) : null;
+    return {
+      target_db_user: 'pasarguard',
+      target_db_name: 'pasarguard',
+      target_db_host: env?.db_host || '127.0.0.1',
+      target_db_port: Number.isFinite(port) ? port : null,
+      target_db_password: document.getElementById('targetDbPassword')?.value || null,
+    };
+  }
   const portRaw = document.getElementById(`${p}DbPort`)?.value?.trim();
   const port = portRaw ? parseInt(portRaw, 10) : null;
   return {
@@ -71,6 +83,9 @@ function hasDbCredentials(role) {
   if (!dbNeedsPassword(db)) return true;
   const c = readDbCredentials(role);
   const prefix = role === 'source' ? 'source' : 'target';
+  if (role === 'target') {
+    return !!c.target_db_password;
+  }
   return !!(c[`${prefix}_db_user`] && c[`${prefix}_db_name`] && c[`${prefix}_db_password`]);
 }
 
@@ -88,18 +103,15 @@ function updateSourceCredentialsVisibility() {
 function updateTargetCredentialsVisibility() {
   const box = document.getElementById('targetDbCredentials');
   if (!box) return;
-  const needs = dbNeedsPassword(state.targetDb);
+  const db = getDetectedTargetDb();
+  const needs = db && dbNeedsPassword(db) && !needsPasarguardInstall();
   box.classList.toggle('hidden', !needs);
-  if (needs) {
-    const portEl = document.getElementById('targetDbPort');
-    if (portEl && !portEl.value) portEl.placeholder = defaultDbPort(state.targetDb);
-  }
 }
 
 function setupCredentialListeners() {
   [
     'sourceDbUser', 'sourceDbName', 'sourceDbHost', 'sourceDbPort', 'sourceDbPassword',
-    'targetDbUser', 'targetDbName', 'targetDbHost', 'targetDbPort', 'targetDbPassword',
+    'targetDbPassword',
   ].forEach((id) => {
     const el = document.getElementById(id);
     if (!el || el.dataset.bound) return;
@@ -186,6 +198,7 @@ async function loadSystemCheck() {
     const data = await res.json();
     applySystemCheck(data);
     renderGlobalChecks();
+    if (state.currentStep === 3) renderDetectedTargetDb();
     updateStepButtons();
   } catch (e) {
     console.error(e);
@@ -263,12 +276,76 @@ function bundleHasEnvPassword() {
 }
 
 function canProceedStep3() {
-  if (!state.targetDb) return t('block.noTargetDb');
+  const db = getDetectedTargetDb();
+  if (!db) return t('block.noTargetDbDetected');
+  state.targetDb = db;
   if (needsPasarguardInstall()) return t('block.pasarguardMissing');
-  if (dbNeedsPassword(state.targetDb) && !hasDbCredentials('target')) {
+  if (dbNeedsPassword(db) && !hasDbCredentials('target')) {
     return t('block.targetCredsIncomplete');
   }
   return null;
+}
+
+function getDetectedTargetDb() {
+  return state.systemCheck?.pasarguard_db
+    || state.detected?.pasarguard_db
+    || null;
+}
+
+function applyTargetEnvDefaults() {
+  const env = state.systemCheck?.pasarguard_env;
+  if (!env) return;
+  const hostEl = document.getElementById('targetDbHost');
+  const portEl = document.getElementById('targetDbPort');
+  if (hostEl && env.db_host) hostEl.value = env.db_host;
+  if (portEl && env.db_port) portEl.value = env.db_port;
+}
+
+function renderDetectedTargetDb() {
+  const card = document.getElementById('detectedTargetDb');
+  if (!card) return;
+
+  const db = getDetectedTargetDb();
+  const env = state.systemCheck?.pasarguard_env;
+  const s = t('step3.detected');
+
+  if (!db) {
+    card.classList.add('hidden');
+    card.innerHTML = '';
+    return;
+  }
+
+  state.targetDb = db;
+  applyTargetEnvDefaults();
+
+  const host = env?.db_host || '127.0.0.1';
+  const port = env?.db_port || defaultDbPort(db) || '—';
+
+  card.innerHTML = `
+    <h3>${s.title}</h3>
+    <div class="detected-db-type">${dbDisplayName(db)}</div>
+    <div class="detected-db-row"><span class="label">${s.user}</span><span class="value">pasarguard</span></div>
+    <div class="detected-db-row"><span class="label">${s.dbName}</span><span class="value">pasarguard</span></div>
+    <div class="detected-db-row"><span class="label">${s.host}</span><span class="value">${host}</span></div>
+    <div class="detected-db-row"><span class="label">${s.port}</span><span class="value">${port}</span></div>
+  `;
+  card.classList.remove('hidden');
+}
+
+function copyTargetEnvCmd() {
+  const cmd = document.getElementById('targetEnvCmd')?.textContent?.trim()
+    || 'sudo nano /opt/pasarguard/.env';
+  const btn = document.getElementById('btnCopyTargetEnv');
+  navigator.clipboard.writeText(cmd).then(() => {
+    if (!btn) return;
+    const orig = btn.textContent;
+    btn.textContent = t('copied');
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.textContent = orig;
+      btn.classList.remove('copied');
+    }, 1600);
+  }).catch(() => {});
 }
 
 function updateStepButtons() {
@@ -517,75 +594,29 @@ async function renderTargetDbs() {
   const panel = state.selectedPanel;
   if (!panel || !state.sourceDb) return goStep(2);
 
-  const grid = document.getElementById('targetDbGrid');
-  const crossEl = document.getElementById('crossDbWarning');
-  const recEl = document.getElementById('targetRecommendation');
-  grid.innerHTML = '...';
-
-  if (panel.id === 'marzban') {
-    const h2 = document.querySelector('#step3 h2');
-    const desc = document.querySelector('#step3 .desc');
-    if (h2) h2.textContent = t('step3.marzbanH2');
-    if (desc) desc.textContent = t('step3.marzbanDesc');
-
-    const dbs = state.pasarguardInstallDbs.length
-      ? state.pasarguardInstallDbs
-      : ['sqlite', 'mysql', 'mariadb', 'postgresql', 'timescaledb'];
-
-    grid.innerHTML = dbs.map(db => `
-      <div class="db-card ${state.detected?.pasarguard_db === db ? 'recommended' : ''}" data-db="${db}" onclick="selectTargetDb('${db}')">
-        <h4>${dbDisplayName(db)}</h4>
-        ${state.detected?.pasarguard_db === db ? `<p>${t('detected')}</p>` : ''}
-      </div>`).join('');
-
-    if (state.detected?.pasarguard_db && dbs.includes(state.detected.pasarguard_db)) {
-      selectTargetDb(state.detected.pasarguard_db);
-    } else if (dbs.length) {
-      selectTargetDb(dbs[0]);
-    }
-
-    recEl?.classList.add('hidden');
-    document.getElementById('installPgSection')?.classList.add('hidden');
-    updateCrossDbWarning();
-    updateTargetCredentialsVisibility();
-    updateStepButtons();
-    return;
-  }
-
   const h2 = document.querySelector('#step3 h2');
   const desc = document.querySelector('#step3 .desc');
-  if (h2) h2.textContent = t('step3.h2');
-  if (desc) desc.textContent = t('step3.desc');
-  crossEl?.classList.add('hidden');
+  const crossEl = document.getElementById('crossDbWarning');
 
-  try {
-    const res = await fetch(`/api/recommendations/${panel.id}/${state.sourceDb}`);
-    const recs = await res.json();
-    const lang = state.lang;
-
-    grid.innerHTML = recs.map(r => `
-      <div class="db-card ${r.recommended ? 'recommended' : ''}" data-db="${r.id}" onclick="selectTargetDb('${r.id}')">
-        <h4>${tr(r.name, lang)}</h4>
-        <p>${tr(r.reason, lang)}</p>
-      </div>`).join('');
-
-    if (recs.length) selectTargetDb(recs[0].id);
-
-    if (recs[0]?.recommended) {
-      recEl.classList.remove('hidden');
-      recEl.innerHTML = `💡 ${tr(recs[0].reason, lang)}`;
-    } else recEl.classList.add('hidden');
-  } catch (e) {
-    grid.innerHTML = 'Error';
+  if (panel.id === 'marzban') {
+    if (h2) h2.textContent = t('step3.marzbanH2');
+    if (desc) desc.textContent = t('step3.marzbanDescAuto');
+  } else {
+    if (h2) h2.textContent = t('step3.h2');
+    if (desc) desc.textContent = t('step3.descAuto');
   }
+
+  renderDetectedTargetDb();
+  updateCrossDbWarning();
 
   const needsPg = needsPasarguardInstall();
   const installSection = document.getElementById('installPgSection');
-  installSection.classList.toggle('hidden', !needsPg);
+  installSection?.classList.toggle('hidden', !needsPg);
   if (needsPg) {
     const cmdEl = document.getElementById('installPgCmd');
     if (cmdEl) cmdEl.textContent = getPgInstallCmd();
   }
+
   updateTargetCredentialsVisibility();
   updateStepButtons();
 }
@@ -606,9 +637,6 @@ function updateCrossDbWarning() {
 
 function selectTargetDb(db) {
   state.targetDb = db;
-  document.querySelectorAll('#targetDbGrid .db-card').forEach(c => {
-    c.classList.toggle('selected', c.dataset.db === db);
-  });
   updateCrossDbWarning();
   updateTargetCredentialsVisibility();
   updateStepButtons();
