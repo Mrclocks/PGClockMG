@@ -59,6 +59,11 @@ function togglePassword(inputId, btn) {
   btn.textContent = show ? '🙈' : '👁';
 }
 
+function getSourceEnvSummary() {
+  const analysis = state.bundleStatus?.analysis || state.uploadInfo?.analysis;
+  return analysis?.env_summary || state.systemCheck?.marzban_env || null;
+}
+
 function readDbCredentials(role) {
   const p = role === 'source' ? 'source' : 'target';
   const migrationPwd = getMigrationPassword(role);
@@ -74,14 +79,22 @@ function readDbCredentials(role) {
       target_db_password: migrationPwd,
     };
   }
-  const portRaw = document.getElementById(`${p}DbPort`)?.value?.trim();
+  const db = state.sourceDb;
+  const env = getSourceEnvSummary();
+  const portRaw = document.getElementById('sourceDbPort')?.value?.trim() || env?.db_port;
   const port = portRaw ? parseInt(portRaw, 10) : null;
+  const user = document.getElementById('sourceDbUser')?.value?.trim()
+    || env?.db_user
+    || (db === 'mysql' || db === 'mariadb' ? 'root' : null);
+  const name = document.getElementById('sourceDbName')?.value?.trim()
+    || env?.db_name
+    || (db === 'mysql' || db === 'mariadb' ? 'marzban' : null);
   return {
-    [`${p}_db_user`]: document.getElementById(`${p}DbUser`)?.value?.trim() || null,
-    [`${p}_db_name`]: document.getElementById(`${p}DbName`)?.value?.trim() || null,
-    [`${p}_db_host`]: document.getElementById(`${p}DbHost`)?.value?.trim() || '127.0.0.1',
-    [`${p}_db_port`]: Number.isFinite(port) ? port : null,
-    [`${p}_db_password`]: migrationPwd,
+    source_db_user: user,
+    source_db_name: name,
+    source_db_host: document.getElementById('sourceDbHost')?.value?.trim() || env?.db_host || '127.0.0.1',
+    source_db_port: Number.isFinite(port) ? port : null,
+    source_db_password: migrationPwd,
   };
 }
 
@@ -154,11 +167,12 @@ function getTargetPasswordCandidates() {
   return [];
 }
 
-function copyTextToClipboard(text) {
+function passwordCandidatesConfirmed(role) {
   const rows = getPasswordRows(role);
   if (!rows.length) return true;
   const confirmed = pwdConfirmedMap(role);
-  return rows.every(r => confirmed[r.key] && (pwdValuesMap(role)[r.key] ?? r.value ?? '').trim());
+  const values = pwdValuesMap(role);
+  return rows.every(r => confirmed[r.key] && (values[r.key] ?? r.value ?? '').trim());
 }
 
 function pwdFieldId(role, key) {
@@ -322,15 +336,28 @@ function updateTargetCredentialsVisibility() {
 }
 
 function applySourceEnvDefaults() {
-  const analysis = state.bundleStatus?.analysis || state.uploadInfo?.analysis;
-  const env = analysis?.env_summary || state.systemCheck?.marzban_env;
-  if (!env) return;
+  const env = getSourceEnvSummary();
   const userEl = document.getElementById('sourceDbUser');
   const nameEl = document.getElementById('sourceDbName');
   const hostEl = document.getElementById('sourceDbHost');
   const portEl = document.getElementById('sourceDbPort');
+  if (!env) {
+    if (userEl && !userEl.value && (state.sourceDb === 'mysql' || state.sourceDb === 'mariadb')) {
+      userEl.value = 'root';
+    }
+    if (nameEl && !nameEl.value && (state.sourceDb === 'mysql' || state.sourceDb === 'mariadb')) {
+      nameEl.value = 'marzban';
+    }
+    return;
+  }
   if (userEl && env.db_user && !userEl.value) userEl.value = env.db_user;
+  else if (userEl && !userEl.value && (state.sourceDb === 'mysql' || state.sourceDb === 'mariadb')) {
+    userEl.value = 'root';
+  }
   if (nameEl && env.db_name && !nameEl.value) nameEl.value = env.db_name;
+  else if (nameEl && !nameEl.value && (state.sourceDb === 'mysql' || state.sourceDb === 'mariadb')) {
+    nameEl.value = 'marzban';
+  }
   if (hostEl && env.db_host) hostEl.value = env.db_host;
   if (portEl && env.db_port) portEl.value = env.db_port;
 }
@@ -564,19 +591,23 @@ function renderDetectedTargetDb() {
 }
 
 function updateStepButtons() {
-  const b0 = document.getElementById('btnStep0');
-  const b1 = document.getElementById('btnStep1');
-  const b2 = document.getElementById('btnStep2');
-  const b3 = document.getElementById('btnStep3');
-  const b4 = document.getElementById('btnStep4');
-  if (b0) b0.disabled = !!canProceedStep0();
-  if (b1) b1.disabled = !!canProceedStep1();
-  if (b2) b2.disabled = !!canProceedStep2();
-  if (b3) b3.disabled = !!canProceedStep3();
-  if (state.currentStep === 0) showStepBlock(0, canProceedStep0());
-  if (state.currentStep === 1) showStepBlock(1, canProceedStep1());
-  if (state.currentStep === 2) showStepBlock(2, canProceedStep2());
-  if (state.currentStep === 3) showStepBlock(3, canProceedStep3());
+  try {
+    const b0 = document.getElementById('btnStep0');
+    const b1 = document.getElementById('btnStep1');
+    const b2 = document.getElementById('btnStep2');
+    const b3 = document.getElementById('btnStep3');
+    const b4 = document.getElementById('btnStep4');
+    if (b0) b0.disabled = !!canProceedStep0();
+    if (b1) b1.disabled = !!canProceedStep1();
+    if (b2) b2.disabled = !!canProceedStep2();
+    if (b3) b3.disabled = !!canProceedStep3();
+    if (state.currentStep === 0) showStepBlock(0, canProceedStep0());
+    if (state.currentStep === 1) showStepBlock(1, canProceedStep1());
+    if (state.currentStep === 2) showStepBlock(2, canProceedStep2());
+    if (state.currentStep === 3) showStepBlock(3, canProceedStep3());
+  } catch (e) {
+    console.error('updateStepButtons failed:', e);
+  }
 }
 
 async function goStep(n) {
@@ -1081,7 +1112,10 @@ async function renderUploadSection() {
   section.classList.remove('hidden');
   notNeeded?.classList.add('hidden');
   document.getElementById('uploadSectionTitle').textContent = t('step2.uploadH3');
-  document.getElementById('uploadSectionDesc').textContent = tr(reqs.reason, state.lang);
+  const uploadDesc = tr(reqs.reason, state.lang) || t('step2.uploadDesc');
+  document.getElementById('uploadSectionDesc').textContent = uploadDesc;
+  document.getElementById('uploadDragText').textContent = t('step2.uploadDrag');
+  document.getElementById('uploadSelectText').textContent = t('step2.uploadSelect');
   document.getElementById('uploadModeZip').textContent = t('upload.modeZip');
   document.getElementById('uploadModeSeparate').textContent = t('upload.modeSeparate');
   setUploadMode(state.uploadMode);
