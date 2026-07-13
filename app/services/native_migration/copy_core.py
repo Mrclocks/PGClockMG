@@ -13,7 +13,7 @@ import re
 import sqlite3
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Callable
+from typing import Callable, Iterable
 
 TABLE_ORDER = [
     "jwt",
@@ -63,11 +63,20 @@ SUBSCRIPTION_TABLES = frozenset({
 # Abort migration when any of these tables exist in source but copy zero rows
 MIGRATION_ABORT_IF_ZERO = frozenset({
     "users",
-    "hosts",
     "inbounds",
     "groups",
     "nodes",
 })
+
+# PasarGuard ALPN enum labels (Marzban aliases → canonical)
+HOST_ALPN_MAP = {
+    "h1": "http/1.1",
+    "http/1.1": "http/1.1",
+    "http1": "http/1.1",
+    "http/1.0": "http/1.1",
+    "h2": "h2",
+    "h3": "h3",
+}
 
 _HOST_OBSOLETE = frozenset({"none", "None", "NONE", "null", "NULL", ""})
 
@@ -101,10 +110,13 @@ TARGET_INSERT_DEFAULTS: dict[str, dict[str, object]] = {
     },
     "hosts": {
         "priority": 0,
-        "remark": "",
-        "address": "",
+        "remark": "host",
+        "address": "0.0.0.0",
         "security": "inbound_default",
         "fingerprint": "none",
+        "random_user_agent": False,
+        "use_sni_as_host": False,
+        "is_disabled": False,
     },
     "groups": {
         "is_disabled": False,
@@ -280,6 +292,56 @@ def coerce_mux_settings(value):
     return coerce_json_value(value)
 
 
+def normalize_host_alpn(value):
+    """Normalize Marzban ALPN tokens for PasarGuard EnumArray (comma-separated)."""
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple, set)):
+        raw_parts = [str(v) for v in value]
+    else:
+        s = str(value).strip()
+        if not s or s.lower() in _HOST_OBSOLETE:
+            return None
+        cleaned = s.replace("[", "").replace("]", "").replace('"', "").replace("'", "")
+        raw_parts = [p.strip() for p in cleaned.split(",") if p.strip()]
+    parts: list[str] = []
+    for part in raw_parts:
+        low = part.strip().lower()
+        if not low or low in _HOST_OBSOLETE:
+            continue
+        mapped = HOST_ALPN_MAP.get(low, part.strip())
+        if mapped not in parts:
+            parts.append(mapped)
+    return ",".join(parts) if parts else None
+
+
+def apply_host_defaults(columns: list[str], values: tuple) -> tuple:
+    """Fill missing host NOT NULL fields with safe PasarGuard defaults."""
+    defaults = TARGET_INSERT_DEFAULTS.get("hosts", {})
+    cols = list(columns)
+    vals = list(values)
+    for col, default in defaults.items():
+        if col in cols:
+            idx = cols.index(col)
+            if vals[idx] is None or (isinstance(vals[idx], str) and not str(vals[idx]).strip()
+                                     and col not in ("address", "remark")):
+                vals[idx] = default
+    return tuple(vals)
+
+
+def build_inbound_tag_lookup(rows: Iterable[tuple]) -> dict[int, str]:
+    """Map inbounds.id → inbounds.tag for legacy inbound_id on hosts."""
+    lookup: dict[int, str] = {}
+    for row in rows:
+        try:
+            inbound_id, tag = row[0], row[1]
+            if inbound_id is not None and tag:
+                lookup[int(inbound_id)] = str(tag)
+        except (TypeError, ValueError, IndexError):
+            continue
+    return lookup
+
+
 def build_table_column_plan(
     table: str,
     src_cols: list[str],
@@ -355,8 +417,11 @@ def convert_value(table: str, column: str, value):
 
     if table == "hosts" and column == "remark":
         if value is None or (isinstance(value, str) and not value.strip()):
-            return ""
+            return "host"
         return str(value).strip()
+
+    if table == "hosts" and column == "alpn":
+        return normalize_host_alpn(value)
 
     if value is None:
         return None
@@ -387,12 +452,8 @@ def convert_value(table: str, column: str, value):
         obsolete = OBSOLETE_TO_EMPTY.get((table, column))
         if obsolete and stripped in obsolete:
             return None
-        if table == "hosts" and column == "alpn" and "," in stripped:
-            parts = [
-                p.strip() for p in stripped.split(",")
-                if p.strip() and p.strip() not in (obsolete or ())
-            ]
-            return ",".join(parts) if parts else None
+        if table == "hosts" and column == "alpn":
+            return normalize_host_alpn(stripped)
         if stripped.startswith("{") or stripped.startswith("["):
             try:
                 json.loads(stripped)

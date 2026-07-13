@@ -307,6 +307,76 @@ def test_hosts_marzban_none_enums_copy():
         os.unlink(dst)
 
 
+def test_hosts_inbound_id_resolves_to_tag():
+    """Legacy hosts.inbound_id → PasarGuard hosts.inbound_tag."""
+    import tempfile
+    from app.services.native_migration.adapters import (
+        create_reader, create_writer, copy_tables_universal,
+    )
+
+    fd1, src = tempfile.mkstemp(suffix=".sqlite3")
+    fd2, dst = tempfile.mkstemp(suffix=".sqlite3")
+    os.close(fd1)
+    os.close(fd2)
+    try:
+        sc = sqlite3.connect(src)
+        sc.executescript(
+            """
+            CREATE TABLE admins (id INTEGER PRIMARY KEY, username TEXT);
+            INSERT INTO admins VALUES (1, 'admin');
+            CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT);
+            INSERT INTO users VALUES (1, 'u1');
+            CREATE TABLE inbounds (id INTEGER PRIMARY KEY, tag TEXT);
+            INSERT INTO inbounds VALUES (1, 'vless-tcp');
+            CREATE TABLE hosts (
+                id INTEGER PRIMARY KEY, remark TEXT, address TEXT,
+                inbound_id INTEGER, security TEXT, fingerprint TEXT
+            );
+            INSERT INTO hosts VALUES (1, 'h1', '1.2.3.4', 1, 'none', 'none');
+            """
+        )
+        sc.commit()
+        sc.close()
+
+        dc = sqlite3.connect(dst)
+        dc.executescript(
+            """
+            CREATE TABLE admins (id INTEGER PRIMARY KEY, username TEXT);
+            CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT);
+            CREATE TABLE inbounds (id INTEGER PRIMARY KEY, tag TEXT);
+            CREATE TABLE hosts (
+                id INTEGER PRIMARY KEY, remark TEXT NOT NULL, address TEXT NOT NULL,
+                inbound_tag TEXT, security TEXT NOT NULL, fingerprint TEXT NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 0
+            );
+            """
+        )
+        dc.commit()
+        dc.close()
+
+        reader = create_reader("sqlite", src, {})
+        writer = create_writer("sqlite", {"sqlite_path": dst}, dst)
+        try:
+            stats, _ = copy_tables_universal(
+                reader, writer, lambda _m: None, fail_hard=True,
+            )
+        finally:
+            reader.close()
+            writer.close()
+
+        assert stats.get("hosts") == 1
+        verify = sqlite3.connect(dst)
+        tag = verify.execute(
+            "SELECT inbound_tag FROM hosts WHERE id=1"
+        ).fetchone()[0]
+        verify.close()
+        assert tag == "vless-tcp"
+        print("OK: hosts_inbound_id_resolves_to_tag")
+    finally:
+        os.unlink(src)
+        os.unlink(dst)
+
+
 def test_hosts_legacy_columns_copy_sqlite():
     """Legacy Marzban host columns map to PasarGuard JSON column names."""
     import tempfile
@@ -591,6 +661,7 @@ if __name__ == "__main__":
     test_users_status_not_bool()
     test_hosts_json_and_column_plan()
     test_hosts_marzban_none_enums_copy()
+    test_hosts_inbound_id_resolves_to_tag()
     test_hosts_legacy_columns_copy_sqlite()
     test_nodes_defaults_copy_sqlite()
     test_nodes_missing_target_table_skips()

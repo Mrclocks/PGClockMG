@@ -19,6 +19,8 @@ from app.services.native_migration.copy_core import (
     BOOL_COLUMNS,
     convert_value,
     build_table_column_plan,
+    build_inbound_tag_lookup,
+    apply_host_defaults,
     parse_not_null_column,
     to_bool,
     sqlite_columns,
@@ -322,8 +324,13 @@ class MysqlWriter(TableWriter):
         for lbl in labels:
             if lbl.lower() == low:
                 return lbl
+        # PasarGuard fingerprint.none may store as empty string in PG enum
+        if low == "none" and "" in labels:
+            return ""
         if nullable:
             return None
+        if "none" in labels:
+            return "none"
         return sorted(labels)[0] if labels else s
 
     def _coerce_row(self, table: str, columns: list[str], values: tuple) -> tuple:
@@ -722,6 +729,59 @@ def _retry_with_defaults(
     return _attempt_insert(writer, table, cols, tuple(vals))
 
 
+def _try_insert_host_row(
+    writer: TableWriter,
+    columns: list[str],
+    values: tuple,
+    log: Callable[[str], None],
+) -> tuple[bool, str | None]:
+    """Hosts: multi-tier fallback so subscription hosts always copy."""
+    table = "hosts"
+    values = apply_host_defaults(columns, values)
+
+    ok, err = _try_insert_row(writer, table, columns, values, log)
+    if ok:
+        return True, None
+
+    host_defaults = {
+        k: v for k, v in TARGET_INSERT_DEFAULTS.get("hosts", {}).items() if k in columns
+    }
+    ok2, err2 = _retry_with_defaults(writer, table, columns, values, host_defaults)
+    if ok2:
+        log("hosts: copied with PasarGuard defaults fallback")
+        return True, None
+
+    relax = [c for c in columns if c in JSON_COLUMNS or c in ("alpn", "inbound_tag")]
+    if relax:
+        ok3, err3 = _retry_null_columns(writer, table, columns, values, relax)
+        if ok3:
+            log("hosts: copied with relaxed JSON/ALPN/inbound_tag")
+            return True, None
+        err = err3 or err
+
+    minimal_order = (
+        "id", "remark", "address", "priority", "security", "fingerprint",
+        "random_user_agent", "use_sni_as_host", "inbound_tag",
+    )
+    minimal = [c for c in minimal_order if c in columns]
+    if minimal and len(minimal) < len(columns):
+        min_vals = []
+        for col in minimal:
+            idx = columns.index(col)
+            v = values[idx]
+            if v is None and col in host_defaults:
+                v = host_defaults[col]
+            min_vals.append(v)
+        min_vals = apply_host_defaults(minimal, tuple(min_vals))
+        ok4, err4 = _attempt_insert(writer, table, minimal, min_vals)
+        if ok4:
+            log(f"hosts: copied minimal row ({len(minimal)} columns)")
+            return True, None
+        err = err4 or err
+
+    return False, err
+
+
 def _try_insert_row(
     writer: TableWriter,
     table: str,
@@ -902,6 +962,24 @@ def copy_tables_universal(
         defaults = TARGET_INSERT_DEFAULTS.get(table, {})
         src_index = {col: i for i, col in enumerate(fetch_src)}
 
+        inbound_lookup: dict[int, str] = {}
+        if table == "hosts" and "inbounds" in source_tables:
+            ic = reader.source_columns("inbounds")
+            if "id" in ic and "tag" in ic:
+                inbound_lookup = build_inbound_tag_lookup(
+                    reader.fetch_rows("inbounds", ["id", "tag"])
+                )
+            if (
+                "inbound_tag" in tgt_cols
+                and "inbound_tag" not in insert_cols
+                and "inbound_id" in src_cols
+            ):
+                insert_cols.append("inbound_tag")
+                select_cols.append("__inbound_id__")
+                if "inbound_id" not in fetch_src:
+                    fetch_src.append("inbound_id")
+                    src_index["inbound_id"] = len(fetch_src) - 1
+
         writer.truncate(table)
         count = 0
         errors = 0
@@ -909,14 +987,27 @@ def copy_tables_universal(
         for row in reader.fetch_rows(table, fetch_src):
             values = []
             for ins_col, sel_col in zip(insert_cols, select_cols):
-                if sel_col is None:
-                    values.append(defaults.get(ins_col))
+                if sel_col == "__inbound_id__":
+                    iid = row[src_index["inbound_id"]]
+                    raw = None
+                    if iid is not None:
+                        try:
+                            raw = inbound_lookup.get(int(iid))
+                        except (TypeError, ValueError):
+                            raw = None
+                elif sel_col is None:
+                    raw = defaults.get(ins_col)
                 else:
                     raw = row[src_index[sel_col]]
-                    values.append(convert_value(table, ins_col, raw))
-            ok, row_err = _try_insert_row(
-                writer, table, insert_cols, tuple(values), log,
-            )
+                values.append(convert_value(table, ins_col, raw))
+            if table == "hosts":
+                ok, row_err = _try_insert_host_row(
+                    writer, insert_cols, tuple(values), log,
+                )
+            else:
+                ok, row_err = _try_insert_row(
+                    writer, table, insert_cols, tuple(values), log,
+                )
             if ok:
                 count += 1
             else:
@@ -974,6 +1065,16 @@ def copy_tables_universal(
                     f"Migration failed: source has {src_n} {table} but "
                     f"0 were copied to target. First error: {hint}"
                 )
+
+    # Hosts: never abort whole migration — report loudly if incomplete
+    src_hosts = source_counts.get("hosts", 0)
+    dst_hosts = stats.get("hosts", 0)
+    if src_hosts > 0 and dst_hosts < src_hosts and "hosts" in attempted_tables:
+        hint = (table_first_errors.get("hosts") or "")[:300]
+        log(
+            f"WARNING hosts incomplete: {dst_hosts}/{src_hosts} copied"
+            + (f" — {hint}" if hint else "")
+        )
 
     report = build_copy_report(source_counts, stats)
     for item in report.get("incomplete", []):
