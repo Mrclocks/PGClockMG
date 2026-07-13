@@ -1,4 +1,11 @@
-"""Shared table copy helpers."""
+"""Shared table copy helpers.
+
+Policy: copy only what exists in the source.
+- Columns missing from source are skipped (intersection with target).
+- NULL in source stays NULL — never invent PasarGuard-only defaults.
+- Obsolete source values that break the target (e.g. alpn='none') are
+  neutralized to NULL/empty, not replaced with guessed defaults.
+"""
 
 from __future__ import annotations
 
@@ -23,7 +30,7 @@ TABLE_ORDER = [
     "node_usages",
 ]
 
-# Heavy/obsolete tables only — associations are copied
+# Heavy/obsolete tables only — associations are copied when present
 SKIP_TABLES = {
     "alembic_version",
     "admin_usage_logs",
@@ -33,20 +40,10 @@ SKIP_TABLES = {
     "tls",
 }
 
-ENUM_DEFAULTS = {
-    ("hosts", "fingerprint"): "none",
-    ("hosts", "security"): "inbound_default",
-    # ALPN "none" removed in modern PasarGuard — empty string = no ALPN
-    ("hosts", "alpn"): "",
-}
-
-# Marzban/old values → current PasarGuard values
-ENUM_REMAP = {
-    ("hosts", "alpn"): {
-        "none": "",
-        "None": "",
-        "NONE": "",
-    },
+# Source values that are invalid on current PasarGuard → store as empty/NULL
+# Do NOT invent replacement defaults for fields the source never had.
+OBSOLETE_TO_EMPTY = {
+    ("hosts", "alpn"): frozenset({"none", "None", "NONE"}),
 }
 
 # SQLite stores these as 0/1; PostgreSQL expects boolean
@@ -89,27 +86,34 @@ def sqlite_columns(conn: sqlite3.Connection, table: str) -> list[str]:
 
 
 def convert_value(table: str, column: str, value):
+    """Coerce types only. Never invent PasarGuard fields the source lacked."""
     if value is None:
-        return ENUM_DEFAULTS.get((table, column))
+        return None
+
     if column in BOOL_COLUMNS:
         return to_bool(value)
+
     if isinstance(value, bytes):
         try:
             value = value.decode("utf-8")
         except Exception:
             return value
+
     if isinstance(value, str):
         stripped = value.strip()
-        remap = ENUM_REMAP.get((table, column))
-        if remap and stripped in remap:
-            return remap[stripped]
-        # Empty strings are invalid for many PG enums — use default or NULL
+        # Empty → NULL (do not invent defaults)
         if stripped == "":
-            return ENUM_DEFAULTS.get((table, column))
-        # ALPN stored as EnumArray CSV — strip obsolete "none" tokens
+            return None
+        obsolete = OBSOLETE_TO_EMPTY.get((table, column))
+        if obsolete and stripped in obsolete:
+            return None
+        # ALPN CSV: drop obsolete tokens, keep real ones
         if table == "hosts" and column == "alpn" and "," in stripped:
-            parts = [p for p in stripped.split(",") if p and p.lower() != "none"]
-            return ",".join(parts)
+            parts = [
+                p for p in stripped.split(",")
+                if p and p not in (obsolete or ())
+            ]
+            return ",".join(parts) if parts else None
         if stripped.startswith("{") or stripped.startswith("["):
             try:
                 json.loads(stripped)
@@ -117,6 +121,7 @@ def convert_value(table: str, column: str, value):
             except Exception:
                 pass
         return stripped
+
     return value
 
 

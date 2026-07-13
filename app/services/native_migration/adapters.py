@@ -324,9 +324,7 @@ class PostgresWriter(TableWriter):
         return types
 
     def _coerce_row(self, table: str, columns: list[str], values: tuple) -> tuple:
-        from app.services.native_migration.copy_core import (
-            to_bool, ENUM_DEFAULTS, ENUM_REMAP, convert_value,
-        )
+        from app.services.native_migration.copy_core import to_bool, convert_value
 
         types = self._types_for(table)
         out = []
@@ -336,11 +334,11 @@ class PostgresWriter(TableWriter):
             if kind == "boolean":
                 out.append(to_bool(val) if val is not None else None)
             elif kind.startswith("enum:"):
+                # Empty / obsolete → NULL; never invent a PasarGuard default
                 if val is None or (isinstance(val, str) and val.strip() == ""):
-                    out.append(ENUM_DEFAULTS.get((table, col)))
+                    out.append(None)
                 else:
-                    remap = ENUM_REMAP.get((table, col), {})
-                    out.append(remap.get(str(val), val))
+                    out.append(val)
             else:
                 out.append(val)
         return tuple(out)
