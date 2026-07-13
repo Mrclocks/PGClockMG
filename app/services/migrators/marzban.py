@@ -115,7 +115,7 @@ class MarzbanMigrator(BaseMigrator):
             self.job.set_progress(85, "Starting PasarGuard...")
             await safe_start_pasarguard(self)
         else:
-            self.job.set_progress(40, "Preparing cross-database migration...")
+            self.job.set_progress(40, "Preparing two-phase cross-database migration...")
             if source_db == "sqlite":
                 if not source_sqlite:
                     raise RuntimeError("SQLite source file missing")
@@ -127,7 +127,7 @@ class MarzbanMigrator(BaseMigrator):
             else:
                 raise RuntimeError(f"Unsupported Marzban source database: {source_db}")
             await self._update_env_paths(source_db, target_db)
-            self.job.set_progress(55, f"Cross-DB: {source_db} → {target_db}...")
+            self.job.set_progress(50, f"Two-phase: {source_db} → {target_db}...")
             await run_cross_db_migration(
                 self, migration_source, source_db, target_db,
             )

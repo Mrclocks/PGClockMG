@@ -15,12 +15,15 @@ TABLE_ORDER = [
     "hosts",
     "user_templates",
     "users",
+    "exclude_inbounds_association",
+    "template_inbounds_association",
     "next_plans",
     "notification_reminders",
     "node_user_usages",
     "node_usages",
 ]
 
+# Heavy/obsolete tables only — associations are copied
 SKIP_TABLES = {
     "alembic_version",
     "admin_usage_logs",
@@ -28,8 +31,6 @@ SKIP_TABLES = {
     "node_stats",
     "proxies",
     "tls",
-    "exclude_inbounds_association",
-    "template_inbounds_association",
 }
 
 ENUM_DEFAULTS = {

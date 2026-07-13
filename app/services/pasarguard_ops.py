@@ -445,6 +445,27 @@ def build_local_alembic_url(params: dict) -> str:
     return f"sqlite+aiosqlite:///{path}"
 
 
+def build_sqlite_alembic_url(path: str | Path) -> str:
+    return f"sqlite+aiosqlite:///{Path(path).as_posix()}"
+
+
+def build_alembic_url_from_conn(db_type: str, conn: dict) -> str:
+    """Build alembic SQLAlchemy URL for any engine from a connection dict."""
+    pwd = conn.get("password") or ""
+    if db_type == "sqlite":
+        path = conn.get("sqlite_path") or str(PASARGUARD_DATA / "db.sqlite3")
+        return build_sqlite_alembic_url(path)
+    user = conn.get("user") or (
+        "postgres" if db_type in ("postgresql", "timescaledb") else "root"
+    )
+    db = conn.get("database") or "pasarguard"
+    port = migration_port(conn, db_type)
+    host = "127.0.0.1"
+    if db_type in ("postgresql", "timescaledb"):
+        return f"postgresql+asyncpg://{user}:{pwd}@{host}:{port}/{db}"
+    return f"mysql+asyncmy://{user}:{pwd}@{host}:{port}/{db}"
+
+
 def sanitize_env_text_for_docker(text: str) -> str:
     """Convert Compose-style KEY = value lines to docker run --env-file format.
 
@@ -481,10 +502,15 @@ def write_docker_env_file(src: Path) -> Path:
     return Path(path)
 
 
-async def _run_pasarguard_alembic(migrator, *args: str) -> tuple[bool, str]:
-    """Run python -m alembic in panel image with host network (127.0.0.1:5432)."""
+async def _run_pasarguard_alembic(
+    migrator, *args: str, url_override: str | None = None,
+) -> tuple[bool, str]:
+    """Run python -m alembic in panel image with host network.
+
+    Always uses 127.0.0.1 + sanitized env. Pass url_override for intermediate DBs.
+    """
     image = resolve_pasarguard_image()
-    url = build_local_alembic_url(migrator.params)
+    url = url_override or build_local_alembic_url(migrator.params)
     migrator.job.log(f"Host-network alembic: {' '.join(args)}")
     migrator.job.log(f"Alembic DB URL: {url.split('@')[-1] if '@' in url else url}")
 
@@ -510,6 +536,28 @@ async def _run_pasarguard_alembic(migrator, *args: str) -> tuple[bool, str]:
     if ok or _alembic_output_indicates_success(out or ""):
         return True, out or ""
     return False, out or ""
+
+
+async def run_alembic_upgrade_head(
+    migrator, *, url_override: str | None = None, heal_db: str | None = None,
+) -> None:
+    """Upgrade schema to head only — never bootstrap to a source revision."""
+    migrator.job.log("Alembic upgrade head...")
+    ok, out = await _run_pasarguard_alembic(
+        migrator, "upgrade", "head", url_override=url_override,
+    )
+    if ok:
+        return
+    if _is_duplicate_schema_error(out or "") and heal_db:
+        migrator.job.log("Schema partially exists — healing alembic_version...")
+        if await _heal_alembic_duplicate_schema(migrator, heal_db, out or ""):
+            ok2, out2 = await _run_pasarguard_alembic(
+                migrator, "upgrade", "head", url_override=url_override,
+            )
+            if ok2:
+                return
+            out = out2 or out
+    raise RuntimeError(f"Failed alembic upgrade head:\n{(out or '')[-3000:]}")
 
 
 async def get_alembic_head_revision(migrator) -> str | None:

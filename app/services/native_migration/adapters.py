@@ -403,10 +403,27 @@ def copy_tables_universal(
     writer: TableWriter,
     log: Callable[[str], None],
     source_version: str | None = None,
+    fail_hard: bool = True,
 ) -> dict[str, int]:
     """Copy shared PasarGuard/Marzban tables from any reader to any writer."""
     stats: dict[str, int] = {}
     source_tables = reader.source_tables()
+    source_counts: dict[str, int] = {}
+
+    for table in ("users", "admins"):
+        if table in source_tables:
+            try:
+                source_counts[table] = sum(1 for _ in reader.fetch_rows(table, ["id"]))
+            except Exception:
+                # Fallback: try without id column
+                try:
+                    cols = reader.source_columns(table)
+                    if cols:
+                        source_counts[table] = sum(1 for _ in reader.fetch_rows(table, [cols[0]]))
+                    else:
+                        source_counts[table] = 0
+                except Exception:
+                    source_counts[table] = -1
 
     for table in TABLE_ORDER:
         if table in SKIP_TABLES or table not in source_tables:
@@ -441,11 +458,14 @@ def copy_tables_universal(
                 errors += 1
                 if first_error is None:
                     first_error = str(exc)
-                if errors <= 3:
+                if errors <= 5:
                     log(f"Row skip {table}: {str(exc)[:200]}")
         stats[table] = count
         if errors:
-            log(f"Imported {table}: {count} rows, {errors} skipped — first error: {(first_error or '')[:200]}")
+            log(
+                f"Imported {table}: {count} rows, {errors} skipped — "
+                f"first error: {(first_error or '')[:200]}"
+            )
         else:
             log(f"Imported {table}: {count} rows ({len(common)} columns)")
 
@@ -456,14 +476,26 @@ def copy_tables_universal(
                 writer.recover()
                 log(f"Sequence reset skip {table}: {str(exc)[:120]}")
 
-        # Commit per table so one bad table cannot abort the whole copy
         try:
             writer.commit()
         except Exception as exc:
             writer.recover()
             log(f"Commit warning {table}: {str(exc)[:120]}")
 
-    if source_version:
+    if source_version and source_version != "head":
         writer.set_alembic_version(source_version)
-    writer.commit()
+        writer.commit()
+    else:
+        writer.commit()
+
+    if fail_hard:
+        for critical in ("users", "admins"):
+            src_n = source_counts.get(critical, 0)
+            dst_n = stats.get(critical, 0)
+            if src_n > 0 and dst_n == 0:
+                raise RuntimeError(
+                    f"Migration failed: source has {src_n} {critical} but "
+                    f"0 were copied to target. Check row-skip errors above."
+                )
+
     return stats

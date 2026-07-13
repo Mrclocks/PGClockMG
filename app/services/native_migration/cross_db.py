@@ -1,21 +1,25 @@
-"""Unified cross-DB migration — any source engine to any target engine."""
+"""Two-phase cross-DB migration — intermediate@head → target@head.
+
+Never bootstraps alembic to a source revision (that path was the main failure mode).
+"""
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
-from app.config import PASARGUARD_DIR, PASARGUARD_DATA
+from app.config import PASARGUARD_DIR, PASARGUARD_DATA, BACKUP_DIR
 from app.services.db_credentials import get_source_connection, get_target_connection
 from app.services.pasarguard_ops import (
     docker_compose_up,
     resolve_db_service,
     _wait_db_service,
-    _is_duplicate_schema_error,
-    _heal_alembic_duplicate_schema,
+    build_sqlite_alembic_url,
+    build_alembic_url_from_conn,
+    build_local_alembic_url,
+    run_alembic_upgrade_head,
     read_target_alembic_version,
 )
-from app.services.native_migration.host_alembic import run_host_alembic
-from app.services.native_migration.source_version import resolve_source_alembic_version
 from app.services.native_migration.sql_staging import import_sql_dump_to_live_db
 from app.services.native_migration.universal_copy import copy_database_universal
 
@@ -29,18 +33,18 @@ def migration_strategy(source_db: str, target_db: str) -> str:
         return "same_db"
     if source_db not in SUPPORTED_ENGINES or target_db not in SUPPORTED_ENGINES:
         return "unsupported"
-    return "universal"
+    return "two_phase"
 
 
-async def _ensure_target_db_running(migrator, target_db: str) -> None:
-    if target_db == "sqlite":
+async def _ensure_db_running(migrator, db_type: str) -> None:
+    if db_type == "sqlite":
         PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
         return
-    service = resolve_db_service(target_db)
+    service = resolve_db_service(db_type)
     if service:
         migrator.job.log(f"Starting database service {service}...")
         await docker_compose_up(migrator, [service])
-        await _wait_db_service(migrator, target_db, service)
+        await _wait_db_service(migrator, db_type, service)
 
 
 async def _stop_panel(migrator) -> None:
@@ -51,52 +55,173 @@ async def _stop_panel(migrator) -> None:
     )
 
 
-async def _bootstrap_schema(migrator, revision: str, target_db: str) -> None:
-    migrator.job.log(f"Creating target schema (alembic {revision})...")
-    ok, out = await run_host_alembic(migrator, "upgrade", revision)
-    if ok:
+async def _reset_target_schema(migrator, target_db: str) -> None:
+    """Wipe target so alembic upgrade head creates a clean head schema."""
+    import asyncio
+
+    if target_db == "sqlite":
+        path = PASARGUARD_DATA / "db.sqlite3"
+        # Keep intermediate data on a side copy if it is the current file
+        if path.exists():
+            BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+            side = BACKUP_DIR / "phase2-intermediate.sqlite3"
+            shutil.copy2(path, side)
+            path.unlink()
+            migrator.job.log(f"Moved intermediate SQLite aside → {side}")
+            migrator._phase2_sqlite_intermediate = str(side)
         return
-    if _is_duplicate_schema_error(out or ""):
-        migrator.job.log("Schema partially exists — healing alembic_version...")
-        if await _heal_alembic_duplicate_schema(migrator, target_db, out or ""):
-            return
-    raise RuntimeError(
-        f"Failed to create target schema at revision {revision}:\n{(out or '')[-3000:]}"
-    )
 
-
-async def _upgrade_to_head(migrator, target_db: str) -> None:
-    migrator.job.log("Upgrading schema to head...")
-    ok, out = await run_host_alembic(migrator, "upgrade", "head")
-    if ok:
+    conn = get_target_connection(migrator.params)
+    service = resolve_db_service(target_db)
+    if not service:
+        migrator.job.log("No compose DB service — skipping schema wipe")
         return
-    if _is_duplicate_schema_error(out or ""):
-        if await _heal_alembic_duplicate_schema(migrator, target_db, out or ""):
-            ok2, out2 = await run_host_alembic(migrator, "upgrade", "head")
-            if ok2:
-                return
-            out = out2 or out
-    raise RuntimeError(
-        f"Failed to upgrade target schema to head:\n{(out or '')[-3000:]}"
+
+    user = conn.get("user") or (
+        "postgres" if target_db in ("postgresql", "timescaledb") else "root"
     )
+    pwd = conn.get("password") or ""
+    db = conn.get("database") or "pasarguard"
+    cwd = str(PASARGUARD_DIR)
+    migrator.job.log(f"Resetting target schema on {service}/{db}...")
+
+    if target_db in ("postgresql", "timescaledb"):
+        sql = (
+            "DROP SCHEMA IF EXISTS public CASCADE; "
+            "CREATE SCHEMA public; "
+            f"GRANT ALL ON SCHEMA public TO \"{user}\"; "
+            "GRANT ALL ON SCHEMA public TO public;"
+        )
+        cmd = (
+            f'cd "{cwd}" && docker compose exec -T {service} '
+            f'env PGPASSWORD="{pwd}" psql -U {user} -d {db} -c "{sql}"'
+        )
+    else:
+        cmd = (
+            f'cd "{cwd}" && docker compose exec -T {service} '
+            f'mysql -u {user} -p"{pwd}" -e '
+            f'"DROP DATABASE IF EXISTS `{db}`; CREATE DATABASE `{db}`;"'
+        )
+
+    proc = await asyncio.create_subprocess_shell(
+        cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    await proc.wait()
+    if proc.returncode != 0:
+        migrator.job.log("Warning: target schema reset returned non-zero — continuing")
 
 
-async def _prepare_source_connection(
-    migrator, source_db: str, source_path: str,
-) -> dict | None:
-    """If source is a .sql dump, import into live staging DB and return its DSN."""
+async def _phase1_land_intermediate(
+    migrator,
+    source_path: str,
+    source_db: str,
+) -> tuple[str, str, dict | None]:
+    """Land source data on an intermediate DB and upgrade it to alembic head.
+
+    Returns (intermediate_path, intermediate_db, staging_conn).
+    """
     path = Path(source_path)
-    if path.suffix.lower() != ".sql":
-        return None
+    staging_conn: dict | None = None
+
     if source_db == "sqlite":
-        raise RuntimeError("SQLite source cannot be a .sql dump — upload db.sqlite3")
+        if not path.exists():
+            raise RuntimeError(f"SQLite source not found: {source_path}")
+        dest = PASARGUARD_DATA / "db.sqlite3"
+        PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
+        if dest.exists() and dest.resolve() != path.resolve():
+            BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(dest, BACKUP_DIR / "pre-phase1-db.sqlite3")
+        if dest.resolve() != path.resolve():
+            shutil.copy2(path, dest)
+        migrator.job.log(f"Phase1: intermediate SQLite at {dest}")
+        url = build_sqlite_alembic_url(dest)
+        await run_alembic_upgrade_head(migrator, url_override=url, heal_db="sqlite")
+        return str(dest), "sqlite", None
+
+    # MySQL/MariaDB/PG source: .sql dump → staging, or live connection
+    if path.suffix.lower() == ".sql":
+        conn = get_source_connection(migrator.params)
+        if not conn.get("password"):
+            tgt = get_target_connection(migrator.params)
+            conn["password"] = tgt.get("password")
+            conn["user"] = conn.get("user") or tgt.get("user")
+            conn["database"] = conn.get("database") or tgt.get("database")
+        staging_conn = await import_sql_dump_to_live_db(
+            migrator, source_path, source_db, conn,
+        )
+        url = build_alembic_url_from_conn(source_db, staging_conn)
+        await run_alembic_upgrade_head(
+            migrator, url_override=url, heal_db=source_db,
+        )
+        return source_path, source_db, staging_conn
+
+    # Live non-sqlite source (credentials from wizard)
     conn = get_source_connection(migrator.params)
-    if not conn.get("password"):
-        tgt = get_target_connection(migrator.params)
-        conn["password"] = tgt.get("password")
-        conn["user"] = conn.get("user") or tgt.get("user")
-        conn["database"] = conn.get("database") or tgt.get("database")
-    return await import_sql_dump_to_live_db(migrator, source_path, source_db, conn)
+    url = build_alembic_url_from_conn(source_db, conn)
+    await run_alembic_upgrade_head(migrator, url_override=url, heal_db=source_db)
+    return source_path, source_db, None
+
+
+async def run_two_phase_migration(
+    migrator,
+    source_path: str,
+    source_db: str,
+    target_db: str,
+) -> dict[str, int]:
+    """Migrate any supported source → any supported target via head→head copy."""
+    strategy = migration_strategy(source_db, target_db)
+    if strategy == "unsupported":
+        raise RuntimeError(f"Unsupported cross-DB migration: {source_db} → {target_db}")
+    if strategy == "same_db":
+        raise RuntimeError("same_db should not use two-phase migrator")
+
+    migrator.job.log(f"Two-phase migration: {source_db} → {target_db}")
+    await _stop_panel(migrator)
+
+    staging_conn: dict | None = None
+    try:
+        # Phase 1 — land + upgrade intermediate to head
+        migrator.job.set_progress(45, "Phase 1: intermediate DB → alembic head...")
+        inter_path, inter_db, staging_conn = await _phase1_land_intermediate(
+            migrator, source_path, source_db,
+        )
+
+        if inter_db == target_db and target_db == "sqlite":
+            migrator.job.log("Phase1 complete — target is SQLite intermediate; skip Phase2")
+            return {"users": -1, "admins": -1}  # counts unknown; same-file path
+
+        # Phase 2 — empty target at head, then copy head→head
+        migrator.job.set_progress(60, f"Phase 2: create {target_db} schema at head...")
+        await _ensure_db_running(migrator, target_db)
+        await _reset_target_schema(migrator, target_db)
+        await run_alembic_upgrade_head(
+            migrator,
+            url_override=build_local_alembic_url(migrator.params),
+            heal_db=target_db,
+        )
+
+        migrator.job.set_progress(75, f"Phase 2: copy {inter_db} → {target_db}...")
+        head = await read_target_alembic_version(migrator, target_db)
+        stats = await copy_database_universal(
+            migrator,
+            inter_path,
+            inter_db,
+            target_db,
+            head or "head",
+            staging_conn=staging_conn,
+            fail_hard=True,
+        )
+        migrator.job.log(
+            f"Two-phase done: users={stats.get('users', 0)} admins={stats.get('admins', 0)}"
+        )
+        return stats
+    finally:
+        container = (staging_conn or {}).get("_ephemeral_container")
+        if container:
+            migrator.job.log(f"Removing staging container {container}...")
+            await migrator._run_cmd(["docker", "rm", "-f", container], timeout=30)
 
 
 async def run_cross_db_migration(
@@ -105,56 +230,8 @@ async def run_cross_db_migration(
     source_db: str,
     target_db: str,
 ) -> None:
-    """Migrate data from any supported source DB to any supported target DB."""
-    strategy = migration_strategy(source_db, target_db)
-    if strategy == "unsupported":
-        raise RuntimeError(
-            f"Unsupported cross-DB migration: {source_db} → {target_db}"
-        )
-    if strategy == "same_db":
-        raise RuntimeError("same_db should not use cross-DB migrator")
-
-    migrator.job.log(f"Universal cross-DB: {source_db} → {target_db}")
-
-    source_version = await resolve_source_alembic_version(migrator, source_db, source_path)
-    if not source_version:
-        raise RuntimeError(
-            "Could not read alembic_version from source — "
-            "backup may be corrupt or from an unsupported panel version."
-        )
-    migrator.job.log(f"Source alembic version: {source_version}")
-
-    staging_conn = await _prepare_source_connection(migrator, source_db, source_path)
-
-    try:
-        await _ensure_target_db_running(migrator, target_db)
-        await _stop_panel(migrator)
-        await _bootstrap_schema(migrator, source_version, target_db)
-
-        stats = await copy_database_universal(
-            migrator,
-            source_path,
-            source_db,
-            target_db,
-            source_version,
-            staging_conn=staging_conn,
-        )
-
-        await _upgrade_to_head(migrator, target_db)
-        final = await read_target_alembic_version(migrator, target_db)
-        migrator.job.log(f"Target alembic after migration: {final or '(unknown)'}")
-
-        users = stats.get("users", 0)
-        admins = stats.get("admins", 0)
-        if users == 0 and admins == 0:
-            migrator.job.log(
-                "Warning: no users/admins copied — check source backup and credentials"
-            )
-    finally:
-        container = (staging_conn or {}).get("_ephemeral_container")
-        if container:
-            migrator.job.log(f"Removing staging container {container}...")
-            await migrator._run_cmd(["docker", "rm", "-f", container], timeout=30)
+    """Public entry — always uses two-phase engine."""
+    await run_two_phase_migration(migrator, source_path, source_db, target_db)
 
 
 run_native_cross_db_migration = run_cross_db_migration

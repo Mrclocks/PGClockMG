@@ -30,7 +30,7 @@ class PasarguardDbMigrator(BaseMigrator):
         self._backup_current_db(source_db)
 
         if source_db != target_db:
-            self.job.set_progress(30, f"Preparing cross-DB migration: {source_db} → {target_db}...")
+            self.job.set_progress(30, f"Two-phase cross-DB: {source_db} → {target_db}...")
             await self._ensure_target_database_stack(target_db)
             await run_cross_db_migration(self, str(source_path), source_db, target_db)
         elif source_db == target_db and source_db == "sqlite":

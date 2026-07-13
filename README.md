@@ -1,6 +1,6 @@
 # PG-Migrator
 
-**نسخه 1.8.3** — سیستم مهاجرت از پنل‌های مختلف به [PasarGuard](https://github.com/PasarGuard/panel) با ویزارد وب گرافیکی.
+**نسخه 2.0.0** — سیستم مهاجرت از پنل‌های مختلف به [PasarGuard](https://github.com/PasarGuard/panel) با ویزارد وب گرافیکی.
 
 **Languages:** Web UI — English · فارسی · Русский | Installer script — English only
 
@@ -19,7 +19,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 # یا دانلود و اجرای مستقیم
 curl -fsSL "https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh" -o /tmp/pg-install.sh
-grep SCRIPT_VERSION /tmp/pg-install.sh   # باید 1.7.0 باشد
+grep SCRIPT_VERSION /tmp/pg-install.sh   # باید 2.0.0 باشد
 sudo bash /tmp/pg-install.sh
 ```
 
@@ -66,7 +66,7 @@ http://SERVER_IP:7000
 1. **ابتدا PasarGuard را دستی نصب کنید** (دیتابیس را در نصب انتخاب کنید)
 2. در ویزارد بکاپ Marzban را آپلود کنید — **نوع DB مبدأ** (SQLite / MySQL) خودکار تشخیص داده می‌شود
 3. در مرحله دیتابیس مقصد بپرسید: **با چه دیتابیسی PasarGuard را نصب کردید؟**
-4. اگر DB مبدأ و مقصد متفاوت باشند (مثلاً Marzban SQLite → PasarGuard PostgreSQL)، **موتور Universal** داده را بدون از دست رفتن اطلاعات کپی می‌کند — نیازی به `db-migrations` یا `alembic stamp` دستی نیست
+4. اگر DB مبدأ و مقصد متفاوت باشند، **موتور دو‌فازی** داده را بدون از دست رفتن اطلاعات کپی می‌کند (ارتقا به head → کپی هم‌تراز) — نیازی به `alembic stamp` دستی نیست
 
 - روش **درجا (in-place)** حذف شده — PasarGuard باید قبل از اجرای ویزارد نصب باشد
 - Marzban می‌تواند روی همین سرور باشد؛ داده از بکاپ یا SQLite زنده خوانده می‌شود
@@ -205,6 +205,13 @@ systemctl disable pg-migrator
 ---
 
 ## Changelog
+
+### v2.0.0
+- **بازنویسی از صفر:** موتور دو‌فازی (intermediate@head → target@head) — حذف bootstrap به revision مبدأ
+- کپی association tables (`exclude_inbounds_association`, `template_inbounds_association`)
+- fail سخت اگر users/admins مبدأ کپی نشوند
+- 3x-ui: همیشه SQLite اول، سپس Phase2 خودکار اگر مقصد غیر SQLite باشد
+- تست integration واقعی: SQLite → PostgreSQL / MySQL / MariaDB (+ SAVEPOINT)
 
 ### v1.8.3
 - رفع `InFailedSqlTransaction` در PostgreSQL — SAVEPOINT برای هر ردیف + recover امن تراکنش

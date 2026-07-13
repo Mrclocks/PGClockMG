@@ -1,18 +1,25 @@
-"""3x-ui → PasarGuard migration using official PasarGuard/migrations tool."""
+"""3x-ui → PasarGuard migration using official PasarGuard/migrations tool.
+
+Always converts to SQLite first. If target_db is not sqlite, runs two-phase
+engine to copy head→head into the requested engine.
+"""
 
 import shutil
 from pathlib import Path
 
-from app.config import PASARGUARD_DIR, PASARGUARD_DATA, TOOLS_DIR, BACKUP_DIR
+from app.config import PASARGUARD_DIR, PASARGUARD_DATA, PASARGUARD_ENV, TOOLS_DIR, BACKUP_DIR
 from app.services.migrators.base import BaseMigrator
 from app.services.prerequisites import find_xui_db
 from app.services.pasarguard_ops import safe_start_pasarguard
+from app.services.native_migration import run_cross_db_migration
+from app.services.env_migration import transform_pasarguard_env_for_target
 
 
 class XuiMigrator(BaseMigrator):
     async def run(self, params: dict) -> dict:
         upload_path = params.get("upload_path")
         install_redirect = params.get("install_redirect", True)
+        target_db = params.get("target_db") or "sqlite"
 
         self.job.set_progress(5, "یافتن دیتابیس 3x-ui...")
 
@@ -62,7 +69,7 @@ class XuiMigrator(BaseMigrator):
         shutil.copy2(xui_db, input_db)
         output_dir = work_dir / "output-db"
 
-        self.job.set_progress(45, "اجرای مهاجرت x-ui → PasarGuard...")
+        self.job.set_progress(45, "اجرای مهاجرت x-ui → PasarGuard SQLite...")
         ok, out = await self._run_cmd(
             ["uv", "run", "migrate.py",
              "--input-db", str(input_db),
@@ -79,7 +86,7 @@ class XuiMigrator(BaseMigrator):
         if not output_db.exists():
             raise RuntimeError("دیتابیس خروجی ایجاد نشد")
 
-        self.job.set_progress(70, "جایگزینی دیتابیس PasarGuard...")
+        self.job.set_progress(70, "جایگزینی دیتابیس PasarGuard (SQLite)...")
         self._backup_file(schema_db, BACKUP_DIR)
         shutil.copy2(output_db, schema_db)
 
@@ -103,6 +110,20 @@ class XuiMigrator(BaseMigrator):
             ], timeout=300)
             redirect_installed = ok
 
+        if target_db != "sqlite":
+            self.job.set_progress(88, f"Two-phase: SQLite → {target_db}...")
+            await run_cross_db_migration(self, str(schema_db), "sqlite", target_db)
+            if PASARGUARD_ENV.exists():
+                from app.services.db_credentials import get_target_connection
+                text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+                conn = get_target_connection(self.params)
+                PASARGUARD_ENV.write_text(
+                    transform_pasarguard_env_for_target(
+                        text, target_db, conn.get("password"),
+                    ),
+                    encoding="utf-8",
+                )
+
         self.job.set_progress(95, "راه‌اندازی مجدد PasarGuard...")
         await safe_start_pasarguard(self)
 
@@ -111,6 +132,7 @@ class XuiMigrator(BaseMigrator):
             "panel_url": self._get_panel_url(),
             "subscription_mode": "redirect",
             "redirect_installed": redirect_installed,
+            "target_db": target_db,
             "mapping_file": str(mapping_file) if mapping_file.exists() else None,
             "warnings": {
                 "en": [
