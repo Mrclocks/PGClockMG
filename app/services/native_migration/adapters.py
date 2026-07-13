@@ -13,7 +13,10 @@ from app.services.native_migration.copy_core import (
     SUBSCRIPTION_TABLES,
     MIGRATION_ABORT_IF_ZERO,
     OPTIONAL_FK_COLUMNS,
+    TARGET_INSERT_DEFAULTS,
+    JSON_COLUMNS,
     convert_value,
+    build_table_column_plan,
     sqlite_columns,
     sqlite_table_names,
 )
@@ -322,8 +325,22 @@ class MysqlWriter(TableWriter):
                 val = self._fit_mysql_enum(
                     labels, val, col_meta.get("nullable", True),
                 )
+            elif col_meta.get("data_type") == "json":
+                from app.services.native_migration.copy_core import coerce_json_value
+                val = coerce_json_value(val)
             out.append(val)
         return tuple(out)
+
+    def enum_columns(self, table: str) -> list[str]:
+        meta = self._load_meta(table)
+        return [c for c, m in meta.items() if m.get("data_type") == "enum"]
+
+    def json_columns(self, table: str, columns: list[str]) -> list[str]:
+        meta = self._load_meta(table)
+        return [
+            c for c in columns
+            if meta.get(c, {}).get("data_type") == "json" or c in JSON_COLUMNS
+        ]
 
     def target_columns(self, table: str) -> list[str]:
         cur = self._conn.cursor()
@@ -497,9 +514,19 @@ class PostgresWriter(TableWriter):
             elif kind.startswith("enum:"):
                 udt = kind.split(":", 1)[1]
                 out.append(self._fit_enum(udt, val, self._nullable_for(table, col)))
+            elif kind in ("json", "jsonb"):
+                from app.services.native_migration.copy_core import coerce_json_value
+                out.append(coerce_json_value(val))
             else:
                 out.append(val)
         return tuple(out)
+
+    def json_columns(self, table: str, columns: list[str]) -> list[str]:
+        types = self._types_for(table)
+        return [
+            c for c in columns
+            if types.get(c, "") in ("json", "jsonb") or c in JSON_COLUMNS
+        ]
 
     def recover(self) -> None:
         """Clear aborted transaction state without losing prior successful work."""
@@ -679,6 +706,36 @@ def _try_insert_row(
             return True, None
         err = err3 or err
 
+    # JSON syntax errors — null JSON columns and retry
+    if (
+        "invalid input syntax for type json" in err_low
+        or "json" in err_low and ("syntax" in err_low or "truncated" in err_low)
+    ):
+        json_cols = []
+        if isinstance(writer, PostgresWriter):
+            json_cols = writer.json_columns(table, columns)
+        elif isinstance(writer, MysqlWriter):
+            json_cols = writer.json_columns(table, columns)
+        else:
+            json_cols = [c for c in columns if c in JSON_COLUMNS]
+        if json_cols:
+            ok4, err4 = _retry_null_columns(writer, table, columns, values, json_cols)
+            if ok4:
+                log(f"{table}: copied after clearing invalid JSON values")
+                return True, None
+            err = err4 or err
+
+    # MySQL enum truncation
+    if isinstance(writer, MysqlWriter) and (
+        "data truncated" in err_low or "enum" in err_low
+    ):
+        enum_cols = [c for c in writer.enum_columns(table) if c in columns]
+        ok5, err5 = _retry_null_columns(writer, table, columns, values, enum_cols)
+        if ok5:
+            log(f"{table}: copied after clearing invalid MySQL enum values")
+            return True, None
+        err = err5 or err
+
     return False, err
 
 
@@ -727,6 +784,7 @@ def copy_tables_universal(
     stats: dict[str, int] = {}
     source_tables = reader.source_tables()
     source_counts: dict[str, int] = {}
+    attempted_tables: set[str] = set()
     for t in TABLE_ORDER:
         n = _count_source_rows(reader, t)
         if n > 0:
@@ -746,20 +804,32 @@ def copy_tables_universal(
             log(f"Skip {table}: not in target schema")
             continue
 
-        common = [c for c in src_cols if c in tgt_cols]
-        if not common:
+        insert_cols, select_cols = build_table_column_plan(table, src_cols, tgt_cols)
+        if not insert_cols:
             log(f"Skip {table}: no matching columns")
             continue
+
+        attempted_tables.add(table)
+
+        fetch_src = list(dict.fromkeys(c for c in select_cols if c is not None))
+        defaults = TARGET_INSERT_DEFAULTS.get(table, {})
+        src_index = {col: i for i, col in enumerate(fetch_src)}
 
         writer.truncate(table)
         count = 0
         errors = 0
         first_error = None
-        for row in reader.fetch_rows(table, common):
-            values = tuple(
-                convert_value(table, col, row[i]) for i, col in enumerate(common)
+        for row in reader.fetch_rows(table, fetch_src):
+            values = []
+            for ins_col, sel_col in zip(insert_cols, select_cols):
+                if sel_col is None:
+                    values.append(defaults.get(ins_col))
+                else:
+                    raw = row[src_index[sel_col]]
+                    values.append(convert_value(table, ins_col, raw))
+            ok, row_err = _try_insert_row(
+                writer, table, insert_cols, tuple(values), log,
             )
-            ok, row_err = _try_insert_row(writer, table, common, values, log)
             if ok:
                 count += 1
             else:
@@ -776,7 +846,7 @@ def copy_tables_universal(
                 f"first error: {(first_error or '')[:200]}"
             )
         else:
-            log(f"Imported {table}: {count} rows ({len(common)} columns)")
+            log(f"Imported {table}: {count} rows ({len(insert_cols)} columns)")
 
         if "id" in tgt_cols:
             try:
@@ -809,7 +879,7 @@ def copy_tables_universal(
         for table in MIGRATION_ABORT_IF_ZERO:
             src_n = source_counts.get(table, 0)
             dst_n = stats.get(table, 0)
-            if src_n > 0 and dst_n == 0:
+            if src_n > 0 and dst_n == 0 and table in attempted_tables:
                 raise RuntimeError(
                     f"Migration failed: source has {src_n} {table} but "
                     f"0 were copied to target. Subscription data missing."

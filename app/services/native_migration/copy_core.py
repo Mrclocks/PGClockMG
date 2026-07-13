@@ -1,9 +1,9 @@
 """Shared table copy helpers.
 
 Policy: copy everything that exists in the source.
-- Column intersection with target schema.
-- Row-level skip on hard errors; report gaps at end (never abort except zero users).
-- Obsolete Marzban enum tokens neutralized before PostgreSQL insert.
+- Column intersection with target schema + legacy Marzban column aliases.
+- Row-level skip on hard errors; abort when critical tables copy zero rows.
+- Obsolete Marzban enum tokens neutralized before PostgreSQL/MySQL insert.
 """
 
 from __future__ import annotations
@@ -57,8 +57,14 @@ SUBSCRIPTION_TABLES = frozenset({
     "exclude_inbounds_association",
 })
 
-# Only abort migration when users cannot be copied at all
-MIGRATION_ABORT_IF_ZERO = frozenset({"users"})
+# Abort migration when any of these tables exist in source but copy zero rows
+MIGRATION_ABORT_IF_ZERO = frozenset({
+    "users",
+    "hosts",
+    "inbounds",
+    "groups",
+    "nodes",
+})
 
 _HOST_OBSOLETE = frozenset({"none", "None", "NONE", "null", "NULL", ""})
 
@@ -66,9 +72,39 @@ OBSOLETE_TO_EMPTY = {
     ("hosts", "alpn"): _HOST_OBSOLETE,
     ("hosts", "fingerprint"): _HOST_OBSOLETE,
     ("hosts", "security"): _HOST_OBSOLETE,
+    ("hosts", "noise_settings"): _HOST_OBSOLETE,
+    ("hosts", "fragment_settings"): _HOST_OBSOLETE,
     ("hosts", "noise"): _HOST_OBSOLETE,
     ("hosts", "fragment"): _HOST_OBSOLETE,
 }
+
+# Legacy Marzban source column -> PasarGuard target column
+SOURCE_TO_TARGET_COLUMNS: dict[str, dict[str, str]] = {
+    "hosts": {
+        "fragment_setting": "fragment_settings",
+        "noise_setting": "noise_settings",
+        "mux_enable": "mux_settings",
+    },
+}
+
+# Target-only NOT NULL columns missing from upgraded intermediate schema
+TARGET_INSERT_DEFAULTS: dict[str, dict[str, object]] = {
+    "nodes": {
+        "server_ca": "",
+        "api_key": "",
+    },
+    "hosts": {
+        "priority": 0,
+    },
+}
+
+JSON_COLUMNS = frozenset({
+    "fragment_settings",
+    "noise_settings",
+    "mux_settings",
+    "http_headers",
+    "transport_settings",
+})
 
 BOOL_COLUMNS = frozenset({
     "enable",
@@ -111,8 +147,80 @@ def normalize_user_status(value):
 # FK columns that may be nulled on retry when parent row missing
 OPTIONAL_FK_COLUMNS: dict[str, tuple[str, ...]] = {
     "nodes": ("core_config_id",),
-    "hosts": ("inbound_id", "group_id"),
+    "hosts": ("inbound_tag",),
 }
+
+
+def coerce_json_value(value):
+    """Normalize a value for PostgreSQL/MySQL JSON columns."""
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, bool):
+        return json.dumps({"enabled": value})
+    if isinstance(value, (int, float)):
+        return json.dumps(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            json.loads(stripped)
+            return stripped
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def coerce_mux_settings(value):
+    """Map legacy mux_enable / string mux data to JSON mux_settings."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return json.dumps({"enabled": value})
+    if isinstance(value, (int, float)):
+        return json.dumps({"enabled": bool(value)})
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        if stripped.startswith("{") or stripped.startswith("["):
+            return coerce_json_value(stripped)
+        return json.dumps({"enabled": to_bool(stripped)})
+    return coerce_json_value(value)
+
+
+def build_table_column_plan(
+    table: str,
+    src_cols: list[str],
+    tgt_cols: list[str],
+) -> tuple[list[str], list[str | None]]:
+    """Build target insert columns and parallel source column selectors."""
+    tgt_set = set(tgt_cols)
+    src_set = set(src_cols)
+    mappings = SOURCE_TO_TARGET_COLUMNS.get(table, {})
+    defaults = TARGET_INSERT_DEFAULTS.get(table, {})
+
+    insert_cols: list[str] = []
+    select_cols: list[str | None] = []
+
+    for sc in src_cols:
+        if sc in tgt_set and sc not in insert_cols:
+            insert_cols.append(sc)
+            select_cols.append(sc)
+
+    for sc, tc in mappings.items():
+        if sc in src_set and tc in tgt_set and tc not in insert_cols:
+            insert_cols.append(tc)
+            select_cols.append(sc)
+
+    for tc, _default in defaults.items():
+        if tc in tgt_set and tc not in insert_cols:
+            insert_cols.append(tc)
+            select_cols.append(None)
+
+    return insert_cols, select_cols
 
 
 def to_bool(value):
@@ -147,6 +255,12 @@ def convert_value(table: str, column: str, value):
 
     if table == "users" and column == "status":
         return normalize_user_status(value)
+
+    if table == "hosts" and column == "mux_settings":
+        return coerce_mux_settings(value)
+
+    if table == "hosts" and column in JSON_COLUMNS:
+        return coerce_json_value(value)
 
     if column in BOOL_COLUMNS:
         return to_bool(value)
