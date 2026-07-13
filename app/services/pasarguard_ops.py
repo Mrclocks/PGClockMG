@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import re
 import sqlite3
+import tempfile
 from pathlib import Path
 
 from app.config import PASARGUARD_DIR, PASARGUARD_ENV, PASARGUARD_DATA
-from app.services.db_credentials import get_target_connection, migration_port, migration_port
+from app.services.db_credentials import get_target_connection, migration_port
 
 STARTUP_MARKERS = (
     "Application startup complete",
@@ -444,6 +445,42 @@ def build_local_alembic_url(params: dict) -> str:
     return f"sqlite+aiosqlite:///{path}"
 
 
+def sanitize_env_text_for_docker(text: str) -> str:
+    """Convert Compose-style KEY = value lines to docker run --env-file format.
+
+    Docker rejects keys with whitespace (e.g. 'UVICORN_HOST ').
+    """
+    lines: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if not key or any(ch.isspace() for ch in key):
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        lines.append(f"{key}={value}")
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def write_docker_env_file(src: Path) -> Path:
+    """Write a temp env file safe for `docker run --env-file`."""
+    text = src.read_text(encoding="utf-8", errors="ignore")
+    fd, path = tempfile.mkstemp(prefix="pgmig-env-", suffix=".env")
+    try:
+        with open(fd, "w", encoding="utf-8") as fh:
+            fh.write(sanitize_env_text_for_docker(text))
+    except Exception:
+        Path(path).unlink(missing_ok=True)
+        raise
+    return Path(path)
+
+
 async def _run_pasarguard_alembic(migrator, *args: str) -> tuple[bool, str]:
     """Run python -m alembic in panel image with host network (127.0.0.1:5432)."""
     image = resolve_pasarguard_image()
@@ -451,9 +488,11 @@ async def _run_pasarguard_alembic(migrator, *args: str) -> tuple[bool, str]:
     migrator.job.log(f"Host-network alembic: {' '.join(args)}")
     migrator.job.log(f"Alembic DB URL: {url.split('@')[-1] if '@' in url else url}")
 
+    env_tmp: Path | None = None
     cmd: list[str] = ["docker", "run", "--rm", "--network", "host"]
     if PASARGUARD_ENV.exists():
-        cmd.extend(["--env-file", str(PASARGUARD_ENV)])
+        env_tmp = write_docker_env_file(PASARGUARD_ENV)
+        cmd.extend(["--env-file", str(env_tmp)])
     cmd.extend([
         "-e", f"SQLALCHEMY_DATABASE_URL={url}",
         "-v", f"{PASARGUARD_DATA}:/var/lib/pasarguard",
@@ -465,6 +504,9 @@ async def _run_pasarguard_alembic(migrator, *args: str) -> tuple[bool, str]:
         ok, out = await migrator._run_cmd(cmd, timeout=600)
     except FileNotFoundError:
         return False, "docker command not found"
+    finally:
+        if env_tmp is not None:
+            env_tmp.unlink(missing_ok=True)
     if ok or _alembic_output_indicates_success(out or ""):
         return True, out or ""
     return False, out or ""

@@ -73,6 +73,17 @@ def test_read_alembic_from_sql_dump():
     print("OK: alembic from sql dump")
 
 
+def test_sanitize_env_text_for_docker():
+    from app.services.pasarguard_ops import sanitize_env_text_for_docker
+
+    raw = 'UVICORN_HOST = "0.0.0.0"\nDB_PASSWORD = secret\n# comment\n'
+    out = sanitize_env_text_for_docker(raw)
+    assert "UVICORN_HOST=0.0.0.0" in out
+    assert "DB_PASSWORD=secret" in out
+    assert "UVICORN_HOST " not in out
+    print("OK: sanitize_env_text_for_docker")
+
+
 def test_native_migration_import():
     from app.services.native_migration import run_native_cross_db_migration
     from app.services.migrators.marzban import MarzbanMigrator
@@ -85,5 +96,6 @@ if __name__ == "__main__":
     test_sqlite_column_intersection()
     test_migration_strategy_matrix()
     test_read_alembic_from_sql_dump()
+    test_sanitize_env_text_for_docker()
     test_native_migration_import()
     print("\nAll native migration tests passed.")

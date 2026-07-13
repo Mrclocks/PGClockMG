@@ -1,6 +1,6 @@
 # PG-Migrator
 
-**نسخه 1.8.1** — سیستم مهاجرت از پنل‌های مختلف به [PasarGuard](https://github.com/PasarGuard/panel) با ویزارد وب گرافیکی.
+**نسخه 1.8.2** — سیستم مهاجرت از پنل‌های مختلف به [PasarGuard](https://github.com/PasarGuard/panel) با ویزارد وب گرافیکی.
 
 **Languages:** Web UI — English · فارسی · Русский | Installer script — English only
 
@@ -205,6 +205,9 @@ systemctl disable pg-migrator
 ---
 
 ## Changelog
+
+### v1.8.2
+- رفع خطای `invalid env file ... contains whitespaces` — sanitize فایل `.env` قبل از `docker run --env-file`
 
 ### v1.8.1
 - رفع خطای `unknown shorthand flag: 'T' in -T` — حذف پرچم `-T` از `docker run` (فقط برای `exec` معتبر است)
