@@ -38,6 +38,13 @@ ENUM_DEFAULTS = {
     ("hosts", "alpn"): "none",
 }
 
+# SQLite stores these as 0/1; PostgreSQL expects boolean
+BOOL_COLUMNS = frozenset({
+    "enable",
+    "is_sudo",
+    "is_disabled",
+})
+
 
 def sqlite_table_names(conn: sqlite3.Connection) -> set[str]:
     return {
@@ -55,6 +62,13 @@ def sqlite_columns(conn: sqlite3.Connection, table: str) -> list[str]:
 def convert_value(table: str, column: str, value):
     if value is None:
         return ENUM_DEFAULTS.get((table, column))
+    if column in BOOL_COLUMNS:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "t", "yes", "on")
     if isinstance(value, bytes):
         try:
             return value.decode("utf-8")

@@ -73,6 +73,15 @@ def test_read_alembic_from_sql_dump():
     print("OK: alembic from sql dump")
 
 
+def test_convert_bool_values():
+    from app.services.native_migration.copy_core import convert_value
+
+    assert convert_value("admins", "is_sudo", 1) is True
+    assert convert_value("admins", "is_sudo", 0) is False
+    assert convert_value("hosts", "fingerprint", None) == "none"
+    print("OK: convert_bool_values")
+
+
 def test_sanitize_env_text_for_docker():
     from app.services.pasarguard_ops import sanitize_env_text_for_docker
 
@@ -96,6 +105,7 @@ if __name__ == "__main__":
     test_sqlite_column_intersection()
     test_migration_strategy_matrix()
     test_read_alembic_from_sql_dump()
+    test_convert_bool_values()
     test_sanitize_env_text_for_docker()
     test_native_migration_import()
     print("\nAll native migration tests passed.")

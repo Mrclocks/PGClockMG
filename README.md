@@ -1,6 +1,6 @@
 # PG-Migrator
 
-**نسخه 1.8.2** — سیستم مهاجرت از پنل‌های مختلف به [PasarGuard](https://github.com/PasarGuard/panel) با ویزارد وب گرافیکی.
+**نسخه 1.8.3** — سیستم مهاجرت از پنل‌های مختلف به [PasarGuard](https://github.com/PasarGuard/panel) با ویزارد وب گرافیکی.
 
 **Languages:** Web UI — English · فارسی · Русский | Installer script — English only
 
@@ -205,6 +205,10 @@ systemctl disable pg-migrator
 ---
 
 ## Changelog
+
+### v1.8.3
+- رفع `InFailedSqlTransaction` در PostgreSQL — SAVEPOINT برای هر ردیف + recover امن تراکنش
+- تبدیل خودکار booleanهای SQLite (0/1) به boolean PostgreSQL
 
 ### v1.8.2
 - رفع خطای `invalid env file ... contains whitespaces` — sanitize فایل `.env` قبل از `docker run --env-file`

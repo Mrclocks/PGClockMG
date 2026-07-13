@@ -76,6 +76,10 @@ class TableWriter(ABC):
     def close(self) -> None:
         pass
 
+    def recover(self) -> None:
+        """Recover writer after a failed statement (no-op by default)."""
+        pass
+
 
 class SqliteReader(TableReader):
     def __init__(self, path: str):
@@ -294,13 +298,25 @@ class PostgresWriter(TableWriter):
             password=dsn["password"],
         )
 
+    def recover(self) -> None:
+        """Clear aborted transaction state without losing prior successful work."""
+        from psycopg2 import extensions
+
+        if self._conn.get_transaction_status() != extensions.TRANSACTION_STATUS_INERROR:
+            return
+        try:
+            cur = self._conn.cursor()
+            cur.execute("ROLLBACK TO SAVEPOINT pgmig_row")
+        except Exception:
+            self._conn.rollback()
+
     def target_columns(self, table: str) -> list[str]:
         cur = self._conn.cursor()
         cur.execute(
             """
             SELECT column_name FROM information_schema.columns
             WHERE table_schema = 'public' AND table_name = %s
-            ORDER BY ordinal_position
+            ORDER BY ORDINAL_POSITION
             """,
             (table,),
         )
@@ -316,18 +332,29 @@ class PostgresWriter(TableWriter):
 
     def insert(self, table: str, columns: list[str], values: tuple) -> None:
         cur = self._conn.cursor()
-        col_list = self._psql.SQL(", ").join(self._psql.Identifier(c) for c in columns)
-        placeholders = self._psql.SQL(", ").join(self._psql.Placeholder() for _ in columns)
-        q = self._psql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
-            self._psql.Identifier(table), col_list, placeholders
-        )
-        cur.execute(q, values)
+        cur.execute("SAVEPOINT pgmig_row")
+        try:
+            col_list = self._psql.SQL(", ").join(self._psql.Identifier(c) for c in columns)
+            placeholders = self._psql.SQL(", ").join(self._psql.Placeholder() for _ in columns)
+            q = self._psql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
+                self._psql.Identifier(table), col_list, placeholders
+            )
+            cur.execute(q, values)
+            cur.execute("RELEASE SAVEPOINT pgmig_row")
+        except Exception:
+            try:
+                cur.execute("ROLLBACK TO SAVEPOINT pgmig_row")
+            except Exception:
+                self._conn.rollback()
+            raise
 
     def reset_sequence(self, table: str) -> None:
         cur = self._conn.cursor()
+        # table names come from our whitelist; quote as identifier for MAX()
         cur.execute(
-            f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), "
-            f"COALESCE((SELECT MAX(id) FROM {table}), 1), true)"
+            f'SELECT setval(pg_get_serial_sequence(%s, \'id\'), '
+            f'COALESCE((SELECT MAX(id) FROM "{table}"), 1), true)',
+            (table,),
         )
 
     def set_alembic_version(self, version: str) -> None:
@@ -401,6 +428,7 @@ def copy_tables_universal(
         writer.truncate(table)
         count = 0
         errors = 0
+        first_error = None
         for row in reader.fetch_rows(table, common):
             values = tuple(
                 convert_value(table, col, row[i]) for i, col in enumerate(common)
@@ -409,17 +437,31 @@ def copy_tables_universal(
                 writer.insert(table, common, values)
                 count += 1
             except Exception as exc:
+                writer.recover()
                 errors += 1
+                if first_error is None:
+                    first_error = str(exc)
                 if errors <= 3:
-                    log(f"Row skip {table}: {str(exc)[:120]}")
+                    log(f"Row skip {table}: {str(exc)[:200]}")
         stats[table] = count
-        log(f"Imported {table}: {count} rows ({len(common)} columns)")
+        if errors:
+            log(f"Imported {table}: {count} rows, {errors} skipped — first error: {(first_error or '')[:200]}")
+        else:
+            log(f"Imported {table}: {count} rows ({len(common)} columns)")
 
         if "id" in tgt_cols:
             try:
                 writer.reset_sequence(table)
-            except Exception:
-                pass
+            except Exception as exc:
+                writer.recover()
+                log(f"Sequence reset skip {table}: {str(exc)[:120]}")
+
+        # Commit per table so one bad table cannot abort the whole copy
+        try:
+            writer.commit()
+        except Exception as exc:
+            writer.recover()
+            log(f"Commit warning {table}: {str(exc)[:120]}")
 
     if source_version:
         writer.set_alembic_version(source_version)
