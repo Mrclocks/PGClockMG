@@ -102,6 +102,25 @@ def test_read_sqlite_alembic_version(tmp_path=None):
         os.unlink(path)
 
 
+def test_mysql_admin_uses_root():
+    from app.services.env_migration import get_pasarguard_admin_connection, get_pasarguard_target_connection
+
+    text = '''
+DB_USER = "pasarguard"
+DB_PASSWORD = "apppass"
+DB_NAME = "pasarguard"
+MYSQL_ROOT_PASSWORD = "rootpass"
+SQLALCHEMY_DATABASE_URL = "mysql+asyncmy://pasarguard:apppass@127.0.0.1/pasarguard"
+'''
+    app = get_pasarguard_target_connection("mysql", env_text=text)
+    assert app["user"] == "pasarguard"
+    admin = get_pasarguard_admin_connection("mysql", password_override="rootpass", env_text=text)
+    assert admin["user"] == "root"
+    assert admin["password"] == "rootpass"
+    assert admin["database"] == "pasarguard"
+    print("OK: mysql admin uses root")
+
+
 def test_extract_env_summary():
     from app.services.env_migration import extract_env_summary
     text = '''
@@ -256,6 +275,7 @@ if __name__ == "__main__":
     test_build_target_urls()
     test_suggest_marzban_mode()
     test_migration_request_marzban_mode()
+    test_mysql_admin_uses_root()
     test_extract_env_summary()
     test_pasarguard_installer_db_vars()
     test_pgbouncer_port_for_migrations()

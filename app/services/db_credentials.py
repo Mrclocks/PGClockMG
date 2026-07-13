@@ -57,9 +57,9 @@ def get_target_connection(params: dict) -> dict:
     if not target_db or not PASARGUARD_ENV.exists():
         return wizard
 
-    from app.services.env_migration import get_pasarguard_target_connection
+    from app.services.env_migration import get_pasarguard_admin_connection
 
-    env_conn = get_pasarguard_target_connection(
+    env_conn = get_pasarguard_admin_connection(
         target_db,
         password_override=wizard.get("password"),
     )

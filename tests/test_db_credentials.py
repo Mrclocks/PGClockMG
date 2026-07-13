@@ -39,7 +39,7 @@ def test_target_merges_env_identity():
         "target_db_port": "3306",
     }
     with patch("app.services.db_credentials.PASARGUARD_ENV", fake_env), patch(
-        "app.services.env_migration.get_pasarguard_target_connection",
+        "app.services.env_migration.get_pasarguard_admin_connection",
         fake_pg_conn,
     ):
         conn = get_target_connection(params)
@@ -47,7 +47,7 @@ def test_target_merges_env_identity():
     assert conn["password"] == "wizardpwd"
     assert conn["database"] == "pasarguard"
     with patch("app.services.db_credentials.PASARGUARD_ENV", fake_env), patch(
-        "app.services.env_migration.get_pasarguard_target_connection",
+        "app.services.env_migration.get_pasarguard_admin_connection",
         fake_pg_conn,
     ):
         url = build_migration_url(params)

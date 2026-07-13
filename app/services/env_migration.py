@@ -371,6 +371,60 @@ def get_pasarguard_target_connection(
     return conn
 
 
+def get_pasarguard_admin_connection(
+    target_db: str,
+    password_override: str | None = None,
+    env_text: str | None = None,
+) -> dict:
+    """Direct admin DB access for alembic, schema init, and data copy.
+
+  MySQL/MariaDB: always root + MYSQL_ROOT_PASSWORD (app user may not exist yet).
+  PostgreSQL: postgres superuser on direct port (not PgBouncer).
+    """
+    text = env_text
+    if text is None and PASARGUARD_ENV.exists():
+        text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+
+    app_conn = get_pasarguard_target_connection(target_db, password_override, text)
+    conn = dict(app_conn)
+    conn["host"] = "127.0.0.1"
+    conn["db_type"] = target_db
+
+    if target_db in ("mysql", "mariadb"):
+        conn["user"] = read_env_var(text or "", "MYSQL_ROOT_USER") or "root"
+        conn["password"] = (
+            password_override
+            or read_env_var(text or "", "MYSQL_ROOT_PASSWORD")
+            or read_env_var(text or "", "MYSQL_PASSWORD")
+            or conn.get("password")
+        )
+        conn["database"] = (
+            read_env_var(text or "", "MYSQL_DATABASE")
+            or read_env_var(text or "", "DB_NAME")
+            or conn.get("database")
+            or "pasarguard"
+        )
+        conn["port"] = (
+            read_env_var(text or "", "MYSQL_PORT")
+            or read_env_var(text or "", "DB_PORT")
+            or conn.get("port")
+            or "3306"
+        )
+    elif target_db in ("postgresql", "timescaledb"):
+        conn["user"] = read_env_var(text or "", "POSTGRES_USER") or "postgres"
+        conn["password"] = (
+            password_override
+            or read_env_var(text or "", "POSTGRES_PASSWORD")
+            or conn.get("password")
+        )
+        port = read_env_var(text or "", "POSTGRES_PORT") or conn.get("port") or "5432"
+        if port == "6432":
+            port = "5432"
+        conn["port"] = port
+
+    return conn
+
+
 def _direct_db_port(target_db: str, conn: dict) -> str:
     """db-migrations and docker exec need direct DB port, not PgBouncer (6432)."""
     port = conn.get("port") or ("3306" if target_db in ("mysql", "mariadb") else "5432")
@@ -445,8 +499,8 @@ def extract_env_summary(text: str) -> dict:
     db_host = parsed.get("host") or compose_db.get("host")
     db_port = parsed.get("port") or compose_db.get("port")
     if db_type in ("mysql", "mariadb"):
-        db_user = db_user or read_env_var(text, "MYSQL_USER") or "root"
-        db_password = db_password or mysql_password
+        db_user = read_env_var(text, "MYSQL_ROOT_USER") or "root"
+        db_password = mysql_password or db_password
         db_name = db_name or read_env_var(text, "MYSQL_DATABASE") or "pasarguard"
         db_host = db_host or read_env_var(text, "MYSQL_HOST") or "127.0.0.1"
         db_port = db_port or read_env_var(text, "MYSQL_PORT") or "3306"

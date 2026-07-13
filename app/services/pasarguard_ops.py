@@ -544,14 +544,14 @@ async def _run_pasarguard_alembic(
     """
     image = resolve_pasarguard_image()
     url = url_override or build_local_alembic_url(migrator.params)
+    conn = get_target_connection(migrator.params)
     migrator.job.log(f"Host-network alembic: {' '.join(args)}")
-    migrator.job.log(f"Alembic DB URL: {url.split('@')[-1] if '@' in url else url}")
+    migrator.job.log(
+        f"Alembic DB: user={conn.get('user')}, db={conn.get('database')}, "
+        f"host={conn.get('host')}:{migration_port(conn, migrator.params.get('target_db', ''))}"
+    )
 
-    env_tmp: Path | None = None
     cmd: list[str] = ["docker", "run", "--rm", "--network", "host"]
-    if PASARGUARD_ENV.exists():
-        env_tmp = write_docker_env_file(PASARGUARD_ENV)
-        cmd.extend(["--env-file", str(env_tmp)])
     cmd.extend([
         "-e", f"SQLALCHEMY_DATABASE_URL={url}",
         "-v", f"{PASARGUARD_DATA}:/var/lib/pasarguard",
@@ -563,9 +563,6 @@ async def _run_pasarguard_alembic(
         ok, out = await migrator._run_cmd(cmd, timeout=600)
     except FileNotFoundError:
         return False, "docker command not found"
-    finally:
-        if env_tmp is not None:
-            env_tmp.unlink(missing_ok=True)
     if ok or _alembic_output_indicates_success(out or ""):
         return True, out or ""
     return False, out or ""
