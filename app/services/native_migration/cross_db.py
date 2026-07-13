@@ -55,6 +55,39 @@ async def _stop_panel(migrator) -> None:
     )
 
 
+async def _flush_pg_type_caches(migrator, target_db: str) -> None:
+    """After DROP SCHEMA CASCADE, PgBouncer keeps stale enum OIDs → cache lookup failed.
+
+    Restart pgbouncer (and postgres if present) so PasarGuard gets fresh type OIDs.
+    """
+    import asyncio
+    import re
+
+    if target_db not in ("postgresql", "timescaledb"):
+        return
+    cwd = str(PASARGUARD_DIR)
+    from app.services.pasarguard_ops import _compose_text
+
+    text = _compose_text()
+    for svc in ("pgbouncer", "postgresql", "timescaledb"):
+        if svc == "timescaledb" and target_db != "timescaledb":
+            continue
+        if svc == "postgresql" and target_db == "timescaledb":
+            continue
+        if not re.search(rf"^\s*{re.escape(svc)}\s*:", text, re.M):
+            continue
+        migrator.job.log(f"Restarting {svc} to clear PG type/OID cache...")
+        await migrator._run_cmd(
+            ["docker", "compose", "restart", svc],
+            cwd=cwd,
+            timeout=120,
+        )
+    await asyncio.sleep(5)
+    service = resolve_db_service(target_db)
+    if service:
+        await _wait_db_service(migrator, target_db, service)
+
+
 async def _reset_target_schema(migrator, target_db: str) -> None:
     """Wipe target so alembic upgrade head creates a clean head schema."""
     import asyncio
@@ -216,6 +249,7 @@ async def run_two_phase_migration(
         migrator.job.log(
             f"Two-phase done: users={stats.get('users', 0)} admins={stats.get('admins', 0)}"
         )
+        await _flush_pg_type_caches(migrator, target_db)
         return stats
     finally:
         container = (staging_conn or {}).get("_ephemeral_container")

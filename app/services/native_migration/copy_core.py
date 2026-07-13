@@ -44,7 +44,25 @@ BOOL_COLUMNS = frozenset({
     "enable",
     "is_sudo",
     "is_disabled",
+    "allowinsecure",
+    "random_user_agent",
+    "use_sni_as_host",
+    "mux_enable",
+    "edit",
+    "enabled",
 })
+
+
+def to_bool(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "t", "yes", "on")
+    return bool(value)
 
 
 def sqlite_table_names(conn: sqlite3.Connection) -> set[str]:
@@ -64,12 +82,7 @@ def convert_value(table: str, column: str, value):
     if value is None:
         return ENUM_DEFAULTS.get((table, column))
     if column in BOOL_COLUMNS:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
-            return bool(value)
-        if isinstance(value, str):
-            return value.strip().lower() in ("1", "true", "t", "yes", "on")
+        return to_bool(value)
     if isinstance(value, bytes):
         try:
             return value.decode("utf-8")
@@ -77,6 +90,9 @@ def convert_value(table: str, column: str, value):
             return value
     if isinstance(value, str):
         stripped = value.strip()
+        # Empty strings are invalid for PG enums — treat as NULL (or enum default)
+        if stripped == "":
+            return ENUM_DEFAULTS.get((table, column))
         if stripped.startswith("{") or stripped.startswith("["):
             try:
                 json.loads(stripped)

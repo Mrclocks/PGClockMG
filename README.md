@@ -1,6 +1,6 @@
 # PG-Migrator
 
-**نسخه 2.0.0** — سیستم مهاجرت از پنل‌های مختلف به [PasarGuard](https://github.com/PasarGuard/panel) با ویزارد وب گرافیکی.
+**نسخه 2.0.1** — سیستم مهاجرت از پنل‌های مختلف به [PasarGuard](https://github.com/PasarGuard/panel) با ویزارد وب گرافیکی.
 
 **Languages:** Web UI — English · فارسی · Русский | Installer script — English only
 
@@ -205,6 +205,11 @@ systemctl disable pg-migrator
 ---
 
 ## Changelog
+
+### v2.0.1
+- تبدیل خودکار همه booleanهای SQLite→PG (`allowinsecure`, `random_user_agent`, …) + coerce از information_schema
+- بعد از `DROP SCHEMA`: restart `pgbouncer`/`postgresql` تا خطای `cache lookup failed for type` برطرف شود
+- `safe_start_pasarguard`: force-recreate پنل بعد از flush کش
 
 ### v2.0.0
 - **بازنویسی از صفر:** موتور دو‌فازی (intermediate@head → target@head) — حذف bootstrap به revision مبدأ

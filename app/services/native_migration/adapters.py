@@ -297,6 +297,49 @@ class PostgresWriter(TableWriter):
             user=dsn["user"],
             password=dsn["password"],
         )
+        self._col_types: dict[str, dict[str, str]] = {}
+
+    def _types_for(self, table: str) -> dict[str, str]:
+        if table in self._col_types:
+            return self._col_types[table]
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT column_name, data_type, udt_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = %s
+            """,
+            (table,),
+        )
+        types: dict[str, str] = {}
+        for name, data_type, udt_name in cur.fetchall():
+            # Normalize: boolean / USER-DEFINED enums
+            if data_type == "boolean" or udt_name == "bool":
+                types[name] = "boolean"
+            elif data_type == "USER-DEFINED":
+                types[name] = f"enum:{udt_name}"
+            else:
+                types[name] = data_type or udt_name or ""
+        self._col_types[table] = types
+        return types
+
+    def _coerce_row(self, table: str, columns: list[str], values: tuple) -> tuple:
+        from app.services.native_migration.copy_core import to_bool, ENUM_DEFAULTS
+
+        types = self._types_for(table)
+        out = []
+        for col, val in zip(columns, values):
+            kind = types.get(col, "")
+            if kind == "boolean":
+                out.append(to_bool(val))
+            elif kind.startswith("enum:"):
+                if val is None or (isinstance(val, str) and val.strip() == ""):
+                    out.append(ENUM_DEFAULTS.get((table, col)))
+                else:
+                    out.append(val)
+            else:
+                out.append(val)
+        return tuple(out)
 
     def recover(self) -> None:
         """Clear aborted transaction state without losing prior successful work."""
@@ -316,7 +359,7 @@ class PostgresWriter(TableWriter):
             """
             SELECT column_name FROM information_schema.columns
             WHERE table_schema = 'public' AND table_name = %s
-            ORDER BY ORDINAL_POSITION
+            ORDER BY ordinal_position
             """,
             (table,),
         )
@@ -334,6 +377,7 @@ class PostgresWriter(TableWriter):
         cur = self._conn.cursor()
         cur.execute("SAVEPOINT pgmig_row")
         try:
+            values = self._coerce_row(table, columns, values)
             col_list = self._psql.SQL(", ").join(self._psql.Identifier(c) for c in columns)
             placeholders = self._psql.SQL(", ").join(self._psql.Placeholder() for _ in columns)
             q = self._psql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
@@ -350,7 +394,6 @@ class PostgresWriter(TableWriter):
 
     def reset_sequence(self, table: str) -> None:
         cur = self._conn.cursor()
-        # table names come from our whitelist; quote as identifier for MAX()
         cur.execute(
             f'SELECT setval(pg_get_serial_sequence(%s, \'id\'), '
             f'COALESCE((SELECT MAX(id) FROM "{table}"), 1), true)',

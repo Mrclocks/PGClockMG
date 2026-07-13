@@ -80,7 +80,10 @@ def test_convert_bool_values():
 
     assert convert_value("admins", "is_sudo", 1) is True
     assert convert_value("admins", "is_sudo", 0) is False
-    assert convert_value("hosts", "fingerprint", None) == "none"
+    assert convert_value("hosts", "allowinsecure", 0) is False
+    assert convert_value("hosts", "random_user_agent", 1) is True
+    assert convert_value("hosts", "use_sni_as_host", 0) is False
+    assert convert_value("hosts", "fingerprint", "") == "none"
     print("OK: convert_bool_values")
 
 

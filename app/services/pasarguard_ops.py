@@ -26,6 +26,8 @@ FAIL_LOG_PATTERNS = (
     "Traceback (most recent call last)",
     "FATAL:",
     "could not connect",
+    "cache lookup failed for type",
+    "Application startup failed",
     "column \"user_template_id\" of relation \"next_plans\" already exists",
 )
 
@@ -656,8 +658,27 @@ async def sync_alembic_for_startup(migrator, target_db: str) -> None:
 async def safe_start_pasarguard(migrator) -> None:
     """Start PasarGuard and fail if the panel does not become healthy."""
     cwd = str(PASARGUARD_DIR)
+    target_db = (migrator.params or {}).get("target_db")
+    # After DROP SCHEMA CASCADE, PgBouncer may hold stale enum OIDs
+    if target_db in ("postgresql", "timescaledb"):
+        from app.services.pasarguard_ops import _compose_text
+        import re
+        text = _compose_text()
+        if re.search(r"^\s*pgbouncer\s*:", text, re.M):
+            migrator.job.log("Restarting pgbouncer before panel start (clear type cache)...")
+            await migrator._run_cmd(
+                ["docker", "compose", "restart", "pgbouncer"],
+                cwd=cwd,
+                timeout=120,
+            )
+            await asyncio.sleep(3)
+
     migrator.job.log("Starting PasarGuard panel...")
-    await migrator._run_cmd(["docker", "compose", "up", "-d", "pasarguard"], cwd=cwd, timeout=180)
+    await migrator._run_cmd(
+        ["docker", "compose", "up", "-d", "--force-recreate", "pasarguard"],
+        cwd=cwd,
+        timeout=180,
+    )
     await verify_pasarguard_healthy(migrator)
 
 
