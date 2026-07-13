@@ -1,3 +1,5 @@
+> ⚠️ **این تنها یک نسخه آزمایشی می‌باشد و احتمال وجود باگ زیاد است.**
+
 <div align="center">
 
 <img src="preview.png" alt="MrClock-MG Wizard Preview" width="720">
