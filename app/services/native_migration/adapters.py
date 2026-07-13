@@ -443,6 +443,43 @@ def create_writer(db_type: str, conn: dict, target_path: str | None = None) -> T
     raise ValueError(f"Unsupported target database: {db_type}")
 
 
+def _try_insert_row(
+    writer: TableWriter,
+    table: str,
+    columns: list[str],
+    values: tuple,
+    log: Callable[[str], None],
+) -> tuple[bool, str | None]:
+    """Insert one row; for nodes retry without core_config_id on FK errors."""
+    try:
+        writer.insert(table, columns, values)
+        return True, None
+    except Exception as exc:
+        writer.recover()
+        err = str(exc)
+        err_low = err.lower()
+        if table == "nodes" and "core_config" in err_low and "core_config_id" in columns:
+            cols = list(columns)
+            vals = list(values)
+            idx = cols.index("core_config_id")
+            vals[idx] = None
+            try:
+                writer.insert(table, cols, tuple(vals))
+                log("Node row copied with core_config_id=NULL (optional FK skipped)")
+                return True, None
+            except Exception as exc2:
+                writer.recover()
+                err = str(exc2)
+        return False, err
+
+
+# Tables that must copy for subscription links / panel login
+CRITICAL_TABLES = ("users", "hosts", "admins")
+
+# Optional — skip rows / warn if none copied (nodes need separate pg-node in PG v5)
+OPTIONAL_TABLES = ("nodes", "core_configs", "groups")
+
+
 def copy_tables_universal(
     reader: TableReader,
     writer: TableWriter,
@@ -497,16 +534,15 @@ def copy_tables_universal(
             values = tuple(
                 convert_value(table, col, row[i]) for i, col in enumerate(common)
             )
-            try:
-                writer.insert(table, common, values)
+            ok, row_err = _try_insert_row(writer, table, common, values, log)
+            if ok:
                 count += 1
-            except Exception as exc:
-                writer.recover()
+            else:
                 errors += 1
                 if first_error is None:
-                    first_error = str(exc)
+                    first_error = row_err
                 if errors <= 5:
-                    log(f"Row skip {table}: {str(exc)[:200]}")
+                    log(f"Row skip {table}: {(row_err or '')[:200]}")
         stats[table] = count
         if errors:
             log(
@@ -536,7 +572,7 @@ def copy_tables_universal(
         writer.commit()
 
     if fail_hard:
-        for critical in ("users", "admins", "hosts", "core_configs", "groups"):
+        for critical in CRITICAL_TABLES:
             src_n = source_counts.get(critical, 0)
             dst_n = stats.get(critical, 0)
             if src_n > 0 and dst_n == 0:
@@ -544,19 +580,14 @@ def copy_tables_universal(
                     f"Migration failed: source has {src_n} {critical} but "
                     f"0 were copied to target. Check row-skip errors above."
                 )
-        src_nodes = source_counts.get("nodes", 0)
-        dst_nodes = stats.get("nodes", 0)
-        if src_nodes > 0 and dst_nodes == 0:
-            raise RuntimeError(
-                f"Migration failed: source has {src_nodes} nodes but "
-                f"0 were copied to target. Check row-skip errors above."
-            )
-        if src_nodes > 0 and stats.get("core_configs", 0) == 0:
-            src_cc = source_counts.get("core_configs", 0)
-            if src_cc > 0:
-                raise RuntimeError(
-                    f"Migration failed: source has {src_cc} core_configs required "
-                    f"by {src_nodes} nodes but none were copied."
+        for optional in OPTIONAL_TABLES:
+            src_n = source_counts.get(optional, 0)
+            dst_n = stats.get(optional, 0)
+            if src_n > 0 and dst_n == 0:
+                log(
+                    f"Warning: {src_n} source {optional} not copied — "
+                    "optional; subscription links are unchanged. "
+                    "Configure manually in PasarGuard/pg-node if needed."
                 )
 
     return stats

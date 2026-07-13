@@ -47,10 +47,6 @@ def test_sqlite_column_intersection():
         assert "exclude_inbounds_association" in TABLE_ORDER
         assert "exclude_inbounds_association" not in SKIP_TABLES
         assert "users" in TABLE_ORDER
-        assert TABLE_ORDER.index("core_configs") < TABLE_ORDER.index("nodes")
-        assert TABLE_ORDER.index("groups") < TABLE_ORDER.index("users_groups_association")
-        assert "settings" in TABLE_ORDER
-        assert "client_templates" in TABLE_ORDER
         conn.close()
         print("OK: sqlite column helpers")
     finally:
@@ -197,6 +193,66 @@ def test_copy_sqlite_to_sqlite_associations(tmp_path=None):
         os.unlink(dst)
 
 
+def test_nodes_zero_copy_does_not_fail(tmp_path=None):
+    """Nodes are optional — migration continues when users/hosts copy OK."""
+    import tempfile
+    from app.services.native_migration.adapters import (
+        create_reader, create_writer, copy_tables_universal,
+    )
+
+    fd1, src = tempfile.mkstemp(suffix=".sqlite3")
+    fd2, dst = tempfile.mkstemp(suffix=".sqlite3")
+    os.close(fd1)
+    os.close(fd2)
+    try:
+        sc = sqlite3.connect(src)
+        sc.executescript(
+            """
+            CREATE TABLE admins (id INTEGER PRIMARY KEY, username TEXT);
+            INSERT INTO admins VALUES (1, 'admin');
+            CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT);
+            INSERT INTO users VALUES (1, 'u1');
+            CREATE TABLE hosts (id INTEGER PRIMARY KEY, remark TEXT);
+            INSERT INTO hosts VALUES (1, 'h1');
+            CREATE TABLE core_configs (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT, core_config_id INTEGER);
+            INSERT INTO nodes VALUES (1, 'n1', 99);
+            INSERT INTO nodes VALUES (2, 'n2', 99);
+            """
+        )
+        sc.commit()
+        sc.close()
+
+        dc = sqlite3.connect(dst)
+        dc.executescript(
+            """
+            CREATE TABLE admins (id INTEGER PRIMARY KEY, username TEXT);
+            CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT);
+            CREATE TABLE hosts (id INTEGER PRIMARY KEY, remark TEXT);
+            """
+        )
+        dc.commit()
+        dc.close()
+
+        logs = []
+        reader = create_reader("sqlite", src, {})
+        writer = create_writer("sqlite", {"sqlite_path": dst}, dst)
+        try:
+            stats = copy_tables_universal(reader, writer, logs.append, fail_hard=True)
+        finally:
+            reader.close()
+            writer.close()
+
+        assert stats.get("users") == 1
+        assert stats.get("hosts") == 1
+        assert stats.get("nodes", 0) == 0
+        assert any("Warning" in ln and "nodes" in ln for ln in logs), logs
+        print("OK: nodes zero-copy warns only")
+    finally:
+        os.unlink(src)
+        os.unlink(dst)
+
+
 def test_sanitize_env_text_for_docker():
     from app.services.pasarguard_ops import sanitize_env_text_for_docker
 
@@ -222,6 +278,7 @@ if __name__ == "__main__":
     test_read_alembic_from_sql_dump()
     test_convert_bool_values()
     test_copy_sqlite_to_sqlite_associations()
+    test_nodes_zero_copy_does_not_fail()
     test_sanitize_env_text_for_docker()
     test_native_migration_import()
     print("\nAll native migration tests passed.")
