@@ -71,15 +71,17 @@ MIGRATION_ABORT_IF_ZERO = frozenset({
 
 _HOST_OBSOLETE = frozenset({"none", "None", "NONE", "null", "NULL", ""})
 
+# alpn=none is invalid in PasarGuard; security=none and fingerprint=none ARE valid
 OBSOLETE_TO_EMPTY = {
     ("hosts", "alpn"): _HOST_OBSOLETE,
-    ("hosts", "fingerprint"): _HOST_OBSOLETE,
-    ("hosts", "security"): _HOST_OBSOLETE,
     ("hosts", "noise_settings"): _HOST_OBSOLETE,
     ("hosts", "fragment_settings"): _HOST_OBSOLETE,
     ("hosts", "noise"): _HOST_OBSOLETE,
     ("hosts", "fragment"): _HOST_OBSOLETE,
 }
+
+# PasarGuard StringArray columns (comma-separated); address is NOT NULL
+HOST_STRING_ARRAY_COLUMNS = frozenset({"address", "sni", "host", "verify_peer_cert_by_name"})
 
 # Legacy Marzban source column -> PasarGuard target column
 SOURCE_TO_TARGET_COLUMNS: dict[str, dict[str, str]] = {
@@ -99,6 +101,10 @@ TARGET_INSERT_DEFAULTS: dict[str, dict[str, object]] = {
     },
     "hosts": {
         "priority": 0,
+        "remark": "",
+        "address": "",
+        "security": "inbound_default",
+        "fingerprint": "none",
     },
     "groups": {
         "is_disabled": False,
@@ -164,6 +170,43 @@ OPTIONAL_FK_COLUMNS: dict[str, tuple[str, ...]] = {
     "nodes": ("core_config_id",),
     "hosts": ("inbound_tag",),
 }
+
+
+def normalize_host_security(value):
+    """PasarGuard ProxyHostSecurity: inbound_default | none | tls."""
+    if value is None:
+        return "inbound_default"
+    s = str(value).strip().lower()
+    if not s or s in ("null", "default"):
+        return "inbound_default"
+    if s in ("inbound_default", "none", "tls"):
+        return s
+    if s in ("inbounddefault", "inbound-default"):
+        return "inbound_default"
+    return "inbound_default"
+
+
+def normalize_host_fingerprint(value):
+    """PasarGuard ProxyHostFingerprint — 'none' is a valid enum label, not empty."""
+    if value is None:
+        return "none"
+    s = str(value).strip()
+    if not s or s.lower() in ("null", "default"):
+        return "none"
+    return s
+
+
+def normalize_host_string_array(column: str, value):
+    """StringArray columns; address is NOT NULL in PasarGuard."""
+    if value is None:
+        return "" if column == "address" else None
+    if isinstance(value, (list, set, tuple)):
+        parts = [str(v).strip() for v in value if str(v).strip()]
+        return ",".join(parts) if parts else ("" if column == "address" else None)
+    s = str(value).strip()
+    if not s:
+        return "" if column == "address" else None
+    return s
 
 
 def engine_family(db_type: str) -> str:
@@ -297,11 +340,26 @@ def sqlite_columns(conn: sqlite3.Connection, table: str) -> list[str]:
 def convert_value(table: str, column: str, value):
     """Coerce types; neutralize obsolete Marzban tokens."""
     value = normalize_raw_value(value)
-    if value is None:
-        return None
 
     if table == "users" and column == "status":
         return normalize_user_status(value)
+
+    if table == "hosts" and column == "security":
+        return normalize_host_security(value)
+
+    if table == "hosts" and column == "fingerprint":
+        return normalize_host_fingerprint(value)
+
+    if table == "hosts" and column in HOST_STRING_ARRAY_COLUMNS:
+        return normalize_host_string_array(column, value)
+
+    if table == "hosts" and column == "remark":
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return ""
+        return str(value).strip()
+
+    if value is None:
+        return None
 
     if table == "hosts" and column == "mux_settings":
         return coerce_mux_settings(value)

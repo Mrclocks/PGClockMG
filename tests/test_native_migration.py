@@ -86,8 +86,12 @@ def test_convert_bool_values():
     assert convert_value("hosts", "allowinsecure", 0) is False
     assert convert_value("hosts", "random_user_agent", 1) is True
     assert convert_value("hosts", "use_sni_as_host", 0) is False
-    assert convert_value("hosts", "fingerprint", "") is None
-    assert convert_value("hosts", "fingerprint", None) is None
+    assert convert_value("hosts", "fingerprint", "") == "none"
+    assert convert_value("hosts", "fingerprint", None) == "none"
+    assert convert_value("hosts", "fingerprint", "none") == "none"
+    assert convert_value("hosts", "security", "none") == "none"
+    assert convert_value("hosts", "security", None) == "inbound_default"
+    assert convert_value("hosts", "address", None) == ""
     assert convert_value("hosts", "alpn", "none") is None
     assert convert_value("hosts", "alpn", None) is None
     assert convert_value("hosts", "alpn", "h2") == "h2"
@@ -213,6 +217,91 @@ def test_nodes_defaults_copy_sqlite():
         verify.close()
         assert row[0] == ""
         print("OK: nodes_defaults_copy_sqlite")
+    finally:
+        os.unlink(src)
+        os.unlink(dst)
+
+
+def test_hosts_marzban_none_enums_copy():
+    """Marzban hosts with security/fingerprint=none must not become NULL."""
+    import tempfile
+    from app.services.native_migration.adapters import (
+        create_reader, create_writer, copy_tables_universal,
+    )
+
+    fd1, src = tempfile.mkstemp(suffix=".sqlite3")
+    fd2, dst = tempfile.mkstemp(suffix=".sqlite3")
+    os.close(fd1)
+    os.close(fd2)
+    try:
+        sc = sqlite3.connect(src)
+        sc.executescript(
+            """
+            CREATE TABLE admins (id INTEGER PRIMARY KEY, username TEXT);
+            INSERT INTO admins VALUES (1, 'admin');
+            CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT);
+            INSERT INTO users VALUES (1, 'u1');
+            CREATE TABLE inbounds (id INTEGER PRIMARY KEY, tag TEXT);
+            INSERT INTO inbounds VALUES (1, 'vless-tcp');
+            CREATE TABLE groups (id INTEGER PRIMARY KEY, name TEXT);
+            INSERT INTO groups VALUES (1, 'g1');
+            CREATE TABLE hosts (
+                id INTEGER PRIMARY KEY, remark TEXT, address TEXT, inbound_tag TEXT,
+                security TEXT, fingerprint TEXT, alpn TEXT
+            );
+            INSERT INTO hosts VALUES (
+                1, 'myhost', 'cdn.example.com', 'vless-tcp', 'none', 'none', 'none'
+            );
+            """
+        )
+        sc.commit()
+        sc.close()
+
+        dc = sqlite3.connect(dst)
+        dc.executescript(
+            """
+            CREATE TABLE admins (id INTEGER PRIMARY KEY, username TEXT);
+            CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT);
+            CREATE TABLE inbounds (id INTEGER PRIMARY KEY, tag TEXT);
+            CREATE TABLE groups (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE hosts (
+                id INTEGER PRIMARY KEY,
+                remark TEXT NOT NULL,
+                address TEXT NOT NULL,
+                inbound_tag TEXT,
+                security TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                alpn TEXT,
+                priority INTEGER NOT NULL DEFAULT 0
+            );
+            """
+        )
+        dc.commit()
+        dc.close()
+
+        reader = create_reader("sqlite", src, {})
+        writer = create_writer("sqlite", {"sqlite_path": dst}, dst)
+        try:
+            stats, _ = copy_tables_universal(
+                reader, writer, lambda _m: None, fail_hard=True,
+            )
+        finally:
+            reader.close()
+            writer.close()
+
+        assert stats.get("hosts") == 1
+        verify = sqlite3.connect(dst)
+        row = verify.execute(
+            "SELECT remark, address, security, fingerprint, alpn, priority FROM hosts WHERE id=1"
+        ).fetchone()
+        verify.close()
+        assert row[0] == "myhost"
+        assert row[1] == "cdn.example.com"
+        assert row[2] == "none"
+        assert row[3] == "none"
+        assert row[4] is None
+        assert row[5] == 0
+        print("OK: hosts_marzban_none_enums_copy")
     finally:
         os.unlink(src)
         os.unlink(dst)
@@ -501,6 +590,7 @@ if __name__ == "__main__":
     test_convert_bool_values()
     test_users_status_not_bool()
     test_hosts_json_and_column_plan()
+    test_hosts_marzban_none_enums_copy()
     test_hosts_legacy_columns_copy_sqlite()
     test_nodes_defaults_copy_sqlite()
     test_nodes_missing_target_table_skips()

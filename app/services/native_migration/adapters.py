@@ -511,6 +511,8 @@ class PostgresWriter(TableWriter):
         if not s or s.lower() in ("none", "null", "default"):
             if nullable:
                 return None
+            if "none" in labels:
+                return "none"
             return sorted(labels)[0] if labels else None
         if s in labels:
             return s
@@ -869,6 +871,7 @@ def copy_tables_universal(
     source_tables = reader.source_tables()
     source_counts: dict[str, int] = {}
     attempted_tables: set[str] = set()
+    table_first_errors: dict[str, str] = {}
     for t in TABLE_ORDER:
         n = _count_source_rows(reader, t)
         if n > 0:
@@ -924,6 +927,8 @@ def copy_tables_universal(
                 if log_limit:
                     log(f"Row skip {table}: {(row_err or '')[:200]}")
         stats[table] = count
+        if first_error:
+            table_first_errors[table] = first_error
         if errors:
             log(
                 f"Imported {table}: {count} rows, {errors} skipped — "
@@ -964,9 +969,10 @@ def copy_tables_universal(
             src_n = source_counts.get(table, 0)
             dst_n = stats.get(table, 0)
             if src_n > 0 and dst_n == 0 and table in attempted_tables:
+                hint = (table_first_errors.get(table) or "unknown")[:400]
                 raise RuntimeError(
                     f"Migration failed: source has {src_n} {table} but "
-                    f"0 were copied to target. Subscription data missing."
+                    f"0 were copied to target. First error: {hint}"
                 )
 
     report = build_copy_report(source_counts, stats)
