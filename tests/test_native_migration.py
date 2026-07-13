@@ -57,15 +57,17 @@ def test_sqlite_column_intersection():
 def test_migration_strategy_matrix():
     from app.services.native_migration import migration_strategy
 
-    assert migration_strategy("sqlite", "postgresql") == "two_phase"
-    assert migration_strategy("sqlite", "timescaledb") == "two_phase"
-    assert migration_strategy("sqlite", "mysql") == "two_phase"
-    assert migration_strategy("mysql", "postgresql") == "two_phase"
-    assert migration_strategy("postgresql", "timescaledb") == "two_phase"
-    assert migration_strategy("postgresql", "sqlite") == "two_phase"
+    engines = ("sqlite", "mysql", "mariadb", "postgresql", "timescaledb")
+    for src in engines:
+        for tgt in engines:
+            s = migration_strategy(src, tgt)
+            if src == tgt:
+                assert s == "same_db"
+            else:
+                assert s == "two_phase", f"{src}→{tgt}"
     assert migration_strategy("sqlite", "sqlite") == "same_db"
     assert migration_strategy("unknown", "postgresql") == "unsupported"
-    print("OK: migration strategy matrix")
+    print("OK: migration strategy matrix (all 25 pairs)")
 
 
 def test_read_alembic_from_sql_dump():

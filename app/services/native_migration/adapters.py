@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -15,8 +16,11 @@ from app.services.native_migration.copy_core import (
     OPTIONAL_FK_COLUMNS,
     TARGET_INSERT_DEFAULTS,
     JSON_COLUMNS,
+    BOOL_COLUMNS,
     convert_value,
     build_table_column_plan,
+    parse_not_null_column,
+    to_bool,
     sqlite_columns,
     sqlite_table_names,
 )
@@ -206,6 +210,15 @@ class SqliteWriter(TableWriter):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(path)
 
+    def _coerce_row(self, table: str, columns: list[str], values: tuple) -> tuple:
+        out = []
+        for col, val in zip(columns, values):
+            val = convert_value(table, col, val)
+            if col in BOOL_COLUMNS and val is not None:
+                val = 1 if to_bool(val) else 0
+            out.append(val)
+        return tuple(out)
+
     def target_columns(self, table: str) -> list[str]:
         return sqlite_columns(self._conn, table)
 
@@ -213,6 +226,7 @@ class SqliteWriter(TableWriter):
         self._conn.execute(f"DELETE FROM {table}")
 
     def insert(self, table: str, columns: list[str], values: tuple) -> None:
+        values = self._coerce_row(table, columns, values)
         cols = ", ".join(columns)
         ph = ", ".join(["?"] * len(columns))
         self._conn.execute(f"INSERT INTO {table} ({cols}) VALUES ({ph})", values)
@@ -313,21 +327,30 @@ class MysqlWriter(TableWriter):
         return sorted(labels)[0] if labels else s
 
     def _coerce_row(self, table: str, columns: list[str], values: tuple) -> tuple:
-        from app.services.native_migration.copy_core import convert_value
+        from app.services.native_migration.copy_core import convert_value, to_bool
 
         meta = self._load_meta(table)
         out = []
         for col, val in zip(columns, values):
             val = convert_value(table, col, val)
             col_meta = meta.get(col, {})
-            if col_meta.get("data_type") == "enum":
+            data_type = col_meta.get("data_type", "")
+            column_type = (col_meta.get("column_type") or "").lower()
+            if data_type == "enum":
                 labels = col_meta.get("enum_labels") or frozenset()
                 val = self._fit_mysql_enum(
                     labels, val, col_meta.get("nullable", True),
                 )
-            elif col_meta.get("data_type") == "json":
+            elif data_type == "json":
                 from app.services.native_migration.copy_core import coerce_json_value
                 val = coerce_json_value(val)
+            elif (
+                col in BOOL_COLUMNS
+                or data_type == "bit"
+                or (data_type == "tinyint" and "tinyint(1)" in column_type)
+            ):
+                if val is not None:
+                    val = 1 if to_bool(val) else 0
             out.append(val)
         return tuple(out)
 
@@ -502,7 +525,11 @@ class PostgresWriter(TableWriter):
         return sorted(labels)[0] if labels else None
 
     def _coerce_row(self, table: str, columns: list[str], values: tuple) -> tuple:
-        from app.services.native_migration.copy_core import to_bool, convert_value
+        from psycopg2.extras import Json
+
+        from app.services.native_migration.copy_core import (
+            coerce_json_value, convert_value, to_bool,
+        )
 
         types = self._types_for(table)
         out = []
@@ -515,8 +542,12 @@ class PostgresWriter(TableWriter):
                 udt = kind.split(":", 1)[1]
                 out.append(self._fit_enum(udt, val, self._nullable_for(table, col)))
             elif kind in ("json", "jsonb"):
-                from app.services.native_migration.copy_core import coerce_json_value
-                out.append(coerce_json_value(val))
+                parsed = coerce_json_value(val)
+                out.append(Json(json.loads(parsed)) if parsed else None)
+            elif kind in (
+                "integer", "bigint", "smallint", "numeric", "double precision", "real",
+            ) and val is not None and isinstance(val, str) and val.strip().isdigit():
+                out.append(int(val.strip()))
             else:
                 out.append(val)
         return tuple(out)
@@ -529,7 +560,7 @@ class PostgresWriter(TableWriter):
         ]
 
     def recover(self) -> None:
-        """Clear aborted transaction state without losing prior successful work."""
+        """Rollback failed row only — never wipe successful inserts in this table."""
         from psycopg2 import extensions
 
         if self._conn.get_transaction_status() != extensions.TRANSACTION_STATUS_INERROR:
@@ -538,7 +569,7 @@ class PostgresWriter(TableWriter):
             cur = self._conn.cursor()
             cur.execute("ROLLBACK TO SAVEPOINT pgmig_row")
         except Exception:
-            self._conn.rollback()
+            pass
 
     def target_columns(self, table: str) -> list[str]:
         cur = self._conn.cursor()
@@ -576,7 +607,7 @@ class PostgresWriter(TableWriter):
             try:
                 cur.execute("ROLLBACK TO SAVEPOINT pgmig_row")
             except Exception:
-                self._conn.rollback()
+                pass
             raise
 
     def reset_sequence(self, table: str) -> None:
@@ -605,6 +636,10 @@ class PostgresWriter(TableWriter):
     def enum_columns(self, table: str) -> list[str]:
         types = self._types_for(table)
         return [c for c, k in types.items() if k.startswith("enum:")]
+
+    def boolean_columns(self, table: str, columns: list[str]) -> list[str]:
+        types = self._types_for(table)
+        return [c for c in columns if types.get(c) == "boolean"]
 
     def close(self) -> None:
         self._conn.close()
@@ -665,6 +700,23 @@ def _retry_null_columns(
     for col in cols_to_null:
         if col in cols:
             vals[cols.index(col)] = None
+    return _attempt_insert(writer, table, cols, tuple(vals))
+
+
+def _retry_with_defaults(
+    writer: TableWriter,
+    table: str,
+    columns: list[str],
+    values: tuple,
+    overrides: dict[str, object],
+) -> tuple[bool, str | None]:
+    if not overrides:
+        return False, "no defaults"
+    cols = list(columns)
+    vals = list(values)
+    for col, default in overrides.items():
+        if col in cols:
+            vals[cols.index(col)] = default
     return _attempt_insert(writer, table, cols, tuple(vals))
 
 
@@ -735,6 +787,38 @@ def _try_insert_row(
             log(f"{table}: copied after clearing invalid MySQL enum values")
             return True, None
         err = err5 or err
+
+    # NOT NULL violations — apply known target defaults
+    if "not null" in err_low or "cannot be null" in err_low:
+        col = parse_not_null_column(err or "")
+        defaults = TARGET_INSERT_DEFAULTS.get(table, {})
+        if col and col in defaults and col in columns:
+            ok6, err6 = _retry_with_defaults(
+                writer, table, columns, values, {col: defaults[col]},
+            )
+            if ok6:
+                log(f"{table}: copied with default {col}={defaults[col]!r}")
+                return True, None
+            err = err6 or err
+
+    # PostgreSQL boolean coercion retry
+    if isinstance(writer, PostgresWriter) and (
+        "invalid input syntax for type boolean" in err_low
+        or "type boolean" in err_low
+    ):
+        bool_cols = writer.boolean_columns(table, columns)
+        if bool_cols:
+            cols = list(columns)
+            vals = list(values)
+            for col in bool_cols:
+                if col in cols:
+                    idx = cols.index(col)
+                    vals[idx] = to_bool(vals[idx]) if vals[idx] is not None else None
+            ok7, err7 = _attempt_insert(writer, table, cols, tuple(vals))
+            if ok7:
+                log(f"{table}: copied after boolean coercion")
+                return True, None
+            err = err7 or err
 
     return False, err
 

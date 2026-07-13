@@ -9,7 +9,10 @@ Policy: copy everything that exists in the source.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Callable
 
 TABLE_ORDER = [
@@ -92,9 +95,16 @@ TARGET_INSERT_DEFAULTS: dict[str, dict[str, object]] = {
     "nodes": {
         "server_ca": "",
         "api_key": "",
+        "status": "healthy",
     },
     "hosts": {
         "priority": 0,
+    },
+    "groups": {
+        "is_disabled": False,
+    },
+    "inbounds": {
+        "is_disabled": False,
     },
 }
 
@@ -104,7 +114,12 @@ JSON_COLUMNS = frozenset({
     "mux_settings",
     "http_headers",
     "transport_settings",
+    "value",
 })
+
+# PostgreSQL / MySQL engine families (same copy logic)
+MYSQL_FAMILY = frozenset({"mysql", "mariadb"})
+PG_FAMILY = frozenset({"postgresql", "timescaledb"})
 
 BOOL_COLUMNS = frozenset({
     "enable",
@@ -149,6 +164,37 @@ OPTIONAL_FK_COLUMNS: dict[str, tuple[str, ...]] = {
     "nodes": ("core_config_id",),
     "hosts": ("inbound_tag",),
 }
+
+
+def engine_family(db_type: str) -> str:
+    """Normalize engine name for cross-DB compatibility checks."""
+    if db_type in MYSQL_FAMILY:
+        return "mysql"
+    if db_type in PG_FAMILY:
+        return "postgresql"
+    return db_type
+
+
+def normalize_raw_value(value):
+    """Normalize DB driver return types before column-specific coercion."""
+    if value is None:
+        return None
+    if isinstance(value, memoryview):
+        value = bytes(value)
+    if isinstance(value, Decimal):
+        if value == value.to_integral_value():
+            return int(value)
+        return float(value)
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ", timespec="seconds")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except Exception:
+            return value
+    return value
 
 
 def coerce_json_value(value):
@@ -250,6 +296,7 @@ def sqlite_columns(conn: sqlite3.Connection, table: str) -> list[str]:
 
 def convert_value(table: str, column: str, value):
     """Coerce types; neutralize obsolete Marzban tokens."""
+    value = normalize_raw_value(value)
     if value is None:
         return None
 
@@ -259,7 +306,9 @@ def convert_value(table: str, column: str, value):
     if table == "hosts" and column == "mux_settings":
         return coerce_mux_settings(value)
 
-    if table == "hosts" and column in JSON_COLUMNS:
+    if column in JSON_COLUMNS or (
+        table == "settings" and column == "value"
+    ):
         return coerce_json_value(value)
 
     if column in BOOL_COLUMNS:
@@ -274,6 +323,8 @@ def convert_value(table: str, column: str, value):
     if isinstance(value, str):
         stripped = value.strip()
         if stripped == "":
+            if column in TARGET_INSERT_DEFAULTS.get(table, {}):
+                return ""
             return None
         obsolete = OBSOLETE_TO_EMPTY.get((table, column))
         if obsolete and stripped in obsolete:
@@ -293,6 +344,23 @@ def convert_value(table: str, column: str, value):
         return stripped
 
     return value
+
+
+def parse_not_null_column(error: str) -> str | None:
+    """Extract column name from NOT NULL violation messages."""
+    if not error:
+        return None
+    patterns = (
+        r'null value in column "([^"]+)"',
+        r"column '([^']+)' cannot be null",
+        r"Column '([^']+)' cannot be null",
+        r"field '([^']+)' doesn't have a default",
+    )
+    for pat in patterns:
+        m = re.search(pat, error, re.IGNORECASE)
+        if m:
+            return m.group(1)
+    return None
 
 
 def copy_sqlite_tables(

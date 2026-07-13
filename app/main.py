@@ -39,7 +39,7 @@ def _server_ip() -> str:
 @app.get("/api/info")
 async def api_info():
     return {
-        "version": "2.0.15",
+        "version": "2.0.16",
         "server_ip": _server_ip(),
         "web_port": WEB_PORT,
         "panels": [p.model_dump() for p in PANELS.values()],
