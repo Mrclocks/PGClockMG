@@ -324,19 +324,23 @@ class PostgresWriter(TableWriter):
         return types
 
     def _coerce_row(self, table: str, columns: list[str], values: tuple) -> tuple:
-        from app.services.native_migration.copy_core import to_bool, ENUM_DEFAULTS
+        from app.services.native_migration.copy_core import (
+            to_bool, ENUM_DEFAULTS, ENUM_REMAP, convert_value,
+        )
 
         types = self._types_for(table)
         out = []
         for col, val in zip(columns, values):
             kind = types.get(col, "")
+            val = convert_value(table, col, val)
             if kind == "boolean":
-                out.append(to_bool(val))
+                out.append(to_bool(val) if val is not None else None)
             elif kind.startswith("enum:"):
                 if val is None or (isinstance(val, str) and val.strip() == ""):
                     out.append(ENUM_DEFAULTS.get((table, col)))
                 else:
-                    out.append(val)
+                    remap = ENUM_REMAP.get((table, col), {})
+                    out.append(remap.get(str(val), val))
             else:
                 out.append(val)
         return tuple(out)
@@ -453,7 +457,7 @@ def copy_tables_universal(
     source_tables = reader.source_tables()
     source_counts: dict[str, int] = {}
 
-    for table in ("users", "admins"):
+    for table in ("users", "admins", "hosts"):
         if table in source_tables:
             try:
                 source_counts[table] = sum(1 for _ in reader.fetch_rows(table, ["id"]))
@@ -532,7 +536,7 @@ def copy_tables_universal(
         writer.commit()
 
     if fail_hard:
-        for critical in ("users", "admins"):
+        for critical in ("users", "admins", "hosts"):
             src_n = source_counts.get(critical, 0)
             dst_n = stats.get(critical, 0)
             if src_n > 0 and dst_n == 0:

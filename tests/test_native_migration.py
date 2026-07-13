@@ -84,6 +84,8 @@ def test_convert_bool_values():
     assert convert_value("hosts", "random_user_agent", 1) is True
     assert convert_value("hosts", "use_sni_as_host", 0) is False
     assert convert_value("hosts", "fingerprint", "") == "none"
+    assert convert_value("hosts", "alpn", "none") == ""
+    assert convert_value("hosts", "alpn", None) == ""
     print("OK: convert_bool_values")
 
 

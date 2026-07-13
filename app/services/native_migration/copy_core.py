@@ -36,7 +36,17 @@ SKIP_TABLES = {
 ENUM_DEFAULTS = {
     ("hosts", "fingerprint"): "none",
     ("hosts", "security"): "inbound_default",
-    ("hosts", "alpn"): "none",
+    # ALPN "none" removed in modern PasarGuard — empty string = no ALPN
+    ("hosts", "alpn"): "",
+}
+
+# Marzban/old values → current PasarGuard values
+ENUM_REMAP = {
+    ("hosts", "alpn"): {
+        "none": "",
+        "None": "",
+        "NONE": "",
+    },
 }
 
 # SQLite stores these as 0/1; PostgreSQL expects boolean
@@ -85,20 +95,28 @@ def convert_value(table: str, column: str, value):
         return to_bool(value)
     if isinstance(value, bytes):
         try:
-            return value.decode("utf-8")
+            value = value.decode("utf-8")
         except Exception:
             return value
     if isinstance(value, str):
         stripped = value.strip()
-        # Empty strings are invalid for PG enums — treat as NULL (or enum default)
+        remap = ENUM_REMAP.get((table, column))
+        if remap and stripped in remap:
+            return remap[stripped]
+        # Empty strings are invalid for many PG enums — use default or NULL
         if stripped == "":
             return ENUM_DEFAULTS.get((table, column))
+        # ALPN stored as EnumArray CSV — strip obsolete "none" tokens
+        if table == "hosts" and column == "alpn" and "," in stripped:
+            parts = [p for p in stripped.split(",") if p and p.lower() != "none"]
+            return ",".join(parts)
         if stripped.startswith("{") or stripped.startswith("["):
             try:
                 json.loads(stripped)
                 return stripped
             except Exception:
                 pass
+        return stripped
     return value
 
 

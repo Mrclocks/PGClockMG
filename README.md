@@ -1,6 +1,6 @@
 # PG-Migrator
 
-**نسخه 2.0.1** — سیستم مهاجرت از پنل‌های مختلف به [PasarGuard](https://github.com/PasarGuard/panel) با ویزارد وب گرافیکی.
+**نسخه 2.0.2** — سیستم مهاجرت از پنل‌های مختلف به [PasarGuard](https://github.com/PasarGuard/panel) با ویزارد وب گرافیکی.
 
 **Languages:** Web UI — English · فارسی · Русский | Installer script — English only
 
@@ -205,6 +205,10 @@ systemctl disable pg-migrator
 ---
 
 ## Changelog
+
+### v2.0.2
+- رفع `ValueError: 'none' is not a valid ProxyHostALPN` — remap `alpn=none` → خالی
+- fail سخت اگر hosts مبدأ کپی نشوند
 
 ### v2.0.1
 - تبدیل خودکار همه booleanهای SQLite→PG (`allowinsecure`, `random_user_agent`, …) + coerce از information_schema
