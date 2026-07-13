@@ -91,6 +91,22 @@ def test_convert_bool_values():
     print("OK: convert_bool_values")
 
 
+def test_users_status_not_bool():
+    from app.services.native_migration.copy_core import (
+        convert_value, normalize_user_status, BOOL_COLUMNS,
+    )
+
+    assert "status" not in BOOL_COLUMNS
+    assert convert_value("users", "status", "active") == "active"
+    assert convert_value("users", "status", "limited") == "limited"
+    assert convert_value("users", "status", "on_hold") == "on_hold"
+    assert convert_value("users", "status", 1) == "active"
+    assert convert_value("users", "status", 0) == "disabled"
+    assert normalize_user_status("onhold") == "on_hold"
+    assert normalize_user_status("ACTIVE") == "active"
+    print("OK: users_status_not_bool")
+
+
 def test_copy_sqlite_to_sqlite_associations(tmp_path=None):
     """Offline head→head style copy including association tables + fail_hard."""
     import tempfile
@@ -293,6 +309,7 @@ if __name__ == "__main__":
     test_migration_strategy_matrix()
     test_read_alembic_from_sql_dump()
     test_convert_bool_values()
+    test_users_status_not_bool()
     test_copy_sqlite_to_sqlite_associations()
     test_nodes_zero_copy_does_not_fail()
     test_build_copy_report()

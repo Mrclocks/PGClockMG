@@ -80,9 +80,33 @@ BOOL_COLUMNS = frozenset({
     "mux_enable",
     "edit",
     "enabled",
-    "is_disabled",
-    "status",
 })
+
+# Marzban → PasarGuard user status (never coerce status as boolean)
+USER_STATUS_ALIASES = {
+    "onhold": "on_hold",
+    "on-hold": "on_hold",
+    "on hold": "on_hold",
+}
+
+
+def normalize_user_status(value):
+    """Map Marzban/SQLite user status to a PasarGuard enum string."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "active" if value else "disabled"
+    if isinstance(value, (int, float)):
+        return "active" if value else "disabled"
+    if not isinstance(value, str):
+        return str(value)
+    s = value.strip()
+    if not s:
+        return None
+    low = s.lower()
+    if low in USER_STATUS_ALIASES:
+        return USER_STATUS_ALIASES[low]
+    return low
 
 # FK columns that may be nulled on retry when parent row missing
 OPTIONAL_FK_COLUMNS: dict[str, tuple[str, ...]] = {
@@ -120,6 +144,9 @@ def convert_value(table: str, column: str, value):
     """Coerce types; neutralize obsolete Marzban tokens."""
     if value is None:
         return None
+
+    if table == "users" and column == "status":
+        return normalize_user_status(value)
 
     if column in BOOL_COLUMNS:
         return to_bool(value)

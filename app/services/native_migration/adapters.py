@@ -252,7 +252,78 @@ class MysqlWriter(TableWriter):
             password=dsn["password"],
             database=self._db,
             charset="utf8mb4",
+            autocommit=False,
         )
+        self._col_meta: dict[str, dict[str, dict]] = {}
+        self._enum_labels: dict[str, frozenset[str]] = {}
+
+    def _load_meta(self, table: str) -> dict[str, dict]:
+        if table in self._col_meta:
+            return self._col_meta[table]
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
+            ORDER BY ORDINAL_POSITION
+            """,
+            (self._db, table),
+        )
+        meta: dict[str, dict] = {}
+        for name, data_type, column_type, is_nullable in cur.fetchall():
+            entry = {
+                "data_type": data_type,
+                "column_type": column_type or "",
+                "nullable": is_nullable == "YES",
+            }
+            if data_type == "enum" and column_type:
+                labels: list[str] = []
+                inner = column_type[column_type.find("(") + 1 : column_type.rfind(")")]
+                for part in inner.split(","):
+                    part = part.strip().strip("'\"")
+                    if part:
+                        labels.append(part)
+                entry["enum_labels"] = frozenset(labels)
+            meta[name] = entry
+        self._col_meta[table] = meta
+        return meta
+
+    def _fit_mysql_enum(self, labels: frozenset[str], val, nullable: bool):
+        if val is None:
+            return None
+        if not isinstance(val, str):
+            val = str(val)
+        s = val.strip()
+        if not s:
+            return None if nullable else (sorted(labels)[0] if labels else None)
+        if s in labels:
+            return s
+        low = s.lower()
+        if low in labels:
+            return low
+        for lbl in labels:
+            if lbl.lower() == low:
+                return lbl
+        if nullable:
+            return None
+        return sorted(labels)[0] if labels else s
+
+    def _coerce_row(self, table: str, columns: list[str], values: tuple) -> tuple:
+        from app.services.native_migration.copy_core import convert_value
+
+        meta = self._load_meta(table)
+        out = []
+        for col, val in zip(columns, values):
+            val = convert_value(table, col, val)
+            col_meta = meta.get(col, {})
+            if col_meta.get("data_type") == "enum":
+                labels = col_meta.get("enum_labels") or frozenset()
+                val = self._fit_mysql_enum(
+                    labels, val, col_meta.get("nullable", True),
+                )
+            out.append(val)
+        return tuple(out)
 
     def target_columns(self, table: str) -> list[str]:
         cur = self._conn.cursor()
@@ -281,10 +352,16 @@ class MysqlWriter(TableWriter):
         return int(cur.fetchone()[0])
 
     def recover(self) -> None:
-        self._conn.rollback()
+        """Rollback failed row only — never wipe successful inserts in this table."""
+        try:
+            cur = self._conn.cursor()
+            cur.execute("ROLLBACK TO SAVEPOINT pgmig_row")
+        except Exception:
+            pass
 
     def insert(self, table: str, columns: list[str], values: tuple) -> None:
         cur = self._conn.cursor()
+        values = self._coerce_row(table, columns, values)
         try:
             cur.execute("SAVEPOINT pgmig_row")
             cols = ", ".join(f"`{c}`" for c in columns)
@@ -295,7 +372,7 @@ class MysqlWriter(TableWriter):
             try:
                 cur.execute("ROLLBACK TO SAVEPOINT pgmig_row")
             except Exception:
-                self._conn.rollback()
+                pass
             raise
 
     def _insert_plain(self, table: str, columns: list[str], values: tuple) -> None:
