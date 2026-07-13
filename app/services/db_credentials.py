@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from app.config import PASARGUARD_DATA
+from app.config import PASARGUARD_DATA, PASARGUARD_ENV
 
 Role = Literal["source", "target"]
 
@@ -51,7 +51,27 @@ def get_source_connection(params: dict) -> dict:
 
 
 def get_target_connection(params: dict) -> dict:
-    return connection_from_params(params, "target")
+    """Target identity from installed PasarGuard .env; password from wizard."""
+    wizard = connection_from_params(params, "target")
+    target_db = params.get("target_db") or wizard.get("db_type")
+    if not target_db or not PASARGUARD_ENV.exists():
+        return wizard
+
+    from app.services.env_migration import get_pasarguard_target_connection
+
+    env_conn = get_pasarguard_target_connection(
+        target_db,
+        password_override=wizard.get("password"),
+    )
+    return {
+        "db_type": target_db,
+        "user": env_conn.get("user") or wizard.get("user"),
+        "password": wizard.get("password") or env_conn.get("password"),
+        "database": env_conn.get("database") or wizard.get("database"),
+        "host": env_conn.get("host") or wizard.get("host") or "127.0.0.1",
+        "port": env_conn.get("port") or wizard.get("port") or _DEFAULT_PORTS.get(target_db),
+        "sqlite_path": env_conn.get("sqlite_path") or wizard.get("sqlite_path"),
+    }
 
 
 def migration_port(conn: dict, db_type: str) -> str:

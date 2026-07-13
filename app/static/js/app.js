@@ -64,16 +64,23 @@ function getSourceEnvSummary() {
   return analysis?.env_summary || state.systemCheck?.marzban_env || null;
 }
 
+function defaultTargetDbUser(db) {
+  if (db === 'mysql' || db === 'mariadb') return 'root';
+  if (db === 'postgresql' || db === 'timescaledb') return 'postgres';
+  return 'pasarguard';
+}
+
 function readDbCredentials(role) {
   const p = role === 'source' ? 'source' : 'target';
   const migrationPwd = getMigrationPassword(role);
   if (p === 'target') {
+    const db = getDetectedTargetDb();
     const env = state.systemCheck?.pasarguard_env || state.pasarguardEnvSummary;
     const portRaw = env?.db_port || document.getElementById('targetDbPort')?.value?.trim();
     const port = portRaw ? parseInt(portRaw, 10) : null;
     return {
-      target_db_user: 'pasarguard',
-      target_db_name: 'pasarguard',
+      target_db_user: env?.db_user || defaultTargetDbUser(db),
+      target_db_name: env?.db_name || 'pasarguard',
       target_db_host: env?.db_host || '127.0.0.1',
       target_db_port: Number.isFinite(port) ? port : null,
       target_db_password: migrationPwd,
@@ -577,12 +584,14 @@ function renderDetectedTargetDb() {
 
   const host = env?.db_host || '127.0.0.1';
   const port = env?.db_port || defaultDbPort(db) || '—';
+  const user = env?.db_user || defaultTargetDbUser(db);
+  const dbName = env?.db_name || 'pasarguard';
 
   card.innerHTML = `
     <h3>${s.title}</h3>
     <div class="detected-db-type">${dbDisplayName(db)}</div>
-    <div class="detected-db-row"><span class="label">${s.user}</span><span class="value">pasarguard</span></div>
-    <div class="detected-db-row"><span class="label">${s.dbName}</span><span class="value">pasarguard</span></div>
+    <div class="detected-db-row"><span class="label">${s.user}</span><span class="value">${user}</span></div>
+    <div class="detected-db-row"><span class="label">${s.dbName}</span><span class="value">${dbName}</span></div>
     <div class="detected-db-row"><span class="label">${s.host}</span><span class="value">${host}</span></div>
     <div class="detected-db-row"><span class="label">${s.port}</span><span class="value">${port}</span></div>
   `;
