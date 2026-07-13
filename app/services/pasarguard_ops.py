@@ -24,12 +24,29 @@ FAIL_LOG_PATTERNS = (
     "DuplicateColumnError",
     "ProgrammingError",
     "Traceback (most recent call last)",
-    "FATAL:",
     "could not connect",
     "cache lookup failed for type",
     "Application startup failed",
+    "ValueError:",
     "column \"user_template_id\" of relation \"next_plans\" already exists",
 )
+
+# Harmless lines from DB restarts — must not fail the panel health check
+BENIGN_LOG_PATTERNS = (
+    "terminating background worker",
+    "due to administrator command",
+    "checkpoint starting:",
+    "checkpoint complete:",
+    "database system is shut down",
+    "database system is ready to accept connections",
+    "shutting down",
+)
+
+
+def _line_indicates_failure(line: str) -> bool:
+    if any(b in line for b in BENIGN_LOG_PATTERNS):
+        return False
+    return any(p in line for p in FAIL_LOG_PATTERNS)
 
 DB_SERVICES = {
     "timescaledb": ("timescaledb", "postgresql"),
@@ -63,13 +80,13 @@ def _target_conn(migrator) -> dict:
 
 def _log_failures_from_output(migrator, output: str) -> None:
     for line in (output or "").splitlines():
-        if any(p in line for p in FAIL_LOG_PATTERNS):
+        if _line_indicates_failure(line):
             migrator.job.log(line)
 
 
 def _extract_failure_snippet(output: str) -> str:
     lines = (output or "").splitlines()
-    hits = [ln for ln in lines if any(p in ln for p in FAIL_LOG_PATTERNS)]
+    hits = [ln for ln in lines if _line_indicates_failure(ln)]
     if hits:
         return "\n".join(hits[-12:])
     return (output or "")[-2000:]
@@ -85,8 +102,11 @@ async def fetch_compose_logs(migrator, services: list[str], tail: int = 200) -> 
     return out if ok else ""
 
 
-async def fetch_pasarguard_logs(migrator, tail: int = 150) -> str:
+async def fetch_pasarguard_logs(migrator, tail: int = 150, *, include_db: bool = False) -> str:
+    """Panel logs only by default — DB restart FATAL lines are not panel failures."""
     pg = await fetch_compose_logs(migrator, ["pasarguard"], tail=tail)
+    if not include_db:
+        return pg
     target_db = migrator.params.get("target_db")
     db_svc = resolve_db_service(target_db) if target_db else None
     if db_svc:
@@ -96,9 +116,11 @@ async def fetch_pasarguard_logs(migrator, tail: int = 150) -> str:
 
 
 def _check_logs_for_failure(output: str) -> str | None:
-    for pattern in FAIL_LOG_PATTERNS:
-        if pattern in (output or ""):
-            return pattern
+    for line in (output or "").splitlines():
+        if _line_indicates_failure(line):
+            for pattern in FAIL_LOG_PATTERNS:
+                if pattern in line:
+                    return pattern
     return None
 
 
@@ -125,9 +147,18 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 120) -> None:
 
         hit = _check_logs_for_failure(out)
         if hit:
+            db_hint = ""
+            target_db = migrator.params.get("target_db")
+            if target_db in ("postgresql", "timescaledb"):
+                db_svc = resolve_db_service(target_db)
+                if db_svc:
+                    db_logs = await fetch_compose_logs(migrator, [db_svc], tail=40)
+                    if db_logs.strip():
+                        db_hint = f"\n\n--- {db_svc} (reference) ---\n{db_logs[-1500:]}"
             raise RuntimeError(
                 "PasarGuard failed to start — see container logs.\n"
                 + _extract_failure_snippet(out)
+                + db_hint
             )
 
         if not await _pasarguard_container_running(migrator):
@@ -223,13 +254,13 @@ async def wait_pasarguard_ready(migrator, max_wait: int = 90, strict: bool = Fal
 
     for attempt in range(max(1, max_wait // 3)):
         out = await fetch_pasarguard_logs(migrator, tail=100)
-        for pattern in FAIL_LOG_PATTERNS:
-            if pattern in (out or ""):
-                if strict:
-                    raise RuntimeError(
-                        "PasarGuard startup error:\n" + _extract_failure_snippet(out)
-                    )
-                migrator.job.log(f"Detected PasarGuard log error: {pattern}")
+        hit = _check_logs_for_failure(out)
+        if hit:
+            if strict:
+                raise RuntimeError(
+                    "PasarGuard startup error:\n" + _extract_failure_snippet(out)
+                )
+            migrator.job.log(f"Detected PasarGuard log error: {hit}")
 
         if any(marker in (out or "") for marker in STARTUP_MARKERS):
             migrator.job.log("PasarGuard ready")

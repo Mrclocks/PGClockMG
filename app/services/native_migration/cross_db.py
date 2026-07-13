@@ -56,9 +56,10 @@ async def _stop_panel(migrator) -> None:
 
 
 async def _flush_pg_type_caches(migrator, target_db: str) -> None:
-    """After DROP SCHEMA CASCADE, PgBouncer keeps stale enum OIDs → cache lookup failed.
+    """After DROP SCHEMA CASCADE, PgBouncer keeps stale enum OIDs.
 
-    Restart pgbouncer (and postgres if present) so PasarGuard gets fresh type OIDs.
+    Only restart pgbouncer — restarting TimescaleDB/PostgreSQL is unnecessary
+    and produces scary benign FATAL lines in logs.
     """
     import asyncio
     import re
@@ -69,20 +70,14 @@ async def _flush_pg_type_caches(migrator, target_db: str) -> None:
     from app.services.pasarguard_ops import _compose_text
 
     text = _compose_text()
-    for svc in ("pgbouncer", "postgresql", "timescaledb"):
-        if svc == "timescaledb" and target_db != "timescaledb":
-            continue
-        if svc == "postgresql" and target_db == "timescaledb":
-            continue
-        if not re.search(rf"^\s*{re.escape(svc)}\s*:", text, re.M):
-            continue
-        migrator.job.log(f"Restarting {svc} to clear PG type/OID cache...")
+    if re.search(r"^\s*pgbouncer\s*:", text, re.M):
+        migrator.job.log("Restarting pgbouncer to clear PG type/OID cache...")
         await migrator._run_cmd(
-            ["docker", "compose", "restart", svc],
+            ["docker", "compose", "restart", "pgbouncer"],
             cwd=cwd,
             timeout=120,
         )
-    await asyncio.sleep(5)
+        await asyncio.sleep(5)
     service = resolve_db_service(target_db)
     if service:
         await _wait_db_service(migrator, target_db, service)
