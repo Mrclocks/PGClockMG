@@ -50,11 +50,14 @@ class PasarguardDbMigrator(BaseMigrator):
         await safe_start_pasarguard(self)
 
         self.job.set_progress(100, "Database migration completed")
-        return {
+        out = {
             "panel_url": self._get_panel_url(),
             "subscription_mode": "native",
             "method": f"{source_db} → {target_db}",
         }
+        if self.copy_report:
+            out["copy_report"] = self.copy_report
+        return out
 
     def _detect_source_path(self, db_type: str) -> str | None:
         if db_type == "sqlite":

@@ -40,6 +40,7 @@ class BaseMigrator(ABC):
     def __init__(self, job: MigrationJob, params: dict | None = None):
         self.job = job
         self.params = params or {}
+        self.copy_report: dict | None = None
 
     @abstractmethod
     async def run(self, params: dict) -> dict:

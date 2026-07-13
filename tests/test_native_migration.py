@@ -142,7 +142,7 @@ def test_copy_sqlite_to_sqlite_associations(tmp_path=None):
         writer = create_writer("sqlite", {"sqlite_path": dst}, dst)
         logs = []
         try:
-            stats = copy_tables_universal(reader, writer, logs.append, fail_hard=True)
+            stats, _report = copy_tables_universal(reader, writer, logs.append, fail_hard=True)
         finally:
             reader.close()
             writer.close()
@@ -175,7 +175,7 @@ def test_copy_sqlite_to_sqlite_associations(tmp_path=None):
             try:
                 raised = False
                 try:
-                    copy_tables_universal(r2, w2, logs.append, fail_hard=True)
+                    copy_tables_universal(r2, w2, logs.append, fail_hard=True)[0]
                 except RuntimeError as exc:
                     raised = True
                     assert "users" in str(exc)
@@ -238,7 +238,7 @@ def test_nodes_zero_copy_does_not_fail(tmp_path=None):
         reader = create_reader("sqlite", src, {})
         writer = create_writer("sqlite", {"sqlite_path": dst}, dst)
         try:
-            stats = copy_tables_universal(reader, writer, logs.append, fail_hard=True)
+            stats, _report = copy_tables_universal(reader, writer, logs.append, fail_hard=True)
         finally:
             reader.close()
             writer.close()
@@ -251,6 +251,22 @@ def test_nodes_zero_copy_does_not_fail(tmp_path=None):
     finally:
         os.unlink(src)
         os.unlink(dst)
+
+
+def test_build_copy_report():
+    from app.services.native_migration.adapters import build_copy_report
+
+    report = build_copy_report(
+        {"nodes": 5, "users": 10, "hosts": 3},
+        {"nodes": 0, "users": 10, "hosts": 2},
+    )
+    assert report["has_gaps"] is True
+    tables = {x["table"] for x in report["incomplete"]}
+    assert tables == {"nodes", "hosts"}
+    assert report["incomplete"][0]["missing"] == 5 or any(
+        i["table"] == "nodes" and i["missing"] == 5 for i in report["incomplete"]
+    )
+    print("OK: build_copy_report")
 
 
 def test_sanitize_env_text_for_docker():
@@ -279,6 +295,7 @@ if __name__ == "__main__":
     test_convert_bool_values()
     test_copy_sqlite_to_sqlite_associations()
     test_nodes_zero_copy_does_not_fail()
+    test_build_copy_report()
     test_sanitize_env_text_for_docker()
     test_native_migration_import()
     print("\nAll native migration tests passed.")

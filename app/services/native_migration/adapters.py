@@ -480,34 +480,54 @@ CRITICAL_TABLES = ("users", "hosts", "admins")
 OPTIONAL_TABLES = ("nodes", "core_configs", "groups")
 
 
+def _count_source_rows(reader: TableReader, table: str) -> int:
+    if table not in reader.source_tables():
+        return 0
+    try:
+        cols = reader.source_columns(table)
+        if not cols:
+            return 0
+        key_col = "id" if "id" in cols else cols[0]
+        return sum(1 for _ in reader.fetch_rows(table, [key_col]))
+    except Exception:
+        return -1
+
+
+def build_copy_report(
+    source_counts: dict[str, int],
+    stats: dict[str, int],
+) -> dict:
+    """Summarize tables that were not fully copied (for post-migration UI)."""
+    incomplete: list[dict] = []
+    for table in TABLE_ORDER:
+        src = source_counts.get(table, 0)
+        if src <= 0:
+            continue
+        copied = stats.get(table, 0)
+        if copied < src:
+            incomplete.append({
+                "table": table,
+                "source": src,
+                "copied": copied,
+                "missing": src - copied,
+            })
+    return {"incomplete": incomplete, "has_gaps": bool(incomplete)}
+
+
 def copy_tables_universal(
     reader: TableReader,
     writer: TableWriter,
     log: Callable[[str], None],
     source_version: str | None = None,
     fail_hard: bool = True,
-) -> dict[str, int]:
+) -> tuple[dict[str, int], dict]:
     """Copy shared PasarGuard/Marzban tables from any reader to any writer."""
     stats: dict[str, int] = {}
     source_tables = reader.source_tables()
-    source_counts: dict[str, int] = {}
-
-    for table in (
-        "users", "admins", "hosts", "nodes", "core_configs", "groups",
-    ):
-        if table in source_tables:
-            try:
-                source_counts[table] = sum(1 for _ in reader.fetch_rows(table, ["id"]))
-            except Exception:
-                # Fallback: try without id column
-                try:
-                    cols = reader.source_columns(table)
-                    if cols:
-                        source_counts[table] = sum(1 for _ in reader.fetch_rows(table, [cols[0]]))
-                    else:
-                        source_counts[table] = 0
-                except Exception:
-                    source_counts[table] = -1
+    source_counts: dict[str, int] = {
+        t: _count_source_rows(reader, t) for t in TABLE_ORDER
+    }
+    source_counts = {k: v for k, v in source_counts.items() if v > 0}
 
     for table in TABLE_ORDER:
         if table in SKIP_TABLES or table not in source_tables:
@@ -590,4 +610,5 @@ def copy_tables_universal(
                     "Configure manually in PasarGuard/pg-node if needed."
                 )
 
-    return stats
+    report = build_copy_report(source_counts, stats)
+    return stats, report

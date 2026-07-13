@@ -188,7 +188,7 @@ def _run_copy(sqlite_path: Path, target_db: str, dsn: dict) -> dict:
     try:
         return copy_tables_universal(
             reader, writer, logs.append, source_version="deadbeefcafe", fail_hard=True,
-        )
+        )[0]
     finally:
         reader.close()
         writer.close()
@@ -392,7 +392,7 @@ def test_savepoint_recovers_bad_row():
             writer = create_writer("postgresql", dsn)
             logs: list[str] = []
             try:
-                stats = copy_tables_universal(
+                stats, _report = copy_tables_universal(
                     reader, writer, logs.append, fail_hard=False,
                 )
             finally:

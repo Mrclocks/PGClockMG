@@ -40,9 +40,10 @@ async def copy_database_universal(
 
     try:
         migrator.job.log(f"Universal copy: {source_db} → {target_db}")
-        stats = copy_tables_universal(
+        stats, report = copy_tables_universal(
             reader, writer, log, source_version, fail_hard=fail_hard,
         )
+        migrator.copy_report = report
         total = sum(v for v in stats.values() if isinstance(v, int) and v >= 0)
         migrator.job.log(
             f"Copy complete: {total} rows across {len(stats)} tables "

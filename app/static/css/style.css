@@ -889,6 +889,71 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
   border-bottom: 1px solid var(--border);
 }
 
+.post-migrate {
+  margin-top: 28px;
+  text-align: right;
+  max-width: 520px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.post-migrate-tip {
+  padding: 14px 16px;
+  background: rgba(59, 130, 246, 0.08);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 0.9rem;
+  line-height: 1.65;
+  margin-bottom: 20px;
+}
+
+.post-migrate-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--warning);
+  margin-bottom: 12px;
+  text-align: right;
+}
+
+.incomplete-transfer-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.incomplete-transfer-card {
+  padding: 12px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: var(--radius-sm);
+  text-align: right;
+}
+
+.incomplete-transfer-card .itc-name {
+  font-weight: 600;
+  font-size: 0.85rem;
+  margin-bottom: 6px;
+  color: var(--text);
+}
+
+.incomplete-transfer-card .itc-stat {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.incomplete-transfer-card .itc-missing {
+  color: var(--warning);
+  font-weight: 500;
+}
+
+[dir="ltr"] .post-migrate,
+[dir="ltr"] .post-migrate-title,
+[dir="ltr"] .incomplete-transfer-card {
+  text-align: left;
+}
+
 /* Footer */
 .footer {
   margin-top: 40px;

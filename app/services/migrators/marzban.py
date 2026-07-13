@@ -400,13 +400,16 @@ class MarzbanMigrator(BaseMigrator):
     def _result(self, method: str, target_db: str) -> dict:
         env_text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.exists() else None
         port = read_env_var(env_text, "UVICORN_PORT") if env_text else None
-        return {
+        out = {
             "panel_url": self._get_panel_url(),
             "panel_port": port or "8000",
             "subscription_mode": "native",
             "method": method,
             "target_db": target_db,
         }
+        if self.copy_report:
+            out["copy_report"] = self.copy_report
+        return out
 
     def _get_panel_url(self) -> str:
         env_text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.exists() else None

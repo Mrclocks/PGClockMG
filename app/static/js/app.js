@@ -1009,6 +1009,65 @@ async function pollStatus(jobId) {
   }, 2000);
 }
 
+function transferTableLabel(tableId) {
+  const key = `step6.transferTables.${tableId}`;
+  const lbl = t(key);
+  return lbl !== key ? lbl : tableId;
+}
+
+function fmtMsg(template, vars) {
+  let s = template;
+  Object.entries(vars).forEach(([k, v]) => {
+    s = s.replace(new RegExp(`\\{${k}\\}`, 'g'), String(v));
+  });
+  return s;
+}
+
+function renderPostMigrateSection(result) {
+  const section = document.getElementById('postMigrateSection');
+  const tipEl = document.getElementById('groupBulkTip');
+  const titleEl = document.getElementById('incompleteTransferTitle');
+  const grid = document.getElementById('incompleteTransferGrid');
+  if (!section || !tipEl || !grid) return;
+
+  const panelId = state.selectedPanel?.id;
+  const showGroupTip = panelId === 'marzban' || panelId === 'pasarguard';
+  const report = result?.copy_report;
+  const incomplete = report?.incomplete || [];
+
+  if (!showGroupTip && !incomplete.length) {
+    section.classList.add('hidden');
+    return;
+  }
+
+  section.classList.remove('hidden');
+  tipEl.textContent = showGroupTip ? t('step6.groupBulkTip') : '';
+  tipEl.classList.toggle('hidden', !showGroupTip);
+
+  if (!incomplete.length) {
+    titleEl.classList.add('hidden');
+    grid.innerHTML = '';
+    return;
+  }
+
+  titleEl.classList.remove('hidden');
+  titleEl.textContent = t('step6.incompleteTitle');
+  grid.innerHTML = incomplete.map((item) => {
+    const name = transferTableLabel(item.table);
+    const copied = fmtMsg(t('step6.incompleteCopied'), {
+      copied: item.copied,
+      source: item.source,
+    });
+    const missing = fmtMsg(t('step6.incompleteMissing'), { missing: item.missing });
+    return `
+      <div class="incomplete-transfer-card">
+        <div class="itc-name">${name}</div>
+        <div class="itc-stat">${copied}</div>
+        <div class="itc-stat itc-missing">${missing}</div>
+      </div>`;
+  }).join('');
+}
+
 function showSuccess(result) {
   goStep(6);
   document.getElementById('resultSuccess').classList.remove('hidden');
@@ -1036,6 +1095,7 @@ function showSuccess(result) {
     details += `<p>${result.users_migrated} / ${result.users_total} users</p>`;
   }
   document.getElementById('resultDetails').innerHTML = details;
+  renderPostMigrateSection(result);
 }
 
 function showError(msg, logs) {
