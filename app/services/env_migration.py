@@ -36,6 +36,22 @@ def mask_password(value: str) -> str:
     return value[0] + ("•" * (len(value) - 2)) + value[-1]
 
 
+def migration_primary_key(candidates: list[dict], db_type: str | None) -> str | None:
+    if not candidates:
+        return None
+    if db_type in ("mysql", "mariadb"):
+        order = ["MYSQL_ROOT_PASSWORD", "MYSQL_PASSWORD", "DB_PASSWORD"]
+    elif db_type in ("postgresql", "timescaledb"):
+        order = ["POSTGRES_PASSWORD", "DB_PASSWORD"]
+    else:
+        order = ["DB_PASSWORD", "MYSQL_ROOT_PASSWORD", "MYSQL_PASSWORD", "POSTGRES_PASSWORD"]
+    keys = {c["key"] for c in candidates}
+    for key in order:
+        if key in keys:
+            return key
+    return candidates[0]["key"]
+
+
 def extract_env_password_candidates(text: str, db_type: str | None = None) -> list[dict]:
     """Return distinct password keys/values found in a panel .env file."""
     if not text:
@@ -64,6 +80,10 @@ def extract_env_password_candidates(text: str, db_type: str | None = None) -> li
             "quoted_preview": f'"{mask_password(val)}"',
             "duplicate_value": dup,
         })
+
+    primary = migration_primary_key(candidates, db_type)
+    for c in candidates:
+        c["used_for_migration"] = c["key"] == primary
     return candidates
 
 

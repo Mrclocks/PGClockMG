@@ -130,8 +130,11 @@ const I18N = {
     dbCred: {
       sourceHint: 'Open your Marzban .env on the server, copy DB values, and paste them below.',
       targetHint: 'Passwords were read from PasarGuard .env — confirm each value below.',
-      confirmTitle: 'Passwords found in .env — confirm each one',
-      confirmHint: 'Check every password you see in .env to confirm it is correct.',
+      confirmTitle: 'Passwords from .env — edit if needed, then confirm',
+      confirmHint: 'Confirm every password below. The one marked “used for migration” is sent to the migrator.',
+      confirmBtn: 'Confirm',
+      confirmedBtn: 'Confirmed',
+      usedForMigration: 'Used for migration',
       sourceCmd: 'nano /opt/marzban/.env',
       targetCmd: 'sudo nano /opt/pasarguard/.env',
       user: 'DB user',
@@ -326,8 +329,11 @@ const I18N = {
     dbCred: {
       sourceHint: 'فایل .env مرزبان را با nano باز کنید، مقادیر دیتابیس را کپی و در فیلدهای زیر وارد کنید.',
       targetHint: 'رمزها از .env پاسارگارد خوانده شد — هر کدام را تأیید کنید.',
-      confirmTitle: 'رمزهای یافت‌شده در .env — هر کدام را تأیید کنید',
-      confirmHint: 'هر رمزی که در .env می‌بینید را تیک بزنید تا درست بودنش را تأیید کنید.',
+      confirmTitle: 'رمزهای .env — در صورت نیاز ویرایش کنید و تأیید بزنید',
+      confirmHint: 'هر رمز را تأیید کنید. رمزی که «برای مهاجرت» مشخص شده به موتور مهاجرت ارسال می‌شود.',
+      confirmBtn: 'تأیید',
+      confirmedBtn: 'تأیید شد',
+      usedForMigration: 'برای مهاجرت',
       sourceCmd: 'nano /opt/marzban/.env',
       targetCmd: 'sudo nano /opt/pasarguard/.env',
       user: 'کاربر DB',
@@ -522,8 +528,11 @@ const I18N = {
     dbCred: {
       sourceHint: 'Откройте .env Marzban через nano, скопируйте данные БД и введите ниже.',
       targetHint: 'Пароли прочитаны из .env PasarGuard — подтвердите каждый.',
-      confirmTitle: 'Пароли в .env — подтвердите каждый',
-      confirmHint: 'Отметьте каждый пароль из .env, чтобы подтвердить правильность.',
+      confirmTitle: 'Пароли из .env — при необходимости измените и подтвердите',
+      confirmHint: 'Подтвердите каждый пароль. Пароль «для миграции» передаётся в движок.',
+      confirmBtn: 'Подтвердить',
+      confirmedBtn: 'Подтверждено',
+      usedForMigration: 'Для миграции',
       sourceCmd: 'nano /opt/marzban/.env',
       targetCmd: 'sudo nano /opt/pasarguard/.env',
       user: 'Пользователь БД',
@@ -656,8 +665,7 @@ function applyI18n() {
   document.querySelector('#resultError h2') && (document.querySelector('#resultError h2').textContent = t('step6.error'));
   const credLabels = [
     ['lblSourceDbUser', 'dbCred.user'], ['lblSourceDbName', 'dbCred.dbName'], ['lblSourceDbHost', 'dbCred.host'],
-    ['lblSourceDbPort', 'dbCred.port'], ['lblSourceDbPassword', 'dbCred.password'],
-    ['lblTargetDbPassword', 'dbCred.password'],
+    ['lblSourceDbPort', 'dbCred.port'],
   ];
   credLabels.forEach(([id, key]) => {
     const el = document.getElementById(id);

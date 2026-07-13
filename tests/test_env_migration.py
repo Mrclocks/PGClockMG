@@ -74,6 +74,8 @@ MYSQL_ROOT_PASSWORD = "rootpass"
     assert "MYSQL_ROOT_PASSWORD" in keys
     assert "DB_PASSWORD" in keys
     assert pick_primary_env_password(cands, "mysql") == "rootpass"
+    assert cands[0]["used_for_migration"] is True
+    assert cands[1]["used_for_migration"] is False
     print("OK: password candidates")
 
 

@@ -1063,40 +1063,106 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
   font-size: 0.78rem;
   font-weight: 600;
   color: var(--text-muted);
-  margin-bottom: 10px;
+  margin-bottom: 12px;
 }
 
-.pwd-candidate-row {
+.pwd-field-row {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.pwd-field-row:last-of-type { border-bottom: none; }
+
+.pwd-field-row.confirmed .pwd-field-input {
+  border-color: rgba(16, 185, 129, 0.45);
+  background: rgba(16, 185, 129, 0.06);
+}
+
+.pwd-field-head {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--border);
-  cursor: pointer;
-  font-size: 0.84rem;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
 }
 
-.pwd-candidate-row:last-child { border-bottom: none; }
+.pwd-migration-badge {
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--primary);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+}
 
-.pwd-candidate-row input[type="checkbox"] {
-  width: 16px;
-  height: 16px;
-  accent-color: var(--primary);
+.pwd-field-controls {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.pwd-field-input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-family: ui-monospace, 'Cascadia Code', monospace;
+  font-size: 0.85rem;
+  direction: ltr;
+  text-align: left;
+}
+
+.pwd-field-input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-glow);
+}
+
+.pwd-field-input[readonly] {
+  opacity: 0.92;
+  cursor: default;
+}
+
+.btn-confirm-pwd {
   flex-shrink: 0;
+  padding: 10px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--primary);
+  background: rgba(59, 130, 246, 0.1);
+  color: var(--primary);
+  font-family: var(--font);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s;
+}
+
+.btn-confirm-pwd:hover:not(.is-confirmed) {
+  background: var(--primary);
+  color: white;
+}
+
+.btn-confirm-pwd.is-confirmed {
+  border-color: var(--success);
+  background: var(--success-bg);
+  color: var(--success);
+  cursor: default;
+}
+
+.pwd-field-hint {
+  margin-top: 10px;
 }
 
 .pwd-candidate-key {
   font-family: ui-monospace, monospace;
   font-size: 0.75rem;
   color: var(--text-dim);
-  min-width: 140px;
-}
-
-.pwd-candidate-val {
-  font-family: ui-monospace, monospace;
-  font-size: 0.8rem;
-  color: var(--text);
-  direction: ltr;
+  font-weight: 600;
 }
 
 .env-summary-grid {
@@ -1123,4 +1189,6 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
   .step-label { font-size: 0.55rem; max-width: 56px; }
   .welcome-card { padding: 20px 18px; }
   .install-cmd-row { flex-direction: column; }
+  .pwd-field-controls { flex-direction: column; }
+  .btn-confirm-pwd { width: 100%; }
 }

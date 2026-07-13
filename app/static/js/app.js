@@ -28,6 +28,8 @@ const state = {
   targetPasswordCandidates: [],
   sourcePwdConfirmed: {},
   targetPwdConfirmed: {},
+  sourcePwdValues: {},
+  targetPwdValues: {},
 };
 
 function panelLatinName(panel) {
@@ -59,6 +61,7 @@ function togglePassword(inputId, btn) {
 
 function readDbCredentials(role) {
   const p = role === 'source' ? 'source' : 'target';
+  const migrationPwd = getMigrationPassword(role);
   if (p === 'target') {
     const env = state.systemCheck?.pasarguard_env || state.pasarguardEnvSummary;
     const portRaw = env?.db_port || document.getElementById('targetDbPort')?.value?.trim();
@@ -68,7 +71,7 @@ function readDbCredentials(role) {
       target_db_name: 'pasarguard',
       target_db_host: env?.db_host || '127.0.0.1',
       target_db_port: Number.isFinite(port) ? port : null,
-      target_db_password: document.getElementById('targetDbPassword')?.value || null,
+      target_db_password: migrationPwd,
     };
   }
   const portRaw = document.getElementById(`${p}DbPort`)?.value?.trim();
@@ -78,20 +81,61 @@ function readDbCredentials(role) {
     [`${p}_db_name`]: document.getElementById(`${p}DbName`)?.value?.trim() || null,
     [`${p}_db_host`]: document.getElementById(`${p}DbHost`)?.value?.trim() || '127.0.0.1',
     [`${p}_db_port`]: Number.isFinite(port) ? port : null,
-    [`${p}_db_password`]: document.getElementById(`${p}DbPassword`)?.value || null,
+    [`${p}_db_password`]: migrationPwd,
   };
+}
+
+function pwdValuesMap(role) {
+  return role === 'source' ? state.sourcePwdValues : state.targetPwdValues;
+}
+
+function pwdConfirmedMap(role) {
+  return role === 'source' ? state.sourcePwdConfirmed : state.targetPwdConfirmed;
+}
+
+function getPasswordRows(role) {
+  const db = role === 'source' ? state.sourceDb : getDetectedTargetDb();
+  let rows = role === 'source' ? state.sourcePasswordCandidates : state.targetPasswordCandidates;
+  if (!rows?.length && dbNeedsPassword(db)) {
+    const key = db === 'mysql' || db === 'mariadb'
+      ? 'MYSQL_ROOT_PASSWORD'
+      : db === 'postgresql' || db === 'timescaledb'
+        ? 'POSTGRES_PASSWORD'
+        : 'DB_PASSWORD';
+    rows = [{ key, value: '', used_for_migration: true }];
+  }
+  return rows || [];
+}
+
+function getMigrationPassword(role) {
+  const db = role === 'source' ? state.sourceDb : getDetectedTargetDb();
+  const rows = getPasswordRows(role);
+  const values = pwdValuesMap(role);
+  const confirmed = pwdConfirmedMap(role);
+
+  const migrationRow = rows.find(r => r.used_for_migration && confirmed[r.key]);
+  if (migrationRow) {
+    const val = (values[migrationRow.key] ?? migrationRow.value ?? '').trim();
+    if (val) return val;
+  }
+
+  const order = db === 'mysql' || db === 'mariadb'
+    ? ['MYSQL_ROOT_PASSWORD', 'MYSQL_PASSWORD', 'DB_PASSWORD']
+    : db === 'postgresql' || db === 'timescaledb'
+      ? ['POSTGRES_PASSWORD', 'DB_PASSWORD']
+      : ['DB_PASSWORD', 'MYSQL_ROOT_PASSWORD', 'MYSQL_PASSWORD', 'POSTGRES_PASSWORD'];
+
+  for (const key of order) {
+    if (confirmed[key] && (values[key] ?? '').trim()) return values[key].trim();
+  }
+  return null;
 }
 
 function hasDbCredentials(role) {
   const db = role === 'source' ? state.sourceDb : state.targetDb;
   if (!dbNeedsPassword(db)) return true;
   if (!passwordCandidatesConfirmed(role)) return false;
-  const c = readDbCredentials(role);
-  const prefix = role === 'source' ? 'source' : 'target';
-  if (role === 'target') {
-    return !!c.target_db_password;
-  }
-  return !!(c[`${prefix}_db_user`] && c[`${prefix}_db_name`] && c[`${prefix}_db_password`]);
+  return !!getMigrationPassword(role);
 }
 
 function getSourcePasswordCandidates() {
@@ -110,77 +154,100 @@ function getTargetPasswordCandidates() {
   return [];
 }
 
-function pickPrimaryPassword(candidates, dbType) {
-  if (!candidates?.length) return null;
-  const order = dbType === 'mysql' || dbType === 'mariadb'
-    ? ['MYSQL_ROOT_PASSWORD', 'MYSQL_PASSWORD', 'DB_PASSWORD']
-    : dbType === 'postgresql' || dbType === 'timescaledb'
-      ? ['POSTGRES_PASSWORD', 'DB_PASSWORD']
-      : ['DB_PASSWORD', 'MYSQL_ROOT_PASSWORD', 'MYSQL_PASSWORD', 'POSTGRES_PASSWORD'];
-  const byKey = Object.fromEntries(candidates.map(c => [c.key, c.value]));
-  for (const key of order) {
-    if (byKey[key]) return { key, value: byKey[key] };
-  }
-  return { key: candidates[0].key, value: candidates[0].value };
+function copyTextToClipboard(text) {
+  const rows = getPasswordRows(role);
+  if (!rows.length) return true;
+  const confirmed = pwdConfirmedMap(role);
+  return rows.every(r => confirmed[r.key] && (pwdValuesMap(role)[r.key] ?? r.value ?? '').trim());
 }
 
-function passwordCandidatesConfirmed(role) {
-  const candidates = role === 'source' ? state.sourcePasswordCandidates : state.targetPasswordCandidates;
-  if (!candidates?.length) return true;
-  const confirmed = role === 'source' ? state.sourcePwdConfirmed : state.targetPwdConfirmed;
-  return candidates.every(c => confirmed[c.key]);
+function pwdFieldId(role, key) {
+  return `pwd-${role}-${key}`;
 }
 
 function renderPasswordCandidates(role) {
   const isSource = role === 'source';
   const container = document.getElementById(isSource ? 'sourcePasswordCandidates' : 'targetPasswordCandidates');
-  const pwdInput = document.getElementById(isSource ? 'sourceDbPassword' : 'targetDbPassword');
   if (!container) return;
 
   const db = isSource ? state.sourceDb : getDetectedTargetDb();
-  const candidates = isSource ? getSourcePasswordCandidates() : getTargetPasswordCandidates();
+  let candidates = isSource ? getSourcePasswordCandidates() : getTargetPasswordCandidates();
+  if (!candidates.length && dbNeedsPassword(db)) {
+    const key = db === 'mysql' || db === 'mariadb'
+      ? 'MYSQL_ROOT_PASSWORD'
+      : db === 'postgresql' || db === 'timescaledb'
+        ? 'POSTGRES_PASSWORD'
+        : 'DB_PASSWORD';
+    candidates = [{ key, value: '', used_for_migration: true }];
+  }
+
   if (isSource) state.sourcePasswordCandidates = candidates;
   else state.targetPasswordCandidates = candidates;
 
-  if (!candidates.length) {
+  const values = pwdValuesMap(role);
+  const confirmed = pwdConfirmedMap(role);
+
+  if (!dbNeedsPassword(db)) {
     container.classList.add('hidden');
     container.innerHTML = '';
     return;
   }
 
-  const confirmed = isSource ? state.sourcePwdConfirmed : state.targetPwdConfirmed;
   container.innerHTML = `
     <div class="pwd-candidates-title">${t('dbCred.confirmTitle')}</div>
-    ${candidates.map(c => `
-      <label class="pwd-candidate-row">
-        <input type="checkbox" data-role="${role}" data-key="${c.key}"
-          ${confirmed[c.key] ? 'checked' : ''}
-          onchange="onPasswordCandidateConfirm('${role}', '${c.key}')">
-        <span class="pwd-candidate-key">${c.key}</span>
-        <code class="pwd-candidate-val">${c.quoted_preview || `"${c.masked}"`}</code>
-      </label>`).join('')}
-    <p class="check-detail" style="margin-top:8px">${t('dbCred.confirmHint')}</p>`;
-  container.classList.remove('hidden');
+    ${candidates.map(c => {
+      const fid = pwdFieldId(role, c.key);
+      const isConfirmed = !!confirmed[c.key];
+      return `
+      <div class="pwd-field-row ${isConfirmed ? 'confirmed' : ''}" data-role="${role}" data-key="${c.key}">
+        <div class="pwd-field-head">
+          <span class="pwd-candidate-key">${c.key}</span>
+          ${c.used_for_migration ? `<span class="pwd-migration-badge">${t('dbCred.usedForMigration')}</span>` : ''}
+        </div>
+        <div class="pwd-field-controls">
+          <input type="text" class="pwd-field-input" id="${fid}" data-role="${role}" data-key="${c.key}"
+            autocomplete="off" spellcheck="false" ${isConfirmed ? 'readonly' : ''}>
+          <button type="button" class="btn btn-confirm-pwd ${isConfirmed ? 'is-confirmed' : ''}"
+            data-role="${role}" data-key="${c.key}" onclick="confirmPasswordField('${role}', '${c.key}')">
+            ${isConfirmed ? t('dbCred.confirmedBtn') : t('dbCred.confirmBtn')}
+          </button>
+        </div>
+      </div>`;
+    }).join('')}
+    <p class="check-detail pwd-field-hint">${t('dbCred.confirmHint')}</p>`;
 
-  const primary = pickPrimaryPassword(candidates, db);
-  if (primary && pwdInput && !pwdInput.dataset.userEdited) {
-    pwdInput.value = primary.value;
-  }
+  candidates.forEach(c => {
+    const input = document.getElementById(pwdFieldId(role, c.key));
+    if (!input) return;
+    const val = values[c.key] ?? c.value ?? '';
+    input.value = val;
+    if (!values[c.key] && c.value) values[c.key] = c.value;
+    input.addEventListener('input', () => {
+      values[c.key] = input.value;
+      if (confirmed[c.key]) {
+        confirmed[c.key] = false;
+        renderPasswordCandidates(role);
+      } else {
+        updateStepButtons();
+      }
+    });
+  });
+
+  container.classList.remove('hidden');
 }
 
-function onPasswordCandidateConfirm(role, key) {
-  const confirmed = role === 'source' ? state.sourcePwdConfirmed : state.targetPwdConfirmed;
-  const cb = document.querySelector(`input[data-role="${role}"][data-key="${key}"]`);
-  confirmed[key] = !!cb?.checked;
-
-  const candidates = role === 'source' ? state.sourcePasswordCandidates : state.targetPasswordCandidates;
-  const db = role === 'source' ? state.sourceDb : getDetectedTargetDb();
-  const primary = pickPrimaryPassword(candidates, db);
-  const pwdInput = document.getElementById(role === 'source' ? 'sourceDbPassword' : 'targetDbPassword');
-  if (pwdInput && primary && passwordCandidatesConfirmed(role)) {
-    pwdInput.value = primary.value;
-    pwdInput.dataset.userEdited = '';
+function confirmPasswordField(role, key) {
+  const values = pwdValuesMap(role);
+  const confirmed = pwdConfirmedMap(role);
+  const input = document.getElementById(pwdFieldId(role, key));
+  const val = input?.value?.trim();
+  if (!val) {
+    input?.focus();
+    return;
   }
+  values[key] = val;
+  confirmed[key] = true;
+  renderPasswordCandidates(role);
   updateStepButtons();
 }
 
@@ -269,17 +336,11 @@ function applySourceEnvDefaults() {
 }
 
 function setupCredentialListeners() {
-  [
-    'sourceDbUser', 'sourceDbName', 'sourceDbHost', 'sourceDbPort', 'sourceDbPassword',
-    'targetDbPassword',
-  ].forEach((id) => {
+  ['sourceDbUser', 'sourceDbName', 'sourceDbHost', 'sourceDbPort'].forEach((id) => {
     const el = document.getElementById(id);
     if (!el || el.dataset.bound) return;
     el.dataset.bound = '1';
-    el.addEventListener('input', () => {
-      if (id.includes('Password')) el.dataset.userEdited = '1';
-      updateStepButtons();
-    });
+    el.addEventListener('input', () => updateStepButtons());
   });
 }
 
@@ -415,7 +476,7 @@ function canProceedStep2() {
   const needsPwd = dbNeedsPassword(state.sourceDb);
   const analysis = state.bundleStatus?.analysis || state.uploadInfo?.analysis;
   if (needsPwd && panel?.id !== 'remnawave' && !hasDbCredentials('source')) {
-    if (!passwordCandidatesConfirmed('source') && state.sourcePasswordCandidates.length) {
+    if (!passwordCandidatesConfirmed('source')) {
       return t('block.passwordNotConfirmed');
     }
     return t('block.sourceCredsIncomplete');
@@ -447,7 +508,7 @@ function canProceedStep3() {
   state.targetDb = db;
   if (needsPasarguardInstall()) return t('block.pasarguardMissing');
   if (dbNeedsPassword(db) && !hasDbCredentials('target')) {
-    if (!passwordCandidatesConfirmed('target') && state.targetPasswordCandidates.length) {
+    if (!passwordCandidatesConfirmed('target')) {
       return t('block.passwordNotConfirmed');
     }
     return t('block.targetCredsIncomplete');

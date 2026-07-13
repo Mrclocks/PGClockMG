@@ -6,7 +6,7 @@
   <title>MrClock-MG</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/css/style.css?v=2.0.6">
+  <link rel="stylesheet" href="/static/css/style.css?v=2.0.7">
 </head>
 <body>
   <div class="bg-grid"></div>
@@ -112,13 +112,6 @@
             <div class="form-group"><label id="lblSourceDbName"></label><input type="text" id="sourceDbName" autocomplete="off"></div>
             <div class="form-group"><label id="lblSourceDbHost"></label><input type="text" id="sourceDbHost" value="127.0.0.1" autocomplete="off"></div>
             <div class="form-group"><label id="lblSourceDbPort"></label><input type="text" id="sourceDbPort" autocomplete="off" placeholder="3306 / 5432"></div>
-            <div class="form-group span-2">
-              <label id="lblSourceDbPassword"></label>
-              <div class="password-field">
-                <input type="password" id="sourceDbPassword" autocomplete="off">
-                <button type="button" class="pwd-toggle" onclick="togglePassword('sourceDbPassword', this)" aria-label="Show password">👁</button>
-              </div>
-            </div>
           </div>
         </div>
 
@@ -171,15 +164,6 @@
             </div>
           </div>
           <div id="targetPasswordCandidates" class="pwd-candidates hidden"></div>
-          <div class="db-cred-grid db-cred-single">
-            <div class="form-group span-2">
-              <label id="lblTargetDbPassword"></label>
-              <div class="password-field">
-                <input type="password" id="targetDbPassword" autocomplete="off">
-                <button type="button" class="pwd-toggle" onclick="togglePassword('targetDbPassword', this)" aria-label="Show password">👁</button>
-              </div>
-            </div>
-          </div>
           <input type="hidden" id="targetDbUser" value="pasarguard">
           <input type="hidden" id="targetDbName" value="pasarguard">
           <input type="hidden" id="targetDbHost" value="127.0.0.1">
@@ -257,7 +241,7 @@
     </footer>
   </div>
 
-  <script src="/static/js/i18n.js?v=2.0.6"></script>
-  <script src="/static/js/app.js?v=2.0.6"></script>
+  <script src="/static/js/i18n.js?v=2.0.7"></script>
+  <script src="/static/js/app.js?v=2.0.7"></script>
 </body>
 </html>
