@@ -246,7 +246,7 @@ def test_nodes_zero_copy_does_not_fail(tmp_path=None):
         assert stats.get("users") == 1
         assert stats.get("hosts") == 1
         assert stats.get("nodes", 0) == 0
-        assert any("Warning" in ln and "nodes" in ln for ln in logs), logs
+        assert any("Partial nodes" in ln or "not transferred" in ln for ln in logs), logs
         print("OK: nodes zero-copy warns only")
     finally:
         os.unlink(src)

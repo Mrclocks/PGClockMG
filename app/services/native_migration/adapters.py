@@ -10,6 +10,9 @@ from typing import Callable, Iterable
 from app.services.native_migration.copy_core import (
     TABLE_ORDER,
     SKIP_TABLES,
+    SUBSCRIPTION_TABLES,
+    MIGRATION_ABORT_IF_ZERO,
+    OPTIONAL_FK_COLUMNS,
     convert_value,
     sqlite_columns,
     sqlite_table_names,
@@ -75,6 +78,10 @@ class TableWriter(ABC):
     @abstractmethod
     def close(self) -> None:
         pass
+
+    def row_count(self, table: str) -> int:
+        """Rows in table after last commit (best effort)."""
+        return -1
 
     def recover(self) -> None:
         """Recover writer after a failed statement (no-op by default)."""
@@ -222,6 +229,13 @@ class SqliteWriter(TableWriter):
     def commit(self) -> None:
         self._conn.commit()
 
+    def row_count(self, table: str) -> int:
+        cur = self._conn.execute(f"SELECT COUNT(*) FROM {table}")
+        return int(cur.fetchone()[0])
+
+    def recover(self) -> None:
+        self._conn.rollback()
+
     def close(self) -> None:
         self._conn.close()
 
@@ -258,7 +272,33 @@ class MysqlWriter(TableWriter):
         cur.execute(f"TRUNCATE TABLE `{table}`")
         cur.execute("SET FOREIGN_KEY_CHECKS = 1")
 
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def row_count(self, table: str) -> int:
+        cur = self._conn.cursor()
+        cur.execute(f"SELECT COUNT(*) FROM `{table}`")
+        return int(cur.fetchone()[0])
+
+    def recover(self) -> None:
+        self._conn.rollback()
+
     def insert(self, table: str, columns: list[str], values: tuple) -> None:
+        cur = self._conn.cursor()
+        try:
+            cur.execute("SAVEPOINT pgmig_row")
+            cols = ", ".join(f"`{c}`" for c in columns)
+            ph = ", ".join(["%s"] * len(columns))
+            cur.execute(f"INSERT INTO `{table}` ({cols}) VALUES ({ph})", values)
+            cur.execute("RELEASE SAVEPOINT pgmig_row")
+        except Exception:
+            try:
+                cur.execute("ROLLBACK TO SAVEPOINT pgmig_row")
+            except Exception:
+                self._conn.rollback()
+            raise
+
+    def _insert_plain(self, table: str, columns: list[str], values: tuple) -> None:
         cur = self._conn.cursor()
         cols = ", ".join(f"`{c}`" for c in columns)
         ph = ", ".join(["%s"] * len(columns))
@@ -276,9 +316,6 @@ class MysqlWriter(TableWriter):
         cur.execute(
             "INSERT INTO alembic_version (version_num) VALUES (%s)", (version,)
         )
-
-    def commit(self) -> None:
-        self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
@@ -298,6 +335,23 @@ class PostgresWriter(TableWriter):
             password=dsn["password"],
         )
         self._col_types: dict[str, dict[str, str]] = {}
+        self._col_nullable: dict[str, dict[str, bool]] = {}
+        self._enum_labels: dict[str, frozenset[str]] = {}
+
+    def _enum_labels_for(self, udt_name: str) -> frozenset[str]:
+        if udt_name not in self._enum_labels:
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+                SELECT e.enumlabel
+                FROM pg_enum e
+                JOIN pg_type t ON e.enumtypid = t.oid
+                WHERE t.typname = %s
+                """,
+                (udt_name,),
+            )
+            self._enum_labels[udt_name] = frozenset(r[0] for r in cur.fetchall())
+        return self._enum_labels[udt_name]
 
     def _types_for(self, table: str) -> dict[str, str]:
         if table in self._col_types:
@@ -305,15 +359,16 @@ class PostgresWriter(TableWriter):
         cur = self._conn.cursor()
         cur.execute(
             """
-            SELECT column_name, data_type, udt_name
+            SELECT column_name, data_type, udt_name, is_nullable
             FROM information_schema.columns
             WHERE table_schema = 'public' AND table_name = %s
             """,
             (table,),
         )
         types: dict[str, str] = {}
-        for name, data_type, udt_name in cur.fetchall():
-            # Normalize: boolean / USER-DEFINED enums
+        nullable: dict[str, bool] = {}
+        for name, data_type, udt_name, is_nullable in cur.fetchall():
+            nullable[name] = is_nullable == "YES"
             if data_type == "boolean" or udt_name == "bool":
                 types[name] = "boolean"
             elif data_type == "USER-DEFINED":
@@ -321,7 +376,36 @@ class PostgresWriter(TableWriter):
             else:
                 types[name] = data_type or udt_name or ""
         self._col_types[table] = types
+        self._col_nullable[table] = nullable
         return types
+
+    def _nullable_for(self, table: str, column: str) -> bool:
+        if table not in self._col_nullable:
+            self._types_for(table)
+        return self._col_nullable.get(table, {}).get(column, True)
+
+    def _fit_enum(self, udt_name: str, val, nullable: bool):
+        labels = self._enum_labels_for(udt_name)
+        if val is None:
+            return None
+        if not isinstance(val, str):
+            return val
+        s = val.strip()
+        if not s or s.lower() in ("none", "null", "default"):
+            if nullable:
+                return None
+            return sorted(labels)[0] if labels else None
+        if s in labels:
+            return s
+        low = s.lower()
+        if low in labels:
+            return low
+        for lbl in labels:
+            if lbl.lower() == low:
+                return lbl
+        if nullable:
+            return None
+        return sorted(labels)[0] if labels else None
 
     def _coerce_row(self, table: str, columns: list[str], values: tuple) -> tuple:
         from app.services.native_migration.copy_core import to_bool, convert_value
@@ -334,11 +418,8 @@ class PostgresWriter(TableWriter):
             if kind == "boolean":
                 out.append(to_bool(val) if val is not None else None)
             elif kind.startswith("enum:"):
-                # Empty / obsolete → NULL; never invent a PasarGuard default
-                if val is None or (isinstance(val, str) and val.strip() == ""):
-                    out.append(None)
-                else:
-                    out.append(val)
+                udt = kind.split(":", 1)[1]
+                out.append(self._fit_enum(udt, val, self._nullable_for(table, col)))
             else:
                 out.append(val)
         return tuple(out)
@@ -412,6 +493,15 @@ class PostgresWriter(TableWriter):
     def commit(self) -> None:
         self._conn.commit()
 
+    def row_count(self, table: str) -> int:
+        cur = self._conn.cursor()
+        cur.execute(f'SELECT COUNT(*) FROM "{table}"')
+        return int(cur.fetchone()[0])
+
+    def enum_columns(self, table: str) -> list[str]:
+        types = self._types_for(table)
+        return [c for c, k in types.items() if k.startswith("enum:")]
+
     def close(self) -> None:
         self._conn.close()
 
@@ -443,6 +533,37 @@ def create_writer(db_type: str, conn: dict, target_path: str | None = None) -> T
     raise ValueError(f"Unsupported target database: {db_type}")
 
 
+def _attempt_insert(
+    writer: TableWriter,
+    table: str,
+    columns: list[str],
+    values: tuple,
+) -> tuple[bool, str | None]:
+    try:
+        writer.insert(table, columns, values)
+        return True, None
+    except Exception as exc:
+        writer.recover()
+        return False, str(exc)
+
+
+def _retry_null_columns(
+    writer: TableWriter,
+    table: str,
+    columns: list[str],
+    values: tuple,
+    cols_to_null: list[str],
+) -> tuple[bool, str | None]:
+    if not cols_to_null:
+        return False, "no columns to null"
+    cols = list(columns)
+    vals = list(values)
+    for col in cols_to_null:
+        if col in cols:
+            vals[cols.index(col)] = None
+    return _attempt_insert(writer, table, cols, tuple(vals))
+
+
 def _try_insert_row(
     writer: TableWriter,
     table: str,
@@ -450,34 +571,38 @@ def _try_insert_row(
     values: tuple,
     log: Callable[[str], None],
 ) -> tuple[bool, str | None]:
-    """Insert one row; for nodes retry without core_config_id on FK errors."""
-    try:
-        writer.insert(table, columns, values)
+    """Insert one row with FK / enum retries for maximum copy fidelity."""
+    ok, err = _attempt_insert(writer, table, columns, values)
+    if ok:
         return True, None
-    except Exception as exc:
-        writer.recover()
-        err = str(exc)
-        err_low = err.lower()
-        if table == "nodes" and "core_config" in err_low and "core_config_id" in columns:
-            cols = list(columns)
-            vals = list(values)
-            idx = cols.index("core_config_id")
-            vals[idx] = None
-            try:
-                writer.insert(table, cols, tuple(vals))
-                log("Node row copied with core_config_id=NULL (optional FK skipped)")
+
+    err_low = (err or "").lower()
+
+    # Optional FK columns (nodes, hosts)
+    for fk_col in OPTIONAL_FK_COLUMNS.get(table, ()):
+        if fk_col in columns and (
+            "foreign key" in err_low
+            or "violates foreign key" in err_low
+            or fk_col.replace("_", "") in err_low.replace("_", "")
+        ):
+            ok2, err2 = _retry_null_columns(writer, table, columns, values, [fk_col])
+            if ok2:
+                log(f"{table}: copied with {fk_col}=NULL (FK retry)")
                 return True, None
-            except Exception as exc2:
-                writer.recover()
-                err = str(exc2)
-        return False, err
+            err = err2 or err
 
+    # PostgreSQL enum: null enum fields and retry
+    if isinstance(writer, PostgresWriter) and (
+        "invalid input value for enum" in err_low or "enum" in err_low
+    ):
+        enum_cols = [c for c in writer.enum_columns(table) if c in columns]
+        ok3, err3 = _retry_null_columns(writer, table, columns, values, enum_cols)
+        if ok3:
+            log(f"{table}: copied after clearing invalid enum values")
+            return True, None
+        err = err3 or err
 
-# Tables that must copy for subscription links / panel login
-CRITICAL_TABLES = ("users", "hosts", "admins")
-
-# Optional — skip rows / warn if none copied (nodes need separate pg-node in PG v5)
-OPTIONAL_TABLES = ("nodes", "core_configs", "groups")
+    return False, err
 
 
 def _count_source_rows(reader: TableReader, table: str) -> int:
@@ -524,10 +649,13 @@ def copy_tables_universal(
     """Copy shared PasarGuard/Marzban tables from any reader to any writer."""
     stats: dict[str, int] = {}
     source_tables = reader.source_tables()
-    source_counts: dict[str, int] = {
-        t: _count_source_rows(reader, t) for t in TABLE_ORDER
-    }
-    source_counts = {k: v for k, v in source_counts.items() if v > 0}
+    source_counts: dict[str, int] = {}
+    for t in TABLE_ORDER:
+        n = _count_source_rows(reader, t)
+        if n > 0:
+            source_counts[t] = n
+        elif n < 0:
+            log(f"Warning: could not count source rows for {t}")
 
     for table in TABLE_ORDER:
         if table in SKIP_TABLES or table not in source_tables:
@@ -561,7 +689,8 @@ def copy_tables_universal(
                 errors += 1
                 if first_error is None:
                     first_error = row_err
-                if errors <= 5:
+                log_limit = errors <= 20 or table in SUBSCRIPTION_TABLES
+                if log_limit:
                     log(f"Row skip {table}: {(row_err or '')[:200]}")
         stats[table] = count
         if errors:
@@ -581,9 +710,17 @@ def copy_tables_universal(
 
         try:
             writer.commit()
+            verified = writer.row_count(table)
+            if verified >= 0 and verified != count:
+                log(f"Count verify {table}: inserted {count}, committed {verified}")
+                count = verified
+                stats[table] = count
         except Exception as exc:
             writer.recover()
             log(f"Commit warning {table}: {str(exc)[:120]}")
+            verified = writer.row_count(table)
+            if verified >= 0:
+                stats[table] = verified
 
     if source_version and source_version != "head":
         writer.set_alembic_version(source_version)
@@ -592,23 +729,27 @@ def copy_tables_universal(
         writer.commit()
 
     if fail_hard:
-        for critical in CRITICAL_TABLES:
-            src_n = source_counts.get(critical, 0)
-            dst_n = stats.get(critical, 0)
+        for table in MIGRATION_ABORT_IF_ZERO:
+            src_n = source_counts.get(table, 0)
+            dst_n = stats.get(table, 0)
             if src_n > 0 and dst_n == 0:
                 raise RuntimeError(
-                    f"Migration failed: source has {src_n} {critical} but "
-                    f"0 were copied to target. Check row-skip errors above."
-                )
-        for optional in OPTIONAL_TABLES:
-            src_n = source_counts.get(optional, 0)
-            dst_n = stats.get(optional, 0)
-            if src_n > 0 and dst_n == 0:
-                log(
-                    f"Warning: {src_n} source {optional} not copied — "
-                    "optional; subscription links are unchanged. "
-                    "Configure manually in PasarGuard/pg-node if needed."
+                    f"Migration failed: source has {src_n} {table} but "
+                    f"0 were copied to target. Subscription data missing."
                 )
 
     report = build_copy_report(source_counts, stats)
+    for item in report.get("incomplete", []):
+        tbl = item["table"]
+        if tbl in SUBSCRIPTION_TABLES:
+            log(
+                f"INCOMPLETE {tbl}: {item['copied']}/{item['source']} copied "
+                f"({item['missing']} missing) — check row-skip errors above"
+            )
+        else:
+            log(
+                f"Partial {tbl}: {item['copied']}/{item['source']} copied "
+                f"({item['missing']} not transferred)"
+            )
+
     return stats, report

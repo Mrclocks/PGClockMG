@@ -1,10 +1,9 @@
 """Shared table copy helpers.
 
-Policy: copy only what exists in the source.
-- Columns missing from source are skipped (intersection with target).
-- NULL in source stays NULL — never invent PasarGuard-only defaults.
-- Obsolete source values that break the target (e.g. alpn='none') are
-  neutralized to NULL/empty, not replaced with guessed defaults.
+Policy: copy everything that exists in the source.
+- Column intersection with target schema.
+- Row-level skip on hard errors; report gaps at end (never abort except zero users).
+- Obsolete Marzban enum tokens neutralized before PostgreSQL insert.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ TABLE_ORDER = [
     "system",
     "settings",
     "admins",
-    "core_configs",  # nodes.core_config_id FK — must precede nodes
+    "core_configs",
     "nodes",
     "inbounds",
     "groups",
@@ -37,7 +36,6 @@ TABLE_ORDER = [
     "node_usages",
 ]
 
-# Heavy/obsolete tables only — associations are copied when present
 SKIP_TABLES = {
     "alembic_version",
     "admin_usage_logs",
@@ -47,13 +45,31 @@ SKIP_TABLES = {
     "tls",
 }
 
-# Source values that are invalid on current PasarGuard → store as empty/NULL
-# Do NOT invent replacement defaults for fields the source never had.
+# Tables that must have rows for subscription links to work (report loudly if incomplete)
+SUBSCRIPTION_TABLES = frozenset({
+    "users",
+    "hosts",
+    "inbounds",
+    "groups",
+    "settings",
+    "users_groups_association",
+    "inbounds_groups_association",
+    "exclude_inbounds_association",
+})
+
+# Only abort migration when users cannot be copied at all
+MIGRATION_ABORT_IF_ZERO = frozenset({"users"})
+
+_HOST_OBSOLETE = frozenset({"none", "None", "NONE", "null", "NULL", ""})
+
 OBSOLETE_TO_EMPTY = {
-    ("hosts", "alpn"): frozenset({"none", "None", "NONE"}),
+    ("hosts", "alpn"): _HOST_OBSOLETE,
+    ("hosts", "fingerprint"): _HOST_OBSOLETE,
+    ("hosts", "security"): _HOST_OBSOLETE,
+    ("hosts", "noise"): _HOST_OBSOLETE,
+    ("hosts", "fragment"): _HOST_OBSOLETE,
 }
 
-# SQLite stores these as 0/1; PostgreSQL expects boolean
 BOOL_COLUMNS = frozenset({
     "enable",
     "is_sudo",
@@ -64,7 +80,15 @@ BOOL_COLUMNS = frozenset({
     "mux_enable",
     "edit",
     "enabled",
+    "is_disabled",
+    "status",
 })
+
+# FK columns that may be nulled on retry when parent row missing
+OPTIONAL_FK_COLUMNS: dict[str, tuple[str, ...]] = {
+    "nodes": ("core_config_id",),
+    "hosts": ("inbound_id", "group_id"),
+}
 
 
 def to_bool(value):
@@ -93,7 +117,7 @@ def sqlite_columns(conn: sqlite3.Connection, table: str) -> list[str]:
 
 
 def convert_value(table: str, column: str, value):
-    """Coerce types only. Never invent PasarGuard fields the source lacked."""
+    """Coerce types; neutralize obsolete Marzban tokens."""
     if value is None:
         return None
 
@@ -108,17 +132,15 @@ def convert_value(table: str, column: str, value):
 
     if isinstance(value, str):
         stripped = value.strip()
-        # Empty → NULL (do not invent defaults)
         if stripped == "":
             return None
         obsolete = OBSOLETE_TO_EMPTY.get((table, column))
         if obsolete and stripped in obsolete:
             return None
-        # ALPN CSV: drop obsolete tokens, keep real ones
         if table == "hosts" and column == "alpn" and "," in stripped:
             parts = [
-                p for p in stripped.split(",")
-                if p and p not in (obsolete or ())
+                p.strip() for p in stripped.split(",")
+                if p.strip() and p.strip() not in (obsolete or ())
             ]
             return ",".join(parts) if parts else None
         if stripped.startswith("{") or stripped.startswith("["):
