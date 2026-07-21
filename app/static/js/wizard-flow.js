@@ -101,6 +101,7 @@ function applyPhaseI18n() {
   set('btnPgInstall', 'pg.install');
   set('lblPgDb', 'pg.dbLabel');
   set('lblPgSsl', 'pg.sslLabel');
+  set('pgSslMustChoose', 'pg.sslMustChoose');
   set('pgSslYes', 'pg.sslYes');
   set('pgSslYesDesc', 'pg.sslYesDesc');
   set('pgSslNo', 'pg.sslNo');
@@ -167,9 +168,11 @@ async function renderPgSetup() {
   } else {
     installedCard?.classList.add('hidden');
     form?.classList.remove('hidden');
+    // Always require a fresh SSL choice before showing next fields / install
+    state.pgSsl = null;
     bindPgSslButtons();
     renderPgDbGrid();
-    selectPgSsl(state.pgSsl);
+    selectPgSsl(null);
   }
 }
 
@@ -223,10 +226,26 @@ function selectPgSsl(yes) {
   state.pgSsl = yes;
   document.querySelectorAll('#pgSslGrid .choice-card').forEach(el => {
     const v = el.dataset.ssl === 'yes';
-    el.classList.toggle('active', yes !== null && v === !!yes);
+    el.classList.toggle('active', yes !== null && yes !== undefined && v === !!yes);
   });
+
+  const after = document.getElementById('pgAfterSsl');
   const yesFields = document.getElementById('pgSslYesFields');
   const noHint = document.getElementById('pgSslNoHint');
+  const must = document.getElementById('pgSslMustChoose');
+
+  // Until Yes/No is chosen — hide everything after SSL
+  if (yes !== true && yes !== false) {
+    after?.classList.add('hidden');
+    yesFields?.classList.add('hidden');
+    noHint?.classList.add('hidden');
+    if (must) must.classList.remove('hidden');
+    return;
+  }
+
+  if (must) must.classList.add('hidden');
+  after?.classList.remove('hidden');
+
   if (yes === true) {
     yesFields?.classList.remove('hidden');
     noHint?.classList.add('hidden');
@@ -234,7 +253,7 @@ function selectPgSsl(yes) {
     if (ipEl && !ipEl.value) ipEl.value = (state.serverIp || '').split(':')[0];
     const portEl = document.getElementById('pgSslHttpPort');
     if (portEl && !portEl.value) portEl.value = '80';
-  } else if (yes === false) {
+  } else {
     yesFields?.classList.add('hidden');
     noHint?.classList.remove('hidden');
     const access = state.panelAccess || {};
@@ -243,9 +262,6 @@ function selectPgSsl(yes) {
       noHint.innerHTML = notes.map(n => `<p>${n}</p>`).join('')
         || `<p>ssh -L 8000:localhost:8000 user@${state.serverIp}</p><p>http://localhost:8000/dashboard/</p>`;
     }
-  } else {
-    yesFields?.classList.add('hidden');
-    noHint?.classList.add('hidden');
   }
   const block = document.getElementById('pgInstallBlock');
   if (block) block.classList.add('hidden');

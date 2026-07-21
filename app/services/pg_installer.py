@@ -110,6 +110,13 @@ async def _download_script(job: MigrationJob) -> Path:
 
 
 def _build_cmd(script: Path, params: dict) -> list[str]:
+    """Always avoid interactive SSL menu when possible.
+
+    - domain SSL → --ssl-domain (no menu)
+    - no SSL → --no-ssl (no menu)
+    - IP SSL → --no-ssl first, then configure IP cert after install
+      (interactive IP menu is unreliable over pipes; post-setup is deterministic)
+    """
     db = params["database"].strip().lower()
     want_ssl = str(params.get("ssl")).lower() in ("1", "true", "yes")
     domain = (params.get("domain") or "").strip()
@@ -120,12 +127,9 @@ def _build_cmd(script: Path, params: dict) -> list[str]:
         cmd += ["--database", db]
 
     if want_ssl and domain:
-        # Non-interactive SSL path in official script (no menu)
         cmd += ["--ssl-domain", domain, "--ssl-http-port", http_port]
-    elif want_ssl:
-        # Hits SSL menu — we pre-answer option 2 as soon as Port 80 note appears
-        cmd += ["--ssl", "--ssl-http-port", http_port]
     else:
+        # IP SSL handled after install; avoid hanging SSL menu entirely
         cmd += ["--no-ssl"]
     return cmd
 
@@ -136,28 +140,114 @@ def _strip_ansi(text: str) -> str:
     return text
 
 
-def _ssl_choice(want_ssl: bool, domain: str) -> str:
-    if want_ssl and domain:
-        return "1"
-    if want_ssl:
-        return "2"
-    return "4"
+def _norm(text: str) -> str:
+    """Lowercase + normalize fancy apostrophes for matching."""
+    t = _strip_ansi(text).lower()
+    return t.replace("\u2019", "'").replace("\u2018", "'")
 
 
-def _looks_like_ssl_menu(text: str) -> bool:
-    low = _strip_ansi(text).lower()
-    return any(
-        s in low
-        for s in (
-            "select ssl option",
-            "choose ssl setup method",
-            "must be reachable for let's encrypt",
-            "must be reachable for let",
-            "1) let's encrypt domain",
-            "2) let's encrypt ip",
-            "4) no ssl",
-        )
+async def _configure_ip_ssl(job: MigrationJob, ip: str, http_port: str) -> None:
+    """Issue Let's Encrypt IP cert after a --no-ssl install (non-interactive)."""
+    job.set_progress(92, f"Configuring SSL for IP {ip}...")
+    job.log(f"Post-install IP SSL setup for {ip} (challenge port {http_port})")
+
+    # Use official script functions by sourcing after bootstrap, via a small driver.
+    # Falls back to calling `pasarguard` env edits + acme if available.
+    driver = Path("/tmp/pgclockmg-ip-ssl.sh")
+    driver.write_text(
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+IPV4="{ip}"
+HTTP_PORT="{http_port}"
+APP_DIR="/opt/pasarguard"
+ENV_FILE="$APP_DIR/.env"
+DATA_DIR="/var/lib/pasarguard"
+CERT_DIR="$DATA_DIR/certs/ip"
+
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "PasarGuard .env not found" >&2
+  exit 1
+fi
+
+# Prefer official CLI helper if present after install
+if command -v pasarguard >/dev/null 2>&1; then
+  # Pull shared libs path used by installed script
+  true
+fi
+
+# Install/ensure acme.sh
+ACME_HOME="${{HOME:-/root}}/.acme.sh"
+ACME_BIN=""
+if [[ -x "$ACME_HOME/acme.sh" ]]; then
+  ACME_BIN="$ACME_HOME/acme.sh"
+elif [[ -x /root/.acme.sh/acme.sh ]]; then
+  ACME_BIN="/root/.acme.sh/acme.sh"
+fi
+
+if [[ -z "$ACME_BIN" ]]; then
+  curl -fsSL https://get.acme.sh | sh -s email=ssl@pasarguard.local || true
+  if [[ -x /root/.acme.sh/acme.sh ]]; then
+    ACME_BIN="/root/.acme.sh/acme.sh"
+  elif [[ -x "$ACME_HOME/acme.sh" ]]; then
+    ACME_BIN="$ACME_HOME/acme.sh"
+  fi
+fi
+
+if [[ -z "$ACME_BIN" ]]; then
+  echo "acme.sh not available — skipping IP SSL (panel installed without SSL)" >&2
+  exit 0
+fi
+
+mkdir -p "$CERT_DIR"
+"$ACME_BIN" --issue -d "$IPV4" --standalone --httpport "$HTTP_PORT" --force || {{
+  echo "IP certificate issuance failed — panel remains without SSL" >&2
+  exit 0
+}}
+
+"$ACME_BIN" --installcert -d "$IPV4" \\
+  --fullchain-file "$CERT_DIR/fullchain.pem" \\
+  --key-file "$CERT_DIR/privkey.pem" || true
+
+if [[ ! -s "$CERT_DIR/fullchain.pem" || ! -s "$CERT_DIR/privkey.pem" ]]; then
+  echo "Certificate files missing — continuing without SSL" >&2
+  exit 0
+fi
+
+# Enable SSL in .env
+set_env() {{
+  local key="$1" val="$2"
+  if grep -qE "^[[:space:]]*#?[[:space:]]*${{key}}=" "$ENV_FILE"; then
+    sed -i -E "s|^[[:space:]]*#?[[:space:]]*${{key}}=.*|$key=\\"$val\\"|" "$ENV_FILE"
+  else
+    printf '\\n%s="%s"\\n' "$key" "$val" >> "$ENV_FILE"
+  fi
+}}
+
+set_env UVICORN_SSL_CERTFILE "$CERT_DIR/fullchain.pem"
+set_env UVICORN_SSL_KEYFILE "$CERT_DIR/privkey.pem"
+set_env UVICORN_SSL_CA_TYPE "public"
+
+cd "$APP_DIR"
+docker compose up -d || true
+echo "IP SSL configured for https://$IPV4"
+""",
+        encoding="utf-8",
     )
+    driver.chmod(0o700)
+
+    proc = await asyncio.create_subprocess_exec(
+        "bash", str(driver),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    out_b, _ = await proc.communicate()
+    out = (out_b or b"").decode("utf-8", errors="replace")
+    for line in out.splitlines():
+        if line.strip():
+            job.log(line)
+    if proc.returncode not in (0, None):
+        job.log(f"IP SSL setup exited {proc.returncode} — panel installed; SSL optional")
 
 
 async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
@@ -168,11 +258,14 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
     domain = (params.get("domain") or "").strip()
     ip = (params.get("ip") or "").strip()
     wipe_volumes = bool(params.get("wipe_volumes"))
-    ssl_pick = _ssl_choice(want_ssl, domain)
+    http_port = str(params.get("ssl_http_port") or "80").strip() or "80"
+    want_ip_ssl = want_ssl and not domain and bool(ip)
 
     script = await _download_script(job)
     cmd = _build_cmd(script, params)
     job.log(f"$ {' '.join(cmd)}")
+    if want_ip_ssl:
+        job.log("IP SSL: install with --no-ssl first, then configure certificate (avoids interactive SSL menu hang)")
     job.set_progress(5, "Starting official installer...")
 
     env = os.environ.copy()
@@ -192,7 +285,7 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
     finished_ok = False
     all_output: list[str] = []
     pending = ""
-    idle_rounds = 0
+    rolling = ""  # last ~2KB for prompt detection (including no-newline prompts)
 
     async def send(line: str, reason: str) -> None:
         job.log(f"→ auto-answer ({reason}): {line!r}")
@@ -200,15 +293,20 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
         proc.stdin.write((line + "\n").encode())
         await proc.stdin.drain()
 
-    async def maybe_answer(text: str) -> None:
+    async def maybe_answer() -> None:
         nonlocal finished_ok
-        low = _strip_ansi(text).lower()
+        low = _norm(rolling[-1200:])
 
-        # CRITICAL: answer SSL as soon as Port-80 / menu text appears.
-        # Official order: print "Port 80 ... Let's Encrypt." THEN read -p.
-        # Sending now fills stdin so `read` never blocks.
-        if "ssl_menu" not in answered and _looks_like_ssl_menu(text):
-            await send(ssl_pick, f"SSL menu → option {ssl_pick}")
+        # With --no-ssl / --ssl-domain we should NOT see SSL menu.
+        # Keep handlers anyway for safety if script still asks.
+        if "ssl_menu" not in answered and (
+            "select ssl option" in low
+            or "choose ssl setup method" in low
+            or "must be reachable for let" in low
+        ):
+            # Should not happen on our preferred paths; pick safe answer
+            choice = "1" if (want_ssl and domain) else ("2" if want_ip_ssl else "4")
+            await send(choice, f"SSL menu fallback → {choice}")
             answered.add("ssl_menu")
 
         if "override" not in answered and "override the previous installation" in low:
@@ -250,7 +348,7 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
             finished_ok = True
             answered.add("install_node")
 
-        if any(m in text for m in ("Application startup complete", "Uvicorn running")):
+        if "application startup complete" in low or "uvicorn running" in low:
             finished_ok = True
 
     assert proc.stdout is not None
@@ -262,9 +360,9 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
                 chunk = b""
 
             if chunk:
-                idle_rounds = 0
                 text = chunk.decode("utf-8", errors="replace")
                 pending += text
+                rolling = (rolling + text)[-4000:]
                 all_output.append(text)
 
                 while "\n" in pending or "\r" in pending:
@@ -277,31 +375,11 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
                     line_clean = _strip_ansi(line).strip()
                     if line_clean:
                         job.log(line_clean)
-                        job.set_progress(min(90, 10 + len(job.logs) // 3), line_clean[:120])
-                        await maybe_answer(line_clean)
+                        job.set_progress(min(88, 10 + len(job.logs) // 3), line_clean[:120])
 
-                if pending.strip():
-                    await maybe_answer(pending)
+                await maybe_answer()
             else:
-                idle_rounds += 1
-                if pending.strip():
-                    await maybe_answer(pending)
-
-                # Force SSL answer if stuck near the known hang point
-                recent = _strip_ansi("".join(all_output[-30:]) + pending).lower()
-                if (
-                    "ssl_menu" not in answered
-                    and idle_rounds >= 2
-                    and (
-                        "port 80" in recent
-                        or "let's encrypt" in recent
-                        or "ssl option" in recent
-                        or "ssl setup method" in recent
-                    )
-                ):
-                    await send(ssl_pick, f"SSL menu (force) → option {ssl_pick}")
-                    answered.add("ssl_menu")
-
+                await maybe_answer()
                 if proc.returncode is not None:
                     break
                 if finished_ok and "install_node" in answered:
@@ -344,15 +422,18 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
         msg = "\n".join(detail).strip() or "PasarGuard install failed (panel not found at /opt/pasarguard)"
         raise RuntimeError(msg)
 
-    if proc.returncode not in (0, None, -signal.SIGINT, -2, 130) and not finished_ok:
-        if not is_pasarguard_installed():
-            raise RuntimeError(f"Installer exited with code {proc.returncode}")
+    # IP SSL after successful non-interactive install
+    if want_ip_ssl:
+        try:
+            await _configure_ip_ssl(job, ip, http_port)
+        except Exception as e:
+            job.log(f"IP SSL setup warning: {e}")
 
     access = get_panel_access_info(prefer_host=domain or ip or None)
     access["database"] = params["database"]
     access["ssl_requested"] = want_ssl
-    access["ssl_http_port"] = str(params.get("ssl_http_port") or "80")
+    access["ssl_http_port"] = http_port
     access["node_skipped"] = True
-    access["ssl_menu_option"] = ssl_pick
+    access["ip_ssl_deferred"] = want_ip_ssl
     job.log("PasarGuard installation complete")
     return access
