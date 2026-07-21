@@ -52,3 +52,18 @@ class MigrationStatus(BaseModel):
     message: str = ""
     logs: List[str] = []
     result: Optional[dict] = None
+
+
+class PasarguardInstallRequest(BaseModel):
+    database: Literal["sqlite", "mysql", "mariadb", "postgresql", "timescaledb"] = "timescaledb"
+    ssl: bool = False
+    domain: Optional[str] = None
+    ip: Optional[str] = None
+    wipe_volumes: bool = False
+    force: bool = False
+
+
+class PasarguardRestoreRequest(BaseModel):
+    upload_id: str
+    force: bool = False
+    confirmed: bool = False

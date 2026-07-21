@@ -3,10 +3,71 @@
 const I18N = {
   en: {
     title: 'MrClock-MG',
-    subtitle: 'Migrate to PasarGuard',
+    subtitle: 'Install & migrate to PasarGuard',
     copied: 'Copied!',
     copyFailed: 'Copy failed',
-    steps: ['Start', 'Panel', 'Source', 'Target', 'Confirm', 'Run', 'Done'],
+    steps: ['Welcome', 'Setup', 'Next', 'Panel', 'Source', 'Target', 'Confirm', 'Run', 'Done'],
+    stepsRestore: ['Welcome', 'Setup', 'Next', 'Restore', 'Done'],
+    stepsSetup: ['Welcome', 'Setup', 'Next'],
+    welcome: {
+      h2: 'Welcome to MrClock-MG',
+      desc: 'Easy PasarGuard install, backup restore, and migration from other panels.',
+      note: 'Everything runs on your own server. Backups, passwords and logs never leave this machine.',
+      backupTip: 'Important: if you plan to restore a PasarGuard backup later, install PasarGuard with the SAME database type as that backup (SQLite / MySQL / MariaDB / PostgreSQL / TimescaleDB).',
+      start: 'Start',
+    },
+    pg: {
+      h2: 'PasarGuard setup',
+      desc: 'Check installation or install PasarGuard automatically.',
+      installedTitle: 'PasarGuard is already installed',
+      installedDetail: 'Found at /opt/pasarguard — you can continue.',
+      continue: 'Continue →',
+      back: '← Back',
+      install: 'Install PasarGuard',
+      dbLabel: 'Database',
+      sslLabel: 'Get SSL certificate?',
+      sslYes: 'Yes — SSL',
+      sslYesDesc: 'Let\'s Encrypt domain or IP certificate',
+      sslNo: 'No SSL',
+      sslNoDesc: 'Localhost / SSH tunnel access only',
+      domain: 'Domain (optional if using IP)',
+      domainHint: 'If you enter a domain, IP is not needed.',
+      ip: 'Server IPv4 (if no domain)',
+      ipHint: 'Used for Let\'s Encrypt IP certificate.',
+      dbMatchTip: 'Choose the database that matches any backup you will restore later.',
+      installing: 'Installing PasarGuard…',
+      doneTitle: 'PasarGuard installed',
+      next: 'Continue →',
+      needDomainOrIp: 'Enter a domain or an IPv4 address for SSL',
+      pickDb: 'Select a database',
+      pickSsl: 'Choose SSL yes or no',
+    },
+    choose: {
+      h2: 'What next?',
+      desc: 'PasarGuard is ready on this server.',
+      finish: 'Finish & open panel',
+      finishDesc: 'Redirect to the PasarGuard login page',
+      restore: 'Restore PasarGuard backup',
+      restoreDesc: 'Upload a backup zip and restore safely',
+      migrate: 'Migrate from another panel',
+      migrateDesc: 'Marzban, 3x-ui, Remnawave, Hiddify, …',
+      back: '← Back',
+    },
+    restore: {
+      h2: 'Restore PasarGuard backup',
+      desc: 'Upload the backup zip. Database type must match the installed panel.',
+      tip: 'Backups usually live under /opt/pasarguard/backup/. Official restore can fail on TimescaleDB version or password mismatches — this wizard auto-fixes those cases when possible.',
+      drag: 'Drag backup zip here or',
+      select: 'browse',
+      confirm: 'Confirm & restore',
+      back: '← Back',
+      analyzing: 'Analyzing backup…',
+      restoring: 'Restoring…',
+      doneTitle: 'Restore completed',
+      openPanel: 'Open PasarGuard panel',
+      needUpload: 'Upload a backup zip first',
+      confirmNeeded: 'Review the analysis, then confirm restore',
+    },
     step0: {
       h2: 'Welcome',
       desc: 'Migration wizard for PasarGuard — check your server is ready.',
@@ -232,10 +293,71 @@ const I18N = {
   },
   fa: {
     title: 'MrClock-MG',
-    subtitle: 'مهاجرت به PasarGuard',
+    subtitle: 'نصب و مهاجرت به PasarGuard',
     copied: 'کپی شد!',
     copyFailed: 'کپی نشد',
-    steps: ['شروع', 'پنل', 'مبدأ', 'مقصد', 'تأیید', 'اجرا', 'نتیجه'],
+    steps: ['خوش‌آمد', 'نصب', 'ادامه', 'پنل', 'مبدأ', 'مقصد', 'تأیید', 'اجرا', 'نتیجه'],
+    stepsRestore: ['خوش‌آمد', 'نصب', 'ادامه', 'ریستور', 'نتیجه'],
+    stepsSetup: ['خوش‌آمد', 'نصب', 'ادامه'],
+    welcome: {
+      h2: 'به MrClock-MG خوش آمدید',
+      desc: 'نصب آسان PasarGuard، ریستور بکاپ، و مهاجرت از پنل‌های دیگر.',
+      note: 'همه چیز روی سرور خودتان اجرا می‌شود. بکاپ، رمز و لاگ از سرور خارج نمی‌شوند.',
+      backupTip: 'مهم: اگر می‌خواهید بعداً بکاپ PasarGuard را ریستور کنید، حتماً همان نوع دیتابیس بکاپ را هنگام نصب انتخاب کنید (SQLite / MySQL / MariaDB / PostgreSQL / TimescaleDB).',
+      start: 'شروع',
+    },
+    pg: {
+      h2: 'راه‌اندازی PasarGuard',
+      desc: 'بررسی نصب یا نصب خودکار PasarGuard.',
+      installedTitle: 'PasarGuard از قبل نصب است',
+      installedDetail: 'در /opt/pasarguard یافت شد — می‌توانید ادامه دهید.',
+      continue: 'ادامه →',
+      back: '← بازگشت',
+      install: 'نصب PasarGuard',
+      dbLabel: 'دیتابیس',
+      sslLabel: 'دریافت SSL؟',
+      sslYes: 'بله — SSL',
+      sslYesDesc: 'گواهی Let’s Encrypt برای دامنه یا آیپی',
+      sslNo: 'خیر — بدون SSL',
+      sslNoDesc: 'فقط localhost / تونل SSH',
+      domain: 'دامنه (اختیاری اگر آیپی می‌دهید)',
+      domainHint: 'اگر دامنه بزنید نیازی به آیپی نیست.',
+      ip: 'آیپی IPv4 سرور (اگر دامنه ندارید)',
+      ipHint: 'برای گواهی SSL روی آیپی استفاده می‌شود.',
+      dbMatchTip: 'دیتابیسی را انتخاب کنید که با بکاپ احتمالی‌تان یکی باشد.',
+      installing: 'در حال نصب PasarGuard…',
+      doneTitle: 'PasarGuard نصب شد',
+      next: 'ادامه →',
+      needDomainOrIp: 'برای SSL دامنه یا آیپی وارد کنید',
+      pickDb: 'دیتابیس را انتخاب کنید',
+      pickSsl: 'SSL را انتخاب کنید',
+    },
+    choose: {
+      h2: 'بعدی چه کار کنیم؟',
+      desc: 'PasarGuard روی این سرور آماده است.',
+      finish: 'پایان نصب و ورود',
+      finishDesc: 'رفتن به صفحه ورود پنل',
+      restore: 'ریستور بکاپ PasarGuard',
+      restoreDesc: 'آپلود zip بکاپ و ریستور امن',
+      migrate: 'مهاجرت از پنل‌های دیگر',
+      migrateDesc: 'Marzban، 3x-ui، Remnawave، Hiddify و …',
+      back: '← بازگشت',
+    },
+    restore: {
+      h2: 'ریستور بکاپ PasarGuard',
+      desc: 'فایل zip بکاپ را آپلود کنید. نوع دیتابیس باید با پنل نصب‌شده یکی باشد.',
+      tip: 'بکاپ‌ها معمولاً در /opt/pasarguard/backup/ هستند. ریستور رسمی روی نسخه TimescaleDB یا پسورد ممکن است گیر کند — این ویزارد تا حد امکان خودکار رفع می‌کند.',
+      drag: 'فایل zip را بکشید یا',
+      select: 'انتخاب کنید',
+      confirm: 'تأیید و ریستور',
+      back: '← بازگشت',
+      analyzing: 'در حال بررسی بکاپ…',
+      restoring: 'در حال ریستور…',
+      doneTitle: 'ریستور انجام شد',
+      openPanel: 'باز کردن پنل PasarGuard',
+      needUpload: 'ابتدا بکاپ را آپلود کنید',
+      confirmNeeded: 'تحلیل را ببینید و سپس تأیید کنید',
+    },
     step0: {
       h2: 'خوش آمدید',
       desc: 'ویزارد مهاجرت به PasarGuard — آمادگی سرور را بررسی کنید.',
@@ -458,10 +580,71 @@ const I18N = {
   },
   ru: {
     title: 'MrClock-MG',
-    subtitle: 'Миграция в PasarGuard',
+    subtitle: 'Установка и миграция в PasarGuard',
     copied: 'Скопировано!',
     copyFailed: 'Не удалось скопировать',
-    steps: ['Старт', 'Панель', 'Источник', 'Цель', 'Проверка', 'Запуск', 'Итог'],
+    steps: ['Старт', 'Установка', 'Далее', 'Панель', 'Источник', 'Цель', 'Проверка', 'Запуск', 'Итог'],
+    stepsRestore: ['Старт', 'Установка', 'Далее', 'Восстановление', 'Итог'],
+    stepsSetup: ['Старт', 'Установка', 'Далее'],
+    welcome: {
+      h2: 'Добро пожаловать в MrClock-MG',
+      desc: 'Установка PasarGuard, восстановление бэкапа и миграция с других панелей.',
+      note: 'Всё выполняется на вашем сервере. Бэкапы, пароли и логи не уходят наружу.',
+      backupTip: 'Важно: если будете восстанавливать бэкап PasarGuard, установите ту же СУБД, что в бэкапе (SQLite / MySQL / MariaDB / PostgreSQL / TimescaleDB).',
+      start: 'Начать',
+    },
+    pg: {
+      h2: 'Настройка PasarGuard',
+      desc: 'Проверка или автоматическая установка PasarGuard.',
+      installedTitle: 'PasarGuard уже установлен',
+      installedDetail: 'Найден в /opt/pasarguard — можно продолжить.',
+      continue: 'Продолжить →',
+      back: '← Назад',
+      install: 'Установить PasarGuard',
+      dbLabel: 'База данных',
+      sslLabel: 'Получить SSL?',
+      sslYes: 'Да — SSL',
+      sslYesDesc: 'Let’s Encrypt для домена или IP',
+      sslNo: 'Без SSL',
+      sslNoDesc: 'Только localhost / SSH-туннель',
+      domain: 'Домен (не нужен, если указываете IP)',
+      domainHint: 'Если указан домен, IP не требуется.',
+      ip: 'IPv4 сервера (если нет домена)',
+      ipHint: 'Для SSL-сертификата на IP.',
+      dbMatchTip: 'Выберите СУБД, совпадающую с будущим бэкапом.',
+      installing: 'Установка PasarGuard…',
+      doneTitle: 'PasarGuard установлен',
+      next: 'Продолжить →',
+      needDomainOrIp: 'Укажите домен или IPv4 для SSL',
+      pickDb: 'Выберите базу данных',
+      pickSsl: 'Выберите SSL да/нет',
+    },
+    choose: {
+      h2: 'Что дальше?',
+      desc: 'PasarGuard готов на этом сервере.',
+      finish: 'Завершить и войти',
+      finishDesc: 'Перейти на страницу входа панели',
+      restore: 'Восстановить бэкап PasarGuard',
+      restoreDesc: 'Загрузить zip и безопасно восстановить',
+      migrate: 'Миграция с другой панели',
+      migrateDesc: 'Marzban, 3x-ui, Remnawave, Hiddify, …',
+      back: '← Назад',
+    },
+    restore: {
+      h2: 'Восстановление бэкапа PasarGuard',
+      desc: 'Загрузите zip бэкапа. Тип БД должен совпадать с установленной панелью.',
+      tip: 'Бэкапы обычно в /opt/pasarguard/backup/. Официальный restore может падать из‑за версии TimescaleDB или пароля — мастер по возможности исправит это.',
+      drag: 'Перетащите zip сюда или',
+      select: 'выберите',
+      confirm: 'Подтвердить и восстановить',
+      back: '← Назад',
+      analyzing: 'Анализ бэкапа…',
+      restoring: 'Восстановление…',
+      doneTitle: 'Восстановление завершено',
+      openPanel: 'Открыть панель PasarGuard',
+      needUpload: 'Сначала загрузите бэкап',
+      confirmNeeded: 'Проверьте анализ и подтвердите',
+    },
     step0: {
       h2: 'Добро пожаловать',
       desc: 'Мастер миграции в PasarGuard — проверьте готовность сервера.',
@@ -719,10 +902,6 @@ function applyI18n() {
   if (brandTitle) brandTitle.textContent = t('title');
   const map = {
     subtitle: '.subtitle',
-    'step0.h2': '#step0 .welcome-header h2',
-    'step0.desc': '#step0 .welcome-header .desc',
-    'step0.info': '#step0 .welcome-note',
-    'step0.start': '#btnStep0',
     'step1.h2': '#step1 h2', 'step1.desc': '#step1 .desc', 'step1.back': '#step1 .btn-ghost',
     'step1.next': '#btnStep1',
     'step2.h2': '#step2 h2', 'step2.desc': '#step2 .desc',
@@ -742,7 +921,8 @@ function applyI18n() {
     if (el) el.textContent = t(k);
   }
   document.querySelector('#redirectOption span') && (document.querySelector('#redirectOption span').textContent = t('step4.redirect'));
-  document.querySelector('#step6 h2.success-title') && (document.querySelector('#step6 .result-card.success h2').textContent = t('step6.success'));
+  const successH2 = document.querySelector('#resultSuccess h2');
+  if (successH2) successH2.textContent = t('step6.success');
   document.querySelector('#resultError h2') && (document.querySelector('#resultError h2').textContent = t('step6.error'));
   const credLabels = [
     ['lblSourceDbUser', 'dbCred.user'], ['lblSourceDbName', 'dbCred.dbName'], ['lblSourceDbHost', 'dbCred.host'],
@@ -765,13 +945,18 @@ function applyI18n() {
   if (copySrc) copySrc.textContent = t('step3.copyCmd');
   if (copyBtn) copyBtn.textContent = t('step3.copyCmd');
   document.title = `${t('title')} — ${t('subtitle')}`;
-  renderSteps();
-  renderGlobalChecks();
+  if (typeof applyPhaseI18n === 'function') applyPhaseI18n();
+  if (typeof renderFlowSteps === 'function') renderFlowSteps();
+  else renderSteps();
   if (state.currentStep === 3) renderDetectedTargetDb();
   updateStepButtons();
 }
 
 function renderSteps() {
+  if (typeof renderFlowSteps === 'function') {
+    renderFlowSteps();
+    return;
+  }
   const steps = t('steps');
   if (!Array.isArray(steps)) return;
   document.querySelectorAll('.step').forEach((el, i) => {
@@ -783,6 +968,9 @@ function renderSteps() {
 }
 
 function renderGlobalChecks() {
+  // Legacy helper — welcome phase no longer uses globalChecks list.
+  const el = document.getElementById('globalChecks');
+  if (!el) return;
   const checks = t('step0.checks');
   if (!Array.isArray(checks)) return;
   let html = checks.map(([icon, title, detail]) => `

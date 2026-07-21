@@ -1257,3 +1257,45 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
   .pwd-field-controls { flex-direction: column; }
   .btn-confirm-pwd { width: 100%; }
 }
+
+.choice-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 12px 0 20px;
+}
+.choice-grid-3 { grid-template-columns: 1fr; }
+@media (min-width: 720px) {
+  .choice-grid-3 { grid-template-columns: repeat(3, 1fr); }
+}
+.choice-card {
+  text-align: start;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: border-color .15s, box-shadow .15s;
+}
+.choice-card:hover { border-color: var(--border-hover); box-shadow: var(--shadow); }
+.choice-card.active { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary-glow); }
+.choice-card strong { font-size: 1rem; }
+.choice-card span { color: var(--text-muted); font-size: .9rem; line-height: 1.4; }
+.choice-card-lg { min-height: 140px; }
+.choice-icon { font-size: 1.6rem; margin-bottom: 4px; }
+.success-card {
+  background: var(--success-bg);
+  border: 1px solid rgba(16,185,129,.35);
+  border-radius: var(--radius);
+  padding: 18px;
+  margin: 12px 0;
+}
+.success-card h3 { margin-bottom: 8px; color: var(--success); }
+.upload-zone.dragover {
+  border-color: var(--primary);
+  background: rgba(59,130,246,.08);
+}

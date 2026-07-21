@@ -7,7 +7,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSock
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
 
-from app.models import MigrationRequest
+from app.models import MigrationRequest, PasarguardInstallRequest, PasarguardRestoreRequest
 from app.panels import PANELS, DATABASE_TYPES, SUBSCRIPTION_LABELS, PASARGUARD_INSTALL_DBS
 from app.services.prerequisites import check_prerequisites, get_recommended_target_dbs, get_system_status
 from app.services.orchestrator import start_migration, get_job
@@ -17,9 +17,15 @@ from app.services.upload_bundle import (
     init_bundle, save_bundle_slot, get_bundle_status, prepare_bundle_workspace, bundle_has_upload,
 )
 from app.services.upload_requirements import get_upload_requirements
+from app.services.pg_access import get_panel_access_info
+from app.services.pg_installer import start_pasarguard_install, get_install_job, validate_install_request
+from app.services.pg_restore import (
+    analyze_pasarguard_backup, start_pasarguard_restore, get_restore_job,
+)
 from app.config import WEB_PORT
 
-app = FastAPI(title="PG-Migrator", version="1.0.0")
+APP_VERSION = "2.1.0"
+app = FastAPI(title="PG-Migrator", version=APP_VERSION)
 
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -39,7 +45,7 @@ def _server_ip() -> str:
 @app.get("/api/info")
 async def api_info():
     return {
-        "version": "2.0.18",
+        "version": APP_VERSION,
         "server_ip": _server_ip(),
         "web_port": WEB_PORT,
         "panels": [p.model_dump() for p in PANELS.values()],
@@ -47,6 +53,78 @@ async def api_info():
         "pasarguard_install_dbs": PASARGUARD_INSTALL_DBS,
         "subscription_labels": SUBSCRIPTION_LABELS,
         "system": get_system_status(),
+        "panel_access": get_panel_access_info(),
+    }
+
+
+@app.get("/api/pasarguard/status")
+async def api_pasarguard_status():
+    return get_panel_access_info()
+
+
+@app.post("/api/pasarguard/install")
+async def api_pasarguard_install(req: PasarguardInstallRequest):
+    params = req.model_dump()
+    errors = validate_install_request(params)
+    if errors:
+        raise HTTPException(400, {"errors": errors})
+    try:
+        job = await start_pasarguard_install(params)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"job_id": job.job_id, "status": job.status}
+
+
+@app.get("/api/pasarguard/install/{job_id}")
+async def api_pasarguard_install_status(job_id: str):
+    job = get_install_job(job_id)
+    if not job:
+        raise HTTPException(404, "Install job not found")
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "progress": job.progress,
+        "message": job.message,
+        "logs": job.logs[-200:],
+        "result": job.result,
+    }
+
+
+@app.get("/api/pasarguard/restore/analyze/{upload_id}")
+async def api_pasarguard_restore_analyze(upload_id: str):
+    try:
+        return analyze_pasarguard_backup(upload_id=upload_id)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/pasarguard/restore")
+async def api_pasarguard_restore(req: PasarguardRestoreRequest):
+    if not req.confirmed:
+        raise HTTPException(400, "Confirmation required")
+    try:
+        job = await start_pasarguard_restore(req.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(400, str(e))
+    return {"job_id": job.job_id, "status": job.status}
+
+
+@app.get("/api/pasarguard/restore/{job_id}")
+async def api_pasarguard_restore_status(job_id: str):
+    job = get_restore_job(job_id)
+    if not job:
+        raise HTTPException(404, "Restore job not found")
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "progress": job.progress,
+        "message": job.message,
+        "logs": job.logs[-200:],
+        "result": job.result,
     }
 
 

@@ -407,18 +407,25 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadInfo();
   if (!state.systemCheck) await loadSystemCheck();
   setLang(state.lang);
-  document.getElementById('uploadDragText').textContent = t('step2.uploadDrag');
-  document.getElementById('uploadSelectText').textContent = t('step2.uploadSelect');
-  document.querySelector('#remnawaveFields .form-group:nth-child(1) label').textContent = t('step2.remnawaveUrl');
-  document.querySelector('#remnawaveFields .form-group:nth-child(2) label').textContent = t('step2.remnawaveToken');
-  document.getElementById('remnawaveUrl').placeholder = t('step2.remnawaveUrlPh');
-  document.getElementById('remnawaveToken').placeholder = t('step2.remnawaveTokenPh');
+  const drag = document.getElementById('uploadDragText');
+  const sel = document.getElementById('uploadSelectText');
+  if (drag) drag.textContent = t('step2.uploadDrag');
+  if (sel) sel.textContent = t('step2.uploadSelect');
+  const rw1 = document.querySelector('#remnawaveFields .form-group:nth-child(1) label');
+  const rw2 = document.querySelector('#remnawaveFields .form-group:nth-child(2) label');
+  if (rw1) rw1.textContent = t('step2.remnawaveUrl');
+  if (rw2) rw2.textContent = t('step2.remnawaveToken');
+  const rwUrl = document.getElementById('remnawaveUrl');
+  const rwTok = document.getElementById('remnawaveToken');
+  if (rwUrl) rwUrl.placeholder = t('step2.remnawaveUrlPh');
+  if (rwTok) rwTok.placeholder = t('step2.remnawaveTokenPh');
   document.getElementById('footerDocs').textContent = t('footer.docs');
   document.getElementById('footerGithub').textContent = t('footer.github');
   document.getElementById('statusMsg').textContent = t('step5.preparing');
   setupUpload();
   setupCredentialListeners();
   updateStepButtons();
+  if (typeof showPhase === 'function') showPhase('welcome');
 });
 
 function applySystemCheck(sys) {
@@ -445,6 +452,7 @@ async function loadInfo() {
     if (data.version) document.getElementById('appVersion').textContent = `v${data.version}`;
     if (data.pasarguard_install_dbs) state.pasarguardInstallDbs = data.pasarguard_install_dbs;
     if (data.system) applySystemCheck(data.system);
+    if (data.panel_access) state.panelAccess = data.panel_access;
   } catch (e) {
     console.error(e);
   }
@@ -480,10 +488,7 @@ function showStepBlock(step, msg) {
 }
 
 function canProceedStep0() {
-  const s = state.systemCheck;
-  if (!s) return t('step0.checking');
-  if (!s.root) return t('block.noRoot');
-  if (!s.docker) return t('block.noDocker');
+  // Pre-flight is handled in welcome/pg phases now.
   return null;
 }
 
@@ -601,35 +606,30 @@ function renderDetectedTargetDb() {
 
 function updateStepButtons() {
   try {
-    const b0 = document.getElementById('btnStep0');
     const b1 = document.getElementById('btnStep1');
     const b2 = document.getElementById('btnStep2');
     const b3 = document.getElementById('btnStep3');
     const b4 = document.getElementById('btnStep4');
-    if (b0) b0.disabled = !!canProceedStep0();
     if (b1) b1.disabled = !!canProceedStep1();
     if (b2) b2.disabled = !!canProceedStep2();
     if (b3) b3.disabled = !!canProceedStep3();
-    if (state.currentStep === 0) showStepBlock(0, canProceedStep0());
-    if (state.currentStep === 1) showStepBlock(1, canProceedStep1());
-    if (state.currentStep === 2) showStepBlock(2, canProceedStep2());
-    if (state.currentStep === 3) showStepBlock(3, canProceedStep3());
+    if (state.phase === 'migrate' || state.currentStep >= 1) {
+      if (state.currentStep === 1) showStepBlock(1, canProceedStep1());
+      if (state.currentStep === 2) showStepBlock(2, canProceedStep2());
+      if (state.currentStep === 3) showStepBlock(3, canProceedStep3());
+    }
   } catch (e) {
     console.error('updateStepButtons failed:', e);
   }
 }
 
 async function goStep(n) {
+  state.phase = 'migrate';
   if (n > state.currentStep) {
     let block = null;
-    if (n >= 1) block = canProceedStep0();
-    if (!block && n >= 2) block = canProceedStep1();
-    if (!block && n >= 3) {
-      block = canProceedStep2();
-    }
-    if (!block && n >= 4) {
-      block = canProceedStep2() || canProceedStep3();
-    }
+    if (n >= 2) block = canProceedStep1();
+    if (!block && n >= 3) block = canProceedStep2();
+    if (!block && n >= 4) block = canProceedStep2() || canProceedStep3();
     if (!block && n >= 5) {
       const v = await validateMigrationRequest();
       if (!v.ok) block = tr(v.errors[0], state.lang) || t('block.validationFailed');
@@ -641,20 +641,16 @@ async function goStep(n) {
     }
   }
 
-  if (n === 0) loadSystemCheck();
   if (n === 1) renderPanels();
   if (n === 2) renderSourceDbs();
   if (n === 3) renderTargetDbs();
   if (n === 4) renderSummary();
 
   state.currentStep = n;
-  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-  document.getElementById(`step${n}`).classList.add('active');
-  document.querySelectorAll('.step').forEach(s => {
-    const sn = parseInt(s.dataset.step);
-    s.classList.toggle('active', sn === n);
-    s.classList.toggle('done', sn < n);
-  });
+  document.querySelectorAll('main.main > .panel').forEach(p => p.classList.remove('active'));
+  const panel = document.getElementById(`step${n}`);
+  if (panel) panel.classList.add('active');
+  if (typeof renderFlowSteps === 'function') renderFlowSteps();
   showStepBlock(n, null);
   updateStepButtons();
 }
