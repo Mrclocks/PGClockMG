@@ -422,6 +422,14 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
   text-align: center;
   cursor: pointer;
   transition: all 0.2s;
+  color: inherit;
+  font: inherit;
+  width: 100%;
+}
+
+button.db-card {
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 .db-card:hover { border-color: var(--border-hover); }

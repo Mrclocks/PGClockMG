@@ -109,9 +109,12 @@ function applyPhaseI18n() {
   set('pgDomainHint', 'pg.domainHint');
   set('lblPgIp', 'pg.ip');
   set('pgIpHint', 'pg.ipHint');
+  set('lblPgSslPort', 'pg.sslPort');
+  set('pgSslPortHint', 'pg.sslPortHint');
   set('pgDbMatchTip', 'pg.dbMatchTip');
   set('pgDoneTitle', 'pg.doneTitle');
   set('btnPgDoneNext', 'pg.next');
+  bindPgSslButtons();
 
   applyChooseI18n();
 
@@ -164,6 +167,7 @@ async function renderPgSetup() {
   } else {
     installedCard?.classList.add('hidden');
     form?.classList.remove('hidden');
+    bindPgSslButtons();
     renderPgDbGrid();
     selectPgSsl(state.pgSsl);
   }
@@ -172,19 +176,47 @@ async function renderPgSetup() {
 function renderPgDbGrid() {
   const grid = document.getElementById('pgDbGrid');
   if (!grid) return;
-  const dbs = state.pasarguardInstallDbs?.length
+  if (!state.pgDb) state.pgDb = 'timescaledb';
+  const dbs = (state.pasarguardInstallDbs?.length
     ? state.pasarguardInstallDbs
-    : ['sqlite', 'mysql', 'mariadb', 'postgresql', 'timescaledb'];
+    : ['sqlite', 'mysql', 'mariadb', 'postgresql', 'timescaledb']);
   grid.innerHTML = dbs.map(db => {
-    const name = dbDisplayName(db);
-    const active = state.pgDb === db ? 'active' : '';
-    return `<button type="button" class="db-card ${active}" onclick="selectPgDb('${db}')"><strong>${name}</strong></button>`;
+    const name = (typeof dbDisplayName === 'function' ? dbDisplayName(db) : db);
+    const selected = state.pgDb === db ? 'selected' : '';
+    const rec = db === 'timescaledb' ? 'recommended' : '';
+    return `<button type="button" class="db-card ${selected} ${rec}" data-db="${db}"><h4>${name}</h4></button>`;
   }).join('');
+
+  if (!grid.dataset.bound) {
+    grid.dataset.bound = '1';
+    grid.addEventListener('click', (e) => {
+      const btn = e.target.closest('.db-card[data-db]');
+      if (!btn) return;
+      e.preventDefault();
+      selectPgDb(btn.dataset.db);
+    });
+  }
 }
 
 function selectPgDb(db) {
+  if (!db) return;
   state.pgDb = db;
   renderPgDbGrid();
+  const block = document.getElementById('pgInstallBlock');
+  if (block) block.classList.add('hidden');
+}
+
+function bindPgSslButtons() {
+  const yes = document.getElementById('btnPgSslYes');
+  const no = document.getElementById('btnPgSslNo');
+  if (yes && !yes.dataset.bound) {
+    yes.dataset.bound = '1';
+    yes.addEventListener('click', (e) => { e.preventDefault(); selectPgSsl(true); });
+  }
+  if (no && !no.dataset.bound) {
+    no.dataset.bound = '1';
+    no.addEventListener('click', (e) => { e.preventDefault(); selectPgSsl(false); });
+  }
 }
 
 function selectPgSsl(yes) {
@@ -198,29 +230,37 @@ function selectPgSsl(yes) {
   if (yes === true) {
     yesFields?.classList.remove('hidden');
     noHint?.classList.add('hidden');
-    if (!document.getElementById('pgIp')?.value) {
-      document.getElementById('pgIp').value = (state.serverIp || '').split(':')[0];
-    }
+    const ipEl = document.getElementById('pgIp');
+    if (ipEl && !ipEl.value) ipEl.value = (state.serverIp || '').split(':')[0];
+    const portEl = document.getElementById('pgSslHttpPort');
+    if (portEl && !portEl.value) portEl.value = '80';
   } else if (yes === false) {
     yesFields?.classList.add('hidden');
     noHint?.classList.remove('hidden');
     const access = state.panelAccess || {};
     const notes = (access.no_ssl_notes && access.no_ssl_notes[state.lang]) || [];
-    noHint.innerHTML = notes.map(n => `<p>${n}</p>`).join('')
-      || `<p>ssh -L 8000:localhost:8000 user@${state.serverIp}</p><p>http://localhost:8000/dashboard/</p>`;
+    if (noHint) {
+      noHint.innerHTML = notes.map(n => `<p>${n}</p>`).join('')
+        || `<p>ssh -L 8000:localhost:8000 user@${state.serverIp}</p><p>http://localhost:8000/dashboard/</p>`;
+    }
   } else {
     yesFields?.classList.add('hidden');
     noHint?.classList.add('hidden');
   }
+  const block = document.getElementById('pgInstallBlock');
+  if (block) block.classList.add('hidden');
 }
 
 function validatePgForm() {
   if (!state.pgDb) return t('pg.pickDb');
-  if (state.pgSsl === null) return t('pg.pickSsl');
+  if (state.pgSsl === null || state.pgSsl === undefined) return t('pg.pickSsl');
   if (state.pgSsl === true) {
     const domain = document.getElementById('pgDomain')?.value?.trim();
     const ip = document.getElementById('pgIp')?.value?.trim();
     if (!domain && !ip) return t('pg.needDomainOrIp');
+    const port = document.getElementById('pgSslHttpPort')?.value?.trim() || '80';
+    const n = parseInt(port, 10);
+    if (!Number.isFinite(n) || n < 1 || n > 65535) return t('pg.badSslPort');
   }
   return null;
 }
@@ -238,17 +278,23 @@ async function startPgInstall() {
   document.getElementById('pgInstalledCard')?.classList.add('hidden');
   document.getElementById('pgInstallProgress')?.classList.remove('hidden');
   document.getElementById('pgInstallDone')?.classList.add('hidden');
+  document.getElementById('pgLogTerminal')?.classList.add('hidden');
 
   const domain = document.getElementById('pgDomain')?.value?.trim() || null;
   const ip = document.getElementById('pgIp')?.value?.trim() || null;
+  const sslPort = parseInt(document.getElementById('pgSslHttpPort')?.value || '80', 10) || 80;
   const body = {
     database: state.pgDb,
     ssl: !!state.pgSsl,
     domain: state.pgSsl && domain ? domain : null,
     ip: state.pgSsl && !domain ? ip : null,
+    ssl_http_port: sslPort,
     wipe_volumes: false,
     force: false,
   };
+
+  const status = document.getElementById('pgStatusMsg');
+  if (status) status.textContent = t('pg.installing');
 
   try {
     const res = await fetch('/api/pasarguard/install', {
@@ -256,13 +302,32 @@ async function startPgInstall() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || data.message || JSON.stringify(data));
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = data.detail;
+      const msg = typeof detail === 'string' ? detail
+        : Array.isArray(detail) ? detail.map(d => d.msg || d).join(', ')
+        : (detail?.errors ? detail.errors.join(', ') : null)
+        || data.message || res.statusText || 'Install request failed';
+      throw new Error(msg);
+    }
     pollPgInstall(data.job_id);
   } catch (e) {
-    document.getElementById('pgStatusMsg').textContent = e.message;
-    document.getElementById('pgInstallForm')?.classList.remove('hidden');
+    showPgInstallError(e.message || String(e));
   }
+}
+
+function showPgInstallError(msg) {
+  document.getElementById('pgInstallProgress')?.classList.add('hidden');
+  document.getElementById('pgInstallDone')?.classList.add('hidden');
+  document.getElementById('pgInstallForm')?.classList.remove('hidden');
+  const blockEl = document.getElementById('pgInstallBlock');
+  if (blockEl) {
+    blockEl.textContent = msg;
+    blockEl.classList.remove('hidden');
+  }
+  const status = document.getElementById('pgStatusMsg');
+  if (status) status.textContent = '';
 }
 
 async function pollPgInstall(jobId) {
@@ -270,7 +335,6 @@ async function pollPgInstall(jobId) {
   const text = document.getElementById('pgProgressText');
   const status = document.getElementById('pgStatusMsg');
   const term = document.getElementById('pgLogTerminal');
-  let lastLen = 0;
 
   const tick = async () => {
     try {
@@ -278,12 +342,10 @@ async function pollPgInstall(jobId) {
       const job = await res.json();
       if (fill) fill.style.width = `${job.progress || 0}%`;
       if (text) text.textContent = `${job.progress || 0}%`;
-      if (status) status.textContent = job.message || t('pg.installing');
-      if (term && job.logs?.length > lastLen) {
-        term.textContent = job.logs.join('\n');
-        term.scrollTop = term.scrollHeight;
-        lastLen = job.logs.length;
-      }
+      if (status) status.textContent = job.status === 'error'
+        ? ''
+        : (job.message || t('pg.installing'));
+
       if (job.status === 'success') {
         await loadSystemCheck();
         await refreshPanelAccess();
@@ -291,8 +353,7 @@ async function pollPgInstall(jobId) {
         return;
       }
       if (job.status === 'error') {
-        if (status) status.textContent = job.message || 'Error';
-        document.getElementById('pgInstallForm')?.classList.remove('hidden');
+        showPgInstallError(job.message || job.result?.error || 'Installation failed');
         return;
       }
       setTimeout(tick, 1500);
@@ -502,3 +563,12 @@ function showRestoreDone(result) {
   }
   renderFlowSteps();
 }
+
+// Expose for inline handlers / debugging
+window.showPhase = showPhase;
+window.startWizard = startWizard;
+window.selectPgDb = selectPgDb;
+window.selectPgSsl = selectPgSsl;
+window.startPgInstall = startPgInstall;
+window.choosePath = choosePath;
+window.startRestore = startRestore;

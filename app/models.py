@@ -59,6 +59,7 @@ class PasarguardInstallRequest(BaseModel):
     ssl: bool = False
     domain: Optional[str] = None
     ip: Optional[str] = None
+    ssl_http_port: int = 80
     wipe_volumes: bool = False
     force: bool = False
 
