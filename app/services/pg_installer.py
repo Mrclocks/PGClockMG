@@ -18,19 +18,6 @@ from app.services.prerequisites import is_pasarguard_installed
 SCRIPT_URL = "https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh"
 _install_jobs: dict[str, MigrationJob] = {}
 
-# Prompts from official pasarguard.sh install (matched on rolling buffer, even without newline)
-PROMPT_RULES = [
-    ("override", re.compile(r"override the previous installation\?\s*\(y/n\)\s*$", re.I)),
-    ("volumes", re.compile(r"Delete volumes\?\s*\[y/N\]:\s*$", re.I)),
-    ("ssl_menu", re.compile(r"Select SSL option\s*\[1-4\]\s*\(default:\s*1\):\s*$", re.I)),
-    ("ssl_domain", re.compile(r"Enter domain for SSL certificate[^:]*:\s*$", re.I)),
-    ("ssl_ipv4_default", re.compile(r"Enter IPv4 for SSL certificate\s*\(default:[^)]*\):\s*$", re.I)),
-    ("ssl_ipv4", re.compile(r"Enter IPv4 for SSL certificate:\s*$", re.I)),
-    ("ssl_ipv6", re.compile(r"Enter IPv6 for SSL certificate[^:]*:\s*$", re.I)),
-    ("panel_port", re.compile(r"Enter a different port for PasarGuard[^:]*:\s*$", re.I)),
-    ("install_node", re.compile(r"Do you want to install PasarGuard node\?\s*\(y/n\)\s*$", re.I)),
-]
-
 
 def get_install_job(job_id: str) -> MigrationJob | None:
     return _install_jobs.get(job_id)
@@ -100,7 +87,6 @@ async def _run_install(job: MigrationJob, params: dict) -> None:
         job.set_progress(100, "PasarGuard installed")
     except Exception as e:
         err = str(e).strip() or "Installation failed"
-        # Keep only a clean user-facing error (no traceback in message)
         job.status = "error"
         job.message = err
         job.log(f"ERROR: {err}")
@@ -124,7 +110,6 @@ async def _download_script(job: MigrationJob) -> Path:
 
 
 def _build_cmd(script: Path, params: dict) -> list[str]:
-    """Build CLI matching official docs: --database + --ssl-domain / --ssl / --no-ssl."""
     db = params["database"].strip().lower()
     want_ssl = str(params.get("ssl")).lower() in ("1", "true", "yes")
     domain = (params.get("domain") or "").strip()
@@ -135,10 +120,10 @@ def _build_cmd(script: Path, params: dict) -> list[str]:
         cmd += ["--database", db]
 
     if want_ssl and domain:
-        # Fully non-interactive SSL path in official script
+        # Non-interactive SSL path in official script (no menu)
         cmd += ["--ssl-domain", domain, "--ssl-http-port", http_port]
     elif want_ssl:
-        # IP SSL still needs menu option 2 — we auto-answer
+        # Hits SSL menu — we pre-answer option 2 as soon as Port 80 note appears
         cmd += ["--ssl", "--ssl-http-port", http_port]
     else:
         cmd += ["--no-ssl"]
@@ -146,7 +131,33 @@ def _build_cmd(script: Path, params: dict) -> list[str]:
 
 
 def _strip_ansi(text: str) -> str:
-    return re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", text)
+    text = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", text)
+    text = re.sub(r"\x1b\].*?\x07", "", text)
+    return text
+
+
+def _ssl_choice(want_ssl: bool, domain: str) -> str:
+    if want_ssl and domain:
+        return "1"
+    if want_ssl:
+        return "2"
+    return "4"
+
+
+def _looks_like_ssl_menu(text: str) -> bool:
+    low = _strip_ansi(text).lower()
+    return any(
+        s in low
+        for s in (
+            "select ssl option",
+            "choose ssl setup method",
+            "must be reachable for let's encrypt",
+            "must be reachable for let",
+            "1) let's encrypt domain",
+            "2) let's encrypt ip",
+            "4) no ssl",
+        )
+    )
 
 
 async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
@@ -157,8 +168,7 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
     domain = (params.get("domain") or "").strip()
     ip = (params.get("ip") or "").strip()
     wipe_volumes = bool(params.get("wipe_volumes"))
-    # Domain SSL uses flags only — no SSL menu. IP SSL still needs menu.
-    needs_ssl_menu = want_ssl and not domain
+    ssl_pick = _ssl_choice(want_ssl, domain)
 
     script = await _download_script(job)
     cmd = _build_cmd(script, params)
@@ -167,7 +177,7 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
 
     env = os.environ.copy()
     env["DEBIAN_FRONTEND"] = "noninteractive"
-    env["TERM"] = "dumb"
+    env["TERM"] = "xterm"
     env["PYTHONUNBUFFERED"] = "1"
 
     proc = await asyncio.create_subprocess_exec(
@@ -181,7 +191,8 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
     answered: set[str] = set()
     finished_ok = False
     all_output: list[str] = []
-    pending = ""  # incomplete line (read -p prompts live here)
+    pending = ""
+    idle_rounds = 0
 
     async def send(line: str, reason: str) -> None:
         job.log(f"→ auto-answer ({reason}): {line!r}")
@@ -189,108 +200,116 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
         proc.stdin.write((line + "\n").encode())
         await proc.stdin.drain()
 
-    async def handle_prompts(window: str) -> None:
+    async def maybe_answer(text: str) -> None:
         nonlocal finished_ok
-        clean = _strip_ansi(window)
-        # Match against end of buffer (prompt usually at the end)
-        tail = clean[-400:]
+        low = _strip_ansi(text).lower()
 
-        for key, pattern in PROMPT_RULES:
-            if key in answered:
-                continue
-            if not pattern.search(tail):
-                continue
+        # CRITICAL: answer SSL as soon as Port-80 / menu text appears.
+        # Official order: print "Port 80 ... Let's Encrypt." THEN read -p.
+        # Sending now fills stdin so `read` never blocks.
+        if "ssl_menu" not in answered and _looks_like_ssl_menu(text):
+            await send(ssl_pick, f"SSL menu → option {ssl_pick}")
+            answered.add("ssl_menu")
 
-            if key == "override":
-                if params.get("force"):
-                    await send("y", "override install")
-                    answered.add(key)
-                else:
-                    await send("n", "abort override")
-                    answered.add(key)
-                    raise RuntimeError("PasarGuard is already installed")
+        if "override" not in answered and "override the previous installation" in low:
+            if params.get("force"):
+                await send("y", "override install")
+                answered.add("override")
+            else:
+                await send("n", "abort override")
+                answered.add("override")
+                raise RuntimeError("PasarGuard is already installed")
 
-            elif key == "volumes":
-                await send("y" if wipe_volumes else "n", "delete volumes")
-                answered.add(key)
+        if "volumes" not in answered and "delete volumes?" in low:
+            await send("y" if wipe_volumes else "n", "delete volumes")
+            answered.add("volumes")
 
-            elif key == "ssl_menu":
-                if want_ssl and domain:
-                    await send("1", "SSL domain")
-                elif want_ssl:
-                    await send("2", "SSL IP certificate")
-                else:
-                    await send("4", "No SSL")
-                answered.add(key)
+        if "ssl_domain" not in answered and "enter domain for ssl" in low:
+            await send(domain or "", "SSL domain")
+            answered.add("ssl_domain")
 
-            elif key == "ssl_domain":
-                await send(domain or "", "SSL domain value")
-                answered.add(key)
+        if "ssl_ipv4" not in answered and "enter ipv4 for ssl" in low:
+            await send(ip if ip else "", "SSL IPv4")
+            answered.add("ssl_ipv4")
 
-            elif key in ("ssl_ipv4", "ssl_ipv4_default"):
-                # Empty → accept detected default when prompt has default
-                await send(ip if ip else "", "SSL IPv4")
-                answered.add("ssl_ipv4")
-                answered.add("ssl_ipv4_default")
+        if "ssl_ipv6" not in answered and "enter ipv6 for ssl" in low:
+            await send("", "skip IPv6")
+            answered.add("ssl_ipv6")
 
-            elif key == "ssl_ipv6":
-                await send("", "skip IPv6")
-                answered.add(key)
+        if "panel_port" not in answered and "enter a different port for pasarguard" in low:
+            free = _find_free_port(8001)
+            await send(str(free), f"panel port → {free}")
+            answered.add("panel_port")
 
-            elif key == "panel_port":
-                free = _find_free_port(8001)
-                await send(str(free), f"panel port → {free}")
-                answered.add(key)
+        if "install_node" not in answered and "install pasarguard node" in low:
+            await send("n", "skip node install")
+            answered.add("install_node")
+            finished_ok = True
 
-            elif key == "install_node":
-                await send("n", "skip node install")
-                answered.add(key)
-                finished_ok = True
+        if "skipping node installation" in low:
+            finished_ok = True
+            answered.add("install_node")
+
+        if any(m in text for m in ("Application startup complete", "Uvicorn running")):
+            finished_ok = True
 
     assert proc.stdout is not None
     try:
         while True:
             try:
-                chunk = await asyncio.wait_for(proc.stdout.read(256), timeout=1.0)
+                chunk = await asyncio.wait_for(proc.stdout.read(512), timeout=1.0)
             except asyncio.TimeoutError:
-                # Still check pending prompt while installer is idle waiting for input
-                if pending:
-                    await handle_prompts(pending)
+                chunk = b""
+
+            if chunk:
+                idle_rounds = 0
+                text = chunk.decode("utf-8", errors="replace")
+                pending += text
+                all_output.append(text)
+
+                while "\n" in pending or "\r" in pending:
+                    if "\r\n" in pending:
+                        line, pending = pending.split("\r\n", 1)
+                    elif "\n" in pending:
+                        line, pending = pending.split("\n", 1)
+                    else:
+                        line, pending = pending.split("\r", 1)
+                    line_clean = _strip_ansi(line).strip()
+                    if line_clean:
+                        job.log(line_clean)
+                        job.set_progress(min(90, 10 + len(job.logs) // 3), line_clean[:120])
+                        await maybe_answer(line_clean)
+
+                if pending.strip():
+                    await maybe_answer(pending)
+            else:
+                idle_rounds += 1
+                if pending.strip():
+                    await maybe_answer(pending)
+
+                # Force SSL answer if stuck near the known hang point
+                recent = _strip_ansi("".join(all_output[-30:]) + pending).lower()
+                if (
+                    "ssl_menu" not in answered
+                    and idle_rounds >= 2
+                    and (
+                        "port 80" in recent
+                        or "let's encrypt" in recent
+                        or "ssl option" in recent
+                        or "ssl setup method" in recent
+                    )
+                ):
+                    await send(ssl_pick, f"SSL menu (force) → option {ssl_pick}")
+                    answered.add("ssl_menu")
+
                 if proc.returncode is not None:
                     break
-                if finished_ok:
+                if finished_ok and "install_node" in answered:
                     break
-                continue
-
-            if not chunk:
-                break
-
-            text = chunk.decode("utf-8", errors="replace")
-            pending += text
-            all_output.append(text)
-
-            # Flush complete lines to log
-            while "\n" in pending or "\r" in pending:
-                if "\r\n" in pending:
-                    line, pending = pending.split("\r\n", 1)
-                elif "\n" in pending:
-                    line, pending = pending.split("\n", 1)
-                else:
-                    line, pending = pending.split("\r", 1)
-                line = _strip_ansi(line).strip()
-                if line:
-                    job.log(line)
-                    job.set_progress(min(90, 10 + len(job.logs) // 3), line[:120])
-                    low = line.lower()
-                    if "skipping node installation" in low:
-                        finished_ok = True
-                    if any(m in line for m in ("Application startup complete", "Uvicorn running")):
-                        finished_ok = True
-
-            # Critical: answer prompts that have no trailing newline yet
-            await handle_prompts(pending)
 
             if finished_ok and "install_node" in answered:
+                break
+            if not chunk and proc.returncode is not None:
                 break
     finally:
         if finished_ok and proc.returncode is None:
@@ -312,11 +331,9 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
             pass
         await proc.wait()
 
-    # Allow containers to settle
     await asyncio.sleep(2)
 
     if not is_pasarguard_installed():
-        # Extract last meaningful error lines for the user
         blob = _strip_ansi("".join(all_output))
         err_lines = [
             ln.strip()
@@ -327,9 +344,7 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
         msg = "\n".join(detail).strip() or "PasarGuard install failed (panel not found at /opt/pasarguard)"
         raise RuntimeError(msg)
 
-    # If process died early with error code and we never finished node prompt
     if proc.returncode not in (0, None, -signal.SIGINT, -2, 130) and not finished_ok:
-        # 130 = 128+SIGINT; still OK if panel exists
         if not is_pasarguard_installed():
             raise RuntimeError(f"Installer exited with code {proc.returncode}")
 
@@ -338,6 +353,6 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
     access["ssl_requested"] = want_ssl
     access["ssl_http_port"] = str(params.get("ssl_http_port") or "80")
     access["node_skipped"] = True
-    access["needs_ssl_menu"] = needs_ssl_menu
+    access["ssl_menu_option"] = ssl_pick
     job.log("PasarGuard installation complete")
     return access
