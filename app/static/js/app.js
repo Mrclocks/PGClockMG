@@ -1,7 +1,7 @@
 /* PG-Migrator Wizard */
 
 const state = {
-  lang: localStorage.getItem('pg-migrator-lang') || 'en',
+  lang: localStorage.getItem('pg-migrator-lang') || 'fa',
   currentStep: 0,
   panels: [],
   subscriptionLabels: {},
@@ -819,9 +819,9 @@ function renderSourceDbs() {
   grid.innerHTML = panel.supported_source_dbs.map(db => {
     const auto = state.detected?.marzban_db === db || state.detected?.pasarguard_db === db;
     return `
-      <div class="db-card ${auto ? 'recommended' : ''}" data-db="${db}" onclick="selectSourceDb('${db}')">
+      <div class="db-card ${auto ? 'has-badge' : ''}" data-db="${db}" onclick="selectSourceDb('${db}')">
         <h4>${dbDisplayName(db)}</h4>
-        ${auto ? `<p>${lang === 'fa' ? 'شناسایی‌شده' : lang === 'ru' ? 'Обнаружено' : 'Detected'}</p>` : ''}
+        ${auto ? `<span class="db-badge">${lang === 'fa' ? 'شناسایی‌شده' : lang === 'ru' ? 'Обнаружено' : 'Detected'}</span>` : ''}
       </div>`;
   }).join('');
 

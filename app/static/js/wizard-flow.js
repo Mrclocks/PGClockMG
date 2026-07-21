@@ -186,8 +186,10 @@ function renderPgDbGrid() {
   grid.innerHTML = dbs.map(db => {
     const name = (typeof dbDisplayName === 'function' ? dbDisplayName(db) : db);
     const selected = state.pgDb === db ? 'selected' : '';
-    const rec = db === 'timescaledb' ? 'recommended' : '';
-    return `<button type="button" class="db-card ${selected} ${rec}" data-db="${db}"><h4>${name}</h4></button>`;
+    const rec = db === 'timescaledb'
+      ? `<span class="db-badge">${t('dbRecommended')}</span>`
+      : '';
+    return `<button type="button" class="db-card ${selected}" data-db="${db}"><h4>${name}</h4>${rec}</button>`;
   }).join('');
 
   if (!grid.dataset.bound) {
@@ -226,6 +228,7 @@ function selectPgSsl(yes) {
   state.pgSsl = yes;
   document.querySelectorAll('#pgSslGrid .choice-card').forEach(el => {
     const v = el.dataset.ssl === 'yes';
+    el.classList.toggle('selected', yes !== null && yes !== undefined && v === !!yes);
     el.classList.toggle('active', yes !== null && yes !== undefined && v === !!yes);
   });
 

@@ -6,6 +6,7 @@ const I18N = {
     subtitle: 'Install & migrate to PasarGuard',
     copied: 'Copied!',
     copyFailed: 'Copy failed',
+    dbRecommended: 'Recommended',
     steps: ['Welcome', 'Setup', 'Next', 'Panel', 'Source', 'Target', 'Confirm', 'Run', 'Done'],
     stepsRestore: ['Welcome', 'Setup', 'Next', 'Restore', 'Done'],
     stepsSetup: ['Welcome', 'Setup', 'Next'],
@@ -300,6 +301,7 @@ const I18N = {
     subtitle: 'نصب و مهاجرت به PasarGuard',
     copied: 'کپی شد!',
     copyFailed: 'کپی نشد',
+    dbRecommended: 'توصیه‌شده',
     steps: ['خوش‌آمد', 'نصب', 'ادامه', 'پنل', 'مبدأ', 'مقصد', 'تأیید', 'اجرا', 'نتیجه'],
     stepsRestore: ['خوش‌آمد', 'نصب', 'ادامه', 'ریستور', 'نتیجه'],
     stepsSetup: ['خوش‌آمد', 'نصب', 'ادامه'],
@@ -591,6 +593,7 @@ const I18N = {
     subtitle: 'Установка и миграция в PasarGuard',
     copied: 'Скопировано!',
     copyFailed: 'Не удалось скопировать',
+    dbRecommended: 'Рекомендуется',
     steps: ['Старт', 'Установка', 'Далее', 'Панель', 'Источник', 'Цель', 'Проверка', 'Запуск', 'Итог'],
     stepsRestore: ['Старт', 'Установка', 'Далее', 'Восстановление', 'Итог'],
     stepsSetup: ['Старт', 'Установка', 'Далее'],
@@ -880,18 +883,25 @@ const I18N = {
 };
 
 function t(key) {
-  const lang = state.lang || 'en';
+  const lang = state.lang || 'fa';
   const parts = key.split('.');
-  let v = I18N[lang];
-  for (const p of parts) v = v?.[p];
-  return v ?? I18N.en[key] ?? key;
+  const lookup = (dict) => {
+    let v = dict;
+    for (const p of parts) {
+      v = v?.[p];
+      if (v === undefined) return undefined;
+    }
+    return v;
+  };
+  return lookup(I18N[lang]) ?? lookup(I18N.fa) ?? lookup(I18N.en) ?? key;
 }
 
 function tr(obj, lang) {
   if (!obj) return '';
   if (typeof obj === 'string') return obj;
   if (Array.isArray(obj)) return obj;
-  return obj[lang] || obj.en || '';
+  const L = lang || state.lang || 'fa';
+  return obj[L] || obj.fa || obj.en || '';
 }
 
 function setLang(lang) {
@@ -958,6 +968,7 @@ function applyI18n() {
   if (copyBtn) copyBtn.textContent = t('step3.copyCmd');
   document.title = `${t('title')} — ${t('subtitle')}`;
   if (typeof applyPhaseI18n === 'function') applyPhaseI18n();
+  if (typeof renderPgDbGrid === 'function' && state.phase === 'pg') renderPgDbGrid();
   if (typeof renderFlowSteps === 'function') renderFlowSteps();
   else renderSteps();
   if (state.currentStep === 3) renderDetectedTargetDb();

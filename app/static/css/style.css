@@ -19,7 +19,8 @@
   --radius: 12px;
   --radius-sm: 8px;
   --shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
-  --font: 'Vazirmatn', system-ui, sans-serif;
+  --font: 'Vazirmatn', 'Tahoma', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -31,12 +32,29 @@ body {
   background: var(--bg);
   color: var(--text);
   min-height: 100vh;
-  line-height: 1.6;
+  line-height: 1.65;
   overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
-html[lang="en"], html[lang="ru"] { --font: 'Inter', system-ui, sans-serif; }
-html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
+/* All controls inherit UI font (fixes broken Persian on buttons) */
+button, input, select, textarea {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+html[lang="en"], html[lang="ru"] {
+  --font: 'Inter', system-ui, sans-serif;
+  line-height: 1.6;
+}
+html[lang="fa"] {
+  --font: 'Vazirmatn', 'Tahoma', system-ui, sans-serif;
+  line-height: 1.75;
+}
+html[lang="fa"] body {
+  letter-spacing: 0;
+}
 
 .bg-grid {
   position: fixed;
@@ -143,7 +161,7 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
   border-radius: 20px;
   font-size: 0.8rem;
   color: var(--primary);
-  font-family: monospace;
+  font-family: var(--font-mono);
   direction: ltr;
 }
 
@@ -229,13 +247,19 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
 
 .step-label {
   display: block;
-  font-size: 0.62rem;
+  font-size: 0.7rem;
   color: var(--text-dim);
   font-weight: 500;
-  letter-spacing: 0.01em;
-  line-height: 1.2;
-  max-width: 72px;
+  letter-spacing: 0;
+  line-height: 1.35;
+  max-width: 80px;
   text-align: center;
+  font-family: var(--font);
+}
+
+html[lang="fa"] .step-label {
+  font-size: 0.72rem;
+  max-width: 88px;
 }
 
 .step.active .step-label {
@@ -262,12 +286,16 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
   font-size: 1.5rem;
   font-weight: 700;
   margin-bottom: 8px;
+  font-family: var(--font);
+  line-height: 1.35;
 }
 
 .desc {
   color: var(--text-muted);
   margin-bottom: 24px;
   font-size: 0.95rem;
+  font-family: var(--font);
+  line-height: 1.65;
 }
 
 .desc-sm {
@@ -395,7 +423,7 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
 }
 
 .install-cmd-box code {
-  font-family: ui-monospace, 'Cascadia Code', monospace;
+  font-family: var(--font-mono);
   font-size: 0.78rem;
   color: var(--text);
   word-break: break-all;
@@ -421,10 +449,12 @@ html[lang="fa"] { --font: 'Vazirmatn', system-ui, sans-serif; }
   padding: 16px;
   text-align: center;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
   color: inherit;
   font: inherit;
   width: 100%;
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 button.db-card {
@@ -433,17 +463,21 @@ button.db-card {
 }
 
 .db-card:hover { border-color: var(--border-hover); }
-.db-card.selected { border-color: var(--primary); background: rgba(59,130,246,0.08); }
-.db-card.recommended::after {
-  content: 'توصیه‌شده';
-  display: block;
-  font-size: 0.65rem;
+.db-card.selected {
+  border-color: var(--primary);
+  background: rgba(59, 130, 246, 0.08);
+  box-shadow: 0 0 0 3px var(--primary-glow);
+}
+.db-badge {
+  display: inline-block;
+  margin-top: 8px;
+  font-size: 0.7rem;
   color: var(--success);
-  margin-top: 6px;
   font-weight: 600;
+  font-family: var(--font);
 }
 
-.db-card h4 { font-size: 0.95rem; font-weight: 600; }
+.db-card h4 { font-size: 0.95rem; font-weight: 600; font-family: var(--font); }
 .db-card p { font-size: 0.75rem; color: var(--text-dim); margin-top: 4px; }
 
 /* Marzban migration method */
@@ -470,7 +504,9 @@ button.db-card {
   border-radius: var(--radius);
   padding: 18px;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
+  font-family: var(--font);
+  color: inherit;
 }
 .mode-card:hover { border-color: var(--border-hover); }
 .mode-card.selected {
@@ -859,7 +895,7 @@ button.db-card {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 16px;
-  font-family: 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 0.78rem;
   line-height: 1.7;
   max-height: 360px;
@@ -886,7 +922,7 @@ button.db-card {
 
 .result-details {
   margin-top: 24px;
-  text-align: right;
+  text-align: start;
   font-size: 0.85rem;
   color: var(--text-muted);
 }
@@ -1057,12 +1093,13 @@ button.db-card {
 }
 
 .detected-db-card h3 {
-  font-size: 0.72rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  font-size: 0.82rem;
+  text-transform: none;
+  letter-spacing: 0;
   color: var(--text-dim);
   font-weight: 600;
   margin-bottom: 14px;
+  font-family: var(--font);
 }
 
 .detected-db-row {
@@ -1183,7 +1220,7 @@ button.db-card {
   border-radius: var(--radius-sm);
   background: var(--bg-elevated);
   color: var(--text);
-  font-family: ui-monospace, 'Cascadia Code', monospace;
+  font-family: var(--font-mono);
   font-size: 0.85rem;
   direction: ltr;
   text-align: left;
@@ -1232,7 +1269,7 @@ button.db-card {
 }
 
 .pwd-candidate-key {
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 0.75rem;
   color: var(--text-dim);
   font-weight: 600;
@@ -1259,7 +1296,8 @@ button.db-card {
   .header { flex-direction: column; gap: 12px; align-items: flex-start; }
   .panel-grid { grid-template-columns: 1fr; }
   .steps { overflow-x: auto; padding-bottom: 6px; }
-  .step-label { font-size: 0.55rem; max-width: 56px; }
+  .step-label { font-size: 0.65rem; max-width: 64px; }
+  html[lang="fa"] .step-label { font-size: 0.68rem; max-width: 72px; }
   .welcome-card { padding: 20px 18px; }
   .install-cmd-row { flex-direction: column; }
   .pwd-field-controls { flex-direction: column; }
@@ -1279,20 +1317,45 @@ button.db-card {
 .choice-card {
   text-align: start;
   background: var(--bg-card);
-  border: 1px solid var(--border);
+  border: 2px solid var(--border);
   border-radius: var(--radius);
-  padding: 16px;
+  padding: 16px 18px;
   color: var(--text);
   cursor: pointer;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  transition: border-color .15s, box-shadow .15s;
+  transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
+  font-family: var(--font);
+  font-size: 0.95rem;
+  line-height: 1.55;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
 }
-.choice-card:hover { border-color: var(--border-hover); box-shadow: var(--shadow); }
-.choice-card.active { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary-glow); }
-.choice-card strong { font-size: 1rem; }
-.choice-card span { color: var(--text-muted); font-size: .9rem; line-height: 1.4; }
+.choice-card:hover {
+  border-color: var(--border-hover);
+  box-shadow: var(--shadow);
+}
+.choice-card.active,
+.choice-card.selected {
+  border-color: var(--primary);
+  background: rgba(59, 130, 246, 0.08);
+  box-shadow: 0 0 0 3px var(--primary-glow);
+}
+.choice-card strong {
+  font-size: 1rem;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--text);
+}
+.choice-card span {
+  color: var(--text-muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
+  font-family: inherit;
+  font-weight: 400;
+}
 .choice-card-lg { min-height: 140px; }
 .choice-icon { font-size: 1.6rem; margin-bottom: 4px; }
 .success-card {
@@ -1302,7 +1365,7 @@ button.db-card {
   padding: 18px;
   margin: 12px 0;
 }
-.success-card h3 { margin-bottom: 8px; color: var(--success); }
+.success-card h3 { margin-bottom: 8px; color: var(--success); font-family: var(--font); }
 .upload-zone.dragover {
   border-color: var(--primary);
   background: rgba(59,130,246,.08);
