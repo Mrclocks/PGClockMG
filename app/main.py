@@ -24,7 +24,7 @@ from app.services.pg_restore import (
 )
 from app.config import WEB_PORT
 
-APP_VERSION = "2.1.3"
+APP_VERSION = "2.1.4"
 app = FastAPI(title="PG-Migrator", version=APP_VERSION)
 
 STATIC_DIR = Path(__file__).parent / "static"

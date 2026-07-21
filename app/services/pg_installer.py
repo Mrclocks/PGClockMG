@@ -285,42 +285,42 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
     finished_ok = False
     all_output: list[str] = []
     pending = ""
-    rolling = ""  # last ~2KB for prompt detection (including no-newline prompts)
+    rolling = ""
+    idle_rounds = 0
+    last_answer_at = 0.0
 
     async def send(line: str, reason: str) -> None:
+        nonlocal last_answer_at
         job.log(f"→ auto-answer ({reason}): {line!r}")
         assert proc.stdin is not None
         proc.stdin.write((line + "\n").encode())
         await proc.stdin.drain()
+        last_answer_at = asyncio.get_running_loop().time()
 
-    async def maybe_answer() -> None:
+    async def maybe_answer(*, force_idle: bool = False) -> None:
         nonlocal finished_ok
-        low = _norm(rolling[-1200:])
+        low = _norm(rolling[-2000:])
+        pending_low = _norm(pending[-500:])
 
-        # With --no-ssl / --ssl-domain we should NOT see SSL menu.
-        # Keep handlers anyway for safety if script still asks.
-        if "ssl_menu" not in answered and (
-            "select ssl option" in low
-            or "choose ssl setup method" in low
-            or "must be reachable for let" in low
-        ):
-            # Should not happen on our preferred paths; pick safe answer
-            choice = "1" if (want_ssl and domain) else ("2" if want_ip_ssl else "4")
-            await send(choice, f"SSL menu fallback → {choice}")
-            answered.add("ssl_menu")
-
+        # --- known prompts (answer as soon as related text appears) ---
         if "override" not in answered and "override the previous installation" in low:
-            if params.get("force"):
-                await send("y", "override install")
-                answered.add("override")
-            else:
-                await send("n", "abort override")
-                answered.add("override")
+            await send("y" if params.get("force") else "n", "override")
+            answered.add("override")
+            if not params.get("force"):
                 raise RuntimeError("PasarGuard is already installed")
 
         if "volumes" not in answered and "delete volumes?" in low:
             await send("y" if wipe_volumes else "n", "delete volumes")
             answered.add("volumes")
+
+        if "ssl_menu" not in answered and (
+            "select ssl option" in low
+            or "choose ssl setup method" in low
+            or "must be reachable for let" in low
+        ):
+            choice = "1" if (want_ssl and domain) else ("2" if want_ip_ssl else "4")
+            await send(choice, f"SSL menu → {choice}")
+            answered.add("ssl_menu")
 
         if "ssl_domain" not in answered and "enter domain for ssl" in low:
             await send(domain or "", "SSL domain")
@@ -339,7 +339,15 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
             await send(str(free), f"panel port → {free}")
             answered.add("panel_port")
 
-        if "install_node" not in answered and "install pasarguard node" in low:
+        # Node prompt — official text prints "(Not recommended...)" THEN read -p
+        # Answer immediately on that banner so read never blocks.
+        if "install_node" not in answered and (
+            "install pasarguard node" in low
+            or "want to install node" in low
+            or "not recommended for commercial use" in low
+            or "doesn't have any core by default" in low
+            or "need at least one node" in low
+        ):
             await send("n", "skip node install")
             answered.add("install_node")
             finished_ok = True
@@ -351,18 +359,76 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
         if "application startup complete" in low or "uvicorn running" in low:
             finished_ok = True
 
+        # --- idle catch-all: any leftover (y/n) / : prompt gets a safe default ---
+        if not force_idle:
+            return
+
+        blob = pending_low or low[-400:]
+        # Don't answer repeatedly every tick
+        now = asyncio.get_running_loop().time()
+        if now - last_answer_at < 1.5:
+            return
+
+        # Looks like a waiting prompt (read -p leaves text without newline)
+        looks_prompt = bool(
+            re.search(r"\(y/n\)\s*$", blob)
+            or re.search(r"\[y/n\]\s*:?\s*$", blob)
+            or re.search(r"[?]:?\s*$", blob)
+            or re.search(r":\s*$", blob)
+            or "select" in blob
+            or "(y/n)" in blob
+        )
+        if not looks_prompt:
+            # Still force node skip if we saw commercial-use banner recently
+            if "install_node" not in answered and "commercial use" in low:
+                await send("n", "skip node (idle)")
+                answered.add("install_node")
+                finished_ok = True
+            return
+
+        if "install_node" not in answered and (
+            "node" in blob or "commercial" in low or "(y/n)" in blob
+        ):
+            await send("n", "skip node (idle prompt)")
+            answered.add("install_node")
+            finished_ok = True
+            return
+
+        if "volumes" not in answered and "volume" in blob:
+            await send("n", "volumes (idle)")
+            answered.add("volumes")
+            return
+
+        if "ssl_menu" not in answered and "ssl" in blob:
+            await send("4", "SSL no (idle)")
+            answered.add("ssl_menu")
+            return
+
+        if "panel_port" not in answered and "port" in blob:
+            free = _find_free_port(8001)
+            await send(str(free), f"port (idle) → {free}")
+            answered.add("panel_port")
+            return
+
+        # Generic: Enter / n for yes-no, empty for others
+        if "(y/n)" in blob or "[y/n]" in blob:
+            await send("n", "generic no (idle)")
+        else:
+            await send("", "generic Enter (idle)")
+
     assert proc.stdout is not None
     try:
         while True:
             try:
-                chunk = await asyncio.wait_for(proc.stdout.read(512), timeout=1.0)
+                chunk = await asyncio.wait_for(proc.stdout.read(512), timeout=0.8)
             except asyncio.TimeoutError:
                 chunk = b""
 
             if chunk:
+                idle_rounds = 0
                 text = chunk.decode("utf-8", errors="replace")
                 pending += text
-                rolling = (rolling + text)[-4000:]
+                rolling = (rolling + text)[-6000:]
                 all_output.append(text)
 
                 while "\n" in pending or "\r" in pending:
@@ -379,7 +445,17 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
 
                 await maybe_answer()
             else:
-                await maybe_answer()
+                idle_rounds += 1
+                await maybe_answer(force_idle=(idle_rounds >= 2))
+
+                # If panel already exists and we've passed node step or idle long — stop log follow
+                if idle_rounds >= 5 and is_pasarguard_installed():
+                    if "install_node" not in answered:
+                        await send("n", "skip node (installed+idle)")
+                        answered.add("install_node")
+                    finished_ok = True
+                    break
+
                 if proc.returncode is not None:
                     break
                 if finished_ok and "install_node" in answered:
@@ -393,6 +469,13 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
         if finished_ok and proc.returncode is None:
             job.log("Install finished — stopping log follow")
             try:
+                # Extra Enter/n in case a prompt is still open
+                try:
+                    assert proc.stdin is not None
+                    proc.stdin.write(b"n\n\n")
+                    await proc.stdin.drain()
+                except Exception:
+                    pass
                 proc.send_signal(signal.SIGINT)
             except Exception:
                 try:
