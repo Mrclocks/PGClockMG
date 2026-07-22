@@ -8,3 +8,8 @@ backups/
 uploads/
 logs/
 tools/
+
+tests/_tmp_*
+__pycache__/
+*.pyc
+
