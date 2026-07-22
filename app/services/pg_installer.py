@@ -557,5 +557,23 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
     access["ssl_http_port"] = http_port
     access["node_skipped"] = True
     access["ip_ssl_deferred"] = want_ip_ssl
+
+    # Stamp engine so detection does not collapse timescaledb → postgresql via URL
+    try:
+        from app.config import PASARGUARD_ENV
+        from app.services.env_migration import _set_env_var_simple, read_env_var
+
+        db_engine = params.get("database") or ""
+        if PASARGUARD_ENV.exists() and db_engine in (
+            "sqlite", "mysql", "mariadb", "postgresql", "timescaledb",
+        ):
+            text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+            if read_env_var(text, "PASARGUARD_DB_ENGINE") != db_engine:
+                text = _set_env_var_simple(text, "PASARGUARD_DB_ENGINE", db_engine)
+                PASARGUARD_ENV.write_text(text, encoding="utf-8")
+                job.log(f"Stamped PASARGUARD_DB_ENGINE={db_engine}")
+    except Exception as e:
+        job.log(f"DB engine stamp note: {e}")
+
     job.log("PasarGuard installation complete")
     return access

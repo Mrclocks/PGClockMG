@@ -218,6 +218,11 @@ async function startWizardGoal(goal) {
   state.wizardGoal = goal;
   await loadSystemCheck();
   await refreshPanelAccess();
+  // Change-DB / restore always confirms target engine on the setup screen first
+  if (goal === 'change_db') {
+    showPhase('pg');
+    return;
+  }
   const installed = !!(state.systemCheck?.pasarguard || state.panelAccess?.installed);
   if (installed) {
     await continueAfterPgReady();
@@ -250,11 +255,22 @@ async function continueAfterPgReady() {
 }
 
 function backFromRestore() {
+  // After change_db we always came through pg setup
   if (state.wizardGoal === 'change_db') {
-    showPhase('welcome');
+    showPhase('pg');
     return;
   }
   showPhase(state.wizardGoal ? 'welcome' : 'choose');
+}
+
+function showPgReinstallForm() {
+  document.getElementById('pgInstalledCard')?.classList.add('hidden');
+  const form = document.getElementById('pgInstallForm');
+  form?.classList.remove('hidden');
+  state.pgSsl = null;
+  bindPgSslButtons();
+  renderPgDbGrid();
+  selectPgSsl(null);
 }
 
 async function refreshPanelAccess() {
@@ -378,8 +394,8 @@ function applyPhaseI18n() {
 
   applyChooseI18n();
 
-  const restoreH2Key = state.wizardGoal === 'change_db' ? 'restore.h2ChangeDb' : 'restore.h2';
-  const restoreDescKey = state.wizardGoal === 'change_db' ? 'restore.descChangeDb' : 'restore.desc';
+  const restoreH2Key = 'restore.h2ChangeDb';
+  const restoreDescKey = 'restore.descChangeDb';
   set('restoreH2', restoreH2Key);
   set('restoreDesc', restoreDescKey);
   set('restoreDbTipText', 'restore.tip');
@@ -395,6 +411,7 @@ function applyPhaseI18n() {
   set('restoreErrorDetailToggle', 'restore.errorDetail');
   set('btnRestoreErrorBack', 'restore.back');
   set('btnRestoreRetry', 'restore.retry');
+  set('btnRestoreRunningBack', 'restore.cancel');
   set('restoreConvertNoteText', 'restore.autoConvertNote');
   set('btnCopyRestorePath', 'copy');
   set('restoreUninstallTitle', 'uninstall.title');
@@ -434,11 +451,21 @@ async function renderPgSetup() {
 
   if (installed) {
     installedCard?.classList.remove('hidden');
-    form?.classList.add('hidden');
+    // For change_db: keep form available via "reinstall" but default to continue
+    if (state.wizardGoal === 'change_db') {
+      form?.classList.add('hidden');
+    } else {
+      form?.classList.add('hidden');
+    }
     const detail = document.getElementById('pgInstalledDetail');
     if (detail) {
       const db = state.systemCheck?.pasarguard_db || state.panelAccess?.db_type || '';
       detail.textContent = `${t('pg.installedDetail')}${db ? ` (${db})` : ''}`;
+    }
+    const reinstallBtn = document.getElementById('btnPgReinstall');
+    if (reinstallBtn) {
+      reinstallBtn.classList.toggle('hidden', state.wizardGoal !== 'change_db');
+      reinstallBtn.textContent = t('pg.reinstallOther');
     }
   } else {
     installedCard?.classList.add('hidden');
@@ -972,6 +999,7 @@ window.startWizard = startWizard;
 window.startWizardGoal = startWizardGoal;
 window.continueAfterPgReady = continueAfterPgReady;
 window.backFromRestore = backFromRestore;
+window.showPgReinstallForm = showPgReinstallForm;
 window.selectPgDb = selectPgDb;
 window.selectPgSsl = selectPgSsl;
 window.startPgInstall = startPgInstall;

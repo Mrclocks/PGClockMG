@@ -143,8 +143,18 @@ def _compose_has_pgbouncer() -> bool:
     return bool(re.search(r"^\s*pgbouncer\s*:", body, re.MULTILINE))
 
 
-def detect_db_type_from_env(text: str) -> str | None:
-    """Detect database engine from .env content (SQLALCHEMY URL wins over pgAdmin hints)."""
+def detect_db_type_from_env(text: str, *, prefer_compose: bool = True) -> str | None:
+    """Detect database engine from .env (+ live docker-compose when available).
+
+    Official Timescale installs use ``postgresql+asyncpg://…`` without the word
+    ``timescale`` in the URL. For that case we must prefer the compose service
+    name (``timescaledb:`` vs ``postgresql:``), not the URL substring.
+    """
+    # Explicit stamp (written by finalize / install tooling when present)
+    stamped = (read_env_var(text, "PASARGUARD_DB_ENGINE") or "").strip().lower()
+    if stamped in ("sqlite", "mysql", "mariadb", "postgresql", "timescaledb"):
+        return stamped
+
     url = read_env_var(text, "SQLALCHEMY_DATABASE_URL") or ""
     if url:
         low = url.lower()
@@ -155,11 +165,18 @@ def detect_db_type_from_env(text: str) -> str | None:
         if "mysql" in low or "pymysql" in low or "asyncmy" in low:
             return "mysql"
         if "postgres" in low or "asyncpg" in low or "timescale" in low:
-            return "timescaledb" if "timescale" in low else "postgresql"
+            # URL alone cannot distinguish Timescale vs PostgreSQL on real installs
+            if "timescale" in low:
+                return "timescaledb"
+            if prefer_compose:
+                svc = _compose_db_service()
+                if svc in ("timescaledb", "postgresql"):
+                    return svc
+            return "postgresql"
 
     db_creds = read_compose_db_credentials(text)
     if db_creds.get("database") and db_creds.get("user"):
-        svc = _compose_db_service()
+        svc = _compose_db_service() if prefer_compose else None
         if svc in ("timescaledb", "postgresql"):
             return svc
         if svc in ("mysql", "mariadb"):
@@ -172,7 +189,7 @@ def detect_db_type_from_env(text: str) -> str | None:
             return "mysql"
 
     if read_env_var(text, "PGADMIN_EMAIL") or read_env_var(text, "PGADMIN_PASSWORD"):
-        svc = _compose_db_service()
+        svc = _compose_db_service() if prefer_compose else None
         return "timescaledb" if svc == "timescaledb" else "postgresql"
 
     low = text.lower()
@@ -183,6 +200,10 @@ def detect_db_type_from_env(text: str) -> str | None:
     if "mysql" in low:
         return "mysql"
     if "postgres" in low or "timescale" in low:
+        if prefer_compose:
+            svc = _compose_db_service()
+            if svc in ("timescaledb", "postgresql"):
+                return svc
         return "timescaledb" if "timescale" in low else "postgresql"
     return None
 
@@ -957,6 +978,9 @@ def finalize_pasarguard_env_after_restore(
     # Remap/keep SSL from restored files; fall back to install certs only if needed
     text = sanitize_ssl_env(text, install_env_snapshot)
     text = ensure_pgadmin_env(text, install_env_snapshot)
+    # Stamp engine so detection does not collapse timescaledb → postgresql via URL alone
+    if final_db in ("sqlite", "mysql", "mariadb", "postgresql", "timescaledb"):
+        text = _set_env_var_simple(text, "PASARGUARD_DB_ENGINE", final_db)
     return text
 
 
