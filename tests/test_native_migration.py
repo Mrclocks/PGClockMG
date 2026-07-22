@@ -653,6 +653,108 @@ def test_build_copy_report():
     print("OK: build_copy_report")
 
 
+def test_prepare_replace_blocks_cascade_wipe():
+    """Regression: per-table TRUNCATE CASCADE on late parents (admin_roles) wiped users/admins.
+
+    After bulk prepare_replace, per-table truncate must be a no-op so earlier inserts survive.
+    """
+    import tempfile
+    from app.services.native_migration.adapters import (
+        SqliteReader,
+        SqliteWriter,
+        copy_tables_universal,
+    )
+
+    class CascadeSimWriter(SqliteWriter):
+        def truncate(self, table: str) -> None:
+            if getattr(self, "_bulk_prepared", False):
+                return
+            super().truncate(table)
+            if table == "admin_roles":
+                # Emulate PostgreSQL: TRUNCATE admin_roles CASCADE → admins → users
+                self._conn.execute("DELETE FROM admins")
+                self._conn.execute("DELETE FROM users")
+                try:
+                    self._conn.execute("DELETE FROM users_groups_association")
+                except Exception:
+                    pass
+
+    fd1, src = tempfile.mkstemp(suffix=".sqlite3")
+    fd2, dst = tempfile.mkstemp(suffix=".sqlite3")
+    os.close(fd1)
+    os.close(fd2)
+    try:
+        schema = """
+            CREATE TABLE admins (id INTEGER PRIMARY KEY, username TEXT);
+            CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, admin_id INTEGER);
+            CREATE TABLE users_groups_association (user_id INTEGER, group_id INTEGER);
+            CREATE TABLE admin_roles (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE hosts (id INTEGER PRIMARY KEY, remark TEXT);
+            """
+        sc = sqlite3.connect(src)
+        sc.executescript(
+            schema
+            + """
+            INSERT INTO admins VALUES (1, 'admin');
+            INSERT INTO users VALUES (1, 'u1', 1);
+            INSERT INTO users VALUES (2, 'u2', 1);
+            INSERT INTO users_groups_association VALUES (1, 1);
+            INSERT INTO users_groups_association VALUES (2, 1);
+            INSERT INTO admin_roles VALUES (1, 'sudo');
+            INSERT INTO hosts VALUES (1, 'h1');
+            """
+        )
+        sc.commit()
+        sc.close()
+
+        dc = sqlite3.connect(dst)
+        dc.executescript(schema)
+        dc.commit()
+        dc.close()
+
+        reader = SqliteReader(src)
+        writer = CascadeSimWriter(dst)
+        logs = []
+        try:
+            stats, _ = copy_tables_universal(reader, writer, logs.append, fail_hard=True)
+        finally:
+            reader.close()
+            writer.close()
+
+        assert stats.get("users") == 2, stats
+        assert stats.get("admins") == 1, stats
+        assert stats.get("hosts") == 1, stats
+        assert any("Pre-wiped" in ln for ln in logs), logs
+
+        # Without prepare_replace, mid-copy CASCADE simulation must abort on recount
+        fd3, dst2 = tempfile.mkstemp(suffix=".sqlite3")
+        os.close(fd3)
+        dc2 = sqlite3.connect(dst2)
+        dc2.executescript(schema)
+        dc2.commit()
+        dc2.close()
+        r2 = SqliteReader(src)
+        w2 = CascadeSimWriter(dst2)
+        w2.prepare_replace = lambda _tables: None  # force old per-table path
+        raised = False
+        try:
+            try:
+                copy_tables_universal(r2, w2, logs.append, fail_hard=True)
+            except RuntimeError as exc:
+                raised = True
+                assert "users" in str(exc).lower() or "TRUNCATE CASCADE" in str(exc)
+            assert raised, "expected post-copy abort when CASCADE wipes users"
+        finally:
+            r2.close()
+            w2.close()
+            os.unlink(dst2)
+
+        print("OK: prepare_replace_blocks_cascade_wipe")
+    finally:
+        os.unlink(src)
+        os.unlink(dst)
+
+
 def test_sanitize_env_text_for_docker():
     from app.services.pasarguard_ops import sanitize_env_text_for_docker
 
@@ -686,6 +788,7 @@ if __name__ == "__main__":
     test_nodes_missing_target_table_skips()
     test_copy_sqlite_to_sqlite_associations()
     test_build_copy_report()
+    test_prepare_replace_blocks_cascade_wipe()
     test_sanitize_env_text_for_docker()
     test_native_migration_import()
     print("\nAll native migration tests passed.")

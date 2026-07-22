@@ -69,6 +69,10 @@ class TableWriter(ABC):
     def truncate(self, table: str) -> None:
         pass
 
+    def prepare_replace(self, tables: list[str]) -> None:
+        """Optional: wipe all listed tables once before inserts (avoids mid-copy CASCADE)."""
+        return None
+
     @abstractmethod
     def insert(self, table: str, columns: list[str], values: tuple) -> None:
         pass
@@ -212,6 +216,7 @@ class SqliteWriter(TableWriter):
     def __init__(self, path: str):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(path)
+        self._bulk_prepared = False
 
     def _coerce_row(self, table: str, columns: list[str], values: tuple) -> tuple:
         out = []
@@ -225,7 +230,21 @@ class SqliteWriter(TableWriter):
     def target_columns(self, table: str) -> list[str]:
         return sqlite_columns(self._conn, table)
 
+    def prepare_replace(self, tables: list[str]) -> None:
+        for t in tables:
+            safe = "".join(c for c in t if c.isalnum() or c == "_")
+            if safe != t:
+                continue
+            try:
+                self._conn.execute(f"DELETE FROM {safe}")
+            except Exception:
+                pass
+        self._conn.commit()
+        self._bulk_prepared = True
+
     def truncate(self, table: str) -> None:
+        if self._bulk_prepared:
+            return
         self._conn.execute(f"DELETE FROM {table}")
 
     def insert(self, table: str, columns: list[str], values: tuple) -> None:
@@ -282,6 +301,7 @@ class MysqlWriter(TableWriter):
         )
         self._col_meta: dict[str, dict[str, dict]] = {}
         self._enum_labels: dict[str, frozenset[str]] = {}
+        self._bulk_prepared = False
 
     def _load_meta(self, table: str) -> dict[str, dict]:
         if table in self._col_meta:
@@ -392,10 +412,27 @@ class MysqlWriter(TableWriter):
         return [r[0] for r in cur.fetchall()]
 
     def truncate(self, table: str) -> None:
+        if getattr(self, "_bulk_prepared", False):
+            return
         cur = self._conn.cursor()
         cur.execute("SET FOREIGN_KEY_CHECKS = 0")
         cur.execute(f"TRUNCATE TABLE `{table}`")
         cur.execute("SET FOREIGN_KEY_CHECKS = 1")
+
+    def prepare_replace(self, tables: list[str]) -> None:
+        cur = self._conn.cursor()
+        cur.execute("SET FOREIGN_KEY_CHECKS = 0")
+        for t in tables:
+            safe = "".join(c for c in t if c.isalnum() or c == "_")
+            if safe != t:
+                continue
+            try:
+                cur.execute(f"TRUNCATE TABLE `{safe}`")
+            except Exception:
+                pass
+        cur.execute("SET FOREIGN_KEY_CHECKS = 1")
+        self._conn.commit()
+        self._bulk_prepared = True
 
     def commit(self) -> None:
         self._conn.commit()
@@ -474,6 +511,41 @@ class PostgresWriter(TableWriter):
         self._col_types: dict[str, dict[str, str]] = {}
         self._col_nullable: dict[str, dict[str, bool]] = {}
         self._enum_labels: dict[str, frozenset[str]] = {}
+        self._bulk_prepared = False
+
+    def prepare_replace(self, tables: list[str]) -> None:
+        """Wipe all copy targets once. Per-table TRUNCATE CASCADE was wiping users/admins
+        when a later parent table (e.g. admin_roles) was truncated."""
+        existing = []
+        for t in tables:
+            safe = "".join(c for c in t if c.isalnum() or c == "_")
+            if safe != t:
+                continue
+            if self.target_columns(t):
+                existing.append(t)
+        if not existing:
+            return
+        cur = self._conn.cursor()
+        # Disable FK triggers so TRUNCATE order does not matter; we refill in TABLE_ORDER.
+        cur.execute("SET session_replication_role = 'replica'")
+        idents = self._psql.SQL(", ").join(self._psql.Identifier(t) for t in existing)
+        cur.execute(
+            self._psql.SQL("TRUNCATE TABLE {} RESTART IDENTITY CASCADE").format(idents)
+        )
+        cur.execute("SET session_replication_role = 'origin'")
+        self._conn.commit()
+        self._bulk_prepared = True
+
+    def truncate(self, table: str) -> None:
+        if self._bulk_prepared:
+            return
+        # Never CASCADE here — that deletes already-copied child tables (users via admins).
+        cur = self._conn.cursor()
+        cur.execute(
+            self._psql.SQL("TRUNCATE TABLE {} RESTART IDENTITY").format(
+                self._psql.Identifier(table)
+            )
+        )
 
     def _enum_labels_for(self, udt_name: str) -> frozenset[str]:
         if udt_name not in self._enum_labels:
@@ -994,6 +1066,23 @@ def copy_tables_universal(
                 source_counts[t] = n
             log(f"Extra table queued for copy: {t}" + (f" ({n} rows)" if n > 0 else ""))
 
+    # Build wipe list first — one bulk TRUNCATE avoids CASCADE wiping earlier tables
+    wipe_tables: list[str] = []
+    for table in ordered:
+        if table in SKIP_TABLES or table not in source_tables:
+            continue
+        if not reader.source_columns(table):
+            continue
+        if not writer.target_columns(table):
+            continue
+        wipe_tables.append(table)
+    if wipe_tables:
+        try:
+            writer.prepare_replace(wipe_tables)
+            log(f"Pre-wiped {len(wipe_tables)} target tables before copy (safe bulk replace)")
+        except Exception as exc:
+            log(f"Bulk prepare_replace note: {str(exc)[:200]} — falling back to per-table truncate")
+
     for table in ordered:
         if table in SKIP_TABLES or table not in source_tables:
             continue
@@ -1121,6 +1210,25 @@ def copy_tables_universal(
             )
     else:
         writer.commit()
+
+    # Final truth check — catch mid-copy CASCADE wipes that inflated earlier stats
+    for table in MIGRATION_ABORT_IF_ZERO:
+        src_n = source_counts.get(table, 0)
+        if src_n <= 0 or table not in attempted_tables:
+            continue
+        try:
+            live = writer.row_count(table)
+        except Exception:
+            live = -1
+        if live >= 0:
+            stats[table] = live
+            if live == 0 and src_n > 0:
+                raise RuntimeError(
+                    f"Migration failed: {table} was {src_n} in source but 0 after full copy "
+                    f"(likely TRUNCATE CASCADE from a later table). Retry with updated migrator."
+                )
+            if live < src_n:
+                log(f"Post-copy recount {table}: {live}/{src_n}")
 
     if fail_hard:
         for table in MIGRATION_ABORT_IF_ZERO:
