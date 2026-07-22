@@ -362,7 +362,7 @@ def _set_env_var(text: str, key: str, value: str) -> str:
     pattern = rf"(?m)^\s*#?\s*{re.escape(key)}\s*=.*$"
     line = f'{key}="{value}"'
     if re.search(pattern, text):
-        return re.sub(pattern, line, text, count=1)
+        return re.sub(pattern, lambda _m: line, text, count=1)
     return text.rstrip() + "\n" + line + "\n"
 
 
@@ -682,12 +682,17 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         fa = "نسخه TimescaleDB بکاپ با سرور هم‌خوان نیست."
         en = "TimescaleDB version mismatch between backup and server."
         causes_fa = ["ویزارد معمولاً ایمیج را هم‌تراز می‌کند — دوباره تلاش کنید یا لاگ کامل را ببینید."]
-    elif "ssl certificate file" in low and "does not exist" in low:
-        fa = "فایل گواهی SSL در .env تعریف شده ولی روی دیسک وجود ندارد."
-        en = "SSL certificate path in .env points to a missing file."
+    elif (
+        "certificate files were not restored" in low
+        or "certs restore failed" in low
+        or ("ssl certificate file" in low and "does not exist" in low)
+    ):
+        fa = "گواهی SSL بکاپ به /var/lib/pasarguard/certs منتقل نشد یا در .env مپ نشد."
+        en = "Backup SSL certs were not restored/mapped under /var/lib/pasarguard/certs."
         causes_fa = [
-            "بکاپ SSL دارد ولی cert/key روی سرور جدید کپی نشده — در v2.3.6+ SSL نامعتبر حذف می‌شود",
-            "پوشه certs را از بکاپ بررسی کنید یا نصب بدون SSL (--no-ssl) را حفظ کنید",
+            "پوشه certs باید داخل زیپ بکاپ باشد (نه فقط مسیر در .env)",
+            "در v2.4.0+ certs به /var/lib/pasarguard/certs کپی و UVICORN_SSL_* روی همان مسیر مپ می‌شود",
+            "اگر بکاپ بدون certs گرفته شده، دوباره با certs بکاپ بگیرید یا پنل را بدون SSL نصب کنید",
         ]
     elif "migration incomplete" in low:
         fa = "بخشی از داده‌ها کپی نشد (کاربر/هاست/گروه/نود ناقص)."
@@ -747,12 +752,18 @@ async def _finalize_env_after_restore(
     user: str | None,
     db_name: str | None,
 ) -> None:
-    """Write finalized .env: correct DB URL, valid SSL, pgAdmin vars."""
+    """Write finalized .env: backup panel settings + target DB URL + remapped SSL."""
+    from app.services.env_migration import (
+        align_ssl_env_to_disk,
+        ssl_cert_files_exist,
+    )
+
     text = (
         PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
         if PASARGUARD_ENV.exists()
         else install_env_snapshot
     )
+    backup_wanted_ssl = bool(read_env_var(text, "UVICORN_SSL_CERTFILE"))
     finalized = finalize_pasarguard_env_after_restore(
         text,
         final_db,
@@ -761,6 +772,9 @@ async def _finalize_env_after_restore(
         db_user=user,
         db_name=db_name,
     )
+    # Second pass after certs are on disk
+    finalized = align_ssl_env_to_disk(finalized)
+
     if not env_points_to_db(finalized, final_db):
         raise RuntimeError(
             f".env SQLALCHEMY_DATABASE_URL does not match final engine {final_db}"
@@ -769,7 +783,19 @@ async def _finalize_env_after_restore(
         shutil.copy2(PASARGUARD_ENV, PASARGUARD_ENV.with_suffix(".env.bak-before-finalize"))
     PASARGUARD_ENV.write_text(finalized, encoding="utf-8")
     url = read_env_var(finalized, "SQLALCHEMY_DATABASE_URL") or ""
-    job.log(f"Finalized .env for {final_db} (URL driver: {url.split('://')[0] if '://' in url else '?'})")
+    cert = read_env_var(finalized, "UVICORN_SSL_CERTFILE")
+    key = read_env_var(finalized, "UVICORN_SSL_KEYFILE")
+    ssl_ok = ssl_cert_files_exist(cert, key)
+    job.log(
+        f"Finalized .env for {final_db} "
+        f"(URL driver: {url.split('://')[0] if '://' in url else '?'}, "
+        f"SSL={'ok ' + str(cert) if ssl_ok else 'disabled/missing'})"
+    )
+    if backup_wanted_ssl and not ssl_ok:
+        raise RuntimeError(
+            "Backup .env requires SSL but certificate files were not restored to "
+            "/var/lib/pasarguard/certs/. Include certs/ in the backup zip and retry."
+        )
 
 
 def _relocate_sqlite_after_convert(job: MigrationJob) -> None:
@@ -935,6 +961,8 @@ def _env_completeness_checklist(job: MigrationJob, final_db: str, backup_env: st
         "SQLALCHEMY_DATABASE_URL",
         "UVICORN_PORT",
         "UVICORN_HOST",
+        "UVICORN_SSL_CERTFILE",
+        "UVICORN_SSL_KEYFILE",
         "SUBSCRIPTION_URL_PREFIX",
         "SUBSCRIPTION_PATH",
         "TELEGRAM_API_TOKEN",
@@ -951,6 +979,16 @@ def _env_completeness_checklist(job: MigrationJob, final_db: str, backup_env: st
             report[key] = "ok" if ok else "WRONG_ENGINE"
             job.log(f"Env check {key}: {'matches ' + final_db if ok else 'MISMATCH'}")
             continue
+        if key.startswith("UVICORN_SSL_"):
+            if bak and not val:
+                report[key] = "MISSING_SSL"
+                job.log(f"Env check {key}: missing (backup had SSL)")
+            elif val:
+                report[key] = "ok"
+                job.log(f"Env check {key}: {val}")
+            else:
+                report[key] = "empty"
+            continue
         if bak and not val:
             report[key] = "MISSING"
             job.log(f"Env check {key}: missing (was in backup)")
@@ -959,10 +997,14 @@ def _env_completeness_checklist(job: MigrationJob, final_db: str, backup_env: st
             job.log(f"Env check {key}: present")
         else:
             report[key] = "empty"
-    missing = [k for k, v in report.items() if v in ("MISSING", "WRONG_ENGINE")]
+    missing = [k for k, v in report.items() if v in ("MISSING", "WRONG_ENGINE", "MISSING_SSL")]
     if "SQLALCHEMY_DATABASE_URL" in missing:
         raise RuntimeError(
             f".env SQLALCHEMY_DATABASE_URL does not match final engine {final_db}"
+        )
+    if any(v == "MISSING_SSL" for v in report.values()):
+        raise RuntimeError(
+            "Backup SSL settings were not mapped into .env — certs restore failed."
         )
     return report
 
@@ -1464,22 +1506,139 @@ async def _merge_env_after_restore(
     job.log("Merged .env (backup app settings; DB URL finalized after convert)")
 
 
+def _copy_tree_replace(src: Path, dest: Path) -> int:
+    """Replace dest with src tree; return number of files copied."""
+    if dest.exists():
+        shutil.rmtree(dest, ignore_errors=True)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, dest)
+    return sum(1 for p in dest.rglob("*") if p.is_file())
+
+
+def _find_named_dir(root: Path, name: str) -> Path | None:
+    """Find a directory named `name` that looks like real content (not empty)."""
+    preferred = [
+        root / name,
+        root / "var" / "lib" / "pasarguard" / name,
+        root / "var" / "lib" / "marzban" / name,
+        root / "opt" / "pasarguard" / name,
+        root / "opt" / "marzban" / name,
+    ]
+    for p in preferred:
+        if p.is_dir() and any(p.rglob("*")):
+            return p
+    for p in root.rglob(name):
+        if p.is_dir() and any(f.is_file() for f in p.rglob("*")):
+            # Prefer dirs that contain pem/json over empty shells
+            return p
+    return None
+
+
 async def _restore_data_files(job: MigrationJob, root: Path) -> None:
-    """Copy certs/templates/xray-like dirs from backup without clobbering DB files."""
+    """
+    Replace panel assets from backup onto this server.
+
+    Critical: certs/templates/xray go under /var/lib/pasarguard (not /opt/pasarguard),
+    because .env SSL paths are /var/lib/pasarguard/certs/...
+    """
+    PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
+    restored: list[str] = []
+
+    # --- certs → /var/lib/pasarguard/certs (full replace) ---
+    certs_src = _find_named_dir(root, "certs")
+    if certs_src:
+        n = _copy_tree_replace(certs_src, PASARGUARD_DATA / "certs")
+        job.log(f"Restored certs/ → /var/lib/pasarguard/certs/ ({n} files)")
+        restored.append(f"certs:{n}")
+    else:
+        # Loose pem files anywhere in backup
+        pems = [p for p in root.rglob("*.pem") if p.is_file()]
+        if pems:
+            dest = PASARGUARD_DATA / "certs" / "imported"
+            dest.mkdir(parents=True, exist_ok=True)
+            for p in pems:
+                shutil.copy2(p, dest / p.name)
+            job.log(f"Restored {len(pems)} loose .pem files → certs/imported/")
+            restored.append(f"pem:{len(pems)}")
+        else:
+            job.log("No certs/ found in backup")
+
+    # --- templates → /var/lib/pasarguard/templates ---
+    templates_src = _find_named_dir(root, "templates")
+    if templates_src:
+        n = _copy_tree_replace(templates_src, PASARGUARD_DATA / "templates")
+        job.log(f"Restored templates/ → /var/lib/pasarguard/templates/ ({n} files)")
+        restored.append(f"templates:{n}")
+        v2ray = PASARGUARD_DATA / "templates" / "v2ray"
+        xray = PASARGUARD_DATA / "templates" / "xray"
+        if v2ray.exists() and not xray.exists():
+            v2ray.rename(xray)
+            job.log("Renamed templates/v2ray → templates/xray")
+
+    # --- xray_config.json ---
+    xray_src = None
+    for cand in (
+        root / "xray_config.json",
+        root / "var" / "lib" / "pasarguard" / "xray_config.json",
+        root / "var" / "lib" / "marzban" / "xray_config.json",
+    ):
+        if cand.is_file():
+            xray_src = cand
+            break
+    if not xray_src:
+        found = list(root.rglob("xray_config.json"))
+        xray_src = found[0] if found else None
+    if xray_src:
+        dest = PASARGUARD_DATA / "xray_config.json"
+        text = xray_src.read_text(encoding="utf-8", errors="ignore")
+        text = text.replace("/var/lib/marzban", "/var/lib/pasarguard").replace("/opt/marzban", "/opt/pasarguard")
+        dest.write_text(text, encoding="utf-8")
+        job.log("Restored xray_config.json → /var/lib/pasarguard/")
+        restored.append("xray_config")
+
+    # --- full var/lib/pasarguard tree (except db.sqlite3) ---
+    for data_src in (
+        root / "var" / "lib" / "pasarguard",
+        root / "var" / "lib" / "marzban",
+    ):
+        if not data_src.is_dir():
+            continue
+        for item in data_src.iterdir():
+            if item.name in ("db.sqlite3", "certs", "templates"):
+                continue  # already handled / skip sqlite
+            dest = PASARGUARD_DATA / item.name
+            try:
+                if item.is_dir():
+                    n = _copy_tree_replace(item, dest)
+                    job.log(f"Restored data/{item.name}/ ({n} files)")
+                else:
+                    shutil.copy2(item, dest)
+                    job.log(f"Restored data/{item.name}")
+                restored.append(item.name)
+            except Exception as e:
+                job.log(f"Skip data {item.name}: {e}")
+
+    # --- other top-level assets into /opt/pasarguard (not certs/templates) ---
     skip_names = {
         ".env", "db_backup.sql", "db_backup_filtered.sql", "db.sqlite3",
-        "docker-compose.yml", "pg_dump",
+        "docker-compose.yml", "pg_dump", "certs", "templates", "var", "opt",
+        "xray_config.json",
     }
     for item in root.iterdir():
         if item.name in skip_names or item.name.startswith("pasarguard_"):
             continue
         if item.name.endswith(".sql") or item.name.endswith(".filtered"):
             continue
+        # Never put certs under /opt — already handled
+        if item.name.lower() in ("fullchain.pem", "privkey.pem", "cert.pem", "key.pem"):
+            dest = PASARGUARD_DATA / "certs" / "imported"
+            dest.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item, dest / item.name)
+            continue
         dest = PASARGUARD_DIR / item.name
         try:
             if item.is_dir():
                 if dest.exists():
-                    # merge copy
                     for sub in item.rglob("*"):
                         if sub.is_file():
                             rel = sub.relative_to(item)
@@ -1493,24 +1652,7 @@ async def _restore_data_files(job: MigrationJob, root: Path) -> None:
         except Exception as e:
             job.log(f"Skip copying {item.name}: {e}")
 
-    # Data dir pieces (excluding sqlite already handled)
-    data_src = root / "var" / "lib" / "pasarguard"
-    if not data_src.exists():
-        alt = list(root.rglob("xray_config.json"))
-        # optional
-    if data_src.exists():
-        PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
-        for item in data_src.iterdir():
-            if item.name == "db.sqlite3":
-                continue
-            dest = PASARGUARD_DATA / item.name
-            try:
-                if item.is_dir():
-                    if dest.exists():
-                        shutil.rmtree(dest, ignore_errors=True)
-                    shutil.copytree(item, dest)
-                else:
-                    shutil.copy2(item, dest)
-            except Exception as e:
-                job.log(f"Skip data {item.name}: {e}")
-    job.log("App/data files restored (best-effort)")
+    cert_count = sum(1 for p in (PASARGUARD_DATA / "certs").rglob("*") if p.is_file()) if (PASARGUARD_DATA / "certs").exists() else 0
+    job.log(
+        f"App/data files restored — certs_on_disk={cert_count}, items={', '.join(restored) or 'none'}"
+    )

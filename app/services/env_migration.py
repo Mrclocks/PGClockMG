@@ -629,9 +629,10 @@ def transform_pasarguard_env_for_target(
 
 def _set_env_var_simple(text: str, key: str, value: str) -> str:
     pattern = rf"(?m)^\s*#?\s*{re.escape(key)}\s*=.*$"
+    # Use a callable repl so Windows paths (\U in \Users) are not treated as regex escapes.
     line = f'{key}="{value}"'
     if re.search(pattern, text):
-        return re.sub(pattern, line, text, count=1)
+        return re.sub(pattern, lambda _m: line, text, count=1)
     return text.rstrip() + "\n" + line + "\n"
 
 
@@ -665,14 +666,34 @@ def _resolve_ssl_cert_path(path_str: str) -> Path | None:
         host = PASARGUARD_DIR / normalized[len("/opt/pasarguard/"):]
         if host.is_file():
             return host
+    # Marzban legacy paths → PasarGuard data
+    if normalized.startswith("/var/lib/marzban/"):
+        host = PASARGUARD_DATA / normalized[len("/var/lib/marzban/"):]
+        if host.is_file():
+            return host
     p = Path(path_str)
     if p.is_file():
         return p
     for base in (PASARGUARD_DATA, PASARGUARD_DIR):
-        candidate = base / path_str
+        candidate = base / path_str.lstrip("/")
         if candidate.is_file():
             return candidate
+        # basename search under certs/
+        name = Path(normalized).name
+        if name:
+            hit = next((PASARGUARD_DATA / "certs").rglob(name), None) if (PASARGUARD_DATA / "certs").exists() else None
+            if hit and hit.is_file():
+                return hit
     return p if p.is_absolute() else PASARGUARD_DIR / path_str
+
+
+def host_path_to_container_data(path: Path) -> str | None:
+    """Convert host file under /var/lib/pasarguard to container path."""
+    try:
+        rel = path.resolve().relative_to(PASARGUARD_DATA.resolve())
+        return f"/var/lib/pasarguard/{rel.as_posix()}"
+    except Exception:
+        return None
 
 
 def ssl_cert_files_exist(cert: str | None, key: str | None) -> bool:
@@ -683,14 +704,114 @@ def ssl_cert_files_exist(cert: str | None, key: str | None) -> bool:
     return bool(cp and kp and cp.is_file() and kp.is_file())
 
 
-def sanitize_ssl_env(text: str, install_env: str | None = None) -> str:
+def _find_ssl_pair_under_certs() -> tuple[Path, Path] | None:
+    """Locate fullchain+privkey (or common aliases) under restored certs/."""
+    root = PASARGUARD_DATA / "certs"
+    if not root.is_dir():
+        return None
+
+    def pick(names: tuple[str, ...]) -> Path | None:
+        for name in names:
+            hits = sorted(root.rglob(name))
+            for h in hits:
+                if h.is_file() and h.stat().st_size > 0:
+                    return h
+        return None
+
+    cert = pick(("fullchain.pem", "fullchain.crt", "cert.pem", "certificate.pem", "cert.crt"))
+    key = pick(("privkey.pem", "privkey.key", "private.key", "key.pem", "private.pem"))
+    if cert and key:
+        return cert, key
+    # Domain-folder layout: certs/<domain>/fullchain.pem
+    for domain_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        c = None
+        for name in ("fullchain.pem", "cert.pem"):
+            p = domain_dir / name
+            if p.is_file() and p.stat().st_size > 0:
+                c = p
+                break
+        k = None
+        for name in ("privkey.pem", "key.pem", "privkey.key"):
+            p = domain_dir / name
+            if p.is_file() and p.stat().st_size > 0:
+                k = p
+                break
+        if c and k:
+            return c, k
+    return None
+
+
+def align_ssl_env_to_disk(text: str) -> str:
     """
-    Keep SSL only when cert/key files exist on disk.
-    Falls back to install SSL, otherwise strips SSL vars (avoids startup crash).
+    Keep backup SSL paths when files exist; otherwise remap to restored certs/.
+    Only strip SSL vars when no cert files can be found (never rewrite ports).
     """
     cert = read_env_var(text, "UVICORN_SSL_CERTFILE")
     key = read_env_var(text, "UVICORN_SSL_KEYFILE")
+
     if ssl_cert_files_exist(cert, key):
+        # Normalize to container paths under /var/lib/pasarguard when possible
+        cp = _resolve_ssl_cert_path(cert)
+        kp = _resolve_ssl_cert_path(key)
+        if cp and kp:
+            c_cont = host_path_to_container_data(cp) or cert
+            k_cont = host_path_to_container_data(kp) or key
+            text = _set_env_var_simple(text, "UVICORN_SSL_CERTFILE", c_cont)
+            text = _set_env_var_simple(text, "UVICORN_SSL_KEYFILE", k_cont)
+            if not read_env_var(text, "UVICORN_SSL_CA_TYPE"):
+                text = _set_env_var_simple(text, "UVICORN_SSL_CA_TYPE", "public")
+        return text
+
+    # Remap using basenames from env under certs/
+    if cert or key:
+        for raw, env_key in ((cert, "UVICORN_SSL_CERTFILE"), (key, "UVICORN_SSL_KEYFILE")):
+            if not raw:
+                continue
+            name = Path(raw.replace("\\", "/")).name
+            if not name:
+                continue
+            certs = PASARGUARD_DATA / "certs"
+            if certs.is_dir():
+                hit = next((p for p in certs.rglob(name) if p.is_file() and p.stat().st_size > 0), None)
+                if hit:
+                    cont = host_path_to_container_data(hit)
+                    if cont:
+                        text = _set_env_var_simple(text, env_key, cont)
+        if ssl_cert_files_exist(
+            read_env_var(text, "UVICORN_SSL_CERTFILE"),
+            read_env_var(text, "UVICORN_SSL_KEYFILE"),
+        ):
+            if not read_env_var(text, "UVICORN_SSL_CA_TYPE"):
+                text = _set_env_var_simple(text, "UVICORN_SSL_CA_TYPE", "public")
+            return text
+
+    pair = _find_ssl_pair_under_certs()
+    if pair:
+        c_cont = host_path_to_container_data(pair[0])
+        k_cont = host_path_to_container_data(pair[1])
+        if c_cont and k_cont:
+            text = _set_env_var_simple(text, "UVICORN_SSL_CERTFILE", c_cont)
+            text = _set_env_var_simple(text, "UVICORN_SSL_KEYFILE", k_cont)
+            if not read_env_var(text, "UVICORN_SSL_CA_TYPE"):
+                text = _set_env_var_simple(text, "UVICORN_SSL_CA_TYPE", "public")
+            return text
+
+    # No usable certs — strip SSL only (keep ports/telegram/etc.)
+    for key_name in ("UVICORN_SSL_CERTFILE", "UVICORN_SSL_KEYFILE", "UVICORN_SSL_CA_TYPE"):
+        text = _unset_env_var(text, key_name)
+    return text
+
+
+def sanitize_ssl_env(text: str, install_env: str | None = None) -> str:
+    """
+    Keep SSL when cert/key exist on disk (or can be remapped from certs/).
+    Falls back to install SSL only if backup has none; never overwrites ports.
+    """
+    text = align_ssl_env_to_disk(text)
+    if ssl_cert_files_exist(
+        read_env_var(text, "UVICORN_SSL_CERTFILE"),
+        read_env_var(text, "UVICORN_SSL_KEYFILE"),
+    ):
         return text
 
     if install_env:
@@ -706,12 +827,6 @@ def sanitize_ssl_env(text: str, install_env: str | None = None) -> str:
 
     for key_name in ("UVICORN_SSL_CERTFILE", "UVICORN_SSL_KEYFILE", "UVICORN_SSL_CA_TYPE"):
         text = _unset_env_var(text, key_name)
-
-    if install_env:
-        for key_name in ("UVICORN_PORT", "UVICORN_HOST"):
-            val = read_env_var(install_env, key_name)
-            if val:
-                text = _set_env_var_simple(text, key_name, val)
     return text
 
 
@@ -775,11 +890,11 @@ def finalize_pasarguard_env_after_restore(
     db_name: str | None = None,
 ) -> str:
     """
-    Pin .env to the restored/converted DB engine, valid SSL, and pgAdmin vars.
-    Called after data restore and optional cross-DB convert, before compose up.
+    Full panel replacement from backup .env, except live DB connection.
 
-    Critical: build SQLALCHEMY from the *install* snapshot (correct host/port/user),
-    never from a backup-merged .env that still points at sqlite.
+    - Keep every backup key (ports, telegram, subscription, SSL, xray, …)
+    - Only rewrite SQLALCHEMY / DB_* / POSTGRES_* / MYSQL_* for the target engine
+    - Remap SSL paths to restored certs under /var/lib/pasarguard/certs
     """
     install_url = read_env_var(install_env_snapshot, "SQLALCHEMY_DATABASE_URL") or ""
     if install_url and env_points_to_db(install_env_snapshot, final_db):
@@ -818,6 +933,11 @@ def finalize_pasarguard_env_after_restore(
         pwd = password or read_env_var(install_env_snapshot, "DB_PASSWORD") or ""
         text = _set_env_var_simple(text, "DB_USER", user)
         text = _set_env_var_simple(text, "DB_NAME", name)
+        # Prefer install DB_HOST/DB_PORT (docker/pgbouncer layout)
+        for key in ("DB_HOST", "DB_PORT", "POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER", "POSTGRES_DB"):
+            val = read_env_var(install_env_snapshot, key)
+            if val:
+                text = _set_env_var_simple(text, key, val)
         if pwd:
             text = _set_env_var_simple(text, "DB_PASSWORD", pwd)
         if final_db in ("postgresql", "timescaledb") and pwd:
@@ -826,14 +946,15 @@ def finalize_pasarguard_env_after_restore(
             root_pw = read_env_var(install_env_snapshot, "MYSQL_ROOT_PASSWORD") or pwd
             text = _set_env_var_simple(text, "MYSQL_ROOT_PASSWORD", root_pw)
 
+    # Never overwrite backup UVICORN_PORT/HOST — only fill if missing
     for key in ("UVICORN_PORT", "UVICORN_HOST", "UVICORN_ROOT_PATH", "ALLOWED_ORIGINS"):
-        # Keep backup panel port/host when present — change-DB must match old panel
         if read_env_var(text, key):
             continue
         val = read_env_var(install_env_snapshot, key)
         if val:
             text = _set_env_var_simple(text, key, val)
 
+    # Remap/keep SSL from restored files; fall back to install certs only if needed
     text = sanitize_ssl_env(text, install_env_snapshot)
     text = ensure_pgadmin_env(text, install_env_snapshot)
     return text
