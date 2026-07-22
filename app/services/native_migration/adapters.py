@@ -921,9 +921,16 @@ def build_copy_report(
     source_counts: dict[str, int],
     stats: dict[str, int],
 ) -> dict:
-    """Summarize tables that were not fully copied (for post-migration UI)."""
+    """Summarize tables that were not fully copied (for post-migration UI).
+
+    ``has_gaps`` is True only when a *critical* table is incomplete.
+    Best-effort history tables (usages, subscription updates, hwids, …) may
+    appear in ``incomplete`` / ``soft_incomplete`` without failing the job —
+    SQLite often keeps orphan FK rows that PostgreSQL correctly rejects.
+    """
     incomplete: list[dict] = []
     seen: set[str] = set()
+    critical = STRICT_COMPLETE_TABLES | SUBSCRIPTION_TABLES | MIGRATION_ABORT_IF_ZERO
     for table in list(TABLE_ORDER) + sorted(source_counts.keys()):
         if table in seen:
             continue
@@ -939,7 +946,14 @@ def build_copy_report(
                 "copied": copied,
                 "missing": src - copied,
             })
-    return {"incomplete": incomplete, "has_gaps": bool(incomplete)}
+    critical_incomplete = [i for i in incomplete if i["table"] in critical]
+    soft_only = [i for i in incomplete if i["table"] not in critical]
+    return {
+        "incomplete": incomplete,
+        "critical_incomplete": critical_incomplete,
+        "soft_incomplete": soft_only,
+        "has_gaps": bool(critical_incomplete),
+    }
 
 
 def copy_tables_universal(

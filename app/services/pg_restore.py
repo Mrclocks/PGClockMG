@@ -1359,11 +1359,28 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             )
             src_from_copy = (copy_report or {}).get("source_counts") or {}
             if src_from_copy:
-                expected_counts = {k: v for k, v in src_from_copy.items() if isinstance(v, int) and v > 0}
+                from app.services.native_migration.copy_core import VERIFY_TABLES
+
+                expected_counts = {
+                    k: v
+                    for k, v in src_from_copy.items()
+                    if isinstance(v, int) and v > 0 and k in VERIFY_TABLES
+                }
+            soft_gaps = (copy_report or {}).get("soft_incomplete") or []
+            if soft_gaps:
+                job.log(
+                    "Non-critical tables partially skipped (orphans/history OK): "
+                    + ", ".join(
+                        f"{i['table']} {i['copied']}/{i['source']}" for i in soft_gaps[:8]
+                    )
+                )
             if copy_report.get("has_gaps"):
+                crit = copy_report.get("critical_incomplete") or copy_report.get("incomplete") or []
                 raise RuntimeError(
                     "Migration incomplete — critical tables were not fully copied:\n"
-                    + str(copy_report.get("gaps") or copy_report)
+                    + ", ".join(
+                        f"{i.get('table')} {i.get('copied')}/{i.get('source')}" for i in crit
+                    )
                 )
         elif target_db and soft_db_family(restore_engine, target_db):
             final_db = target_db

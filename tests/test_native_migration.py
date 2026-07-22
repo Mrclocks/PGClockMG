@@ -631,6 +631,25 @@ def test_build_copy_report():
     assert report["incomplete"][0]["missing"] == 5 or any(
         i["table"] == "nodes" and i["missing"] == 5 for i in report["incomplete"]
     )
+
+    # Orphan history must NOT fail the job
+    soft = build_copy_report(
+        {
+            "users": 50,
+            "hosts": 7,
+            "user_subscription_updates": 48,
+            "node_usages": 100,
+        },
+        {
+            "users": 50,
+            "hosts": 7,
+            "user_subscription_updates": 0,
+            "node_usages": 100,
+        },
+    )
+    assert soft["has_gaps"] is False
+    assert soft["soft_incomplete"]
+    assert soft["soft_incomplete"][0]["table"] == "user_subscription_updates"
     print("OK: build_copy_report")
 
 
