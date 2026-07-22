@@ -74,6 +74,7 @@ const I18N = {
       badSslPort: 'Enter a valid SSL HTTP port (1–65535), default 80',
       pickDb: 'Select a database',
       pickSsl: 'Choose SSL yes or no',
+      installCancelled: 'Install cancelled — you can go back or retry.',
     },
     choose: {
       h2: 'What next?',
@@ -409,6 +410,7 @@ const I18N = {
       badSslPort: 'پورت SSL معتبر وارد کنید (۱–۶۵۵۳۵)، پیش‌فرض ۸۰',
       pickDb: 'دیتابیس را انتخاب کنید',
       pickSsl: 'SSL را انتخاب کنید',
+      installCancelled: 'نصب لغو شد — می‌توانید برگردید یا دوباره تلاش کنید.',
     },
     choose: {
       h2: 'بعدی چه کار کنیم؟',
@@ -741,6 +743,7 @@ const I18N = {
       badSslPort: 'Укажите корректный HTTP-порт SSL (1–65535), по умолчанию 80',
       pickDb: 'Выберите базу данных',
       pickSsl: 'Выберите SSL да/нет',
+      installCancelled: 'Установка отменена — можно вернуться или повторить.',
     },
     choose: {
       h2: 'Что дальше?',

@@ -1,11 +1,15 @@
-"""PasarGuard database migration between DB engines using official db-migrations tool."""
+"""PasarGuard database migration between DB engines (two-phase head→head copy)."""
 
 from pathlib import Path
 import shutil
 
 from app.config import PASARGUARD_DIR, PASARGUARD_DATA, PASARGUARD_ENV, BACKUP_DIR
 from app.services.migrators.base import BaseMigrator
-from app.services.env_migration import transform_pasarguard_env_for_target
+from app.services.env_migration import (
+    finalize_pasarguard_env_after_restore,
+    env_points_to_db,
+    transform_pasarguard_env_for_target,
+)
 from app.services.native_migration import run_cross_db_migration
 from app.services.pasarguard_ops import safe_start_pasarguard, docker_compose_up, resolve_db_service
 
@@ -21,6 +25,12 @@ class PasarguardDbMigrator(BaseMigrator):
         if not PASARGUARD_DIR.exists():
             raise RuntimeError("PasarGuard is not installed on this server")
 
+        install_env_snapshot = (
+            PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+            if PASARGUARD_ENV.exists()
+            else ""
+        )
+
         self.job.set_progress(15, "Locating source database...")
         source_path = upload_path or self._detect_source_path(source_db)
         if not source_path or not Path(source_path).exists():
@@ -33,6 +43,15 @@ class PasarguardDbMigrator(BaseMigrator):
             self.job.set_progress(30, f"Two-phase cross-DB: {source_db} → {target_db}...")
             await self._ensure_target_database_stack(target_db)
             await run_cross_db_migration(self, str(source_path), source_db, target_db)
+            report = getattr(self, "copy_report", None) or {}
+            if report.get("has_gaps"):
+                crit = report.get("critical_incomplete") or report.get("incomplete") or []
+                raise RuntimeError(
+                    "Migration incomplete — critical tables were not fully copied:\n"
+                    + ", ".join(
+                        f"{i.get('table')} {i.get('copied')}/{i.get('source')}" for i in crit
+                    )
+                )
         elif source_db == target_db and source_db == "sqlite":
             self.job.set_progress(40, "Replacing SQLite database...")
             dest = PASARGUARD_DATA / "db.sqlite3"
@@ -44,16 +63,21 @@ class PasarguardDbMigrator(BaseMigrator):
             await run_db_migration(self, str(source_path), source_db, target_db)
 
         self.job.set_progress(75, "Updating PasarGuard .env...")
-        await self._update_pasarguard_env(target_db)
+        await self._update_pasarguard_env(target_db, install_env_snapshot)
+
+        if source_db != target_db and target_db != "sqlite":
+            self._relocate_sqlite()
 
         self.job.set_progress(90, "Starting PasarGuard...")
         await safe_start_pasarguard(self)
 
+        stats = getattr(self, "copy_stats", None) or {}
         self.job.set_progress(100, "Database migration completed")
         out = {
             "panel_url": self._get_panel_url(),
             "subscription_mode": "native",
             "method": f"{source_db} → {target_db}",
+            "copy_stats": stats,
         }
         if self.copy_report:
             out["copy_report"] = self.copy_report
@@ -81,19 +105,51 @@ class PasarguardDbMigrator(BaseMigrator):
             import asyncio
             await asyncio.sleep(8)
 
-    async def _update_pasarguard_env(self, target_db: str):
-        if not PASARGUARD_ENV.exists():
+    def _relocate_sqlite(self) -> None:
+        sqlite_path = PASARGUARD_DATA / "db.sqlite3"
+        if not sqlite_path.exists():
+            return
+        bak = PASARGUARD_DATA / f"db.sqlite3.pre-migrate-{self.job.job_id}.bak"
+        if bak.exists():
+            bak.unlink()
+        shutil.move(str(sqlite_path), str(bak))
+        self.job.log(f"Moved SQLite aside → {bak.name} (panel uses server DB)")
+
+    async def _update_pasarguard_env(self, target_db: str, install_env_snapshot: str):
+        if not PASARGUARD_ENV.exists() and not install_env_snapshot:
             return
         from app.services.db_credentials import get_target_connection
-        self._backup_file(PASARGUARD_ENV, BACKUP_DIR)
-        text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+
+        self._backup_file(PASARGUARD_ENV, BACKUP_DIR) if PASARGUARD_ENV.exists() else None
+        text = (
+            PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+            if PASARGUARD_ENV.exists()
+            else install_env_snapshot
+        )
         conn = get_target_connection(self.params)
         pwd = conn.get("password")
-        PASARGUARD_ENV.write_text(
-            transform_pasarguard_env_for_target(text, target_db, pwd),
-            encoding="utf-8",
-        )
-        self.job.log(".env updated for target database")
+        user = conn.get("user")
+        db_name = conn.get("database")
+
+        # Prefer the same finalize path as restore so URL/engine stamp stay consistent.
+        if install_env_snapshot:
+            finalized = finalize_pasarguard_env_after_restore(
+                text,
+                target_db,
+                pwd,
+                install_env_snapshot,
+                db_user=user,
+                db_name=db_name,
+            )
+        else:
+            finalized = transform_pasarguard_env_for_target(text, target_db, pwd)
+
+        if not env_points_to_db(finalized, target_db):
+            raise RuntimeError(
+                f".env SQLALCHEMY_DATABASE_URL does not match target engine {target_db}"
+            )
+        PASARGUARD_ENV.write_text(finalized, encoding="utf-8")
+        self.job.log(f".env finalized for {target_db}")
 
     def _get_panel_url(self) -> str:
         import socket

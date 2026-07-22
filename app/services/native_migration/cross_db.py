@@ -240,6 +240,41 @@ async def run_two_phase_migration(
             migrator.job.log("Phase1 complete — target is SQLite intermediate; skip Phase2")
             return {"users": -1, "admins": -1}  # counts unknown; same-file path
 
+        # Sanity: refuse to wipe target if intermediate source looks empty for key tables.
+        # This prevents the classic "DROP SCHEMA then copy nothing" empty-panel outcome.
+        try:
+            from app.services.native_migration.adapters import (
+                create_reader,
+                _count_source_rows,
+            )
+
+            pre_reader = create_reader(
+                inter_db,
+                inter_path if inter_db == "sqlite" else None,
+                staging_conn or get_source_connection(migrator.params),
+            )
+            try:
+                critical = ("users", "admins", "hosts", "inbounds", "nodes", "groups")
+                pre_counts = {}
+                for t in critical:
+                    n = _count_source_rows(pre_reader, t)
+                    if n > 0:
+                        pre_counts[t] = n
+                if pre_counts:
+                    migrator.job.log(
+                        "Phase1 source ready: "
+                        + ", ".join(f"{k}={v}" for k, v in pre_counts.items())
+                    )
+                else:
+                    migrator.job.log(
+                        "WARNING: Phase1 intermediate has 0 rows in users/admins/hosts/"
+                        "inbounds/nodes/groups — convert may produce an empty panel"
+                    )
+            finally:
+                pre_reader.close()
+        except Exception as e:
+            migrator.job.log(f"Phase1 pre-count note: {e}")
+
         # Phase 2 — empty target at head, then copy head→head
         migrator.job.set_progress(60, f"Phase 2: create {target_db} schema at head...")
         await _prepare_target_for_migration(migrator, target_db)

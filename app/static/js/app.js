@@ -963,6 +963,7 @@ async function startMigration() {
 function connectWebSocket(jobId) {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${proto}//${location.host}/ws/migrate/${jobId}`);
+  state._migrateWs = ws;
   const terminal = document.getElementById('logTerminal');
 
   ws.onmessage = (ev) => {
@@ -977,6 +978,7 @@ function connectWebSocket(jobId) {
       if (msg.message) document.getElementById('statusMsg').textContent = msg.message;
     }
     if (msg.type === 'done') {
+      state._migrateWs = null;
       if (msg.status === 'success' && !msg.result?.error) showSuccess(msg.result);
       else showError(msg.result?.error || msg.message || 'Error', terminal.textContent);
     }
@@ -984,10 +986,21 @@ function connectWebSocket(jobId) {
   ws.onerror = () => pollStatus(jobId);
 }
 
+function stopMigrationPoll() {
+  try { state._migrateWs?.close(); } catch (e) { /* ignore */ }
+  state._migrateWs = null;
+  if (state._migratePollInterval) {
+    clearInterval(state._migratePollInterval);
+    state._migratePollInterval = null;
+  }
+}
+window.stopMigrationPoll = stopMigrationPoll;
+
 async function pollStatus(jobId) {
   const terminal = document.getElementById('logTerminal');
   const cursor = { lastLen: 0 };
   if (terminal) terminal.textContent = '';
+  if (state._migratePollInterval) clearInterval(state._migratePollInterval);
   const interval = setInterval(async () => {
     try {
       const res = await fetch(`/api/migrate/${jobId}`);
@@ -996,13 +1009,19 @@ async function pollStatus(jobId) {
       document.getElementById('progressText').textContent = data.progress + '%';
       if (data.message) document.getElementById('statusMsg').textContent = data.message;
       appendMigrateLogs(terminal, data.logs, cursor);
-      if (data.status === 'success' && !data.result?.error) { clearInterval(interval); showSuccess(data.result); }
+      if (data.status === 'success' && !data.result?.error) {
+        clearInterval(interval);
+        state._migratePollInterval = null;
+        showSuccess(data.result);
+      }
       if (data.status === 'error' || data.result?.error) {
         clearInterval(interval);
+        state._migratePollInterval = null;
         showError(data.result?.error || data.message, data.logs.join('\n'));
       }
     } catch (e) { /* retry */ }
   }, 1500);
+  state._migratePollInterval = interval;
 }
 
 function appendMigrateLogs(terminal, logs, cursor) {

@@ -1,33 +1,33 @@
 :root {
-  /* PasarGuard panel dark (shadcn tokens) — dark only */
-  --pg-bg: 240 4% 8%;
-  --pg-card: 240 2% 11.5%;
-  --pg-accent: 240 4% 16%;
-  --pg-border: 0 0% 18%;
-  --pg-primary: 216 46% 53%;
+  /* Clean modern dark — readable for beginners */
+  --pg-bg: 220 16% 7%;
+  --pg-card: 220 14% 11%;
+  --pg-accent: 220 12% 16%;
+  --pg-border: 220 10% 22%;
+  --pg-primary: 210 90% 52%;
   --pg-destructive: 0 72% 51%;
-  --pg-success: 142 76% 36%;
-  --radius: 0.85rem;
-  --radius-sm: 0.6rem;
+  --pg-success: 152 60% 40%;
+  --radius: 1rem;
+  --radius-sm: 0.75rem;
 
   --bg: hsl(var(--pg-bg));
   --bg-card: hsl(var(--pg-card));
   --bg-elevated: hsl(var(--pg-accent));
   --border: hsl(var(--pg-border));
-  --border-hover: hsl(0 0% 28%);
+  --border-hover: hsl(220 10% 34%);
   --text: hsl(0 0% 98%);
-  --text-muted: hsl(0 0% 63.9%);
-  --text-dim: hsl(0 0% 45%);
+  --text-muted: hsl(220 8% 68%);
+  --text-dim: hsl(220 6% 48%);
   --primary: hsl(var(--pg-primary));
-  --primary-hover: hsl(216 41% 49%);
-  --primary-glow: hsla(216, 46%, 53%, 0.22);
+  --primary-hover: hsl(210 90% 46%);
+  --primary-glow: hsla(210, 90%, 52%, 0.28);
   --success: hsl(var(--pg-success));
-  --success-bg: hsla(142, 76%, 36%, 0.12);
+  --success-bg: hsla(152, 60%, 40%, 0.14);
   --warning: hsl(38 92% 50%);
   --warning-bg: hsla(38, 92%, 50%, 0.12);
   --error: hsl(var(--pg-destructive));
   --error-bg: hsla(0, 72%, 51%, 0.12);
-  --shadow: 0 4px 24px rgba(0, 0, 0, 0.45);
+  --shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
   --font: 'Vazirmatn', 'Tahoma', system-ui, sans-serif;
   --font-mono: ui-monospace, 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace;
 }
@@ -54,7 +54,7 @@ button, input, select, textarea {
 }
 
 html[lang="en"], html[lang="ru"] {
-  --font: 'Inter', system-ui, sans-serif;
+  --font: 'Manrope', system-ui, sans-serif;
   line-height: 1.6;
 }
 html[lang="fa"] {
@@ -68,10 +68,9 @@ html[lang="fa"] body {
 .bg-grid {
   position: fixed;
   inset: 0;
-  background-image:
-    linear-gradient(rgba(59, 130, 246, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(59, 130, 246, 0.03) 1px, transparent 1px);
-  background-size: 48px 48px;
+  background:
+    radial-gradient(ellipse 80% 50% at 50% -20%, hsla(210, 90%, 52%, 0.14), transparent 55%),
+    radial-gradient(ellipse 60% 40% at 100% 100%, hsla(200, 70%, 40%, 0.06), transparent 50%);
   pointer-events: none;
   z-index: 0;
 }
@@ -79,9 +78,9 @@ html[lang="fa"] body {
 .app {
   position: relative;
   z-index: 1;
-  max-width: 900px;
+  max-width: 820px;
   margin: 0 auto;
-  padding: 24px 20px 40px;
+  padding: 20px 18px 48px;
   min-height: 100vh;
   display: flex;
   flex-direction: column;
@@ -870,24 +869,29 @@ button.db-card {
 }
 
 .btn {
-  padding: 12px 24px;
+  padding: 12px 22px;
   border-radius: var(--radius-sm);
   font-family: var(--font);
   font-size: 0.95rem;
   font-weight: 600;
   cursor: pointer;
   border: none;
-  transition: all 0.2s;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease, opacity 0.15s ease;
+  min-height: 44px;
 }
 
 .btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.btn-primary { background: var(--primary); color: white; }
+.btn-primary {
+  background: var(--primary);
+  color: white;
+  box-shadow: 0 4px 14px var(--primary-glow);
+}
 .btn-primary:hover:not(:disabled) { background: var(--primary-hover); transform: translateY(-1px); }
 .btn-secondary { background: var(--bg-elevated); color: var(--text); border: 1px solid var(--border); }
 .btn-secondary:hover { border-color: var(--border-hover); }
 .btn-ghost { background: transparent; color: var(--text-muted); border: 1px solid var(--border); }
-.btn-ghost:hover { color: var(--text); border-color: var(--border-hover); }
-.btn-lg { padding: 14px 32px; font-size: 1rem; }
+.btn-ghost:hover { color: var(--text); border-color: var(--border-hover); background: var(--bg-elevated); }
+.btn-lg { padding: 14px 28px; font-size: 1rem; min-height: 48px; }
 
 /* Progress */
 .progress-wrap {
@@ -1383,15 +1387,15 @@ button.db-card {
 .choice-card {
   text-align: start;
   background: var(--bg-card);
-  border: 2px solid var(--border);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 16px 18px;
+  padding: 20px 18px;
   color: var(--text);
   cursor: pointer;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
+  gap: 8px;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease;
   font-family: var(--font);
   font-size: 0.95rem;
   line-height: 1.55;
@@ -1400,30 +1404,42 @@ button.db-card {
   width: 100%;
 }
 .choice-card:hover {
-  border-color: var(--border-hover);
-  box-shadow: var(--shadow);
+  border-color: var(--primary);
+  background: hsl(220 14% 13%);
+  transform: translateY(-2px);
 }
 .choice-card.active,
 .choice-card.selected {
   border-color: var(--primary);
-  background: rgba(59, 130, 246, 0.08);
+  background: hsla(210, 90%, 52%, 0.1);
   box-shadow: 0 0 0 3px var(--primary-glow);
 }
 .choice-card strong {
-  font-size: 1rem;
-  font-weight: 600;
+  font-size: 1.05rem;
+  font-weight: 700;
   font-family: inherit;
   color: var(--text);
 }
 .choice-card span {
   color: var(--text-muted);
-  font-size: 0.88rem;
+  font-size: 0.86rem;
   line-height: 1.5;
   font-family: inherit;
   font-weight: 400;
 }
-.choice-card-lg { min-height: 140px; }
-.choice-icon { font-size: 1.6rem; margin-bottom: 4px; }
+.choice-card-lg { min-height: 132px; }
+.choice-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: hsla(210, 90%, 52%, 0.12);
+  color: var(--primary);
+  margin-bottom: 4px;
+}
+.choice-icon .icon { width: 22px; height: 22px; }
 .success-card {
   background: var(--bg-card);
   border: 1px solid hsla(142, 76%, 36%, 0.35);

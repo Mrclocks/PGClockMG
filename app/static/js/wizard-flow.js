@@ -300,6 +300,41 @@ function backFromRestore() {
   showPhase(state.wizardGoal ? 'welcome' : 'choose');
 }
 
+function cancelPgInstall() {
+  stopPgInstallPoll();
+  document.getElementById('pgInstallProgress')?.classList.add('hidden');
+  document.getElementById('pgInstallDone')?.classList.add('hidden');
+  // Prefer returning to the form so the user can change DB/SSL and retry.
+  const form = document.getElementById('pgInstallForm');
+  const installed = document.getElementById('pgInstalledCard');
+  if (form && !form.classList.contains('hidden')) {
+    // already on form
+  } else if (installed && state.panelAccess?.installed) {
+    installed.classList.remove('hidden');
+    form?.classList.add('hidden');
+  } else {
+    form?.classList.remove('hidden');
+    installed?.classList.add('hidden');
+  }
+  const block = document.getElementById('pgInstallBlock');
+  if (block) {
+    block.textContent = t('pg.installCancelled') || '';
+    if (block.textContent) block.classList.remove('hidden');
+  }
+}
+
+function cancelMigrationRun() {
+  if (typeof stopMigrationPoll === 'function') stopMigrationPoll();
+  else if (window._migrationPollTimer) {
+    clearTimeout(window._migrationPollTimer);
+    window._migrationPollTimer = null;
+  }
+  goStep(4);
+}
+
+window.cancelPgInstall = cancelPgInstall;
+window.cancelMigrationRun = cancelMigrationRun;
+
 function showPgReinstallForm() {
   document.getElementById('pgInstalledCard')?.classList.add('hidden');
   const form = document.getElementById('pgInstallForm');
@@ -410,6 +445,8 @@ function applyPhaseI18n() {
   set('btnPgContinue', 'pg.continue');
   set('btnPgBack', 'pg.back');
   set('btnPgInstalledBack', 'pg.back');
+  set('btnPgProgressBack', 'pg.back');
+  set('btnPgDoneBack', 'pg.back');
   set('btnPgInstall', 'pg.install');
   set('lblPgDb', 'pg.dbLabel');
   set('lblPgSsl', 'pg.sslLabel');
@@ -440,6 +477,7 @@ function applyPhaseI18n() {
   set('restoreSelectText', 'restore.select');
   set('btnRestoreConfirm', 'restore.confirm');
   set('btnRestoreBack', 'restore.back');
+  set('btnRestoreDoneBack', 'restore.back');
   set('restoreDoneTitle', 'restore.doneTitle');
   set('restorePanelLink', 'restore.openPanel');
   set('restoreRunningTitle', 'restore.runningTitle');
@@ -449,6 +487,7 @@ function applyPhaseI18n() {
   set('btnRestoreErrorBack', 'restore.back');
   set('btnRestoreRetry', 'restore.retry');
   set('btnRestoreRunningBack', 'restore.cancel');
+  set('btnStep5Back', 'step4.back');
   set('restoreConvertNoteText', 'restore.autoConvertNote');
   set('btnCopyRestorePath', 'copy');
   set('restoreUninstallTitle', 'uninstall.title');

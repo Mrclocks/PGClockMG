@@ -751,8 +751,8 @@ def test_postgres_writer_truncate_noop_after_bulk_prepare():
 
 def test_postgres_writer_prepare_replace_survives_non_superuser():
     """When SET session_replication_role is denied (non-superuser), prepare_replace
-    must NOT raise and must NOT leave the connection in an aborted-transaction state:
-    it rolls back, still TRUNCATEs, and relies on parent-first TABLE_ORDER instead."""
+    must fall back to ALTER TABLE DISABLE TRIGGER ALL (table-owner path) so FK
+    checks are still off during bulk insert of admins/users."""
     import types
     import sys as _sys
 
@@ -768,6 +768,7 @@ def test_postgres_writer_prepare_replace_survives_non_superuser():
             if "session_replication_role" in text:
                 self.conn.aborted = True
                 raise RuntimeError("permission denied to set parameter")
+            # DISABLE / ENABLE TRIGGER ALL succeed for table owner
 
         def fetchall(self):
             return []
@@ -825,18 +826,19 @@ def test_postgres_writer_prepare_replace_survives_non_superuser():
     })
     writer.target_columns = lambda t: {"id": "integer"}
 
-    # Must not raise even though SET session_replication_role is denied.
     writer.prepare_replace(["admins", "users"])
 
-    assert writer._fk_disabled is False, "should detect FK-disable is unavailable"
+    assert writer._fk_disabled is True, "FK must be disabled via trigger fallback"
+    assert writer._fk_mode == "triggers", "should use DISABLE TRIGGER ALL fallback"
     assert writer._bulk_prepared is True, "bulk prepare must still complete"
     assert writer._conn.rolled >= 1, "must rollback after failed SET (no aborted txn)"
     assert any("TRUNCATE" in s for s in writer._conn.executed), "must still TRUNCATE targets"
+    assert any("DISABLE TRIGGER ALL" in s for s in writer._conn.executed), "must disable triggers"
     assert writer._conn.committed >= 1, "commit must succeed after rollback"
 
-    # begin/end must be safe no-ops (no superuser) and not raise.
     writer.begin_bulk_load()
     writer.end_bulk_load()
+    assert any("ENABLE TRIGGER ALL" in s for s in writer._conn.executed), "must re-enable triggers"
     print("OK: postgres_writer_prepare_replace_survives_non_superuser")
 
 

@@ -538,6 +538,8 @@ class PostgresWriter(TableWriter):
         self._bulk_prepared = False
         self._bulk_load_active = False
         self._fk_disabled = False
+        self._fk_mode: str | None = None  # "replica" | "triggers" | None
+        self._trigger_tables: list[str] = []
 
     def _note(self, msg: str) -> None:
         fn = getattr(self, "_log", None)
@@ -548,9 +550,7 @@ class PostgresWriter(TableWriter):
                 pass
 
     def _set_replication_role(self, role: str) -> bool:
-        """Best-effort SET session_replication_role. Requires superuser/replication
-        rights; if it fails we roll back so the connection is never left in an
-        aborted-transaction state, and the caller falls back to parent-first order."""
+        """Best-effort SET session_replication_role (needs superuser)."""
         try:
             cur = self._conn.cursor()
             cur.execute(
@@ -567,6 +567,86 @@ class PostgresWriter(TableWriter):
             self._note(f"session_replication_role={role} not applied ({exc})")
             return False
 
+    def _disable_table_triggers(self, tables: list[str]) -> bool:
+        """Fallback for non-superuser: table owner can DISABLE TRIGGER ALL.
+
+        This is what actually makes admins/users copy succeed when the DB role is
+        `pasarguard` (not superuser) — session_replication_role is denied there.
+        """
+        cur = self._conn.cursor()
+        disabled: list[str] = []
+        for t in tables:
+            try:
+                cur.execute(
+                    self._psql.SQL("ALTER TABLE {} DISABLE TRIGGER ALL").format(
+                        self._psql.Identifier(t)
+                    )
+                )
+                disabled.append(t)
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+                # Re-open a clean txn and continue — partial disable still helps.
+                cur = self._conn.cursor()
+                self._note(f"DISABLE TRIGGER ALL failed on {t}: {exc}")
+        if not disabled:
+            return False
+        self._conn.commit()
+        self._trigger_tables = disabled
+        return True
+
+    def _enable_table_triggers(self) -> None:
+        tables = list(getattr(self, "_trigger_tables", []) or [])
+        if not tables:
+            return
+        cur = self._conn.cursor()
+        for t in tables:
+            try:
+                cur.execute(
+                    self._psql.SQL("ALTER TABLE {} ENABLE TRIGGER ALL").format(
+                        self._psql.Identifier(t)
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+                cur = self._conn.cursor()
+                self._note(f"ENABLE TRIGGER ALL failed on {t}: {exc}")
+        try:
+            self._conn.commit()
+        except Exception:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+        self._trigger_tables = []
+
+    def _disable_fk(self, tables: list[str]) -> bool:
+        if self._set_replication_role("replica"):
+            self._fk_mode = "replica"
+            self._fk_disabled = True
+            self._note("FK enforcement during copy: disabled (session_replication_role=replica)")
+            return True
+        if self._disable_table_triggers(tables):
+            self._fk_mode = "triggers"
+            self._fk_disabled = True
+            self._note(
+                f"FK enforcement during copy: disabled via ALTER TABLE DISABLE TRIGGER ALL "
+                f"({len(self._trigger_tables)} tables)"
+            )
+            return True
+        self._fk_mode = None
+        self._fk_disabled = False
+        self._note(
+            "FK enforcement during copy: ENABLED — relying on parent-first table order "
+            "(admin_roles→admins→users). Non-superuser + no trigger rights."
+        )
+        return False
+
     def prepare_replace(self, tables: list[str]) -> None:
         """Wipe all copy targets once, up front. Per-table TRUNCATE CASCADE was wiping
         users/admins when a later parent table (e.g. admin_roles) was truncated."""
@@ -579,42 +659,45 @@ class PostgresWriter(TableWriter):
                 existing.append(t)
         if not existing:
             return
-        # Best-effort: disable FK triggers so insert order cannot cause FK errors.
-        # If we are not superuser this is a no-op and we rely on parent-first TABLE_ORDER.
-        self._fk_disabled = self._set_replication_role("replica")
-        self._note(
-            "FK enforcement during copy: "
-            + (
-                "disabled (session_replication_role=replica)"
-                if self._fk_disabled
-                else "ENABLED — relying on parent-first table order"
-            )
-        )
+        # Disable FK before TRUNCATE+insert. Prefer replica role; fall back to
+        # DISABLE TRIGGER ALL (works as table owner without superuser).
+        self._disable_fk(existing)
         cur = self._conn.cursor()
         idents = self._psql.SQL(", ").join(self._psql.Identifier(t) for t in existing)
         cur.execute(
             self._psql.SQL("TRUNCATE TABLE {} RESTART IDENTITY CASCADE").format(idents)
         )
-        # Keep replica until end_bulk_load so inserts ignore FK order (admin_roles, etc.)
         self._conn.commit()
         self._bulk_prepared = True
         self._bulk_load_active = True
 
     def begin_bulk_load(self) -> None:
-        # If prepare_replace already put us in replica mode, keep it (session-level
-        # SET survives COMMIT). Otherwise try once more; harmless if it fails.
+        # prepare_replace already disabled FK; only retry if that never ran.
         if not getattr(self, "_fk_disabled", False):
-            self._fk_disabled = self._set_replication_role("replica")
+            # Without a table list we can still try replica mode.
+            if self._set_replication_role("replica"):
+                self._fk_mode = "replica"
+                self._fk_disabled = True
         self._bulk_load_active = True
 
     def end_bulk_load(self) -> None:
         if not getattr(self, "_bulk_load_active", False):
             return
-        if getattr(self, "_fk_disabled", False):
+        mode = getattr(self, "_fk_mode", None)
+        if mode == "replica":
             self._set_replication_role("origin")
-        self._conn.commit()
+        elif mode == "triggers":
+            self._enable_table_triggers()
+        try:
+            self._conn.commit()
+        except Exception:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
         self._bulk_load_active = False
         self._fk_disabled = False
+        self._fk_mode = None
 
     def truncate(self, table: str) -> None:
         if self._bulk_prepared:

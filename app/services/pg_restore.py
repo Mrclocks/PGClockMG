@@ -673,7 +673,8 @@ async def _maybe_cross_db_after_restore(
         job.log(f"DB convert finished: now {target_db}")
         return target_db, stats, report
     except Exception as e:
-        job.log(f"DB convert failed (data still on {backup_db}): {e}")
+        job.log(f"DB convert failed — target schema may have been reset; "
+                f"retry restore. Underlying: {e}")
         explain = explain_restore_error(e, backup_db, target_db)
         err = RuntimeError(explain.get("en") or str(e))
         err.explain = explain  # type: ignore[attr-defined]
