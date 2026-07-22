@@ -407,6 +407,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadInfo();
   if (!state.systemCheck) await loadSystemCheck();
   setLang(state.lang);
+  if (typeof bindFinishModal === 'function') bindFinishModal();
   const drag = document.getElementById('uploadDragText');
   const sel = document.getElementById('uploadSelectText');
   if (drag) drag.textContent = t('step2.uploadDrag');
@@ -873,22 +874,14 @@ async function renderTargetDbs() {
 }
 
 function updateCrossDbWarning() {
+  // DB engine change lives in install → restore, not migration step 3
   const crossEl = document.getElementById('crossDbWarning');
-  if (!crossEl || state.selectedPanel?.id !== 'marzban') return;
-  if (state.sourceDb && state.targetDb && state.sourceDb !== state.targetDb) {
-    crossEl.classList.remove('hidden');
-    const msg = t('step3.crossDbWarning')
-      .replace('{source}', dbDisplayName(state.sourceDb))
-      .replace('{target}', dbDisplayName(state.targetDb));
-    crossEl.innerHTML = `⚠️ ${msg}`;
-  } else {
-    crossEl.classList.add('hidden');
-  }
+  if (crossEl) crossEl.classList.add('hidden');
 }
 
 function selectTargetDb(db) {
+  if (!db) return;
   state.targetDb = db;
-  updateCrossDbWarning();
   updateTargetCredentialsVisibility();
   updateStepButtons();
 }

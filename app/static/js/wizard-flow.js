@@ -5,14 +5,25 @@ Object.assign(state, {
   panelAccess: null,
   pgDb: 'timescaledb',
   pgSsl: null, // true | false | null
+  pgDomain: '',
+  pgIp: '',
   restoreUploadId: null,
   restoreAnalysis: null,
   restoreTargetDb: null,
+  pendingLoginUrl: null,
 });
 
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 async function copyText(codeOrId, raw) {
-  const text = raw != null ? String(raw)
-    : (document.getElementById(codeOrId)?.textContent || codeOrId || '');
+  const el = typeof codeOrId === 'string' ? document.getElementById(codeOrId) : null;
+  const text = raw != null ? String(raw) : (el?.textContent || codeOrId || '');
   try {
     await navigator.clipboard.writeText(text.trim());
     const btn = (typeof event !== 'undefined' && event?.currentTarget) || null;
@@ -27,13 +38,98 @@ async function copyText(codeOrId, raw) {
   }
 }
 
-async function uninstallWizard() {
-  if (!confirm(t('uninstall.confirm'))) return;
+function renderGuideSections(container, access) {
+  if (!container) return;
+  const lang = state.lang || 'fa';
+  const sections = (access?.guide && access.guide[lang]) || [];
+  if (!sections.length) {
+    const owner = (access?.owner_notes && access.owner_notes[lang]) || [];
+    const noSsl = !access?.ssl ? ((access?.no_ssl_notes && access.no_ssl_notes[lang]) || []) : [];
+    container.innerHTML = [...owner, ...noSsl].map(n => `<p class="guide-line">${escapeHtml(n)}</p>`).join('');
+    return;
+  }
+  container.innerHTML = sections.map((sec, si) => {
+    const items = (sec.items || []).map((it, ii) => {
+      const copy = it.copy;
+      if (copy) {
+        const id = `guide-${si}-${ii}`;
+        return `<div class="guide-item">
+          <p class="guide-line">${escapeHtml(it.text || '')}</p>
+          <div class="install-cmd-row">
+            <div class="install-cmd-box"><code id="${id}">${escapeHtml(copy)}</code></div>
+            <button type="button" class="btn btn-copy" onclick="copyText('${id}')">${escapeHtml(t('copy'))}</button>
+          </div>
+        </div>`;
+      }
+      return `<p class="guide-line">${escapeHtml(it.text || '')}</p>`;
+    }).join('');
+    return `<section class="guide-block"><h4 class="guide-title">${escapeHtml(sec.title || '')}</h4>${items}</section>`;
+  }).join('');
+}
+
+function resolveLoginUrl(access) {
+  const a = access || state.panelAccess || {};
+  const host = (state.pgDomain || a.domain || state.pgIp || a.host || a.ip || '').trim();
+  const port = a.port || '8000';
+  const root = (a.root_path && a.root_path !== '/' ? a.root_path : '') || '';
+  if (host && host !== '127.0.0.1' && host !== 'localhost') {
+    const path = `${root}/dashboard/`.replace(/\/{2,}/g, '/');
+    const p = path.startsWith('/') ? path : `/${path}`;
+    return `https://${host}:${port}${p}`;
+  }
+  return a.login_url || a.public_url || a.localhost_url || a.panel_url || '';
+}
+
+function openFinishModal(loginUrl) {
+  state.pendingLoginUrl = loginUrl;
+  const modal = document.getElementById('finishModal');
+  if (!modal) {
+    goToPanel(loginUrl);
+    return;
+  }
+  document.getElementById('finishModalTitle').textContent = t('finishModal.title');
+  document.getElementById('finishModalDesc').textContent = t('finishModal.desc');
+  document.getElementById('btnFinishCancel').textContent = t('finishModal.cancel');
+  document.getElementById('btnFinishUninstall').textContent = t('finishModal.uninstall');
+  document.getElementById('btnFinishContinue').textContent = t('finishModal.continue');
+  modal.classList.remove('hidden');
+}
+
+function closeFinishModal() {
+  document.getElementById('finishModal')?.classList.add('hidden');
+}
+
+function goToPanel(url) {
+  const u = url || state.pendingLoginUrl || resolveLoginUrl();
+  if (u) window.open(u, '_blank');
+}
+
+function bindFinishModal() {
+  const modal = document.getElementById('finishModal');
+  if (!modal || modal.dataset.bound) return;
+  modal.dataset.bound = '1';
+  document.getElementById('btnFinishCancel')?.addEventListener('click', () => closeFinishModal());
+  document.getElementById('btnFinishContinue')?.addEventListener('click', () => {
+    closeFinishModal();
+    goToPanel();
+  });
+  document.getElementById('btnFinishUninstall')?.addEventListener('click', async () => {
+    closeFinishModal();
+    await uninstallWizard(true);
+    goToPanel();
+  });
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) closeFinishModal();
+  });
+}
+
+async function uninstallWizard(skipConfirm) {
+  if (!skipConfirm && !confirm(t('uninstall.confirm'))) return;
   try {
     const res = await fetch('/api/self-uninstall', { method: 'POST' });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'uninstall failed');
-    alert(t('uninstall.scheduled'));
+    if (!skipConfirm) alert(t('uninstall.scheduled'));
   } catch (e) {
     alert(e.message || String(e));
   }
@@ -154,7 +250,7 @@ function applyPhaseI18n() {
 
   set('restoreH2', 'restore.h2');
   set('restoreDesc', 'restore.desc');
-  set('restoreDbTip', 'restore.tip');
+  set('restoreDbTipText', 'restore.tip');
   set('restoreDragText', 'restore.drag');
   set('restoreSelectText', 'restore.select');
   set('btnRestoreConfirm', 'restore.confirm');
@@ -348,6 +444,8 @@ async function startPgInstall() {
 
   const domain = document.getElementById('pgDomain')?.value?.trim() || null;
   const ip = document.getElementById('pgIp')?.value?.trim() || null;
+  state.pgDomain = domain || '';
+  state.pgIp = ip || '';
   const sslPort = parseInt(document.getElementById('pgSslHttpPort')?.value || '80', 10) || 80;
   const body = {
     database: state.pgDb,
@@ -441,31 +539,17 @@ function showPgInstallDone(result) {
   document.getElementById('pgInstallProgress')?.classList.add('hidden');
   const done = document.getElementById('pgInstallDone');
   done?.classList.remove('hidden');
-  const notes = document.getElementById('pgDoneNotes');
-  if (!notes) return;
-  const lang = state.lang;
   const access = result || state.panelAccess || {};
-  const owner = (access.owner_notes && access.owner_notes[lang]) || [];
-  const noSsl = !access.ssl ? ((access.no_ssl_notes && access.no_ssl_notes[lang]) || []) : [];
-  notes.innerHTML = [
-    ...owner.map(n => `<p>• ${n}</p>`),
-    ...noSsl.map(n => `<p>• ${n}</p>`),
-  ].join('');
+  state.panelAccess = access;
+  renderGuideSections(document.getElementById('pgDoneNotes'), access);
 }
 
 async function choosePath(path) {
   if (path === 'finish') {
+    bindFinishModal();
     await refreshPanelAccess();
-    const access = state.panelAccess || {};
-    if (!access.ssl) {
-      // Show notes then open localhost-oriented URL
-      const url = access.localhost_url || access.panel_url;
-      if (url) window.open(url, '_blank');
-      alert((access.no_ssl_notes?.[state.lang] || []).join('\n'));
-      return;
-    }
-    const url = access.public_url || access.panel_url;
-    if (url) window.location.href = url;
+    const url = resolveLoginUrl(state.panelAccess);
+    openFinishModal(url);
     return;
   }
   if (path === 'restore') {
@@ -529,7 +613,9 @@ async function uploadRestoreZip(file) {
     state.restoreAnalysis = analysis;
     renderRestoreAnalysis(analysis);
     btn.disabled = !analysis.ok;
-    status.textContent = analysis.ok ? `✅ ${file.name}` : `⚠️ ${file.name}`;
+    status.textContent = analysis.ok ? file.name : file.name;
+    status.classList.toggle('is-ok', !!analysis.ok);
+    status.classList.toggle('is-warn', !analysis.ok);
   } catch (e) {
     status.textContent = `❌ ${e.message}`;
     btn.disabled = true;
@@ -551,7 +637,7 @@ function renderRestoreAnalysis(a) {
   `;
   if (warn) {
     const lang = state.lang;
-    const items = (a.warnings || []).map(w => `<p>⚠️ ${tr(w, lang)}</p>`).join('');
+    const items = (a.warnings || []).map(w => `<p class="warn-line">${tr(w, lang)}</p>`).join('');
     warn.innerHTML = items;
     warn.classList.toggle('hidden', !items);
   }
@@ -717,26 +803,15 @@ async function pollRestore(jobId) {
 function showRestoreDone(result) {
   document.getElementById('restoreProgress')?.classList.add('hidden');
   document.getElementById('restoreDone')?.classList.remove('hidden');
+  const access = { ...(state.panelAccess || {}), ...(result || {}) };
+  state.panelAccess = access;
   const link = document.getElementById('restorePanelLink');
-  const url = result.public_url || result.panel_url || '#';
+  const url = resolveLoginUrl(access);
   if (link) {
-    link.href = url;
+    link.href = url || '#';
     link.textContent = t('restore.openPanel');
   }
-  const notes = document.getElementById('restoreAccessNotes');
-  if (notes) {
-    const lang = state.lang;
-    const owner = (result.owner_notes && result.owner_notes[lang]) || [];
-    const noSsl = !result.ssl ? ((result.no_ssl_notes && result.no_ssl_notes[lang]) || []) : [];
-    notes.innerHTML = [...owner, ...noSsl].map(n => {
-      const isCmd = /pasarguard|ssh |nano |curl |sudo /.test(n);
-      if (!isCmd) return `<p>• ${n}</p>`;
-      const id = `note-cmd-${Math.random().toString(36).slice(2, 8)}`;
-      const safe = n.replace(/</g, '&lt;');
-      return `<div class="install-cmd-row" style="margin:8px 0"><div class="install-cmd-box"><code id="${id}">${safe}</code></div>
-        <button type="button" class="btn btn-copy" onclick="copyText('${id}')">${t('copy')}</button></div>`;
-    }).join('');
-  }
+  renderGuideSections(document.getElementById('restoreAccessNotes'), access);
   const tip = document.getElementById('restoreUninstallTip');
   const btn = document.getElementById('btnUninstallRestore');
   if (tip) tip.textContent = t('uninstall.tip');

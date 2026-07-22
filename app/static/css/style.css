@@ -7,8 +7,8 @@
   --pg-primary: 216 46% 53%;
   --pg-destructive: 0 72% 51%;
   --pg-success: 142 76% 36%;
-  --radius: 0.5rem;
-  --radius-sm: 0.375rem;
+  --radius: 0.85rem;
+  --radius-sm: 0.6rem;
 
   --bg: hsl(var(--pg-bg));
   --bg-card: hsl(var(--pg-card));
@@ -1424,3 +1424,102 @@ button.db-card {
   border-radius: var(--radius);
   background: hsl(240 2% 9%);
 }
+
+/* Vector icons */
+.icon {
+  width: 1.25rem;
+  height: 1.25rem;
+  display: inline-block;
+  vertical-align: middle;
+  color: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.icon-lg { width: 2.25rem; height: 2.25rem; }
+.logo .icon { width: 1.4rem; height: 1.4rem; color: var(--primary); }
+.choice-icon {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  color: var(--primary);
+  margin-bottom: 6px;
+}
+.choice-icon .icon { width: 1.5rem; height: 1.5rem; }
+.result-icon {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 12px;
+  color: var(--success);
+}
+.result-card.error .result-icon { color: var(--error); }
+.upload-icon {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 10px;
+  color: var(--text-muted);
+}
+
+/* Guide sections after install */
+.guide-sections { text-align: start; margin-top: 8px; }
+.guide-block {
+  margin: 14px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+}
+.guide-title {
+  font-size: 0.92rem;
+  font-weight: 600;
+  margin-bottom: 10px;
+  color: var(--text);
+}
+.guide-line {
+  font-size: 0.88rem;
+  color: var(--text-muted);
+  margin: 6px 0;
+  line-height: 1.55;
+}
+.guide-item { margin-bottom: 10px; }
+
+/* Finish modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0,0,0,.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.modal-overlay.hidden { display: none; }
+.modal-card {
+  width: min(440px, 100%);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 22px;
+  box-shadow: var(--shadow);
+}
+.modal-card h3 {
+  font-size: 1.15rem;
+  margin-bottom: 8px;
+}
+.modal-card p {
+  color: var(--text-muted);
+  font-size: 0.92rem;
+  margin-bottom: 18px;
+  line-height: 1.55;
+}
+.modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.upload-status.is-ok { color: var(--success); }
+.upload-status.is-warn { color: var(--warning); }
+.warn-line { color: var(--warning); font-size: 0.88rem; margin: 6px 0; }
+.logo { border-radius: var(--radius); }

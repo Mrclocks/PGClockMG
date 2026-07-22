@@ -229,9 +229,9 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
             else:
                 experimental_db_change = True
                 warnings.append({
-                    "en": f"Database differs (backup={db_type}, installed={installed_db}). Changing DB type is EXPERIMENTAL and may fail.",
-                    "fa": f"نوع دیتابیس فرق دارد (بکاپ={db_type}، نصب={installed_db}). تغییر دیتابیس هنوز آزمایشی است و ممکن است خطا بدهد.",
-                    "ru": f"Тип БД отличается (backup={db_type}, installed={installed_db}). Смена БД экспериментальна.",
+                    "en": f"Database differs (backup={db_type}, installed={installed_db}). Confirm auto-convert to continue.",
+                    "fa": f"دیتابیس فرق دارد (بکاپ={db_type}، نصب={installed_db}). برای تبدیل خودکار تأیید کنید.",
+                    "ru": f"Тип БД отличается (backup={db_type}, installed={installed_db}). Подтвердите автоконвертацию.",
                 })
 
         if layout == "none" and db_type != "sqlite":
