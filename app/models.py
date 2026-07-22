@@ -68,3 +68,5 @@ class PasarguardRestoreRequest(BaseModel):
     upload_id: str
     force: bool = False
     confirmed: bool = False
+    target_db: Optional[str] = None
+    accept_experimental: bool = False

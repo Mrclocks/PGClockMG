@@ -22,9 +22,10 @@ from app.services.pg_installer import start_pasarguard_install, get_install_job,
 from app.services.pg_restore import (
     analyze_pasarguard_backup, start_pasarguard_restore, get_restore_job,
 )
+from app.services.self_uninstall import uninstall_preview, schedule_self_uninstall
 from app.config import WEB_PORT
 
-APP_VERSION = "2.1.5"
+APP_VERSION = "2.2.0"
 app = FastAPI(title="PG-Migrator", version=APP_VERSION)
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -320,4 +321,15 @@ async def ws_migrate(websocket: WebSocket, job_id: str):
                 break
     except WebSocketDisconnect:
         pass
+
+
+@app.get("/api/self-uninstall")
+async def api_self_uninstall_preview():
+    return uninstall_preview()
+
+
+@app.post("/api/self-uninstall")
+async def api_self_uninstall():
+    """Remove MrClock-MG service and /opt/pg-migrator after a short delay."""
+    return await schedule_self_uninstall(delay_sec=2.0)
 

@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/css/style.css?v=2.1.5">
+  <link rel="stylesheet" href="/static/css/style.css?v=2.2.0">
 </head>
 <body>
   <div class="bg-grid"></div>
@@ -28,7 +28,7 @@
           <button class="lang-btn" data-lang="ru" onclick="setLang('ru')">RU</button>
         </div>
         <span class="badge" id="serverIp">—</span>
-        <span class="version" id="appVersion">v2.1.5</span>
+        <span class="version" id="appVersion">v2.2.0</span>
       </div>
     </header>
 
@@ -170,7 +170,13 @@
       <section class="panel" id="panel-restore">
         <h2 id="restoreH2"></h2>
         <p class="desc" id="restoreDesc"></p>
-        <div class="warning-card" id="restoreDbTip"></div>
+        <div class="info-box" id="restoreDbTip">
+          <p id="restoreDbTipText"></p>
+          <div class="install-cmd-row">
+            <div class="install-cmd-box"><code id="restoreBackupPath">/opt/pasarguard/backup/</code></div>
+            <button type="button" class="btn btn-copy" id="btnCopyRestorePath" onclick="copyText('restoreBackupPath')"></button>
+          </div>
+        </div>
 
         <div class="upload-zone" id="restoreUploadZone">
           <input type="file" id="restoreFileInput" accept=".zip" hidden>
@@ -180,6 +186,20 @@
         <div id="restoreUploadStatus" class="upload-status hidden"></div>
         <div id="restoreAnalysis" class="summary-card hidden"></div>
         <div id="restoreWarnings" class="warnings-box hidden"></div>
+
+        <div id="restoreTargetSection" class="hidden" style="margin-top:16px">
+          <div class="form-group">
+            <label id="lblRestoreTargetDb"></label>
+            <p class="desc-sm" id="restoreTargetHint"></p>
+            <div class="db-grid" id="restoreTargetDbGrid"></div>
+          </div>
+          <label class="checkbox-label experimental-check hidden" id="restoreExperimentalWrap">
+            <input type="checkbox" id="restoreAcceptExperimental">
+            <span id="restoreExperimentalLabel"></span>
+          </label>
+          <span class="badge-experimental" id="restoreExperimentalBadge"></span>
+        </div>
+
         <div id="restoreBlock" class="block-msg hidden"></div>
 
         <div class="actions">
@@ -203,6 +223,10 @@
             <p id="restoreDoneMsg"></p>
             <a class="btn btn-primary btn-lg" id="restorePanelLink" href="#" target="_blank"></a>
             <div id="restoreAccessNotes" class="post-migrate"></div>
+            <div class="uninstall-card" id="restoreUninstallCard">
+              <p id="restoreUninstallTip"></p>
+              <button type="button" class="btn btn-ghost btn-danger" id="btnUninstallRestore" onclick="uninstallWizard()"></button>
+            </div>
           </div>
         </div>
       </section>
@@ -373,6 +397,10 @@
             <div id="incompleteTransferGrid" class="incomplete-transfer-grid"></div>
           </div>
           <div id="resultDetails" class="result-details"></div>
+          <div class="uninstall-card" id="migrateUninstallCard">
+            <p id="migrateUninstallTip"></p>
+            <button type="button" class="btn btn-ghost btn-danger" id="btnUninstallMigrate" onclick="uninstallWizard()"></button>
+          </div>
         </div>
         <div id="resultError" class="result-card error hidden">
           <div class="result-icon">❌</div>
@@ -394,8 +422,8 @@
     </footer>
   </div>
 
-  <script src="/static/js/i18n.js?v=2.1.5"></script>
-  <script src="/static/js/app.js?v=2.1.5"></script>
-  <script src="/static/js/wizard-flow.js?v=2.1.5"></script>
+  <script src="/static/js/i18n.js?v=2.2.0"></script>
+  <script src="/static/js/app.js?v=2.2.0"></script>
+  <script src="/static/js/wizard-flow.js?v=2.2.0"></script>
 </body>
 </html>

@@ -26,9 +26,88 @@ from app.services.upload import get_upload_path
 PASARGUARD_BACKUP_DIR = PASARGUARD_DIR / "backup"
 _restore_jobs: dict[str, MigrationJob] = {}
 
+SUPPORTED_RESTORE_DBS = frozenset({
+    "sqlite", "mysql", "mariadb", "postgresql", "timescaledb",
+})
+
 
 def get_restore_job(job_id: str) -> MigrationJob | None:
     return _restore_jobs.get(job_id)
+
+
+def soft_db_family(a: str | None, b: str | None) -> bool:
+    """True when engines are interchangeable for restore (mysql↔mariadb, pg↔timescale)."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    return {a, b} <= {"mysql", "mariadb"} or {a, b} <= {"postgresql", "timescaledb"}
+
+
+def filter_timescaledb_extension_sql(sql: str) -> str:
+    """Strip CREATE/DROP EXTENSION timescaledb lines (pre/post restore handles it)."""
+    return "\n".join(
+        ln for ln in sql.splitlines()
+        if not re.search(
+            r"^\s*(DROP|CREATE)\s+EXTENSION\s+(IF\s+(EXISTS|NOT\s+EXISTS)\s+)?timescaledb\b",
+            ln,
+            re.I,
+        )
+    )
+
+
+def _sql_literal(value: str) -> str:
+    return "'" + (value or "").replace("'", "''") + "'"
+
+
+def parse_timescale_wanted(versions: list[str] | None) -> str | None:
+    """Pick a concrete TimescaleDB version like 2.28.1 from backup metadata."""
+    if not versions:
+        return None
+    # Prefer dotted semver (ignore empty / "latest")
+    scored = []
+    for v in versions:
+        v = (v or "").strip()
+        if re.match(r"^\d+\.\d+(\.\d+)?$", v):
+            scored.append(v)
+    return scored[0] if scored else (versions[0].strip() or None)
+
+
+def detect_ts_mismatch_from_text(text: str) -> tuple[str, str] | None:
+    """Parse official restore error: backup version X vs server Y."""
+    if not text:
+        return None
+    m = re.search(
+        r"backup version[:\s]+([0-9.]+).*?(?:server|target).*?version[:\s]+([0-9.]+)",
+        text,
+        re.I | re.S,
+    )
+    if m:
+        return m.group(1), m.group(2)
+    m2 = re.search(
+        r"TimescaleDB version mismatch.*?([0-9.]+).*?([0-9.]+)",
+        text,
+        re.I | re.S,
+    )
+    if m2:
+        return m2.group(1), m2.group(2)
+    return None
+
+
+def is_auth_failure_text(text: str) -> bool:
+    if not text:
+        return False
+    low = text.lower()
+    return any(
+        s in low
+        for s in (
+            "sasl authentication failed",
+            "password authentication failed",
+            "access denied for user",
+            "protocolviolationerror",
+            "authentication failed",
+        )
+    )
 
 
 def _safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
@@ -139,36 +218,35 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
                 "fa": "PasarGuard روی این سرور نصب نیست",
                 "ru": "PasarGuard не установлен",
             })
-        elif db_type and installed_db and db_type != installed_db:
-            # mysql≈mariadb soft mismatch
-            soft = {db_type, installed_db} <= {"mysql", "mariadb"} or {db_type, installed_db} <= {"postgresql", "timescaledb"}
-            if not soft:
-                ok = False
+        experimental_db_change = False
+        if db_type and installed_db and db_type != installed_db:
+            if soft_db_family(db_type, installed_db):
                 warnings.append({
-                    "en": f"Database mismatch: backup={db_type}, installed={installed_db}. Install PasarGuard with the SAME database as the backup.",
-                    "fa": f"ناسازگاری دیتابیس: بکاپ={db_type}، نصب={installed_db}. باید همان نوع دیتابیس بکاپ نصب شود.",
-                    "ru": f"Несовпадение БД: backup={db_type}, installed={installed_db}. Установите ту же СУБД, что в бэкапе.",
+                    "en": f"Related engines (backup={db_type}, installed={installed_db}) — restore continues automatically.",
+                    "fa": f"موتورهای هم‌خانواده (بکاپ={db_type}، نصب={installed_db}) — ریستور خودکار ادامه می‌یابد.",
+                    "ru": f"Смежные СУБД (backup={db_type}, installed={installed_db}) — восстановление продолжится.",
                 })
             else:
+                experimental_db_change = True
                 warnings.append({
-                    "en": f"Related DB engines: backup={db_type}, installed={installed_db} — restore will proceed carefully.",
-                    "fa": f"موتورهای مرتبط: بکاپ={db_type}، نصب={installed_db} — ریستور با احتیاط ادامه می‌یابد.",
-                    "ru": f"Смежные СУБД: backup={db_type}, installed={installed_db}.",
+                    "en": f"Database differs (backup={db_type}, installed={installed_db}). Changing DB type is EXPERIMENTAL and may fail.",
+                    "fa": f"نوع دیتابیس فرق دارد (بکاپ={db_type}، نصب={installed_db}). تغییر دیتابیس هنوز آزمایشی است و ممکن است خطا بدهد.",
+                    "ru": f"Тип БД отличается (backup={db_type}, installed={installed_db}). Смена БД экспериментальна.",
                 })
 
         if layout == "none" and db_type != "sqlite":
             ok = False
             warnings.append({
-                "en": "No database dump found in backup (expected db_backup.sql or pg_dump/)",
-                "fa": "دامپ دیتابیس در بکاپ یافت نشد",
-                "ru": "Дамп БД в бэкапе не найден",
+                "en": "No database dump found in backup (expected db_backup.sql or pg_dump/).",
+                "fa": "دامپ دیتابیس داخل بکاپ پیدا نشد (db_backup.sql یا pg_dump/).",
+                "ru": "Дамп БД в бэкапе не найден.",
             })
 
         if ts_versions:
             warnings.append({
-                "en": f"Backup TimescaleDB version(s): {', '.join(sorted(set(ts_versions)))}. Wizard will auto-align the server image if needed.",
-                "fa": f"نسخه TimescaleDB بکاپ: {', '.join(sorted(set(ts_versions)))}. در صورت نیاز نسخه ایمیج سرور هم‌تراز می‌شود.",
-                "ru": f"Версия TimescaleDB в бэкапе: {', '.join(sorted(set(ts_versions)))}.",
+                "en": f"Backup TimescaleDB: {', '.join(sorted(set(ts_versions)))}. Wizard auto-aligns the image before restore.",
+                "fa": f"نسخه TimescaleDB بکاپ: {', '.join(sorted(set(ts_versions)))}. قبل از ریستور ایمیج سرور هم‌تراز می‌شود.",
+                "ru": f"TimescaleDB в бэкапе: {', '.join(sorted(set(ts_versions)))}. Образ будет выровнен автоматически.",
             })
 
         return {
@@ -178,6 +256,9 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
             "backup_db": db_type,
             "installed_db": installed_db,
             "db_match": (db_type == installed_db) if (db_type and installed_db) else None,
+            "soft_match": soft_db_family(db_type, installed_db) if (db_type and installed_db) else None,
+            "experimental_db_change": experimental_db_change,
+            "supported_target_dbs": sorted(SUPPORTED_RESTORE_DBS),
             "layout": layout,
             "timescaledb_versions": sorted(set(ts_versions)),
             "env_summary": {k: v for k, v in (summary or {}).items() if k != "db_password"},
@@ -199,6 +280,20 @@ async def start_pasarguard_restore(params: dict) -> MigrationJob:
     if not analysis.get("ok") and not params.get("force"):
         msgs = [w.get("en") for w in analysis.get("warnings") or [] if w.get("en")]
         raise ValueError("; ".join(msgs) or "Backup validation failed")
+
+    target_db = (params.get("target_db") or analysis.get("installed_db") or analysis.get("backup_db") or "").strip()
+    backup_db = analysis.get("backup_db")
+    if target_db and target_db not in SUPPORTED_RESTORE_DBS:
+        raise ValueError(f"Unsupported target database: {target_db}")
+    if (
+        backup_db and target_db and not soft_db_family(backup_db, target_db)
+        and not params.get("accept_experimental")
+        and not params.get("force")
+    ):
+        raise ValueError(
+            "Changing database type during restore is experimental — confirm accept_experimental=true"
+        )
+    params = {**params, "target_db": target_db or backup_db}
 
     job = MigrationJob()
     _restore_jobs[job.job_id] = job
@@ -297,12 +392,17 @@ async def _read_timescaledb_version(job: MigrationJob, container: str, password:
 
 
 async def _align_timescaledb_image(job: MigrationJob, wanted: str) -> None:
-    """Pin compose timescaledb image to backup version and recreate volume."""
+    """Pin compose timescaledb image to backup version and recreate volume.
+
+    Matches official PasarGuard guidance:
+      image: timescale/timescaledb:{backup_version}-pgXX
+      rm -rf /var/lib/postgresql/pasarguard
+    """
     compose = PASARGUARD_DIR / "docker-compose.yml"
+    wanted = parse_timescale_wanted([wanted]) or wanted
     if not compose.exists() or not wanted:
         return
     text = compose.read_text(encoding="utf-8", errors="ignore")
-    # Detect pg major from current image tag like latest-pg17 or 2.17.2-pg17
     m = re.search(r"timescale/timescaledb:([^\s\"']+)", text)
     current_tag = m.group(1) if m else "latest-pg17"
     pg_suf = "pg17"
@@ -312,6 +412,7 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str) -> None:
     new_tag = f"{wanted}-{pg_suf}"
     if current_tag == new_tag:
         job.log(f"TimescaleDB image already at {new_tag}")
+        # Still wipe if extension probe earlier said mismatch on data volume
         return
 
     job.log(f"Aligning TimescaleDB image: {current_tag} → {new_tag}")
@@ -326,7 +427,6 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str) -> None:
     job.set_progress(25, "Recreating TimescaleDB with matching version...")
     await _compose(job, "stop", "pasarguard", timeout=120)
     await _compose(job, "stop", "timescaledb", "pgbouncer", timeout=120)
-    # Wipe DB data dir so extension version matches fresh init
     data_dir = Path("/var/lib/postgresql/pasarguard")
     if data_dir.exists():
         job.log(f"Resetting DB data directory {data_dir} for version alignment")
@@ -335,7 +435,145 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str) -> None:
     ok, out = await _compose(job, "up", "-d", "timescaledb", "pgbouncer", timeout=300)
     if not ok:
         raise RuntimeError(f"Failed to recreate TimescaleDB:\n{out[-2000:]}")
-    await asyncio.sleep(8)
+    await asyncio.sleep(10)
+    # Verify extension version when possible
+    cur_env = _read_current_env()
+    pw = read_env_var(cur_env, "DB_PASSWORD") or read_env_var(cur_env, "POSTGRES_PASSWORD") or ""
+    user = read_env_var(cur_env, "DB_USER") or "postgres"
+    live = await _read_timescaledb_version(job, "timescaledb", pw, user=user)
+    if live and live != wanted:
+        job.log(f"Warning: live TimescaleDB={live} after align (wanted {wanted}) — continuing")
+    else:
+        job.log(f"TimescaleDB ready (version probe: {live or 'n/a'})")
+
+
+async def _sync_pg_role_passwords(
+    job: MigrationJob,
+    svc: str,
+    password: str,
+    user: str,
+    db_name: str,
+) -> None:
+    """Force DB roles to match live .env — fixes SASL auth after globals.sql restore."""
+    if not password:
+        return
+    roles = []
+    for r in (user, "postgres", "pasarguard", db_name):
+        if r and r not in roles:
+            roles.append(r)
+    lit = _sql_literal(password)
+    for role in roles:
+        ok, out = await _run(
+            job,
+            [
+                "docker", "compose", "exec", "-T",
+                "-e", f"PGPASSWORD={password}",
+                svc, "psql", "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=0",
+                "-c", f'ALTER ROLE "{role}" WITH PASSWORD {lit};',
+            ],
+            cwd=str(PASARGUARD_DIR),
+            timeout=30,
+        )
+        # Also try as postgres superuser if first attempt failed
+        if not ok and user != "postgres":
+            await _run(
+                job,
+                [
+                    "docker", "compose", "exec", "-T",
+                    "-e", f"PGPASSWORD={password}",
+                    svc, "psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=0",
+                    "-c", f'ALTER ROLE "{role}" WITH PASSWORD {lit};',
+                ],
+                cwd=str(PASARGUARD_DIR),
+                timeout=30,
+            )
+        job.log(f"Synced password for role {role}")
+    # Restart pgbouncer so auth cache picks up new SCRAM secrets
+    await _compose(job, "restart", "pgbouncer", timeout=90)
+    await asyncio.sleep(3)
+
+
+async def _heal_panel_auth_if_needed(job: MigrationJob, password: str, user: str, db_name: str, db_type: str) -> None:
+    """If panel crash-loops on SASL/password, re-sync roles and restart."""
+    if db_type not in ("postgresql", "timescaledb", "mysql", "mariadb"):
+        return
+    ok, logs = await _run(
+        job,
+        ["docker", "compose", "logs", "--tail", "80", "pasarguard"],
+        cwd=str(PASARGUARD_DIR),
+        timeout=40,
+    )
+    blob = logs or ""
+    if not is_auth_failure_text(blob):
+        return
+    job.log("Detected DB authentication failure in panel logs — auto-healing credentials...")
+    if db_type in ("postgresql", "timescaledb"):
+        svc = "timescaledb" if db_type == "timescaledb" else await _detect_db_container(job, db_type)
+        if svc:
+            await _sync_pg_role_passwords(job, svc, password, user or "postgres", db_name or "pasarguard")
+    await _compose(job, "restart", "pasarguard", timeout=120)
+    await asyncio.sleep(6)
+    ok2, logs2 = await _run(
+        job,
+        ["docker", "compose", "logs", "--tail", "40", "pasarguard"],
+        cwd=str(PASARGUARD_DIR),
+        timeout=40,
+    )
+    if is_auth_failure_text(logs2 or ""):
+        job.log("Auth still failing after heal — check DB_PASSWORD in /opt/pasarguard/.env")
+    else:
+        job.log("Auth heal applied — panel should start cleanly")
+
+
+async def _maybe_cross_db_after_restore(
+    job: MigrationJob,
+    params: dict,
+    backup_db: str,
+    target_db: str,
+    password: str,
+    user: str,
+    db_name: str,
+) -> str:
+    """Experimental: convert restored DB to a different engine via native cross-DB."""
+    if not target_db or backup_db == target_db or soft_db_family(backup_db, target_db):
+        return target_db or backup_db
+    if not params.get("accept_experimental") and not params.get("force"):
+        job.log("Skipping experimental DB change (not accepted)")
+        return backup_db
+
+    job.set_progress(85, "Experimental DB change…")
+    job.log(f"EXPERIMENTAL: converting {backup_db} → {target_db}")
+    try:
+        from app.services.native_migration.cross_db import run_cross_db_migration
+
+        class _Mini:
+            def __init__(self, j, p):
+                self.job = j
+                self.params = p
+
+            async def _run_cmd(self, cmd, cwd=None, timeout=600):
+                return await _run(self.job, cmd, cwd=cwd, timeout=timeout)
+
+        mini = _Mini(job, {
+            "source_db": backup_db,
+            "target_db": target_db,
+            "target_db_password": password,
+            "source_db_password": password,
+            "target_db_user": user,
+            "source_db_user": user,
+            "target_db_name": db_name or "pasarguard",
+            "source_db_name": db_name or "pasarguard",
+            "target_db_host": "127.0.0.1",
+            "source_db_host": "127.0.0.1",
+        })
+        await run_cross_db_migration(mini, backup_db, target_db)
+        job.log(f"Experimental DB change finished: now {target_db}")
+        return target_db
+    except Exception as e:
+        job.log(f"Experimental DB change failed (data restored on {backup_db}): {e}")
+        raise RuntimeError(
+            f"Restore succeeded on {backup_db}, but experimental change to {target_db} failed: {e}"
+        ) from e
 
 
 async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> dict:
@@ -378,35 +616,54 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         shutil.copy2(zip_path, staged)
         job.log(f"Staged backup at {staged}")
 
-        # TimescaleDB version alignment
+        # TimescaleDB version alignment (official mismatch: backup 2.28.1 vs server 2.28.2)
         ts_versions = analysis.get("timescaledb_versions") or []
-        if installed_db in ("timescaledb", "postgresql") and ts_versions:
-            container = await _detect_db_container(job, installed_db or "timescaledb")
-            if container:
-                # Prefer service name via compose exec
-                svc = "timescaledb" if installed_db == "timescaledb" else container
-                live_ver = await _read_timescaledb_version(
-                    job, svc if installed_db == "timescaledb" else container,
-                    cur_pg_pass or "",
-                    user=cur_user or "postgres",
+        wanted_ts = parse_timescale_wanted(ts_versions)
+        if installed_db in ("timescaledb", "postgresql") or backup_db in ("timescaledb", "postgresql"):
+            if wanted_ts:
+                container = await _detect_db_container(job, "timescaledb") or await _detect_db_container(job, installed_db or "timescaledb")
+                svc = "timescaledb" if (installed_db == "timescaledb" or backup_db == "timescaledb") else (container or "postgresql")
+                live_ver = None
+                if container or svc:
+                    live_ver = await _read_timescaledb_version(
+                        job, "timescaledb" if backup_db == "timescaledb" or installed_db == "timescaledb" else svc,
+                        cur_pg_pass or "",
+                        user=cur_user or "postgres",
+                    )
+                if live_ver and live_ver != wanted_ts:
+                    job.log(f"TimescaleDB mismatch: live={live_ver} backup={wanted_ts}")
+                    await _align_timescaledb_image(job, wanted_ts)
+                elif not live_ver and (backup_db == "timescaledb" or installed_db == "timescaledb"):
+                    job.log("Could not probe live TimescaleDB — pinning image to backup version")
+                    await _align_timescaledb_image(job, wanted_ts)
+
+        # Hard DB mismatch without experimental acceptance
+        target_db = params.get("target_db") or installed_db or backup_db
+        if backup_db and installed_db and not soft_db_family(backup_db, installed_db):
+            if not params.get("accept_experimental") and not params.get("force"):
+                raise RuntimeError(
+                    f"Backup DB ({backup_db}) ≠ installed ({installed_db}). "
+                    "Accept experimental DB change, or reinstall PasarGuard with the backup database."
                 )
-                wanted = ts_versions[0]
-                if live_ver and live_ver != wanted:
-                    job.log(f"TimescaleDB mismatch: live={live_ver} backup={wanted}")
-                    await _align_timescaledb_image(job, wanted)
-                elif not live_ver:
-                    job.log("Could not probe live TimescaleDB version — pinning image to backup version")
-                    await _align_timescaledb_image(job, wanted)
+            job.log("EXPERIMENTAL: hard DB mismatch — restoring into backup engine family first")
 
         job.set_progress(40, "Restoring database...")
         await _compose(job, "stop", "pasarguard", timeout=120)
 
+        restore_engine = backup_db
         if backup_db == "sqlite" or analysis.get("layout") == "sqlite_file":
             await _restore_sqlite(job, root)
         elif backup_db in ("mysql", "mariadb"):
             await _restore_mysql(job, root, backup_db, current_env, backup_env)
         elif backup_db in ("postgresql", "timescaledb"):
             await _restore_postgres(job, root, backup_db, current_env, backup_env, analysis)
+            # Critical: globals.sql may reset role passwords → SASL failure with live .env
+            svc = "timescaledb" if backup_db == "timescaledb" else await _detect_db_container(job, backup_db)
+            if svc and (cur_pg_pass or cur_db_pass):
+                await _sync_pg_role_passwords(
+                    job, svc, cur_pg_pass or cur_db_pass or "",
+                    cur_user or "postgres", cur_name or "pasarguard",
+                )
         else:
             raise RuntimeError(f"Unsupported backup database: {backup_db}")
 
@@ -423,14 +680,38 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             },
         )
 
-        # Copy non-db data files (certs, xray, etc.) carefully
         await _restore_data_files(job, root)
+
+        final_db = restore_engine
+        if target_db and restore_engine != target_db and not soft_db_family(restore_engine, target_db):
+            final_db = await _maybe_cross_db_after_restore(
+                job, params, restore_engine, target_db,
+                cur_db_pass or cur_pg_pass or "",
+                cur_user or "pasarguard",
+                cur_name or "pasarguard",
+            )
+        elif target_db and soft_db_family(restore_engine, target_db):
+            final_db = target_db
 
         job.set_progress(90, "Starting PasarGuard...")
         ok, out = await _compose(job, "up", "-d", timeout=300)
         if not ok:
             job.log(f"compose up warning: {out[-1500:]}")
-        await asyncio.sleep(5)
+            # Auto-retry Timescale version if official error text appears
+            mismatch = detect_ts_mismatch_from_text(out)
+            if mismatch:
+                job.log(f"Detected Timescale mismatch in output: backup={mismatch[0]} server={mismatch[1]}")
+                await _align_timescaledb_image(job, mismatch[0])
+                ok, out = await _compose(job, "up", "-d", timeout=300)
+        await asyncio.sleep(6)
+
+        await _heal_panel_auth_if_needed(
+            job,
+            cur_db_pass or cur_pg_pass or "",
+            cur_user or "postgres",
+            cur_name or "pasarguard",
+            final_db or restore_engine or "",
+        )
 
         # Best-effort schema align
         try:
@@ -444,20 +725,24 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                     return await _run(self.job, cmd, cwd=cwd, timeout=timeout)
 
             mini = _Mini(job, {
-                "target_db": installed_db or backup_db,
+                "target_db": final_db or installed_db or backup_db,
                 "target_db_password": cur_db_pass or cur_pg_pass,
                 "target_db_user": cur_user,
                 "target_db_name": cur_name or "pasarguard",
                 "target_db_host": "127.0.0.1",
             })
-            await sync_alembic_for_startup(mini, installed_db or backup_db)
+            await sync_alembic_for_startup(mini, final_db or installed_db or backup_db)
         except Exception as e:
             job.log(f"Alembic sync note: {e}")
 
         access = get_panel_access_info()
         access["restored"] = True
         access["backup_db"] = backup_db
+        access["final_db"] = final_db
         access["staged_backup"] = str(staged)
+        access["experimental_db_change"] = bool(params.get("accept_experimental")) and (
+            backup_db != final_db and not soft_db_family(backup_db, final_db)
+        )
         return access
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -624,9 +909,8 @@ async def _restore_postgres(
                 await psql("SELECT timescaledb_pre_restore();", db=dbn)
                 filtered = dump_path.with_suffix(dump_path.suffix + ".filtered")
                 filtered.write_text(
-                    "\n".join(
-                        ln for ln in dump_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-                        if not re.search(r"^\s*(DROP|CREATE)\s+EXTENSION\s+(IF\s+(EXISTS|NOT\s+EXISTS)\s+)?timescaledb\b", ln, re.I)
+                    filter_timescaledb_extension_sql(
+                        dump_path.read_text(encoding="utf-8", errors="ignore")
                     ),
                     encoding="utf-8",
                 )
@@ -635,7 +919,21 @@ async def _restore_postgres(
             else:
                 ok, out = await psql("", db=dbn, use_file=dump_path)
             if not ok:
-                raise RuntimeError(f"Failed restoring {dbn}:\n{out[-2000:]}")
+                # Auto-heal Timescale version mismatch mid-restore
+                mismatch = detect_ts_mismatch_from_text(out)
+                if mismatch or "timescaledb" in (out or "").lower() and "version" in (out or "").lower():
+                    wanted = (mismatch[0] if mismatch else parse_timescale_wanted(analysis.get("timescaledb_versions"))) or ""
+                    if wanted:
+                        job.log(f"Timescale restore error — aligning to {wanted} and retrying {dbn}")
+                        await _align_timescaledb_image(job, wanted)
+                        await _compose(job, "up", "-d", svc, timeout=180)
+                        await asyncio.sleep(8)
+                        await psql("CREATE EXTENSION IF NOT EXISTS timescaledb;", db=dbn)
+                        await psql("SELECT timescaledb_pre_restore();", db=dbn)
+                        ok, out = await psql("", db=dbn, use_file=filtered if has_ts == "1" else dump_path)
+                        await psql("SELECT timescaledb_post_restore();", db=dbn)
+                if not ok:
+                    raise RuntimeError(f"Failed restoring {dbn}:\n{out[-2000:]}")
             job.log(f"Database {dbn} restored")
         return
 
@@ -656,10 +954,7 @@ async def _restore_postgres(
         await psql("SELECT timescaledb_pre_restore();", db=db_name)
         filtered = root / "db_backup_filtered.sql"
         filtered.write_text(
-            "\n".join(
-                ln for ln in dump.read_text(encoding="utf-8", errors="ignore").splitlines()
-                if not re.search(r"^\s*(DROP|CREATE)\s+EXTENSION\s+(IF\s+(EXISTS|NOT\s+EXISTS)\s+)?timescaledb\b", ln, re.I)
-            ),
+            filter_timescaledb_extension_sql(dump.read_text(encoding="utf-8", errors="ignore")),
             encoding="utf-8",
         )
         ok, out = await psql("", db=db_name, use_file=filtered)
@@ -667,7 +962,20 @@ async def _restore_postgres(
     else:
         ok, out = await psql("", db=db_name, use_file=dump)
     if not ok:
-        raise RuntimeError(f"PostgreSQL restore failed:\n{out[-2000:]}")
+        mismatch = detect_ts_mismatch_from_text(out)
+        if mismatch:
+            await _align_timescaledb_image(job, mismatch[0])
+            await _compose(job, "up", "-d", svc, timeout=180)
+            await asyncio.sleep(8)
+            if db_type == "timescaledb":
+                await psql("CREATE EXTENSION IF NOT EXISTS timescaledb;", db=db_name)
+                await psql("SELECT timescaledb_pre_restore();", db=db_name)
+                ok, out = await psql("", db=db_name, use_file=filtered)
+                await psql("SELECT timescaledb_post_restore();", db=db_name)
+            else:
+                ok, out = await psql("", db=db_name, use_file=dump)
+        if not ok:
+            raise RuntimeError(f"PostgreSQL restore failed:\n{out[-2000:]}")
     job.log("PostgreSQL dump restored")
 
 

@@ -7,7 +7,40 @@ Object.assign(state, {
   pgSsl: null, // true | false | null
   restoreUploadId: null,
   restoreAnalysis: null,
+  restoreTargetDb: null,
 });
+
+async function copyText(codeOrId, raw) {
+  const text = raw != null ? String(raw)
+    : (document.getElementById(codeOrId)?.textContent || codeOrId || '');
+  try {
+    await navigator.clipboard.writeText(text.trim());
+    const btn = (typeof event !== 'undefined' && event?.currentTarget) || null;
+    if (btn && btn.classList) {
+      const prev = btn.textContent;
+      btn.textContent = t('copied');
+      btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = prev; btn.classList.remove('copied'); }, 1600);
+    }
+  } catch (e) {
+    alert(text);
+  }
+}
+
+async function uninstallWizard() {
+  if (!confirm(t('uninstall.confirm'))) return;
+  try {
+    const res = await fetch('/api/self-uninstall', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'uninstall failed');
+    alert(t('uninstall.scheduled'));
+  } catch (e) {
+    alert(e.message || String(e));
+  }
+}
+
+window.copyText = copyText;
+window.uninstallWizard = uninstallWizard;
 
 const PHASE_PANELS = {
   welcome: 'panel-welcome',
@@ -128,6 +161,16 @@ function applyPhaseI18n() {
   set('btnRestoreBack', 'restore.back');
   set('restoreDoneTitle', 'restore.doneTitle');
   set('restorePanelLink', 'restore.openPanel');
+  set('restoreDbTipText', 'restore.tip');
+  set('lblRestoreTargetDb', 'restore.targetDb');
+  set('restoreTargetHint', 'restore.targetHint');
+  set('restoreExperimentalLabel', 'restore.experimentalLabel');
+  set('restoreExperimentalBadge', 'restore.experimentalBadge');
+  set('btnCopyRestorePath', 'copy');
+  set('restoreUninstallTip', 'uninstall.tip');
+  set('btnUninstallRestore', 'uninstall.button');
+  set('migrateUninstallTip', 'uninstall.tip');
+  set('btnUninstallMigrate', 'uninstall.button');
 }
 
 function applyChooseI18n() {
@@ -297,7 +340,11 @@ async function startPgInstall() {
   document.getElementById('pgInstalledCard')?.classList.add('hidden');
   document.getElementById('pgInstallProgress')?.classList.remove('hidden');
   document.getElementById('pgInstallDone')?.classList.add('hidden');
-  document.getElementById('pgLogTerminal')?.classList.add('hidden');
+  const term = document.getElementById('pgLogTerminal');
+  if (term) {
+    term.classList.remove('hidden');
+    term.textContent = '';
+  }
 
   const domain = document.getElementById('pgDomain')?.value?.trim() || null;
   const ip = document.getElementById('pgIp')?.value?.trim() || null;
@@ -354,6 +401,7 @@ async function pollPgInstall(jobId) {
   const text = document.getElementById('pgProgressText');
   const status = document.getElementById('pgStatusMsg');
   const term = document.getElementById('pgLogTerminal');
+  let lastLen = 0;
 
   const tick = async () => {
     try {
@@ -364,6 +412,12 @@ async function pollPgInstall(jobId) {
       if (status) status.textContent = job.status === 'error'
         ? ''
         : (job.message || t('pg.installing'));
+      if (term && job.logs?.length > lastLen) {
+        term.classList.remove('hidden');
+        term.textContent = job.logs.join('\n');
+        term.scrollTop = term.scrollHeight;
+        lastLen = job.logs.length;
+      }
 
       if (job.status === 'success') {
         await loadSystemCheck();
@@ -432,6 +486,11 @@ async function choosePath(path) {
 function setupRestoreUpload() {
   const zone = document.getElementById('restoreUploadZone');
   const input = document.getElementById('restoreFileInput');
+  const exp = document.getElementById('restoreAcceptExperimental');
+  if (exp && !exp.dataset.bound) {
+    exp.dataset.bound = '1';
+    exp.addEventListener('change', updateRestoreConfirmEnabled);
+  }
   if (!zone || zone.dataset.ready) return;
   zone.dataset.ready = '1';
   zone.addEventListener('click', () => input.click());
@@ -482,11 +541,12 @@ function renderRestoreAnalysis(a) {
   const warn = document.getElementById('restoreWarnings');
   if (!card) return;
   card.classList.remove('hidden');
+  const s = t('restore.summary') || {};
   card.innerHTML = `
-    <div class="summary-row"><span class="summary-label">Backup DB</span><span>${a.backup_db || '—'}</span></div>
-    <div class="summary-row"><span class="summary-label">Installed DB</span><span>${a.installed_db || '—'}</span></div>
-    <div class="summary-row"><span class="summary-label">Match</span><span>${a.db_match === true ? '✅' : a.db_match === false ? '❌' : '—'}</span></div>
-    <div class="summary-row"><span class="summary-label">Layout</span><span>${a.layout || '—'}</span></div>
+    <div class="summary-row"><span class="summary-label">${s.backupDb || 'Backup DB'}</span><span>${a.backup_db || '—'}</span></div>
+    <div class="summary-row"><span class="summary-label">${s.installedDb || 'Installed DB'}</span><span>${a.installed_db || '—'}</span></div>
+    <div class="summary-row"><span class="summary-label">${s.match || 'Match'}</span><span>${a.db_match === true ? '✅' : a.db_match === false ? '❌' : '—'}</span></div>
+    <div class="summary-row"><span class="summary-label">${s.layout || 'Layout'}</span><span>${a.layout || '—'}</span></div>
     ${a.timescaledb_versions?.length ? `<div class="summary-row"><span class="summary-label">TimescaleDB</span><span>${a.timescaledb_versions.join(', ')}</span></div>` : ''}
   `;
   if (warn) {
@@ -494,6 +554,76 @@ function renderRestoreAnalysis(a) {
     const items = (a.warnings || []).map(w => `<p>⚠️ ${tr(w, lang)}</p>`).join('');
     warn.innerHTML = items;
     warn.classList.toggle('hidden', !items);
+  }
+
+  state.restoreTargetDb = a.installed_db || a.backup_db || 'timescaledb';
+  renderRestoreTargetGrid(a);
+
+  const expWrap = document.getElementById('restoreExperimentalWrap');
+  const expBadge = document.getElementById('restoreExperimentalBadge');
+  const needsExp = !!a.experimental_db_change;
+  expWrap?.classList.toggle('hidden', !needsExp);
+  if (expBadge) {
+    expBadge.textContent = t('restore.experimentalBadge');
+    expBadge.classList.toggle('hidden', !needsExp);
+  }
+  updateRestoreConfirmEnabled();
+}
+
+function renderRestoreTargetGrid(a) {
+  const section = document.getElementById('restoreTargetSection');
+  const grid = document.getElementById('restoreTargetDbGrid');
+  if (!section || !grid) return;
+  section.classList.remove('hidden');
+  const dbs = a.supported_target_dbs || ['sqlite', 'mysql', 'mariadb', 'postgresql', 'timescaledb'];
+  grid.innerHTML = dbs.map(db => {
+    const selected = state.restoreTargetDb === db ? 'selected' : '';
+    const name = (typeof dbDisplayName === 'function' ? dbDisplayName(db) : db);
+    const exp = a.backup_db && db !== a.backup_db && !(
+      (['mysql', 'mariadb'].includes(db) && ['mysql', 'mariadb'].includes(a.backup_db))
+      || (['postgresql', 'timescaledb'].includes(db) && ['postgresql', 'timescaledb'].includes(a.backup_db))
+    );
+    return `<button type="button" class="db-card ${selected}" data-db="${db}">
+      <h4>${name}</h4>
+      ${exp ? `<span class="db-badge">${t('restore.experimentalBadge')}</span>` : ''}
+    </button>`;
+  }).join('');
+  if (!grid.dataset.bound) {
+    grid.dataset.bound = '1';
+    grid.addEventListener('click', (e) => {
+      const btn = e.target.closest('.db-card[data-db]');
+      if (!btn) return;
+      state.restoreTargetDb = btn.dataset.db;
+      renderRestoreTargetGrid(state.restoreAnalysis || a);
+      const hard = state.restoreAnalysis?.backup_db
+        && state.restoreTargetDb !== state.restoreAnalysis.backup_db
+        && !(
+          (['mysql', 'mariadb'].includes(state.restoreTargetDb) && ['mysql', 'mariadb'].includes(state.restoreAnalysis.backup_db))
+          || (['postgresql', 'timescaledb'].includes(state.restoreTargetDb) && ['postgresql', 'timescaledb'].includes(state.restoreAnalysis.backup_db))
+        );
+      document.getElementById('restoreExperimentalWrap')?.classList.toggle('hidden', !hard && !state.restoreAnalysis?.experimental_db_change);
+      updateRestoreConfirmEnabled();
+    });
+  }
+}
+
+function updateRestoreConfirmEnabled() {
+  const btn = document.getElementById('btnRestoreConfirm');
+  const a = state.restoreAnalysis;
+  if (!btn || !a) return;
+  const hard = a.backup_db && state.restoreTargetDb
+    && state.restoreTargetDb !== a.backup_db
+    && !(
+      (['mysql', 'mariadb'].includes(state.restoreTargetDb) && ['mysql', 'mariadb'].includes(a.backup_db))
+      || (['postgresql', 'timescaledb'].includes(state.restoreTargetDb) && ['postgresql', 'timescaledb'].includes(a.backup_db))
+    );
+  const accepted = document.getElementById('restoreAcceptExperimental')?.checked;
+  const ok = !!a.ok && (!hard || !!accepted || !!a.experimental_db_change && !!accepted || (!hard));
+  // Allow when analysis ok; if hard change, require experimental checkbox
+  if (hard || a.experimental_db_change) {
+    btn.disabled = !(a.ok && accepted);
+  } else {
+    btn.disabled = !a.ok;
   }
 }
 
@@ -506,9 +636,27 @@ async function startRestore() {
     }
     return;
   }
+  const hard = state.restoreAnalysis.backup_db && state.restoreTargetDb
+    && state.restoreTargetDb !== state.restoreAnalysis.backup_db
+    && !(
+      (['mysql', 'mariadb'].includes(state.restoreTargetDb) && ['mysql', 'mariadb'].includes(state.restoreAnalysis.backup_db))
+      || (['postgresql', 'timescaledb'].includes(state.restoreTargetDb) && ['postgresql', 'timescaledb'].includes(state.restoreAnalysis.backup_db))
+    );
+  const accepted = !!document.getElementById('restoreAcceptExperimental')?.checked;
+  if ((hard || state.restoreAnalysis.experimental_db_change) && !accepted) {
+    const el = document.getElementById('restoreBlock');
+    if (el) {
+      el.textContent = t('restore.needExperimental');
+      el.classList.remove('hidden');
+    }
+    return;
+  }
+
   document.getElementById('restoreProgress')?.classList.remove('hidden');
   document.getElementById('restoreDone')?.classList.add('hidden');
   document.getElementById('btnRestoreConfirm').disabled = true;
+  const term = document.getElementById('restoreLogTerminal');
+  if (term) term.textContent = '';
 
   try {
     const res = await fetch('/api/pasarguard/restore', {
@@ -518,6 +666,8 @@ async function startRestore() {
         upload_id: state.restoreUploadId,
         confirmed: true,
         force: false,
+        target_db: state.restoreTargetDb || state.restoreAnalysis.installed_db,
+        accept_experimental: accepted,
       }),
     });
     const data = await res.json();
@@ -578,8 +728,19 @@ function showRestoreDone(result) {
     const lang = state.lang;
     const owner = (result.owner_notes && result.owner_notes[lang]) || [];
     const noSsl = !result.ssl ? ((result.no_ssl_notes && result.no_ssl_notes[lang]) || []) : [];
-    notes.innerHTML = [...owner, ...noSsl].map(n => `<p>• ${n}</p>`).join('');
+    notes.innerHTML = [...owner, ...noSsl].map(n => {
+      const isCmd = /pasarguard|ssh |nano |curl |sudo /.test(n);
+      if (!isCmd) return `<p>• ${n}</p>`;
+      const id = `note-cmd-${Math.random().toString(36).slice(2, 8)}`;
+      const safe = n.replace(/</g, '&lt;');
+      return `<div class="install-cmd-row" style="margin:8px 0"><div class="install-cmd-box"><code id="${id}">${safe}</code></div>
+        <button type="button" class="btn btn-copy" onclick="copyText('${id}')">${t('copy')}</button></div>`;
+    }).join('');
   }
+  const tip = document.getElementById('restoreUninstallTip');
+  const btn = document.getElementById('btnUninstallRestore');
+  if (tip) tip.textContent = t('uninstall.tip');
+  if (btn) btn.textContent = t('uninstall.button');
   renderFlowSteps();
 }
 
