@@ -73,6 +73,14 @@ class TableWriter(ABC):
         """Optional: wipe all listed tables once before inserts (avoids mid-copy CASCADE)."""
         return None
 
+    def begin_bulk_load(self) -> None:
+        """Optional: disable FK checks for the duration of inserts."""
+        return None
+
+    def end_bulk_load(self) -> None:
+        """Optional: restore FK checks after inserts."""
+        return None
+
     @abstractmethod
     def insert(self, table: str, columns: list[str], values: tuple) -> None:
         pass
@@ -302,6 +310,7 @@ class MysqlWriter(TableWriter):
         self._col_meta: dict[str, dict[str, dict]] = {}
         self._enum_labels: dict[str, frozenset[str]] = {}
         self._bulk_prepared = False
+        self._bulk_load_active = False
 
     def _load_meta(self, table: str) -> dict[str, dict]:
         if table in self._col_meta:
@@ -430,9 +439,24 @@ class MysqlWriter(TableWriter):
                 cur.execute(f"TRUNCATE TABLE `{safe}`")
             except Exception:
                 pass
-        cur.execute("SET FOREIGN_KEY_CHECKS = 1")
+        # Keep FK checks off until end_bulk_load
         self._conn.commit()
         self._bulk_prepared = True
+        self._bulk_load_active = True
+
+    def begin_bulk_load(self) -> None:
+        cur = self._conn.cursor()
+        cur.execute("SET FOREIGN_KEY_CHECKS = 0")
+        self._conn.commit()
+        self._bulk_load_active = True
+
+    def end_bulk_load(self) -> None:
+        if not getattr(self, "_bulk_load_active", False):
+            return
+        cur = self._conn.cursor()
+        cur.execute("SET FOREIGN_KEY_CHECKS = 1")
+        self._conn.commit()
+        self._bulk_load_active = False
 
     def commit(self) -> None:
         self._conn.commit()
@@ -512,6 +536,7 @@ class PostgresWriter(TableWriter):
         self._col_nullable: dict[str, dict[str, bool]] = {}
         self._enum_labels: dict[str, frozenset[str]] = {}
         self._bulk_prepared = False
+        self._bulk_load_active = False
 
     def prepare_replace(self, tables: list[str]) -> None:
         """Wipe all copy targets once. Per-table TRUNCATE CASCADE was wiping users/admins
@@ -532,9 +557,24 @@ class PostgresWriter(TableWriter):
         cur.execute(
             self._psql.SQL("TRUNCATE TABLE {} RESTART IDENTITY CASCADE").format(idents)
         )
-        cur.execute("SET session_replication_role = 'origin'")
+        # Keep replica until end_bulk_load so inserts ignore FK order (admin_roles, etc.)
         self._conn.commit()
         self._bulk_prepared = True
+        self._bulk_load_active = True
+
+    def begin_bulk_load(self) -> None:
+        cur = self._conn.cursor()
+        cur.execute("SET session_replication_role = 'replica'")
+        self._conn.commit()
+        self._bulk_load_active = True
+
+    def end_bulk_load(self) -> None:
+        if not getattr(self, "_bulk_load_active", False):
+            return
+        cur = self._conn.cursor()
+        cur.execute("SET session_replication_role = 'origin'")
+        self._conn.commit()
+        self._bulk_load_active = False
 
     def truncate(self, table: str) -> None:
         if self._bulk_prepared:
@@ -1083,6 +1123,44 @@ def copy_tables_universal(
         except Exception as exc:
             log(f"Bulk prepare_replace note: {str(exc)[:200]} — falling back to per-table truncate")
 
+    try:
+        writer.begin_bulk_load()
+        return _copy_tables_universal_body(
+            reader,
+            writer,
+            log,
+            source_version=source_version,
+            fail_hard=fail_hard,
+            stamp_alembic=stamp_alembic,
+            ordered=ordered,
+            source_tables=source_tables,
+            source_counts=source_counts,
+            attempted_tables=attempted_tables,
+            table_first_errors=table_first_errors,
+            stats=stats,
+        )
+    finally:
+        try:
+            writer.end_bulk_load()
+        except Exception as exc:
+            log(f"end_bulk_load note: {str(exc)[:160]}")
+
+
+def _copy_tables_universal_body(
+    reader: TableReader,
+    writer: TableWriter,
+    log: Callable[[str], None],
+    *,
+    source_version: str | None,
+    fail_hard: bool,
+    stamp_alembic: bool,
+    ordered: list[str],
+    source_tables: set[str],
+    source_counts: dict[str, int],
+    attempted_tables: set[str],
+    table_first_errors: dict[str, str],
+    stats: dict[str, int],
+) -> tuple[dict[str, int], dict]:
     for table in ordered:
         if table in SKIP_TABLES or table not in source_tables:
             continue
@@ -1223,9 +1301,11 @@ def copy_tables_universal(
         if live >= 0:
             stats[table] = live
             if live == 0 and src_n > 0:
+                hint = (table_first_errors.get(table) or "")[:300]
                 raise RuntimeError(
-                    f"Migration failed: {table} was {src_n} in source but 0 after full copy "
-                    f"(likely TRUNCATE CASCADE from a later table). Retry with updated migrator."
+                    f"Migration failed: {table} was {src_n} in source but 0 after full copy"
+                    + (f". First error: {hint}" if hint else "")
+                    + ". Check FK order / parent tables (e.g. admin_roles before admins)."
                 )
             if live < src_n:
                 log(f"Post-copy recount {table}: {live}/{src_n}")
@@ -1268,4 +1348,6 @@ def copy_tables_universal(
                 f"({item['missing']} not transferred)"
             )
 
+    total = sum(stats.values())
+    log(f"Copy complete: {total} rows across {len(stats)} tables")
     return stats, report

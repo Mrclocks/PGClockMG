@@ -19,6 +19,7 @@ TABLE_ORDER = [
     "jwt",
     "system",
     "settings",
+    "admin_roles",  # before admins (role_id FK)
     "admins",
     "core_configs",
     "nodes",
@@ -35,8 +36,14 @@ TABLE_ORDER = [
     "template_inbounds_association",
     "next_plans",
     "notification_reminders",
+    "admin_notification_reminders",
     "node_user_usages",
     "node_usages",
+    "user_hwids",
+    "api_keys",
+    "temp_keys",
+    "node_usage_reset_logs",
+    "user_subscription_updates",
 ]
 
 SKIP_TABLES = {

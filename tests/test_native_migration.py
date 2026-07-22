@@ -653,8 +653,90 @@ def test_build_copy_report():
     print("OK: build_copy_report")
 
 
+def test_admin_roles_before_admins_in_table_order():
+    from app.services.native_migration.copy_core import TABLE_ORDER
+
+    assert TABLE_ORDER.index("admin_roles") < TABLE_ORDER.index("admins")
+    print("OK: admin_roles_before_admins_in_table_order")
+
+
+def test_admin_roles_copied_before_admins_fk():
+    """admins.role_id FK requires admin_roles rows first after a full wipe."""
+    import tempfile
+    from app.services.native_migration.adapters import (
+        SqliteReader,
+        SqliteWriter,
+        copy_tables_universal,
+    )
+
+    fd1, src = tempfile.mkstemp(suffix=".sqlite3")
+    fd2, dst = tempfile.mkstemp(suffix=".sqlite3")
+    os.close(fd1)
+    os.close(fd2)
+    try:
+        schema = """
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE admin_roles (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE admins (
+                id INTEGER PRIMARY KEY,
+                username TEXT,
+                role_id INTEGER REFERENCES admin_roles(id)
+            );
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY,
+                username TEXT,
+                admin_id INTEGER REFERENCES admins(id)
+            );
+            CREATE TABLE hosts (id INTEGER PRIMARY KEY, remark TEXT);
+            """
+        sc = sqlite3.connect(src)
+        sc.executescript(
+            schema
+            + """
+            INSERT INTO admin_roles VALUES (1, 'sudo');
+            INSERT INTO admin_roles VALUES (2, 'admin');
+            INSERT INTO admins VALUES (1, 'root', 1);
+            INSERT INTO users VALUES (1, 'u1', 1);
+            INSERT INTO users VALUES (2, 'u2', 1);
+            INSERT INTO hosts VALUES (1, 'h1');
+            """
+        )
+        sc.commit()
+        sc.close()
+
+        dc = sqlite3.connect(dst)
+        dc.execute("PRAGMA foreign_keys = ON")
+        dc.executescript(schema)
+        dc.commit()
+        dc.close()
+
+        class FkSqliteWriter(SqliteWriter):
+            def __init__(self, path: str):
+                super().__init__(path)
+                self._conn.execute("PRAGMA foreign_keys = ON")
+
+        reader = SqliteReader(src)
+        writer = FkSqliteWriter(dst)
+        logs = []
+        try:
+            stats, _ = copy_tables_universal(reader, writer, logs.append, fail_hard=True)
+        finally:
+            reader.close()
+            writer.close()
+
+        assert stats.get("admin_roles") == 2, stats
+        assert stats.get("admins") == 1, stats
+        assert stats.get("users") == 2, stats
+        # Must appear as ordered table, not late "Extra table"
+        assert not any("Extra table queued for copy: admin_roles" in ln for ln in logs), logs
+        print("OK: admin_roles_copied_before_admins_fk")
+    finally:
+        os.unlink(src)
+        os.unlink(dst)
+
+
 def test_prepare_replace_blocks_cascade_wipe():
-    """Regression: per-table TRUNCATE CASCADE on late parents (admin_roles) wiped users/admins.
+    """Regression: per-table TRUNCATE CASCADE on late parents wiped users/admins.
 
     After bulk prepare_replace, per-table truncate must be a no-op so earlier inserts survive.
     """
@@ -670,8 +752,8 @@ def test_prepare_replace_blocks_cascade_wipe():
             if getattr(self, "_bulk_prepared", False):
                 return
             super().truncate(table)
-            if table == "admin_roles":
-                # Emulate PostgreSQL: TRUNCATE admin_roles CASCADE → admins → users
+            if table == "node_usages":
+                # Emulate PostgreSQL: TRUNCATE late parent CASCADE → wipe earlier kids
                 self._conn.execute("DELETE FROM admins")
                 self._conn.execute("DELETE FROM users")
                 try:
@@ -690,6 +772,7 @@ def test_prepare_replace_blocks_cascade_wipe():
             CREATE TABLE users_groups_association (user_id INTEGER, group_id INTEGER);
             CREATE TABLE admin_roles (id INTEGER PRIMARY KEY, name TEXT);
             CREATE TABLE hosts (id INTEGER PRIMARY KEY, remark TEXT);
+            CREATE TABLE node_usages (id INTEGER PRIMARY KEY, uplink INTEGER);
             """
         sc = sqlite3.connect(src)
         sc.executescript(
@@ -702,6 +785,7 @@ def test_prepare_replace_blocks_cascade_wipe():
             INSERT INTO users_groups_association VALUES (2, 1);
             INSERT INTO admin_roles VALUES (1, 'sudo');
             INSERT INTO hosts VALUES (1, 'h1');
+            INSERT INTO node_usages VALUES (1, 100);
             """
         )
         sc.commit()
@@ -742,7 +826,7 @@ def test_prepare_replace_blocks_cascade_wipe():
                 copy_tables_universal(r2, w2, logs.append, fail_hard=True)
             except RuntimeError as exc:
                 raised = True
-                assert "users" in str(exc).lower() or "TRUNCATE CASCADE" in str(exc)
+                assert "users" in str(exc).lower() or "admins" in str(exc).lower()
             assert raised, "expected post-copy abort when CASCADE wipes users"
         finally:
             r2.close()
@@ -788,6 +872,8 @@ if __name__ == "__main__":
     test_nodes_missing_target_table_skips()
     test_copy_sqlite_to_sqlite_associations()
     test_build_copy_report()
+    test_admin_roles_before_admins_in_table_order()
+    test_admin_roles_copied_before_admins_fk()
     test_prepare_replace_blocks_cascade_wipe()
     test_sanitize_env_text_for_docker()
     test_native_migration_import()
