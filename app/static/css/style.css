@@ -1071,6 +1071,23 @@ button.db-card {
   box-shadow: var(--shadow);
 }
 
+.welcome-goals {
+  margin: 18px 0 16px;
+}
+.welcome-goals .choice-card {
+  text-align: start;
+}
+.welcome-goals .choice-card strong {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 1.05rem;
+}
+.welcome-goals .choice-card > span:last-child {
+  opacity: 0.85;
+  font-size: 0.9rem;
+  line-height: 1.35;
+}
+
 .welcome-header h2 {
   font-size: 1.35rem;
   font-weight: 700;

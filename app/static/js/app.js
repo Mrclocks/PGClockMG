@@ -867,6 +867,7 @@ async function renderTargetDbs() {
 
   const needsPg = needsPasarguardInstall();
   const installSection = document.getElementById('installPgSection');
+  // PG is installed via welcome→pg before migrate; keep section only as emergency fallback
   installSection?.classList.toggle('hidden', !needsPg);
   if (needsPg) {
     const cmdEl = document.getElementById('installPgCmd');
@@ -878,7 +879,7 @@ async function renderTargetDbs() {
 }
 
 function updateCrossDbWarning() {
-  // DB engine change lives in install → restore, not migration step 3
+  // Change-DB is a separate welcome goal (restore), never offered inside migrate
   const crossEl = document.getElementById('crossDbWarning');
   if (crossEl) crossEl.classList.add('hidden');
 }

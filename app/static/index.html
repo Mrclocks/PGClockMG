@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/css/style.css?v=2.3.6">
+  <link rel="stylesheet" href="/static/css/style.css?v=2.3.7">
 </head>
 <body>
   <div class="bg-grid"></div>
@@ -30,7 +30,7 @@
           <button class="lang-btn" data-lang="ru" onclick="setLang('ru')">RU</button>
         </div>
         <span class="badge" id="serverIp">—</span>
-        <span class="version" id="appVersion">v2.3.6</span>
+        <span class="version" id="appVersion">v2.3.7</span>
       </div>
     </header>
 
@@ -38,7 +38,7 @@
 
     <main class="main">
 
-      <!-- Welcome -->
+      <!-- Welcome — pick goal first -->
       <section class="panel active" id="panel-welcome">
         <div class="welcome-card">
           <div class="welcome-header">
@@ -47,10 +47,31 @@
           </div>
           <div class="welcome-body">
             <p class="welcome-note" id="welcomeNote"></p>
+            <p class="desc-sm" id="welcomeGoalHint"></p>
+            <div class="choice-grid choice-grid-3 welcome-goals" id="welcomeGoals">
+              <button type="button" class="choice-card choice-card-lg" onclick="startWizardGoal('install')">
+                <span class="choice-icon" aria-hidden="true">
+                  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 3v12"/><path d="M8 11l4 4 4-4"/><path d="M4 19h16"/></svg>
+                </span>
+                <strong id="welcomeGoalInstall"></strong>
+                <span id="welcomeGoalInstallDesc"></span>
+              </button>
+              <button type="button" class="choice-card choice-card-lg" onclick="startWizardGoal('change_db')">
+                <span class="choice-icon" aria-hidden="true">
+                  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/><path d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>
+                </span>
+                <strong id="welcomeGoalChangeDb"></strong>
+                <span id="welcomeGoalChangeDbDesc"></span>
+              </button>
+              <button type="button" class="choice-card choice-card-lg" onclick="startWizardGoal('migrate')">
+                <span class="choice-icon" aria-hidden="true">
+                  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M16 3h5v5"/><path d="M4 20L21 3"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M4 4l5 5"/></svg>
+                </span>
+                <strong id="welcomeGoalMigrate"></strong>
+                <span id="welcomeGoalMigrateDesc"></span>
+              </button>
+            </div>
             <div class="info-box" id="welcomeBackupTip"></div>
-          </div>
-          <div class="welcome-actions">
-            <button class="btn btn-primary btn-lg btn-start" id="btnWelcomeStart" onclick="startWizard()"></button>
           </div>
         </div>
       </section>
@@ -64,8 +85,8 @@
           <h3 id="pgInstalledTitle"></h3>
           <p id="pgInstalledDetail"></p>
           <div class="actions">
-            <button class="btn btn-ghost" onclick="showPhase('welcome')"></button>
-            <button class="btn btn-primary" id="btnPgContinue" onclick="showPhase('choose')"></button>
+            <button class="btn btn-ghost" onclick="showPhase('welcome')" id="btnPgInstalledBack"></button>
+            <button class="btn btn-primary" id="btnPgContinue" onclick="continueAfterPgReady()"></button>
           </div>
         </div>
 
@@ -138,7 +159,7 @@
             <h2 id="pgDoneTitle"></h2>
             <div id="pgDoneNotes" class="guide-sections"></div>
             <div class="actions" style="justify-content:center;margin-top:16px">
-              <button class="btn btn-primary" onclick="showPhase('choose')" id="btnPgDoneNext"></button>
+              <button class="btn btn-primary" onclick="continueAfterPgReady()" id="btnPgDoneNext"></button>
             </div>
           </div>
         </div>
@@ -172,7 +193,7 @@
           </button>
         </div>
         <div class="actions">
-          <button class="btn btn-ghost" onclick="showPhase('pg')" id="btnChooseBack"></button>
+          <button class="btn btn-ghost" onclick="showPhase('welcome')" id="btnChooseBack"></button>
         </div>
       </section>
 
@@ -206,7 +227,7 @@
           <div id="restoreBlock" class="block-msg hidden"></div>
 
           <div class="actions">
-            <button class="btn btn-ghost" onclick="showPhase('choose')" id="btnRestoreBack"></button>
+            <button class="btn btn-ghost" onclick="backFromRestore()" id="btnRestoreBack"></button>
             <button class="btn btn-primary" id="btnRestoreConfirm" disabled onclick="startRestore()"></button>
           </div>
         </div>
@@ -274,7 +295,7 @@
         <div id="panelPrereqs" class="checks-list hidden"></div>
         <div id="step1Block" class="block-msg hidden"></div>
         <div class="actions">
-          <button class="btn btn-ghost" onclick="showPhase('choose')"></button>
+          <button class="btn btn-ghost" onclick="showPhase('welcome')" id="btnStep1Back"></button>
           <button class="btn btn-primary" id="btnStep1" disabled onclick="goStep(2)"></button>
         </div>
       </section>
@@ -477,10 +498,10 @@
     </div>
   </div>
 
-  <script src="/static/js/icons.js?v=2.3.6"></script>
-  <script src="/static/js/i18n.js?v=2.3.6"></script>
-  <script src="/static/js/app.js?v=2.3.6"></script>
-  <script src="/static/js/wizard-flow.js?v=2.3.6"></script>
+  <script src="/static/js/icons.js?v=2.3.7"></script>
+  <script src="/static/js/i18n.js?v=2.3.7"></script>
+  <script src="/static/js/app.js?v=2.3.7"></script>
+  <script src="/static/js/wizard-flow.js?v=2.3.7"></script>
 </body>
 </html>
 

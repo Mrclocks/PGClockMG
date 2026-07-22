@@ -1,7 +1,8 @@
-/* Pre-migration wizard phases: welcome → pg setup → choose → restore|migrate|finish */
+/* Pre-migration wizard phases: welcome(goal) → pg(if needed) → install|change_db|migrate */
 
 Object.assign(state, {
   phase: 'welcome', // welcome | pg | choose | restore | migrate
+  wizardGoal: null, // install | change_db | migrate
   panelAccess: null,
   pgDb: 'timescaledb',
   pgSsl: null, // true | false | null
@@ -212,8 +213,48 @@ function showPhase(phase) {
   applyPhaseI18n();
 }
 
+/** User picks goal on welcome: install | change_db | migrate */
+async function startWizardGoal(goal) {
+  state.wizardGoal = goal;
+  await loadSystemCheck();
+  await refreshPanelAccess();
+  const installed = !!(state.systemCheck?.pasarguard || state.panelAccess?.installed);
+  if (installed) {
+    await continueAfterPgReady();
+  } else {
+    showPhase('pg');
+  }
+}
+
+/** Legacy entry — keep for any leftover callers */
 function startWizard() {
-  showPhase('pg');
+  startWizardGoal(state.wizardGoal || 'install');
+}
+
+/** After PG is ready (already installed or just installed), jump to chosen goal. */
+async function continueAfterPgReady() {
+  const goal = state.wizardGoal || 'install';
+  if (goal === 'install') {
+    await choosePath('finish');
+    return;
+  }
+  if (goal === 'change_db') {
+    showPhase('restore');
+    return;
+  }
+  if (goal === 'migrate') {
+    await choosePath('migrate');
+    return;
+  }
+  showPhase('choose');
+}
+
+function backFromRestore() {
+  if (state.wizardGoal === 'change_db') {
+    showPhase('welcome');
+    return;
+  }
+  showPhase(state.wizardGoal ? 'welcome' : 'choose');
 }
 
 async function refreshPanelAccess() {
@@ -229,9 +270,28 @@ function renderFlowSteps() {
   const nav = document.getElementById('stepsNav');
   if (!nav) return;
 
+  const goal = state.wizardGoal;
   let labels;
   let activeIdx = 0;
-  if (state.phase === 'welcome') {
+
+  if (goal === 'migrate' || state.phase === 'migrate') {
+    labels = t('stepsMigrate') || t('steps') || [];
+    if (state.phase === 'welcome') activeIdx = 0;
+    else if (state.phase === 'pg') activeIdx = 1;
+    else activeIdx = 1 + (state.currentStep || 1);
+  } else if (goal === 'change_db' || state.phase === 'restore') {
+    labels = t('stepsChangeDb') || t('stepsRestore') || [];
+    if (state.phase === 'welcome') activeIdx = 0;
+    else if (state.phase === 'pg') activeIdx = 1;
+    else if (state.restoreStage === 'done') activeIdx = 4;
+    else if (state.restoreStage === 'running' || state.restoreStage === 'error') activeIdx = 3;
+    else activeIdx = 2;
+  } else if (goal === 'install') {
+    labels = t('stepsInstall') || t('stepsSetup') || [];
+    if (state.phase === 'welcome') activeIdx = 0;
+    else if (state.phase === 'pg') activeIdx = 1;
+    else activeIdx = 2;
+  } else if (state.phase === 'welcome') {
     labels = t('stepsSetup') || ['Welcome', 'Setup', 'Next'];
     activeIdx = 0;
   } else if (state.phase === 'pg') {
@@ -241,14 +301,13 @@ function renderFlowSteps() {
     labels = t('stepsSetup') || ['Welcome', 'Setup', 'Next'];
     activeIdx = 2;
   } else if (state.phase === 'restore') {
-    // Welcome, Setup, Next, Backup, Run, Done
-    labels = t('stepsRestore') || ['Welcome', 'Setup', 'Next', 'Backup', 'Run', 'Done'];
-    if (state.restoreStage === 'done') activeIdx = 5;
-    else if (state.restoreStage === 'running' || state.restoreStage === 'error') activeIdx = 4;
-    else activeIdx = 3;
+    labels = t('stepsChangeDb') || t('stepsRestore') || [];
+    if (state.restoreStage === 'done') activeIdx = 4;
+    else if (state.restoreStage === 'running' || state.restoreStage === 'error') activeIdx = 3;
+    else activeIdx = 2;
   } else if (state.phase === 'migrate') {
-    labels = t('steps') || [];
-    activeIdx = 2 + (state.currentStep || 1);
+    labels = t('stepsMigrate') || t('steps') || [];
+    activeIdx = 1 + (state.currentStep || 1);
   } else {
     labels = t('stepsSetup') || [];
   }
@@ -282,8 +341,14 @@ function applyPhaseI18n() {
   set('welcomeH2', 'welcome.h2');
   set('welcomeDesc', 'welcome.desc');
   set('welcomeNote', 'welcome.note');
+  set('welcomeGoalHint', 'welcome.goalHint');
+  set('welcomeGoalInstall', 'welcome.goalInstall');
+  set('welcomeGoalInstallDesc', 'welcome.goalInstallDesc');
+  set('welcomeGoalChangeDb', 'welcome.goalChangeDb');
+  set('welcomeGoalChangeDbDesc', 'welcome.goalChangeDbDesc');
+  set('welcomeGoalMigrate', 'welcome.goalMigrate');
+  set('welcomeGoalMigrateDesc', 'welcome.goalMigrateDesc');
   set('welcomeBackupTip', 'welcome.backupTip');
-  set('btnWelcomeStart', 'welcome.start');
 
   set('pgH2', 'pg.h2');
   set('pgDesc', 'pg.desc');
@@ -291,6 +356,7 @@ function applyPhaseI18n() {
   set('pgInstalledDetail', 'pg.installedDetail');
   set('btnPgContinue', 'pg.continue');
   set('btnPgBack', 'pg.back');
+  set('btnPgInstalledBack', 'pg.back');
   set('btnPgInstall', 'pg.install');
   set('lblPgDb', 'pg.dbLabel');
   set('lblPgSsl', 'pg.sslLabel');
@@ -305,15 +371,17 @@ function applyPhaseI18n() {
   set('pgIpHint', 'pg.ipHint');
   set('lblPgSslPort', 'pg.sslPort');
   set('pgSslPortHint', 'pg.sslPortHint');
-  set('pgDbMatchTip', 'pg.dbMatchTip');
+  set('pgDbMatchTip', state.wizardGoal === 'change_db' ? 'pg.dbMatchTipChange' : 'pg.dbMatchTip');
   set('pgDoneTitle', 'pg.doneTitle');
   set('btnPgDoneNext', 'pg.next');
   bindPgSslButtons();
 
   applyChooseI18n();
 
-  set('restoreH2', 'restore.h2');
-  set('restoreDesc', 'restore.desc');
+  const restoreH2Key = state.wizardGoal === 'change_db' ? 'restore.h2ChangeDb' : 'restore.h2';
+  const restoreDescKey = state.wizardGoal === 'change_db' ? 'restore.descChangeDb' : 'restore.desc';
+  set('restoreH2', restoreH2Key);
+  set('restoreDesc', restoreDescKey);
   set('restoreDbTipText', 'restore.tip');
   set('restoreDragText', 'restore.drag');
   set('restoreSelectText', 'restore.select');
@@ -616,17 +684,21 @@ function showPgInstallDone(result) {
 
 async function choosePath(path) {
   if (path === 'finish') {
+    state.wizardGoal = state.wizardGoal || 'install';
     bindFinishModal();
     await refreshPanelAccess();
     const url = resolveLoginUrl(state.panelAccess);
     openFinishModal(url);
+    renderFlowSteps();
     return;
   }
   if (path === 'restore') {
+    state.wizardGoal = 'change_db';
     showPhase('restore');
     return;
   }
   if (path === 'migrate') {
+    state.wizardGoal = 'migrate';
     state.phase = 'migrate';
     state.currentStep = 1;
     hideAllMainPanels();
@@ -884,6 +956,9 @@ function showRestoreDone(result) {
 // Expose for inline handlers / debugging
 window.showPhase = showPhase;
 window.startWizard = startWizard;
+window.startWizardGoal = startWizardGoal;
+window.continueAfterPgReady = continueAfterPgReady;
+window.backFromRestore = backFromRestore;
 window.selectPgDb = selectPgDb;
 window.selectPgSsl = selectPgSsl;
 window.startPgInstall = startPgInstall;
