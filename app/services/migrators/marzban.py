@@ -19,6 +19,7 @@ from app.services.env_migration import (
     read_env_var,
     merge_marzban_env_into_pasarguard,
     get_panel_url_from_env,
+    _set_sqlalchemy_url,
 )
 from app.services.db_credentials import build_app_sqlalchemy_url, get_source_connection, get_target_connection
 from app.services.pasarguard_ops import (
@@ -384,18 +385,7 @@ class MarzbanMigrator(BaseMigrator):
         self._backup_file(env_path, BACKUP_DIR)
         original = env_path.read_text(encoding="utf-8", errors="ignore")
         sqlalchemy_url = build_app_sqlalchemy_url(self.params)
-        db_url = f'SQLALCHEMY_DATABASE_URL = "{sqlalchemy_url}"'
-        text = original
-        if re.search(r"SQLALCHEMY_DATABASE_URL", text, re.I):
-            # Callable repl avoids backslash-escape parsing of the replacement string.
-            text = re.sub(
-                r'#\s*SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"|SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"',
-                lambda _m: db_url,
-                text,
-                count=1,
-            )
-        else:
-            text = text.rstrip() + f"\n{db_url}\n"
+        text = _set_sqlalchemy_url(original, sqlalchemy_url)
         env_path.write_text(text, encoding="utf-8")
         self.job.log(".env updated for target database")
 

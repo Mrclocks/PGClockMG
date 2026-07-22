@@ -1432,14 +1432,22 @@ button.db-card {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   border-radius: 12px;
   background: hsla(210, 90%, 52%, 0.12);
   color: var(--primary);
-  margin-bottom: 4px;
+  margin-bottom: 6px;
+  flex-shrink: 0;
+  line-height: 0;
 }
-.choice-icon .icon { width: 22px; height: 22px; }
+.choice-icon .icon,
+.choice-icon svg {
+  width: 22px;
+  height: 22px;
+  display: block;
+  margin: 0 auto;
+}
 .success-card {
   background: var(--bg-card);
   border: 1px solid hsla(142, 76%, 36%, 0.35);
@@ -1583,14 +1591,6 @@ button.db-card {
 }
 .icon-lg { width: 2.25rem; height: 2.25rem; }
 .logo .icon { width: 1.4rem; height: 1.4rem; color: var(--primary); }
-.choice-icon {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  color: var(--primary);
-  margin-bottom: 6px;
-}
-.choice-icon .icon { width: 1.5rem; height: 1.5rem; }
 .result-icon {
   display: flex;
   justify-content: center;

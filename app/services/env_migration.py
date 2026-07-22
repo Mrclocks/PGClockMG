@@ -606,19 +606,7 @@ def transform_marzban_env(
 
     pg_env = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.exists() else None
     sqlalchemy_url = build_sqlalchemy_url_for_target(target_db, password_override)
-    db_url = f'SQLALCHEMY_DATABASE_URL = "{sqlalchemy_url}"'
-
-    if re.search(r"SQLALCHEMY_DATABASE_URL", text, re.I):
-        # Callable repl: a raw string containing backslashes (Windows paths, or any
-        # password with a backslash) would otherwise be mis-parsed as regex escapes.
-        text = re.sub(
-            r'#\s*SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"|SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"',
-            lambda _m: db_url,
-            text,
-            count=1,
-        )
-    else:
-        text = text.rstrip() + f"\n{db_url}\n"
+    text = _set_sqlalchemy_url(text, sqlalchemy_url)
 
     return text
 
@@ -640,24 +628,40 @@ def transform_pasarguard_env_for_target(
         password,
         env_text if env_text is not None else text,
     )
+    return _set_sqlalchemy_url(text, url)
+
+
+def _sqlalchemy_url_line_pattern() -> str:
+    # Matches active or commented SQLALCHEMY_DATABASE_URL assignments (quoted or bare).
+    return (
+        r"(?m)^\s*#?\s*SQLALCHEMY_DATABASE_URL\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\n#]*)\s*(?:#.*)?$"
+    )
+
+
+def _set_sqlalchemy_url(text: str, url: str) -> str:
+    """Force exactly ONE SQLALCHEMY_DATABASE_URL line.
+
+    Real PasarGuard/Marzban backups often contain duplicate URL lines (this user's
+    backup had three identical sqlite URLs). Docker/.env loaders typically use the
+    *last* value, so replacing only the first left the panel on sqlite after convert
+    — data was in Timescale, UI looked empty.
+    """
     url_line = f'SQLALCHEMY_DATABASE_URL = "{url}"'
-    if re.search(r"SQLALCHEMY_DATABASE_URL", text, re.I):
-        # Callable repl avoids backslash-escape parsing of the replacement string.
-        return re.sub(
-            r'#\s*SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"|SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"',
-            lambda _m: url_line,
-            text,
-            count=1,
-        )
-    return text.rstrip() + f"\n{url_line}\n"
+    cleaned = re.sub(_sqlalchemy_url_line_pattern(), "", text)
+    # Collapse excessive blank lines left by removals
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).rstrip() + "\n"
+    return cleaned + url_line + "\n"
 
 
 def _set_env_var_simple(text: str, key: str, value: str) -> str:
+    """Set KEY=value, removing any prior duplicates of KEY (active or commented)."""
     pattern = rf"(?m)^\s*#?\s*{re.escape(key)}\s*=.*$"
-    # Use a callable repl so Windows paths (\U in \Users) are not treated as regex escapes.
     line = f'{key}="{value}"'
     if re.search(pattern, text):
-        return re.sub(pattern, lambda _m: line, text, count=1)
+        # Drop all existing assignments, then append a single authoritative line.
+        text = re.sub(pattern, "", text)
+        text = re.sub(r"\n{3,}", "\n\n", text).rstrip() + "\n"
+        return text + line + "\n"
     return text.rstrip() + "\n" + line + "\n"
 
 
@@ -924,17 +928,7 @@ def finalize_pasarguard_env_after_restore(
     install_url = read_env_var(install_env_snapshot, "SQLALCHEMY_DATABASE_URL") or ""
     if install_url and env_points_to_db(install_env_snapshot, final_db):
         url = _replace_sqlalchemy_password(install_url, password or "") if password else install_url
-        url_line = f'SQLALCHEMY_DATABASE_URL = "{url}"'
-        if re.search(r"SQLALCHEMY_DATABASE_URL", text, re.I):
-            # Callable repl avoids backslash-escape parsing of the replacement string.
-            text = re.sub(
-                r'#\s*SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"|SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"',
-                lambda _m: url_line,
-                text,
-                count=1,
-            )
-        else:
-            text = text.rstrip() + f"\n{url_line}\n"
+        text = _set_sqlalchemy_url(text, url)
     else:
         text = transform_pasarguard_env_for_target(
             text,
@@ -986,6 +980,18 @@ def finalize_pasarguard_env_after_restore(
     # Stamp engine so detection does not collapse timescaledb → postgresql via URL alone
     if final_db in ("sqlite", "mysql", "mariadb", "postgresql", "timescaledb"):
         text = _set_env_var_simple(text, "PASARGUARD_DB_ENGINE", final_db)
+
+    # Hard guarantee: never leave duplicate / leftover sqlite URLs after convert.
+    url_lines = re.findall(_sqlalchemy_url_line_pattern(), text)
+    if len(url_lines) != 1 or not env_points_to_db(text, final_db):
+        # Rebuild URL one more time from install snapshot / builder.
+        if install_url and env_points_to_db(install_env_snapshot, final_db):
+            url = _replace_sqlalchemy_password(install_url, password or "") if password else install_url
+        else:
+            url = build_sqlalchemy_url_for_target(
+                final_db, password, install_env_snapshot or text
+            )
+        text = _set_sqlalchemy_url(text, url)
     return text
 
 

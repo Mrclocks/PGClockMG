@@ -822,11 +822,19 @@ async def _finalize_env_after_restore(
     cert = read_env_var(finalized, "UVICORN_SSL_CERTFILE")
     key = read_env_var(finalized, "UVICORN_SSL_KEYFILE")
     ssl_ok = ssl_cert_files_exist(cert, key)
+    from app.services.env_migration import _sqlalchemy_url_line_pattern
+    import re as _re
+    url_n = len(_re.findall(_sqlalchemy_url_line_pattern(), finalized))
     job.log(
         f"Finalized .env for {final_db} "
         f"(URL driver: {url.split('://')[0] if '://' in url else '?'}, "
+        f"SQLALCHEMY lines={url_n}, "
         f"SSL={'ok ' + str(cert) if ssl_ok else 'disabled/missing'})"
     )
+    if url_n != 1:
+        raise RuntimeError(
+            f".env must contain exactly 1 SQLALCHEMY_DATABASE_URL after finalize, found {url_n}"
+        )
     if backup_wanted_ssl and not ssl_ok:
         raise RuntimeError(
             "Backup .env requires SSL but certificate files were not restored to "
