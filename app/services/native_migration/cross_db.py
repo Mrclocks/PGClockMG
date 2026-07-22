@@ -192,6 +192,26 @@ async def _phase1_land_intermediate(
     return source_path, source_db, None
 
 
+async def _prepare_target_for_migration(migrator, target_db: str) -> None:
+    """Ensure target DB is up, credentials verified, and role passwords aligned."""
+    from app.services.db_auth import (
+        migration_params_from_connection,
+        resolve_live_admin_connection,
+        sync_postgres_roles_to_app_password,
+    )
+
+    await _ensure_db_running(migrator, target_db)
+    admin = await resolve_live_admin_connection(migrator, target_db)
+    migrator.params = migration_params_from_connection(
+        migrator.params.get("source_db") or migrator.params.get("source_db_type") or "sqlite",
+        target_db,
+        admin,
+    )
+    migrator.params["_auto_db_credentials"] = True
+    if target_db in ("postgresql", "timescaledb"):
+        await sync_postgres_roles_to_app_password(migrator, target_db, admin)
+
+
 async def run_two_phase_migration(
     migrator,
     source_path: str,
@@ -222,8 +242,14 @@ async def run_two_phase_migration(
 
         # Phase 2 — empty target at head, then copy head→head
         migrator.job.set_progress(60, f"Phase 2: create {target_db} schema at head...")
-        await _ensure_db_running(migrator, target_db)
+        await _prepare_target_for_migration(migrator, target_db)
         await _reset_target_schema(migrator, target_db)
+        if target_db in ("postgresql", "timescaledb"):
+            from app.services.db_auth import sync_postgres_roles_to_app_password
+
+            await sync_postgres_roles_to_app_password(
+                migrator, target_db, get_target_connection(migrator.params),
+            )
         await run_alembic_upgrade_head(
             migrator,
             url_override=build_local_alembic_url(migrator.params),

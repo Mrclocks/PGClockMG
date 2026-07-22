@@ -563,6 +563,7 @@ async def _maybe_cross_db_after_restore(
 
     try:
         from app.services.native_migration.cross_db import run_cross_db_migration
+        from app.services.db_auth import migration_params_from_connection, resolve_live_admin_connection
 
         class _Mini:
             def __init__(self, j, p):
@@ -570,21 +571,48 @@ async def _maybe_cross_db_after_restore(
                 self.params = p
 
             async def _run_cmd(self, cmd, cwd=None, timeout=600):
-                return await _run(self.job, cmd, cwd=cwd, timeout=timeout)
+                if isinstance(cmd, str):
+                    proc = await asyncio.create_subprocess_shell(
+                        cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT,
+                        cwd=cwd,
+                    )
+                    out_b, _ = await proc.communicate()
+                    out = (out_b or b"").decode("utf-8", errors="replace")
+                    return proc.returncode == 0, out
+                ok, out = await _run(self.job, cmd, cwd=cwd, timeout=timeout)
+                return ok, out or ""
 
-        mini = _Mini(job, {
-            "source_db": backup_db,
-            "target_db": target_db,
-            "target_db_password": password,
-            "source_db_password": password,
-            "target_db_user": user,
-            "source_db_user": user,
-            "target_db_name": db_name or "pasarguard",
-            "source_db_name": db_name or "pasarguard",
-            "target_db_host": "127.0.0.1",
-            "source_db_host": "127.0.0.1",
-        })
-        # Signature: (migrator, source_path, source_db, target_db)
+        # Target DB must be reachable with verified admin credentials before convert
+        env_text = _read_current_env()
+        if target_db != "sqlite":
+            svc = "timescaledb" if target_db == "timescaledb" else await _detect_db_container(job, target_db)
+            if svc:
+                await _compose(job, "up", "-d", svc, "pgbouncer", timeout=300)
+                await asyncio.sleep(5)
+            probe_mini = _Mini(job, {"target_db": target_db, "_auto_db_credentials": True})
+            admin = await resolve_live_admin_connection(probe_mini, target_db, env_text=env_text)
+            if target_db in ("postgresql", "timescaledb"):
+                await _sync_pg_role_passwords(
+                    job,
+                    svc or "timescaledb",
+                    admin.get("password") or password or "",
+                    admin.get("user") or "postgres",
+                    db_name or "pasarguard",
+                )
+            mig_params = migration_params_from_connection(backup_db, target_db, admin)
+        else:
+            mig_params = {
+                "source_db": backup_db,
+                "target_db": target_db,
+                "target_db_user": user,
+                "target_db_password": password,
+                "target_db_name": db_name or "pasarguard",
+            }
+
+        mig_params["_auto_db_credentials"] = True
+        mini = _Mini(job, mig_params)
         await run_cross_db_migration(mini, path, backup_db, target_db)
         job.log(f"DB convert finished: now {target_db}")
         return target_db
@@ -613,12 +641,13 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         fa = f"تبدیل {backup_db} به {target_db} پشتیبانی نمی‌شود."
         en = f"Conversion {backup_db} → {target_db} is not supported."
         causes_fa = ["این ترکیب موتور دیتابیس قابل تبدیل خودکار نیست."]
-    elif is_auth_failure_text(raw) or "password" in low and "auth" in low:
+    elif is_auth_failure_text(raw) or ("password" in low and "auth" in low) or "authentication failed" in low:
         fa = "احراز هویت دیتابیس شکست خورد (پسورد/SASL)."
         en = "Database authentication failed (password/SASL)."
         causes_fa = [
-            "رمز .env با رمز داخل کانتینر یکی نیست",
-            "بعد از ریستور نقش‌ها با رمز بکاپ بازنشانی شده‌اند",
+            "رمز POSTGRES_PASSWORD در .env با رمز واقعی کانتینر TimescaleDB/PostgreSQL یکی نیست",
+            "PgBouncer کش قدیمی دارد — ویزارد نقش‌ها را هم‌تراز و pgbouncer را ریستارت می‌کند",
+            "بعد از ریستور postgres، globals.sql ممکن است نقش‌ها را با رمز بکاپ برگرداند",
         ]
     elif "timescale" in low and "version" in low:
         fa = "نسخه TimescaleDB بکاپ با سرور هم‌خوان نیست."

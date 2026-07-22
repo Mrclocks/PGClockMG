@@ -52,6 +52,9 @@ def get_source_connection(params: dict) -> dict:
 
 def get_target_connection(params: dict) -> dict:
     """Target identity from installed PasarGuard .env; password from wizard."""
+    if params.get("_resolved_target_conn"):
+        return dict(params["_resolved_target_conn"])
+
     wizard = connection_from_params(params, "target")
     target_db = params.get("target_db") or wizard.get("db_type")
     if not target_db or not PASARGUARD_ENV.exists():
@@ -63,10 +66,14 @@ def get_target_connection(params: dict) -> dict:
         target_db,
         password_override=wizard.get("password"),
     )
+    if wizard.get("password") and not params.get("_auto_db_credentials"):
+        password = wizard.get("password")
+    else:
+        password = env_conn.get("password") or wizard.get("password")
     return {
         "db_type": target_db,
         "user": env_conn.get("user") or wizard.get("user"),
-        "password": wizard.get("password") or env_conn.get("password"),
+        "password": password,
         "database": env_conn.get("database") or wizard.get("database"),
         "host": env_conn.get("host") or wizard.get("host") or "127.0.0.1",
         "port": env_conn.get("port") or wizard.get("port") or _DEFAULT_PORTS.get(target_db),

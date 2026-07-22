@@ -413,8 +413,9 @@ def get_pasarguard_admin_connection(
     elif target_db in ("postgresql", "timescaledb"):
         conn["user"] = read_env_var(text or "", "POSTGRES_USER") or "postgres"
         conn["password"] = (
-            password_override
-            or read_env_var(text or "", "POSTGRES_PASSWORD")
+            read_env_var(text or "", "POSTGRES_PASSWORD")
+            or password_override
+            or read_env_var(text or "", "DB_PASSWORD")
             or conn.get("password")
         )
         port = read_env_var(text or "", "POSTGRES_PORT") or conn.get("port") or "5432"
