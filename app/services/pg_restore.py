@@ -281,19 +281,17 @@ async def start_pasarguard_restore(params: dict) -> MigrationJob:
         msgs = [w.get("en") for w in analysis.get("warnings") or [] if w.get("en")]
         raise ValueError("; ".join(msgs) or "Backup validation failed")
 
-    target_db = (params.get("target_db") or analysis.get("installed_db") or analysis.get("backup_db") or "").strip()
+    # Destination is always the DB already installed on this PasarGuard panel
+    target_db = (analysis.get("installed_db") or params.get("target_db") or analysis.get("backup_db") or "").strip()
     backup_db = analysis.get("backup_db")
     if target_db and target_db not in SUPPORTED_RESTORE_DBS:
         raise ValueError(f"Unsupported target database: {target_db}")
-    if (
-        backup_db and target_db and not soft_db_family(backup_db, target_db)
-        and not params.get("accept_experimental")
-        and not params.get("force")
-    ):
-        raise ValueError(
-            "Changing database type during restore is experimental — confirm accept_experimental=true"
-        )
-    params = {**params, "target_db": target_db or backup_db}
+    params = {
+        **params,
+        "target_db": target_db or backup_db,
+        # Auto-convert when backup engine ≠ installed engine (no UI confirmation)
+        "accept_experimental": True,
+    }
 
     job = MigrationJob()
     _restore_jobs[job.job_id] = job
@@ -309,11 +307,18 @@ async def _run_restore(job: MigrationJob, params: dict, analysis: dict) -> None:
         job.status = "success"
         job.set_progress(100, "Restore completed")
     except Exception as e:
+        explain = getattr(e, "explain", None)
+        if not isinstance(explain, dict):
+            explain = explain_restore_error(
+                e,
+                analysis.get("backup_db"),
+                params.get("target_db") or analysis.get("installed_db"),
+            )
         job.status = "error"
-        job.message = str(e)
-        job.log(f"ERROR: {e}")
+        job.message = explain.get("fa") or explain.get("en") or str(e)
+        job.log(f"ERROR: {explain.get('detail') or e}")
         job.log(traceback.format_exc())
-        job.result = {"error": str(e)}
+        job.result = {"error": str(e), "error_explain": explain}
 
 
 async def _run(job: MigrationJob, cmd: list[str], cwd: str | None = None, timeout: int = 600) -> tuple[bool, str]:
@@ -533,16 +538,29 @@ async def _maybe_cross_db_after_restore(
     password: str,
     user: str,
     db_name: str,
+    source_path: str | None = None,
 ) -> str:
-    """Experimental: convert restored DB to a different engine via native cross-DB."""
+    """Convert restored backup engine → installed PasarGuard DB (auto)."""
     if not target_db or backup_db == target_db or soft_db_family(backup_db, target_db):
         return target_db or backup_db
-    if not params.get("accept_experimental") and not params.get("force"):
-        job.log("Skipping experimental DB change (not accepted)")
-        return backup_db
 
-    job.set_progress(85, "Experimental DB change…")
-    job.log(f"EXPERIMENTAL: converting {backup_db} → {target_db}")
+    job.set_progress(85, f"Converting {backup_db} → {target_db}…")
+    job.log(f"Auto DB convert: {backup_db} → {target_db}")
+
+    # Resolve source path for two-phase engine
+    path = source_path
+    if not path:
+        if backup_db == "sqlite":
+            path = str(PASARGUARD_DATA / "db.sqlite3")
+        else:
+            path = ""
+    if backup_db == "sqlite" and (not path or not Path(path).exists()):
+        path = str(PASARGUARD_DATA / "db.sqlite3")
+    if not path or (backup_db == "sqlite" and not Path(path).exists()):
+        raise RuntimeError(
+            f"Cannot convert {backup_db} → {target_db}: source file missing ({path or 'n/a'})"
+        )
+
     try:
         from app.services.native_migration.cross_db import run_cross_db_migration
 
@@ -566,14 +584,68 @@ async def _maybe_cross_db_after_restore(
             "target_db_host": "127.0.0.1",
             "source_db_host": "127.0.0.1",
         })
-        await run_cross_db_migration(mini, backup_db, target_db)
-        job.log(f"Experimental DB change finished: now {target_db}")
+        # Signature: (migrator, source_path, source_db, target_db)
+        await run_cross_db_migration(mini, path, backup_db, target_db)
+        job.log(f"DB convert finished: now {target_db}")
         return target_db
     except Exception as e:
-        job.log(f"Experimental DB change failed (data restored on {backup_db}): {e}")
-        raise RuntimeError(
-            f"Restore succeeded on {backup_db}, but experimental change to {target_db} failed: {e}"
-        ) from e
+        job.log(f"DB convert failed (data still on {backup_db}): {e}")
+        explain = explain_restore_error(e, backup_db, target_db)
+        err = RuntimeError(explain.get("en") or str(e))
+        err.explain = explain  # type: ignore[attr-defined]
+        raise err from e
+
+
+def explain_restore_error(exc: Exception, backup_db: str | None = None, target_db: str | None = None) -> dict:
+    """Human-readable multilingual restore/convert error."""
+    raw = str(exc) or exc.__class__.__name__
+    low = raw.lower()
+    fa = "ریستور یا تبدیل دیتابیس ناموفق بود."
+    en = "Restore or database conversion failed."
+    ru = "Восстановление или конвертация БД не удалась."
+    causes_fa: list[str] = []
+
+    if "missing 1 required positional argument" in low or "source_path" in low:
+        fa = "خطای داخلی تبدیل دیتابیس (پارامتر مسیر منبع)."
+        en = "Internal DB conversion error (source path)."
+        causes_fa = ["نسخه ویزارد قدیمی بود — آپدیت کنید و دوباره ریستور کنید."]
+    elif "unsupported cross-db" in low:
+        fa = f"تبدیل {backup_db} به {target_db} پشتیبانی نمی‌شود."
+        en = f"Conversion {backup_db} → {target_db} is not supported."
+        causes_fa = ["این ترکیب موتور دیتابیس قابل تبدیل خودکار نیست."]
+    elif is_auth_failure_text(raw) or "password" in low and "auth" in low:
+        fa = "احراز هویت دیتابیس شکست خورد (پسورد/SASL)."
+        en = "Database authentication failed (password/SASL)."
+        causes_fa = [
+            "رمز .env با رمز داخل کانتینر یکی نیست",
+            "بعد از ریستور نقش‌ها با رمز بکاپ بازنشانی شده‌اند",
+        ]
+    elif "timescale" in low and "version" in low:
+        fa = "نسخه TimescaleDB بکاپ با سرور هم‌خوان نیست."
+        en = "TimescaleDB version mismatch between backup and server."
+        causes_fa = ["ویزارد معمولاً ایمیج را هم‌تراز می‌کند — دوباره تلاش کنید یا لاگ کامل را ببینید."]
+    elif "no such file" in low or "missing" in low or "not found" in low:
+        fa = "فایل دامپ یا دیتابیس منبع پیدا نشد."
+        en = "Source dump/database file was not found."
+        causes_fa = ["بکاپ ناقص است", "مسیر /var/lib/pasarguard یا دامپ zip خراب است"]
+    elif "docker" in low or "compose" in low:
+        fa = "مشکل در Docker / docker compose هنگام ریستور."
+        en = "Docker / compose problem during restore."
+        causes_fa = ["سرویس Docker بالا نیست", "کانتینر دیتابیس استارت نمی‌شود"]
+    else:
+        causes_fa = ["جزئیات فنی در لاگ آمده است", f"پیام: {raw[:240]}"]
+
+    if backup_db and target_db and backup_db != target_db:
+        fa += f" (بکاپ={backup_db} → نصب={target_db})"
+        en += f" (backup={backup_db} → installed={target_db})"
+
+    return {
+        "en": en,
+        "fa": fa,
+        "ru": ru,
+        "causes_fa": causes_fa,
+        "detail": raw,
+    }
 
 
 async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> dict:
@@ -637,15 +709,10 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                     job.log("Could not probe live TimescaleDB — pinning image to backup version")
                     await _align_timescaledb_image(job, wanted_ts)
 
-        # Hard DB mismatch without experimental acceptance
-        target_db = params.get("target_db") or installed_db or backup_db
-        if backup_db and installed_db and not soft_db_family(backup_db, installed_db):
-            if not params.get("accept_experimental") and not params.get("force"):
-                raise RuntimeError(
-                    f"Backup DB ({backup_db}) ≠ installed ({installed_db}). "
-                    "Accept experimental DB change, or reinstall PasarGuard with the backup database."
-                )
-            job.log("EXPERIMENTAL: hard DB mismatch — restoring into backup engine family first")
+        # Destination = installed panel DB. Soft-family (mysql↔mariadb, pg↔timescale) needs no convert.
+        target_db = installed_db or params.get("target_db") or backup_db
+        if backup_db and target_db and not soft_db_family(backup_db, target_db) and backup_db != target_db:
+            job.log(f"DB mismatch — restore {backup_db} first, then auto-convert → {target_db}")
 
         job.set_progress(40, "Restoring database...")
         await _compose(job, "stop", "pasarguard", timeout=120)
@@ -682,6 +749,15 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
 
         await _restore_data_files(job, root)
 
+        # Source path for cross-DB convert (must exist before workdir cleanup)
+        convert_source: str | None = None
+        if restore_engine == "sqlite" or analysis.get("layout") == "sqlite_file":
+            convert_source = str(PASARGUARD_DATA / "db.sqlite3")
+        else:
+            dump = root / "db_backup.sql"
+            if dump.exists():
+                convert_source = str(dump)
+
         final_db = restore_engine
         if target_db and restore_engine != target_db and not soft_db_family(restore_engine, target_db):
             final_db = await _maybe_cross_db_after_restore(
@@ -689,6 +765,7 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                 cur_db_pass or cur_pg_pass or "",
                 cur_user or "pasarguard",
                 cur_name or "pasarguard",
+                source_path=convert_source,
             )
         elif target_db and soft_db_family(restore_engine, target_db):
             final_db = target_db
@@ -740,8 +817,8 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         access["backup_db"] = backup_db
         access["final_db"] = final_db
         access["staged_backup"] = str(staged)
-        access["experimental_db_change"] = bool(params.get("accept_experimental")) and (
-            backup_db != final_db and not soft_db_family(backup_db, final_db)
+        access["auto_db_convert"] = bool(
+            backup_db and final_db and backup_db != final_db and not soft_db_family(backup_db, final_db)
         )
         return access
     finally:

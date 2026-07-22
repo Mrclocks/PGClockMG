@@ -9,9 +9,37 @@ Object.assign(state, {
   pgIp: '',
   restoreUploadId: null,
   restoreAnalysis: null,
-  restoreTargetDb: null,
+  restoreStage: 'form', // form | running | error | done
   pendingLoginUrl: null,
 });
+
+let _restorePollTimer = null;
+let _pgInstallPollTimer = null;
+
+function stopRestorePoll() {
+  if (_restorePollTimer) {
+    clearTimeout(_restorePollTimer);
+    _restorePollTimer = null;
+  }
+}
+
+function stopPgInstallPoll() {
+  if (_pgInstallPollTimer) {
+    clearTimeout(_pgInstallPollTimer);
+    _pgInstallPollTimer = null;
+  }
+}
+
+/** Append-only log update (avoids rewriting huge textContent every poll). */
+function appendJobLogs(term, logs, cursor) {
+  if (!term || !Array.isArray(logs) || logs.length <= cursor.lastLen) return cursor.lastLen;
+  const chunk = logs.slice(cursor.lastLen).join('\n');
+  const prefix = cursor.lastLen > 0 && term.textContent ? '\n' : '';
+  term.appendChild(document.createTextNode(prefix + chunk));
+  cursor.lastLen = logs.length;
+  term.scrollTop = term.scrollHeight;
+  return cursor.lastLen;
+}
 
 function escapeHtml(s) {
   return String(s ?? '')
@@ -175,7 +203,11 @@ function showPhase(phase) {
   }
   if (phase === 'pg') renderPgSetup();
   if (phase === 'choose') applyChooseI18n();
-  if (phase === 'restore') setupRestoreUpload();
+  if (phase === 'restore') {
+    state.restoreStage = state.restoreStage === 'done' ? 'done' : 'form';
+    if (state.restoreStage === 'form') setRestoreStage('form');
+    setupRestoreUpload();
+  }
   renderFlowSteps();
   applyPhaseI18n();
 }
@@ -209,30 +241,37 @@ function renderFlowSteps() {
     labels = t('stepsSetup') || ['Welcome', 'Setup', 'Next'];
     activeIdx = 2;
   } else if (state.phase === 'restore') {
-    labels = t('stepsRestore') || ['Welcome', 'Setup', 'Next', 'Restore', 'Done'];
-    activeIdx = state.restoreAnalysis && document.getElementById('restoreDone')?.classList.contains('hidden') === false
-      ? 4 : 3;
+    // Welcome, Setup, Next, Backup, Run, Done
+    labels = t('stepsRestore') || ['Welcome', 'Setup', 'Next', 'Backup', 'Run', 'Done'];
+    if (state.restoreStage === 'done') activeIdx = 5;
+    else if (state.restoreStage === 'running' || state.restoreStage === 'error') activeIdx = 4;
+    else activeIdx = 3;
   } else if (state.phase === 'migrate') {
     labels = t('steps') || [];
-    activeIdx = 3 + (state.currentStep || 1); // welcome,setup,next + migrate steps
-    // Map migrate step 1..6 → nav index 3..8
     activeIdx = 2 + (state.currentStep || 1);
   } else {
     labels = t('stepsSetup') || [];
   }
 
   const list = labels || [];
-  const max = Math.max(1, list.length - 1);
-  const pct = Math.round((Math.min(activeIdx, max) / max) * 100);
-  nav.style.setProperty('--steps-progress', `${pct}%`);
   const checkSvg = (typeof icon === 'function')
     ? icon('check')
     : '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 12.5l2.5 2.5L16 9"/></svg>';
-  nav.innerHTML = list.map((label, i) => {
+  const parts = [];
+  list.forEach((label, i) => {
+    if (i > 0) {
+      parts.push(`<div class="step-rail ${i <= activeIdx ? 'done' : ''}" aria-hidden="true"></div>`);
+    }
     const cls = i === activeIdx ? 'active' : (i < activeIdx ? 'done' : '');
     const numInner = i < activeIdx ? checkSvg : String(i + 1);
-    return `<div class="step ${cls}" data-step="${i}"><span class="step-num">${numInner}</span><span class="step-label">${label}</span></div>`;
-  }).join('');
+    parts.push(
+      `<div class="step ${cls}" data-step="${i}">`
+      + `<span class="step-num">${numInner}</span>`
+      + `<span class="step-label">${escapeHtml(label)}</span>`
+      + `</div>`
+    );
+  });
+  nav.innerHTML = parts.join('');
 }
 
 function applyPhaseI18n() {
@@ -282,11 +321,13 @@ function applyPhaseI18n() {
   set('btnRestoreBack', 'restore.back');
   set('restoreDoneTitle', 'restore.doneTitle');
   set('restorePanelLink', 'restore.openPanel');
-  set('restoreDbTipText', 'restore.tip');
-  set('lblRestoreTargetDb', 'restore.targetDb');
-  set('restoreTargetHint', 'restore.targetHint');
-  set('restoreExperimentalLabel', 'restore.experimentalLabel');
-  set('restoreExperimentalBadge', 'restore.experimentalBadge');
+  set('restoreRunningTitle', 'restore.runningTitle');
+  set('restoreRunningDesc', 'restore.runningDesc');
+  set('restoreErrorTitle', 'restore.errorTitle');
+  set('restoreErrorDetailToggle', 'restore.errorDetail');
+  set('btnRestoreErrorBack', 'restore.back');
+  set('btnRestoreRetry', 'restore.retry');
+  set('restoreConvertNoteText', 'restore.autoConvertNote');
   set('btnCopyRestorePath', 'copy');
   set('restoreUninstallTitle', 'uninstall.title');
   set('restoreUninstallTip', 'uninstall.tip');
@@ -522,11 +563,13 @@ function showPgInstallError(msg) {
 }
 
 async function pollPgInstall(jobId) {
+  stopPgInstallPoll();
   const fill = document.getElementById('pgProgressFill');
   const text = document.getElementById('pgProgressText');
   const status = document.getElementById('pgStatusMsg');
   const term = document.getElementById('pgLogTerminal');
-  let lastLen = 0;
+  if (term) term.textContent = '';
+  const cursor = { lastLen: 0 };
 
   const tick = async () => {
     try {
@@ -537,26 +580,26 @@ async function pollPgInstall(jobId) {
       if (status) status.textContent = job.status === 'error'
         ? ''
         : (job.message || t('pg.installing'));
-      if (term && job.logs?.length > lastLen) {
+      if (term) {
         term.classList.remove('hidden');
-        term.textContent = job.logs.join('\n');
-        term.scrollTop = term.scrollHeight;
-        lastLen = job.logs.length;
+        appendJobLogs(term, job.logs, cursor);
       }
 
       if (job.status === 'success') {
+        stopPgInstallPoll();
         await loadSystemCheck();
         await refreshPanelAccess();
         showPgInstallDone(job.result || state.panelAccess);
         return;
       }
       if (job.status === 'error') {
+        stopPgInstallPoll();
         showPgInstallError(job.message || job.result?.error || 'Installation failed');
         return;
       }
-      setTimeout(tick, 1500);
+      _pgInstallPollTimer = setTimeout(tick, 1000);
     } catch (e) {
-      setTimeout(tick, 2500);
+      _pgInstallPollTimer = setTimeout(tick, 2000);
     }
   };
   tick();
@@ -597,11 +640,6 @@ async function choosePath(path) {
 function setupRestoreUpload() {
   const zone = document.getElementById('restoreUploadZone');
   const input = document.getElementById('restoreFileInput');
-  const exp = document.getElementById('restoreAcceptExperimental');
-  if (exp && !exp.dataset.bound) {
-    exp.dataset.bound = '1';
-    exp.addEventListener('change', updateRestoreConfirmEnabled);
-  }
   if (!zone || zone.dataset.ready) return;
   zone.dataset.ready = '1';
   zone.addEventListener('click', () => input.click());
@@ -650,6 +688,22 @@ async function uploadRestoreZip(file) {
   }
 }
 
+function setRestoreStage(stage) {
+  state.restoreStage = stage;
+  document.getElementById('restoreFormStage')?.classList.toggle('hidden', stage !== 'form');
+  document.getElementById('restoreRunningStage')?.classList.toggle('hidden', stage !== 'running');
+  document.getElementById('restoreErrorStage')?.classList.toggle('hidden', stage !== 'error');
+  document.getElementById('restoreDone')?.classList.toggle('hidden', stage !== 'done');
+  renderFlowSteps();
+}
+
+function resetRestoreForm() {
+  stopRestorePoll();
+  setRestoreStage('form');
+  document.getElementById('btnRestoreConfirm').disabled = !state.restoreAnalysis?.ok;
+  applyPhaseI18n();
+}
+
 function renderRestoreAnalysis(a) {
   const card = document.getElementById('restoreAnalysis');
   const warn = document.getElementById('restoreWarnings');
@@ -657,88 +711,39 @@ function renderRestoreAnalysis(a) {
   card.classList.remove('hidden');
   const s = t('restore.summary') || {};
   card.innerHTML = `
-    <div class="summary-row"><span class="summary-label">${s.backupDb || 'Backup DB'}</span><span>${a.backup_db || '—'}</span></div>
-    <div class="summary-row"><span class="summary-label">${s.installedDb || 'Installed DB'}</span><span>${a.installed_db || '—'}</span></div>
-    <div class="summary-row"><span class="summary-label">${s.match || 'Match'}</span><span class="status-inline">${a.db_match === true ? statusIcon('ok') : a.db_match === false ? statusIcon(false) : '—'}</span></div>
-    <div class="summary-row"><span class="summary-label">${s.layout || 'Layout'}</span><span>${a.layout || '—'}</span></div>
-    ${a.timescaledb_versions?.length ? `<div class="summary-row"><span class="summary-label">TimescaleDB</span><span>${a.timescaledb_versions.join(', ')}</span></div>` : ''}
+    <div class="summary-row"><span class="summary-label">${escapeHtml(s.backupDb || 'Backup DB')}</span><span>${escapeHtml(a.backup_db || '—')}</span></div>
+    <div class="summary-row"><span class="summary-label">${escapeHtml(s.installedDb || 'Installed DB')}</span><span>${escapeHtml(a.installed_db || '—')}</span></div>
+    <div class="summary-row"><span class="summary-label">${escapeHtml(s.match || 'Match')}</span><span class="status-inline">${a.db_match === true ? statusIcon('ok') : a.db_match === false ? statusIcon(false) : '—'}</span></div>
+    <div class="summary-row"><span class="summary-label">${escapeHtml(s.layout || 'Layout')}</span><span>${escapeHtml(a.layout || '—')}</span></div>
+    ${a.timescaledb_versions?.length ? `<div class="summary-row"><span class="summary-label">TimescaleDB</span><span>${escapeHtml(a.timescaledb_versions.join(', '))}</span></div>` : ''}
   `;
   if (warn) {
     const lang = state.lang;
-    const items = (a.warnings || []).map(w => `<p class="warn-line">${statusIcon('warn')}<span>${tr(w, lang)}</span></p>`).join('');
+    const items = (a.warnings || []).map(w => `<p class="warn-line">${statusIcon('warn')}<span>${escapeHtml(tr(w, lang))}</span></p>`).join('');
     warn.innerHTML = items;
     warn.classList.toggle('hidden', !items);
   }
 
-  state.restoreTargetDb = a.installed_db || a.backup_db || 'timescaledb';
-  renderRestoreTargetGrid(a);
-
-  const expWrap = document.getElementById('restoreExperimentalWrap');
-  const expBadge = document.getElementById('restoreExperimentalBadge');
-  const needsExp = !!a.experimental_db_change;
-  expWrap?.classList.toggle('hidden', !needsExp);
-  if (expBadge) {
-    expBadge.textContent = t('restore.experimentalBadge');
-    expBadge.classList.toggle('hidden', !needsExp);
-  }
-  updateRestoreConfirmEnabled();
-}
-
-function renderRestoreTargetGrid(a) {
-  const section = document.getElementById('restoreTargetSection');
-  const grid = document.getElementById('restoreTargetDbGrid');
-  if (!section || !grid) return;
-  section.classList.remove('hidden');
-  const dbs = a.supported_target_dbs || ['sqlite', 'mysql', 'mariadb', 'postgresql', 'timescaledb'];
-  grid.innerHTML = dbs.map(db => {
-    const selected = state.restoreTargetDb === db ? 'selected' : '';
-    const name = (typeof dbDisplayName === 'function' ? dbDisplayName(db) : db);
-    const exp = a.backup_db && db !== a.backup_db && !(
-      (['mysql', 'mariadb'].includes(db) && ['mysql', 'mariadb'].includes(a.backup_db))
-      || (['postgresql', 'timescaledb'].includes(db) && ['postgresql', 'timescaledb'].includes(a.backup_db))
+  const note = document.getElementById('restoreConvertNote');
+  const needsConvert = a.backup_db && a.installed_db && a.backup_db !== a.installed_db
+    && !(
+      (['mysql', 'mariadb'].includes(a.backup_db) && ['mysql', 'mariadb'].includes(a.installed_db))
+      || (['postgresql', 'timescaledb'].includes(a.backup_db) && ['postgresql', 'timescaledb'].includes(a.installed_db))
     );
-    return `<button type="button" class="db-card ${selected}" data-db="${db}">
-      <h4>${name}</h4>
-      ${exp ? `<span class="db-badge">${t('restore.experimentalBadge')}</span>` : ''}
-    </button>`;
-  }).join('');
-  if (!grid.dataset.bound) {
-    grid.dataset.bound = '1';
-    grid.addEventListener('click', (e) => {
-      const btn = e.target.closest('.db-card[data-db]');
-      if (!btn) return;
-      state.restoreTargetDb = btn.dataset.db;
-      renderRestoreTargetGrid(state.restoreAnalysis || a);
-      const hard = state.restoreAnalysis?.backup_db
-        && state.restoreTargetDb !== state.restoreAnalysis.backup_db
-        && !(
-          (['mysql', 'mariadb'].includes(state.restoreTargetDb) && ['mysql', 'mariadb'].includes(state.restoreAnalysis.backup_db))
-          || (['postgresql', 'timescaledb'].includes(state.restoreTargetDb) && ['postgresql', 'timescaledb'].includes(state.restoreAnalysis.backup_db))
-        );
-      document.getElementById('restoreExperimentalWrap')?.classList.toggle('hidden', !hard && !state.restoreAnalysis?.experimental_db_change);
-      updateRestoreConfirmEnabled();
-    });
+  if (note) {
+    note.classList.toggle('hidden', !needsConvert);
+    const noteText = document.getElementById('restoreConvertNoteText');
+    if (noteText) noteText.textContent = t('restore.autoConvertNote');
   }
+
+  updateRestoreConfirmEnabled();
 }
 
 function updateRestoreConfirmEnabled() {
   const btn = document.getElementById('btnRestoreConfirm');
   const a = state.restoreAnalysis;
   if (!btn || !a) return;
-  const hard = a.backup_db && state.restoreTargetDb
-    && state.restoreTargetDb !== a.backup_db
-    && !(
-      (['mysql', 'mariadb'].includes(state.restoreTargetDb) && ['mysql', 'mariadb'].includes(a.backup_db))
-      || (['postgresql', 'timescaledb'].includes(state.restoreTargetDb) && ['postgresql', 'timescaledb'].includes(a.backup_db))
-    );
-  const accepted = document.getElementById('restoreAcceptExperimental')?.checked;
-  const ok = !!a.ok && (!hard || !!accepted || !!a.experimental_db_change && !!accepted || (!hard));
-  // Allow when analysis ok; if hard change, require experimental checkbox
-  if (hard || a.experimental_db_change) {
-    btn.disabled = !(a.ok && accepted);
-  } else {
-    btn.disabled = !a.ok;
-  }
+  btn.disabled = !a.ok;
 }
 
 async function startRestore() {
@@ -750,26 +755,17 @@ async function startRestore() {
     }
     return;
   }
-  const hard = state.restoreAnalysis.backup_db && state.restoreTargetDb
-    && state.restoreTargetDb !== state.restoreAnalysis.backup_db
-    && !(
-      (['mysql', 'mariadb'].includes(state.restoreTargetDb) && ['mysql', 'mariadb'].includes(state.restoreAnalysis.backup_db))
-      || (['postgresql', 'timescaledb'].includes(state.restoreTargetDb) && ['postgresql', 'timescaledb'].includes(state.restoreAnalysis.backup_db))
-    );
-  const accepted = !!document.getElementById('restoreAcceptExperimental')?.checked;
-  if ((hard || state.restoreAnalysis.experimental_db_change) && !accepted) {
-    const el = document.getElementById('restoreBlock');
-    if (el) {
-      el.textContent = t('restore.needExperimental');
-      el.classList.remove('hidden');
-    }
-    return;
-  }
 
-  document.getElementById('restoreProgress')?.classList.remove('hidden');
-  document.getElementById('restoreDone')?.classList.add('hidden');
-  document.getElementById('btnRestoreConfirm').disabled = true;
+  stopRestorePoll();
+  setRestoreStage('running');
+  applyPhaseI18n();
+  const fill = document.getElementById('restoreProgressFill');
+  const text = document.getElementById('restoreProgressText');
+  const status = document.getElementById('restoreStatusMsg');
   const term = document.getElementById('restoreLogTerminal');
+  if (fill) fill.style.width = '0%';
+  if (text) text.textContent = '0%';
+  if (status) status.textContent = t('restore.restoring');
   if (term) term.textContent = '';
 
   try {
@@ -780,25 +776,27 @@ async function startRestore() {
         upload_id: state.restoreUploadId,
         confirmed: true,
         force: false,
-        target_db: state.restoreTargetDb || state.restoreAnalysis.installed_db,
-        accept_experimental: accepted,
+        // Destination is always the installed PasarGuard DB
+        target_db: state.restoreAnalysis.installed_db || undefined,
+        accept_experimental: true,
       }),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+    if (!res.ok) throw new Error(typeof data.detail === 'string' ? data.detail : (data.detail?.msg || JSON.stringify(data)));
     pollRestore(data.job_id);
   } catch (e) {
-    document.getElementById('restoreStatusMsg').textContent = e.message;
-    document.getElementById('btnRestoreConfirm').disabled = false;
+    showRestoreError({ fa: e.message, en: e.message, causes_fa: [], detail: e.message });
   }
 }
 
 async function pollRestore(jobId) {
+  stopRestorePoll();
   const fill = document.getElementById('restoreProgressFill');
   const text = document.getElementById('restoreProgressText');
   const status = document.getElementById('restoreStatusMsg');
   const term = document.getElementById('restoreLogTerminal');
-  let lastLen = 0;
+  const cursor = { lastLen: 0 };
+
   const tick = async () => {
     try {
       const res = await fetch(`/api/pasarguard/restore/${jobId}`);
@@ -806,31 +804,66 @@ async function pollRestore(jobId) {
       if (fill) fill.style.width = `${job.progress || 0}%`;
       if (text) text.textContent = `${job.progress || 0}%`;
       if (status) status.textContent = job.message || t('restore.restoring');
-      if (term && job.logs?.length > lastLen) {
-        term.textContent = job.logs.join('\n');
-        term.scrollTop = term.scrollHeight;
-        lastLen = job.logs.length;
-      }
+      appendJobLogs(term, job.logs, cursor);
+
       if (job.status === 'success') {
+        stopRestorePoll();
         showRestoreDone(job.result || {});
         return;
       }
       if (job.status === 'error') {
-        if (status) status.textContent = job.message || 'Error';
-        document.getElementById('btnRestoreConfirm').disabled = false;
+        stopRestorePoll();
+        const explain = job.result?.error_explain || {
+          fa: job.message,
+          en: job.message,
+          causes_fa: [],
+          detail: job.result?.error || job.message,
+        };
+        showRestoreError(explain, job.logs);
         return;
       }
-      setTimeout(tick, 1500);
+      _restorePollTimer = setTimeout(tick, 900);
     } catch (e) {
-      setTimeout(tick, 2500);
+      _restorePollTimer = setTimeout(tick, 1800);
     }
   };
   tick();
 }
 
+function showRestoreError(explain, logs) {
+  setRestoreStage('error');
+  applyPhaseI18n();
+  const lang = state.lang || 'fa';
+  const msg = (lang === 'fa' ? explain.fa : lang === 'ru' ? explain.ru : explain.en)
+    || explain.fa || explain.en || t('restore.errorTitle');
+  const msgEl = document.getElementById('restoreErrorMsg');
+  if (msgEl) msgEl.textContent = msg;
+
+  const causesBox = document.getElementById('restoreErrorCauses');
+  const causes = explain.causes_fa || [];
+  if (causesBox) {
+    if (causes.length && (lang === 'fa' || !explain.causes_en)) {
+      causesBox.innerHTML = `<h4>${escapeHtml(t('restore.causesTitle'))}</h4><ul>${
+        causes.map(c => `<li>${escapeHtml(c)}</li>`).join('')
+      }</ul>`;
+      causesBox.classList.remove('hidden');
+    } else {
+      causesBox.classList.add('hidden');
+      causesBox.innerHTML = '';
+    }
+  }
+
+  const detail = document.getElementById('restoreErrorDetail');
+  if (detail) {
+    const lines = Array.isArray(logs) ? logs.join('\n') : (explain.detail || '');
+    detail.textContent = lines || explain.detail || '';
+  }
+}
+
 function showRestoreDone(result) {
-  document.getElementById('restoreProgress')?.classList.add('hidden');
-  document.getElementById('restoreDone')?.classList.remove('hidden');
+  stopRestorePoll();
+  setRestoreStage('done');
+  applyPhaseI18n();
   const access = { ...(state.panelAccess || {}), ...(result || {}) };
   state.panelAccess = access;
   const link = document.getElementById('restorePanelLink');
@@ -846,7 +879,6 @@ function showRestoreDone(result) {
   if (title) title.textContent = t('uninstall.title');
   if (tip) tip.textContent = t('uninstall.tip');
   if (btn) btn.textContent = t('uninstall.button');
-  renderFlowSteps();
 }
 
 // Expose for inline handlers / debugging
@@ -857,3 +889,5 @@ window.selectPgSsl = selectPgSsl;
 window.startPgInstall = startPgInstall;
 window.choosePath = choosePath;
 window.startRestore = startRestore;
+window.resetRestoreForm = resetRestoreForm;
+window.setRestoreStage = setRestoreStage;

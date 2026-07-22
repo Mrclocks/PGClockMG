@@ -985,6 +985,8 @@ function connectWebSocket(jobId) {
 
 async function pollStatus(jobId) {
   const terminal = document.getElementById('logTerminal');
+  const cursor = { lastLen: 0 };
+  if (terminal) terminal.textContent = '';
   const interval = setInterval(async () => {
     try {
       const res = await fetch(`/api/migrate/${jobId}`);
@@ -992,14 +994,23 @@ async function pollStatus(jobId) {
       document.getElementById('progressFill').style.width = data.progress + '%';
       document.getElementById('progressText').textContent = data.progress + '%';
       if (data.message) document.getElementById('statusMsg').textContent = data.message;
-      terminal.textContent = data.logs.join('\n');
+      appendMigrateLogs(terminal, data.logs, cursor);
       if (data.status === 'success' && !data.result?.error) { clearInterval(interval); showSuccess(data.result); }
       if (data.status === 'error' || data.result?.error) {
         clearInterval(interval);
         showError(data.result?.error || data.message, data.logs.join('\n'));
       }
     } catch (e) { /* retry */ }
-  }, 2000);
+  }, 1500);
+}
+
+function appendMigrateLogs(terminal, logs, cursor) {
+  if (!terminal || !Array.isArray(logs) || logs.length <= cursor.lastLen) return;
+  const chunk = logs.slice(cursor.lastLen).join('\n');
+  const prefix = cursor.lastLen > 0 && terminal.textContent ? '\n' : '';
+  terminal.appendChild(document.createTextNode(prefix + chunk));
+  cursor.lastLen = logs.length;
+  terminal.scrollTop = terminal.scrollHeight;
 }
 
 function transferTableLabel(tableId) {
