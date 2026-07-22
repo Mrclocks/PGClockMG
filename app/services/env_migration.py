@@ -305,7 +305,8 @@ def get_pasarguard_target_connection(
 ) -> dict:
     """Read target DB user/name/host/port/password from installed PasarGuard .env."""
     defaults = _DEFAULTS.get(target_db, _DEFAULTS["postgresql"]).copy()
-    defaults["sqlite_path"] = str(PASARGUARD_DATA / "db.sqlite3")
+    # .as_posix(): SQLAlchemy URLs always need forward slashes (server is Linux-only).
+    defaults["sqlite_path"] = (PASARGUARD_DATA / "db.sqlite3").as_posix()
     defaults["db_type"] = target_db
 
     text = env_text
@@ -483,7 +484,7 @@ def build_db_migration_target_url(
     conn = get_pasarguard_target_connection(target_db, password, env_text)
     pwd = conn.get("password") or "password"
     if target_db == "sqlite":
-        path = conn.get("sqlite_path") or str(PASARGUARD_DATA / "db.sqlite3")
+        path = conn.get("sqlite_path") or (PASARGUARD_DATA / "db.sqlite3").as_posix()
         return f"sqlite:///{path}"
     if target_db in ("mysql", "mariadb"):
         user = conn.get("user") or "root"
@@ -608,9 +609,11 @@ def transform_marzban_env(
     db_url = f'SQLALCHEMY_DATABASE_URL = "{sqlalchemy_url}"'
 
     if re.search(r"SQLALCHEMY_DATABASE_URL", text, re.I):
+        # Callable repl: a raw string containing backslashes (Windows paths, or any
+        # password with a backslash) would otherwise be mis-parsed as regex escapes.
         text = re.sub(
             r'#\s*SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"|SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"',
-            db_url,
+            lambda _m: db_url,
             text,
             count=1,
         )
@@ -639,9 +642,10 @@ def transform_pasarguard_env_for_target(
     )
     url_line = f'SQLALCHEMY_DATABASE_URL = "{url}"'
     if re.search(r"SQLALCHEMY_DATABASE_URL", text, re.I):
+        # Callable repl avoids backslash-escape parsing of the replacement string.
         return re.sub(
             r'#\s*SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"|SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"',
-            url_line,
+            lambda _m: url_line,
             text,
             count=1,
         )
@@ -922,9 +926,10 @@ def finalize_pasarguard_env_after_restore(
         url = _replace_sqlalchemy_password(install_url, password or "") if password else install_url
         url_line = f'SQLALCHEMY_DATABASE_URL = "{url}"'
         if re.search(r"SQLALCHEMY_DATABASE_URL", text, re.I):
+            # Callable repl avoids backslash-escape parsing of the replacement string.
             text = re.sub(
                 r'#\s*SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"|SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"',
-                url_line,
+                lambda _m: url_line,
                 text,
                 count=1,
             )

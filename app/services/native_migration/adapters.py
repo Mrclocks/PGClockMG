@@ -717,14 +717,6 @@ class PostgresWriter(TableWriter):
         )
         return [r[0] for r in cur.fetchall()]
 
-    def truncate(self, table: str) -> None:
-        cur = self._conn.cursor()
-        cur.execute(
-            self._psql.SQL("TRUNCATE TABLE {} RESTART IDENTITY CASCADE").format(
-                self._psql.Identifier(table)
-            )
-        )
-
     def insert(self, table: str, columns: list[str], values: tuple) -> None:
         cur = self._conn.cursor()
         cur.execute("SAVEPOINT pgmig_row")
@@ -1348,6 +1340,4 @@ def _copy_tables_universal_body(
                 f"({item['missing']} not transferred)"
             )
 
-    total = sum(stats.values())
-    log(f"Copy complete: {total} rows across {len(stats)} tables")
     return stats, report

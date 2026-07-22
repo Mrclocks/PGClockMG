@@ -387,9 +387,10 @@ class MarzbanMigrator(BaseMigrator):
         db_url = f'SQLALCHEMY_DATABASE_URL = "{sqlalchemy_url}"'
         text = original
         if re.search(r"SQLALCHEMY_DATABASE_URL", text, re.I):
+            # Callable repl avoids backslash-escape parsing of the replacement string.
             text = re.sub(
                 r'#\s*SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"|SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"',
-                db_url,
+                lambda _m: db_url,
                 text,
                 count=1,
             )

@@ -451,7 +451,7 @@ async def _wait_db_service(migrator, target_db: str, service: str, attempts: int
 async def read_target_alembic_version(migrator, target_db: str) -> str | None:
     if target_db == "sqlite":
         conn = _target_conn(migrator)
-        path = conn.get("sqlite_path") or str(PASARGUARD_DATA / "db.sqlite3")
+        path = conn.get("sqlite_path") or (PASARGUARD_DATA / "db.sqlite3").as_posix()
         return read_sqlite_alembic_version(path)
 
     service = resolve_db_service(target_db)
@@ -574,7 +574,7 @@ def build_local_alembic_url(params: dict) -> str:
         return f"postgresql+asyncpg://{user}:{pwd}@127.0.0.1:{port}/{db}"
     if target_db in ("mysql", "mariadb"):
         return f"mysql+asyncmy://{user}:{pwd}@127.0.0.1:{port}/{db}"
-    path = conn.get("sqlite_path") or str(PASARGUARD_DATA / "db.sqlite3")
+    path = conn.get("sqlite_path") or (PASARGUARD_DATA / "db.sqlite3").as_posix()
     return f"sqlite+aiosqlite:///{path}"
 
 

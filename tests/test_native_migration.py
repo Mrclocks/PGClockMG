@@ -653,6 +653,102 @@ def test_build_copy_report():
     print("OK: build_copy_report")
 
 
+def test_no_duplicate_methods_in_adapters():
+    """Regression: PostgresWriter had truncate() defined twice — the second (unsafe,
+    unconditional TRUNCATE ... CASCADE) silently shadowed the safe bulk-aware one,
+    which completely undid the CASCADE-wipe fix without any test catching it.
+
+    Guard against this whole bug class: no class in adapters.py may define the
+    same method name twice.
+    """
+    import ast
+
+    src_path = ROOT / "app" / "services" / "native_migration" / "adapters.py"
+    tree = ast.parse(src_path.read_text(encoding="utf-8"), filename=str(src_path))
+
+    problems = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        seen: dict[str, int] = {}
+        for item in node.body:
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if item.name in seen:
+                    problems.append(
+                        f"{node.name}.{item.name} defined twice "
+                        f"(lines {seen[item.name]} and {item.lineno})"
+                    )
+                else:
+                    seen[item.name] = item.lineno
+
+    assert not problems, "Duplicate method definitions found:\n" + "\n".join(problems)
+    print("OK: no_duplicate_methods_in_adapters")
+
+
+def test_postgres_writer_truncate_noop_after_bulk_prepare():
+    """PostgresWriter.truncate() must be a no-op once _bulk_prepared is set —
+    otherwise a later per-table TRUNATE ... CASCADE re-wipes earlier inserts."""
+    import types
+    import sys as _sys
+
+    fake_psycopg2 = types.ModuleType("psycopg2")
+
+    class _FakeConn:
+        def cursor(self):
+            return MagicMock()
+
+        def commit(self):
+            pass
+
+    fake_psycopg2.connect = lambda **kw: _FakeConn()
+    fake_sql_mod = types.ModuleType("psycopg2.sql")
+
+    class _Ident:
+        def __init__(self, name):
+            self.name = name
+
+    class _SQL:
+        def __init__(self, text):
+            self.text = text
+
+        def format(self, *a, **kw):
+            return self
+
+        def join(self, items):
+            return self
+
+    fake_sql_mod.Identifier = _Ident
+    fake_sql_mod.SQL = _SQL
+    fake_sql_mod.Placeholder = lambda: "%s"
+    fake_psycopg2.sql = fake_sql_mod
+    _sys.modules["psycopg2"] = fake_psycopg2
+    _sys.modules["psycopg2.sql"] = fake_sql_mod
+
+    # Force re-import so PostgresWriter binds to our fake psycopg2 module
+    mod_name = "app.services.native_migration.adapters"
+    if mod_name in _sys.modules:
+        del _sys.modules[mod_name]
+    from app.services.native_migration.adapters import PostgresWriter
+
+    writer = PostgresWriter({
+        "host": "x", "port": 5432, "database": "x", "user": "x", "password": "x",
+    })
+    called = {"n": 0}
+    real_cursor = writer._conn.cursor
+
+    def _tracking_cursor():
+        called["n"] += 1
+        return real_cursor()
+
+    writer._conn.cursor = _tracking_cursor
+    writer._bulk_prepared = True
+    before = called["n"]
+    writer.truncate("admins")
+    # No-op: must not touch the cursor (i.e. must not issue any TRUNCATE) once bulk-prepared
+    assert called["n"] == before, "truncate() issued SQL despite _bulk_prepared=True"
+    print("OK: postgres_writer_truncate_noop_after_bulk_prepare")
+
+
 def test_admin_roles_before_admins_in_table_order():
     from app.services.native_migration.copy_core import TABLE_ORDER
 
@@ -872,6 +968,8 @@ if __name__ == "__main__":
     test_nodes_missing_target_table_skips()
     test_copy_sqlite_to_sqlite_associations()
     test_build_copy_report()
+    test_no_duplicate_methods_in_adapters()
+    test_postgres_writer_truncate_noop_after_bulk_prepare()
     test_admin_roles_before_admins_in_table_order()
     test_admin_roles_copied_before_admins_fk()
     test_prepare_replace_blocks_cascade_wipe()

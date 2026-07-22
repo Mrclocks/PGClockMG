@@ -13,6 +13,8 @@ from app.services.env_migration import (
     read_env_var,
     extract_env_password_candidates,
     pick_primary_env_password,
+    transform_pasarguard_env_for_target,
+    finalize_pasarguard_env_after_restore,
 )
 
 
@@ -79,6 +81,35 @@ MYSQL_ROOT_PASSWORD = "rootpass"
     print("OK: password candidates")
 
 
+def test_url_replacement_survives_backslashes():
+    """Regression: raw dynamic strings (Windows paths, or any password containing a
+    backslash) were passed directly as the `repl` argument to re.sub(), which
+    interprets backslash-letter sequences as invalid regex escapes and raises
+    `re.error: bad escape`. All SQLALCHEMY_DATABASE_URL rewrites must use a
+    callable repl (lambda) so the replacement text is inserted verbatim.
+    """
+    old = 'SQLALCHEMY_DATABASE_URL = "sqlite:////var/lib/marzban/db.sqlite3"\n'
+
+    # Simulate a sqlite path containing backslashes (e.g. Windows-style separators,
+    # or any value that looks like a regex escape sequence such as \1, \g, \l...).
+    tricky_path = "C:\\var\\lib\\pasarguard\\db.sqlite3"
+    out = transform_pasarguard_env_for_target(
+        old, "sqlite",
+        env_text=f'SQLALCHEMY_DATABASE_URL = "sqlite+aiosqlite:///{tricky_path}"',
+    )
+    assert tricky_path.replace("\\", "\\\\") in out or tricky_path in out
+    assert "sqlite+aiosqlite" in out
+
+    # finalize_pasarguard_env_after_restore must also survive a backslashy install URL
+    install_snapshot = f'SQLALCHEMY_DATABASE_URL = "postgresql+asyncpg://user:p\\ass@127.0.0.1:5432/pasarguard"\n'
+    text = 'SQLALCHEMY_DATABASE_URL = "sqlite:////var/lib/marzban/db.sqlite3"\n'
+    out2 = finalize_pasarguard_env_after_restore(
+        text, "postgresql", "p\\ass", install_snapshot,
+    )
+    assert "SQLALCHEMY_DATABASE_URL" in out2
+    print("OK: url_replacement_survives_backslashes")
+
+
 if __name__ == "__main__":
     test_sqlite_env_transform()
     test_mysql_env_uses_root_password()
@@ -86,4 +117,5 @@ if __name__ == "__main__":
     test_mysql_dump_fix()
     test_read_env_var()
     test_extract_env_password_candidates()
+    test_url_replacement_survives_backslashes()
     print("\nAll env migration tests passed.")

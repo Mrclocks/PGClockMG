@@ -39,7 +39,7 @@ def connection_from_params(params: dict, role: Role) -> dict:
         "database": _field(params, role, "name"),
         "host": _field(params, role, "host") or "127.0.0.1",
         "port": _field(params, role, "port") or _DEFAULT_PORTS.get(db_type),
-        "sqlite_path": str(PASARGUARD_DATA / "db.sqlite3"),
+        "sqlite_path": (PASARGUARD_DATA / "db.sqlite3").as_posix(),
     }
     if db_type == "sqlite":
         conn["database"] = Path(conn["sqlite_path"]).name
@@ -94,7 +94,7 @@ def build_migration_url(params: dict) -> str:
     conn = get_target_connection(params)
     pwd = conn.get("password") or ""
     if target_db == "sqlite":
-        path = conn.get("sqlite_path") or str(PASARGUARD_DATA / "db.sqlite3")
+        path = conn.get("sqlite_path") or (PASARGUARD_DATA / "db.sqlite3").as_posix()
         return f"sqlite:///{path}"
     if target_db in ("mysql", "mariadb"):
         user = conn.get("user") or "root"
@@ -115,7 +115,7 @@ def build_app_sqlalchemy_url(params: dict) -> str:
     conn = get_target_connection(params)
     pwd = conn.get("password") or ""
     if target_db == "sqlite":
-        path = conn.get("sqlite_path") or str(PASARGUARD_DATA / "db.sqlite3")
+        path = conn.get("sqlite_path") or (PASARGUARD_DATA / "db.sqlite3").as_posix()
         return f"sqlite+aiosqlite:///{path}"
     if target_db in ("mysql", "mariadb"):
         user = conn.get("user") or "root"
