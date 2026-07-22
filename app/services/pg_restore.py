@@ -691,6 +691,14 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
             "تبدیل sqlite→timescaledb انجام شده ولی .env هنوز SQLite بود — در v2.3.6+ .env بعد از تبدیل اصلاح می‌شود",
             "فایل db.sqlite3 بعد از تبدیل کنار گذاشته می‌شود تا پنل به TimescaleDB وصل شود",
         ]
+    elif "pasarguard container is not running" in low:
+        fa = "کانتینر PasarGuard بالا نیامد (ری‌استارت یا کرش)."
+        en = "PasarGuard container is not running (crash/restart loop)."
+        causes_fa = [
+            "بعد از تبدیل، .env هنوز URL اشتباه (مثلاً sqlite) داشت — در v2.3.8+ از .env نصب حفظ می‌شود",
+            "SSL نامعتبر یا خطای اتصال به PostgreSQL/PgBouncer — لاگ واقعی ValueError/asyncpg را ببینید",
+            "روی سرور: docker compose -f /opt/pasarguard/docker-compose.yml logs pasarguard --tail 80",
+        ]
     elif "pasarguard failed to start" in low or "did not reach ready state" in low:
         fa = "پنل PasarGuard بعد از ریستور بالا نیامد."
         en = "PasarGuard panel did not start after restore."
@@ -997,7 +1005,11 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             _relocate_sqlite_after_convert(job)
 
         job.set_progress(90, "Starting PasarGuard...")
-        ok, out = await _compose(job, "up", "-d", timeout=300)
+        # Force recreate so panel picks up finalized .env (DB URL / SSL)
+        ok, out = await _compose(job, "up", "-d", "--force-recreate", "pasarguard", timeout=300)
+        if not ok:
+            job.log(f"compose recreate warning: {out[-1500:]}")
+            ok, out = await _compose(job, "up", "-d", timeout=300)
         if not ok:
             job.log(f"compose up warning: {out[-1500:]}")
             # Auto-retry Timescale version if official error text appears
@@ -1006,7 +1018,7 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                 job.log(f"Detected Timescale mismatch in output: backup={mismatch[0]} server={mismatch[1]}")
                 await _align_timescaledb_image(job, mismatch[0])
                 ok, out = await _compose(job, "up", "-d", timeout=300)
-        await asyncio.sleep(6)
+        await asyncio.sleep(8)
 
         await _heal_panel_auth_if_needed(
             job,

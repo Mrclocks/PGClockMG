@@ -20,16 +20,18 @@ FAIL_LOG_PATTERNS = (
     "Database migrations failed",
     "ERROR: Database migrations failed",
     "sqlalchemy.exc.",
-    "asyncpg.exceptions.DuplicateColumnError",
+    "asyncpg.exceptions.",
     "DuplicateColumnError",
     "ProgrammingError",
     "Traceback (most recent call last)",
     "could not connect",
+    "connection refused",
+    "password authentication failed",
+    "SASL authentication failed",
     "cache lookup failed for type",
     "Application startup failed",
     "ValueError:",
     "SSL certificate file",
-    "does not exist.",
     "column \"user_template_id\" of relation \"next_plans\" already exists",
 )
 
@@ -44,11 +46,15 @@ BENIGN_LOG_PATTERNS = (
     "shutting down",
 )
 
+# Noise from no-SSL banners / SSH tunnel hints — never treat as the root cause
+BANNER_NOISE_PATTERNS = (
+    "ssh -L",
+    "navigate to",
+    "on your computer",
+    "Then, navigate",
+    "#####",
+)
 
-def _line_indicates_failure(line: str) -> bool:
-    if any(b in line for b in BENIGN_LOG_PATTERNS):
-        return False
-    return any(p in line for p in FAIL_LOG_PATTERNS)
 
 DB_SERVICES = {
     "timescaledb": ("timescaledb", "postgresql"),
@@ -86,12 +92,42 @@ def _log_failures_from_output(migrator, output: str) -> None:
             migrator.job.log(line)
 
 
+def _strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", text or "")
+
+
+def _is_banner_noise(line: str) -> bool:
+    low = line.lower()
+    # Keep real failures even if they share a word with banners
+    if any(p.lower() in low for p in FAIL_LOG_PATTERNS):
+        return False
+    return any(n.lower() in low for n in BANNER_NOISE_PATTERNS)
+
+
+def _line_indicates_failure(line: str) -> bool:
+    if any(b in line for b in BENIGN_LOG_PATTERNS):
+        return False
+    if _is_banner_noise(line):
+        return False
+    return any(p in line for p in FAIL_LOG_PATTERNS)
+
+
 def _extract_failure_snippet(output: str) -> str:
-    lines = (output or "").splitlines()
+    clean = _strip_ansi(output or "")
+    lines = clean.splitlines()
     hits = [ln for ln in lines if _line_indicates_failure(ln)]
     if hits:
-        return "\n".join(hits[-12:])
-    return (output or "")[-2000:]
+        return "\n".join(hits[-16:])
+    useful = []
+    for ln in lines:
+        if not ln.strip() or _is_banner_noise(ln):
+            continue
+        if any(x in ln for x in ("ERROR", "Error", "Traceback", "Exception", "failed", "FATAL", "ValueError")):
+            useful.append(ln)
+    if useful:
+        return "\n".join(useful[-20:])
+    non_banner = [ln for ln in lines if ln.strip() and not _is_banner_noise(ln)]
+    return "\n".join(non_banner[-20:]) if non_banner else clean[-1500:]
 
 
 async def fetch_compose_logs(migrator, services: list[str], tail: int = 200) -> str:
@@ -126,29 +162,78 @@ def _check_logs_for_failure(output: str) -> str | None:
     return None
 
 
-async def _pasarguard_container_running(migrator) -> bool:
+async def _pasarguard_container_state(migrator) -> str:
+    """Return running | restarting | exited | unknown for the panel service."""
     cwd = str(PASARGUARD_DIR)
-    ok, running = await migrator._run_cmd(
-        ["docker", "compose", "ps", "--status", "running", "-q", "pasarguard"],
+    ok, out = await migrator._run_cmd(
+        ["docker", "compose", "ps", "--format", "{{.Name}} {{.Status}}", "pasarguard"],
+        cwd=cwd,
+        timeout=20,
+    )
+    text = (out or "").lower()
+    if ok and text.strip():
+        if "restarting" in text:
+            return "restarting"
+        if "up " in text or "(healthy)" in text or "running" in text:
+            return "running"
+        if "exit" in text or "dead" in text or "created" in text:
+            return "exited"
+
+    ok2, ids = await migrator._run_cmd(
+        ["docker", "compose", "ps", "-q", "pasarguard"],
         cwd=cwd,
         timeout=15,
     )
-    return bool(ok and running.strip())
+    if ok2 and (ids or "").strip():
+        cid = (ids or "").strip().splitlines()[0].strip()
+        ok3, st = await migrator._run_cmd(
+            ["docker", "inspect", "-f", "{{.State.Status}}", cid],
+            cwd=cwd,
+            timeout=15,
+        )
+        status = (st or "").strip().lower()
+        if status in ("running", "restarting", "exited", "dead", "created"):
+            return status if status != "dead" else "exited"
+        if status:
+            return status
+    return "unknown"
 
 
-async def verify_pasarguard_healthy(migrator, max_wait: int = 120) -> None:
+async def _pasarguard_container_running(migrator) -> bool:
+    return (await _pasarguard_container_state(migrator)) == "running"
+
+
+async def _ensure_pasarguard_up(migrator) -> None:
+    cwd = str(PASARGUARD_DIR)
+    await migrator._run_cmd(
+        ["docker", "compose", "up", "-d", "pasarguard"],
+        cwd=cwd,
+        timeout=180,
+    )
+
+
+async def verify_pasarguard_healthy(migrator, max_wait: int = 150) -> None:
     """Fail unless PasarGuard logs show a clean startup (no migration errors)."""
     migrator.job.log("Verifying PasarGuard started without errors...")
-    await asyncio.sleep(12)
+    await asyncio.sleep(8)
 
     stable_ready = 0
-    attempts = max(8, max_wait // 4)
-    for _ in range(attempts):
+    not_running_streak = 0
+    healed_once = False
+    attempts = max(10, max_wait // 4)
+    for i in range(attempts):
         out = await fetch_pasarguard_logs(migrator, tail=300)
         _log_failures_from_output(migrator, out)
 
         hit = _check_logs_for_failure(out)
         if hit:
+            # Give crash-loop a moment and one recreate before hard-fail
+            if not healed_once:
+                healed_once = True
+                migrator.job.log(f"Panel error detected ({hit}) — recreating pasarguard once…")
+                await _ensure_pasarguard_up(migrator)
+                await asyncio.sleep(10)
+                continue
             db_hint = ""
             target_db = migrator.params.get("target_db")
             if target_db in ("postgresql", "timescaledb"):
@@ -163,11 +248,22 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 120) -> None:
                 + db_hint
             )
 
-        if not await _pasarguard_container_running(migrator):
-            raise RuntimeError(
-                "PasarGuard container is not running.\n" + _extract_failure_snippet(out)
-            )
+        state = await _pasarguard_container_state(migrator)
+        if state != "running":
+            not_running_streak += 1
+            migrator.job.log(f"PasarGuard container state={state} (wait {not_running_streak})")
+            if not_running_streak >= 2 and not healed_once:
+                healed_once = True
+                migrator.job.log("Bringing pasarguard back up…")
+                await _ensure_pasarguard_up(migrator)
+            if not_running_streak >= 6:
+                raise RuntimeError(
+                    "PasarGuard container is not running.\n" + _extract_failure_snippet(out)
+                )
+            await asyncio.sleep(5)
+            continue
 
+        not_running_streak = 0
         if any(marker in (out or "") for marker in STARTUP_MARKERS):
             stable_ready += 1
             if stable_ready >= 2:

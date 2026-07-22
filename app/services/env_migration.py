@@ -477,9 +477,13 @@ def build_db_migration_target_url(
     return f"postgresql+asyncpg://{user}:{pwd}@{host}:{port}/{db}"
 
 
-def build_sqlalchemy_url_for_target(target_db: str, password_override: str | None = None) -> str:
+def build_sqlalchemy_url_for_target(
+    target_db: str,
+    password_override: str | None = None,
+    env_text: str | None = None,
+) -> str:
     """Build SQLALCHEMY_DATABASE_URL line for PasarGuard .env (async drivers)."""
-    conn = get_pasarguard_target_connection(target_db, password_override)
+    conn = get_pasarguard_target_connection(target_db, password_override, env_text)
     pwd = conn.get("password") or "password"
     if target_db == "sqlite":
         path = conn.get("sqlite_path") or "/var/lib/pasarguard/db.sqlite3"
@@ -595,9 +599,24 @@ def transform_marzban_env(
     return text
 
 
-def transform_pasarguard_env_for_target(text: str, target_db: str, password: str | None = None) -> str:
-    """Update existing PasarGuard .env when only DB backend changes."""
-    url_line = f'SQLALCHEMY_DATABASE_URL = "{build_sqlalchemy_url_for_target(target_db, password)}"'
+def transform_pasarguard_env_for_target(
+    text: str,
+    target_db: str,
+    password: str | None = None,
+    *,
+    env_text: str | None = None,
+) -> str:
+    """Update existing PasarGuard .env when only DB backend changes.
+
+    env_text: credential source for building the URL (prefer install snapshot, not
+    a backup-merged .env that still points at sqlite).
+    """
+    url = build_sqlalchemy_url_for_target(
+        target_db,
+        password,
+        env_text if env_text is not None else text,
+    )
+    url_line = f'SQLALCHEMY_DATABASE_URL = "{url}"'
     if re.search(r"SQLALCHEMY_DATABASE_URL", text, re.I):
         return re.sub(
             r'#\s*SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"|SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"',
@@ -734,6 +753,18 @@ def env_points_to_db(text: str, target_db: str) -> bool:
     return False
 
 
+def _replace_sqlalchemy_password(url: str, password: str) -> str:
+    if not url or not password:
+        return url
+    m = re.search(r"^(.*://[^:/@]+:)([^@]+)(@.*)$", url)
+    if m:
+        return m.group(1) + password + m.group(3)
+    m2 = re.search(r"^(.*://[^:/@]+)(@.*)$", url)
+    if m2:
+        return m2.group(1) + ":" + password + m2.group(2)
+    return url
+
+
 def finalize_pasarguard_env_after_restore(
     text: str,
     final_db: str,
@@ -746,12 +777,44 @@ def finalize_pasarguard_env_after_restore(
     """
     Pin .env to the restored/converted DB engine, valid SSL, and pgAdmin vars.
     Called after data restore and optional cross-DB convert, before compose up.
+
+    Critical: build SQLALCHEMY from the *install* snapshot (correct host/port/user),
+    never from a backup-merged .env that still points at sqlite.
     """
-    text = transform_pasarguard_env_for_target(text, final_db, password)
+    install_url = read_env_var(install_env_snapshot, "SQLALCHEMY_DATABASE_URL") or ""
+    if install_url and env_points_to_db(install_env_snapshot, final_db):
+        url = _replace_sqlalchemy_password(install_url, password or "") if password else install_url
+        url_line = f'SQLALCHEMY_DATABASE_URL = "{url}"'
+        if re.search(r"SQLALCHEMY_DATABASE_URL", text, re.I):
+            text = re.sub(
+                r'#\s*SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"|SQLALCHEMY_DATABASE_URL\s*=\s*"[^"]*"',
+                url_line,
+                text,
+                count=1,
+            )
+        else:
+            text = text.rstrip() + f"\n{url_line}\n"
+    else:
+        text = transform_pasarguard_env_for_target(
+            text,
+            final_db,
+            password,
+            env_text=install_env_snapshot or text,
+        )
 
     if final_db != "sqlite":
-        user = db_user or read_env_var(install_env_snapshot, "DB_USER") or "pasarguard"
-        name = db_name or read_env_var(install_env_snapshot, "DB_NAME") or "pasarguard"
+        user = (
+            db_user
+            or read_env_var(install_env_snapshot, "DB_USER")
+            or read_env_var(install_env_snapshot, "POSTGRES_USER")
+            or "pasarguard"
+        )
+        name = (
+            db_name
+            or read_env_var(install_env_snapshot, "DB_NAME")
+            or read_env_var(install_env_snapshot, "POSTGRES_DB")
+            or "pasarguard"
+        )
         pwd = password or read_env_var(install_env_snapshot, "DB_PASSWORD") or ""
         text = _set_env_var_simple(text, "DB_USER", user)
         text = _set_env_var_simple(text, "DB_NAME", name)
@@ -760,7 +823,8 @@ def finalize_pasarguard_env_after_restore(
         if final_db in ("postgresql", "timescaledb") and pwd:
             text = _set_env_var_simple(text, "POSTGRES_PASSWORD", pwd)
         if final_db in ("mysql", "mariadb") and pwd:
-            text = _set_env_var_simple(text, "MYSQL_ROOT_PASSWORD", pwd)
+            root_pw = read_env_var(install_env_snapshot, "MYSQL_ROOT_PASSWORD") or pwd
+            text = _set_env_var_simple(text, "MYSQL_ROOT_PASSWORD", root_pw)
 
     for key in ("UVICORN_PORT", "UVICORN_HOST", "UVICORN_ROOT_PATH", "ALLOWED_ORIGINS"):
         val = read_env_var(install_env_snapshot, key)

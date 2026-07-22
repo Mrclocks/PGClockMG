@@ -51,13 +51,27 @@ def test_finalize_sqlite_to_timescaledb_url():
         db_user="pasarguard", db_name="pasarguard",
     )
     assert env_points_to_db(out, "timescaledb")
-    assert "sqlite" not in (out.lower())
+    assert "sqlite+aiosqlite" not in out.lower()
+    # Install URL host/port/user must be preserved (not rebuilt from sqlite .env)
+    assert "pasarguard:live@127.0.0.1:6432/pasarguard" in out
     assert "TELEGRAM_API_TOKEN" in out
     assert 'DB_PASSWORD="live"' in out
     assert 'POSTGRES_PASSWORD="live"' in out
     # SSL paths from backup but files missing → stripped
     assert "UVICORN_SSL_CERTFILE" not in out
     print("OK: finalize timescaledb URL + strip missing SSL")
+
+
+def test_finalize_prefers_install_url_over_sqlite_merge():
+    backup = 'SQLALCHEMY_DATABASE_URL="sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3"\nFOO="1"\n'
+    install = (
+        'SQLALCHEMY_DATABASE_URL="postgresql+asyncpg://pasarguard:secret@127.0.0.1:6432/pasarguard"\n'
+        'DB_USER="pasarguard"\nDB_PASSWORD="secret"\n'
+    )
+    out = finalize_pasarguard_env_after_restore(backup, "postgresql", "secret", install)
+    assert "sqlite+aiosqlite" not in out.lower()
+    assert "postgresql+asyncpg://pasarguard:secret@127.0.0.1:6432/pasarguard" in out
+    print("OK: finalize keeps install postgresql URL")
 
 
 def test_sanitize_ssl_keeps_valid_files():
@@ -95,6 +109,7 @@ def test_resolve_container_cert_path():
 if __name__ == "__main__":
     test_detect_db_type_sqlalchemy_beats_pgadmin()
     test_finalize_sqlite_to_timescaledb_url()
+    test_finalize_prefers_install_url_over_sqlite_merge()
     test_sanitize_ssl_keeps_valid_files()
     test_resolve_container_cert_path()
     print("\nAll env_finalize tests passed")
