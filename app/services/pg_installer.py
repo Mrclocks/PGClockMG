@@ -131,7 +131,7 @@ def _build_cmd(script: Path, params: dict) -> list[str]:
     else:
         # IP SSL handled after install; avoid hanging SSL menu entirely
         cmd += ["--no-ssl"]
-    return cmd
+    return _install_cmd_prefix() + cmd
 
 
 def _strip_ansi(text: str) -> str:
@@ -144,6 +144,35 @@ def _norm(text: str) -> str:
     """Lowercase + normalize fancy apostrophes for matching."""
     t = _strip_ansi(text).lower()
     return t.replace("\u2019", "'").replace("\u2018", "'")
+
+
+def _volume_delete_prompt_seen(text: str) -> bool:
+    """Detect PasarGuard installer volume cleanup prompt (official pasarguard.sh)."""
+    low = _norm(text)
+    return any(
+        marker in low
+        for marker in (
+            "permanently delete all data in these volumes",
+            "do you want to delete these volumes",
+            "delete volumes? [y/n]",
+            "delete volumes?",
+        )
+    )
+
+
+def _volume_delete_answer(wipe_volumes: bool) -> str:
+    return "y" if wipe_volumes else "n"
+
+
+def _install_cmd_prefix() -> list[str]:
+    """Line-buffer stdout/stderr so read -p prompts reach us without a PTY."""
+    if os.name != "posix":
+        return []
+    from shutil import which
+
+    if which("stdbuf"):
+        return ["stdbuf", "-oL", "-eL"]
+    return []
 
 
 async def _configure_ip_ssl(job: MigrationJob, ip: str, http_port: str) -> None:
@@ -309,8 +338,10 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
             if not params.get("force"):
                 raise RuntimeError("PasarGuard is already installed")
 
-        if "volumes" not in answered and "delete volumes?" in low:
-            await send("y" if wipe_volumes else "n", "delete volumes")
+        # Answer as soon as the WARNING banner appears — before read -p blocks on stdin.
+        if "volumes" not in answered and _volume_delete_prompt_seen(rolling):
+            ans = _volume_delete_answer(wipe_volumes)
+            await send(ans, "delete volumes")
             answered.add("volumes")
 
         if "ssl_menu" not in answered and (
@@ -364,6 +395,14 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
             return
 
         blob = pending_low or low[-400:]
+
+        # Volume prompt can stall without a trailing newline on read -p — never gate this on looks_prompt.
+        if "volumes" not in answered and _volume_delete_prompt_seen(blob or rolling):
+            ans = _volume_delete_answer(wipe_volumes)
+            await send(ans, "delete volumes (idle)")
+            answered.add("volumes")
+            return
+
         # Don't answer repeatedly every tick
         now = asyncio.get_running_loop().time()
         if now - last_answer_at < 1.5:
@@ -392,11 +431,6 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
             await send("n", "skip node (idle prompt)")
             answered.add("install_node")
             finished_ok = True
-            return
-
-        if "volumes" not in answered and "volume" in blob:
-            await send("n", "volumes (idle)")
-            answered.add("volumes")
             return
 
         if "ssl_menu" not in answered and "ssl" in blob:
@@ -442,6 +476,10 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
                     if line_clean:
                         job.log(line_clean)
                         job.set_progress(min(88, 10 + len(job.logs) // 3), line_clean[:120])
+                        if "volumes" not in answered and _volume_delete_prompt_seen(line_clean):
+                            ans = _volume_delete_answer(wipe_volumes)
+                            await send(ans, "delete volumes (banner line)")
+                            answered.add("volumes")
 
                 await maybe_answer()
             else:
@@ -449,7 +487,8 @@ async def _install_pasarguard(job: MigrationJob, params: dict) -> dict:
                 await maybe_answer(force_idle=(idle_rounds >= 2))
 
                 # If panel already exists and we've passed node step or idle long — stop log follow
-                if idle_rounds >= 5 and is_pasarguard_installed():
+                # Don't exit while a known interactive prompt is still unanswered
+                if idle_rounds >= 5 and is_pasarguard_installed() and "volumes" in answered:
                     if "install_node" not in answered:
                         await send("n", "skip node (installed+idle)")
                         answered.add("install_node")
