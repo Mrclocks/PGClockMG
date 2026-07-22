@@ -62,41 +62,43 @@ def test_finalize_sqlite_to_timescaledb_url():
     print("OK: finalize timescaledb URL + strip missing SSL")
 
 
-def test_finalize_collapses_duplicate_sqlite_urls_from_real_backup():
-    """User backup_20260722082719.zip had THREE identical SQLALCHEMY sqlite lines.
+def test_finalize_collapses_duplicate_sqlite_urls():
+    """Duplicate SQLALCHEMY lines (common in some panel .env files) must collapse to one.
     Replacing only the first left the panel on sqlite (last-wins) after convert."""
     import re
     from app.services.env_migration import _sqlalchemy_url_line_pattern
 
-    backup = Path(ROOT / "_backup_test" / ".env")
-    if backup.exists():
-        text = backup.read_text(encoding="utf-8", errors="ignore")
-    else:
-        text = "\n".join([
-            'SQLALCHEMY_DATABASE_URL = "sqlite+aiosqlite://///var/lib/pasarguard/db.sqlite3"',
-            'SQLALCHEMY_DATABASE_URL = "sqlite+aiosqlite://///var/lib/pasarguard/db.sqlite3"',
-            'SQLALCHEMY_DATABASE_URL = "sqlite+aiosqlite://///var/lib/pasarguard/db.sqlite3"',
-            'UVICORN_PORT = 8880',
-        ])
+    # Synthetic fixture — never load a personal backup into the repo/tests.
+    text = "\n".join([
+        'SQLALCHEMY_DATABASE_URL = "sqlite+aiosqlite://///var/lib/pasarguard/db.sqlite3"',
+        'SQLALCHEMY_DATABASE_URL = "sqlite+aiosqlite://///var/lib/pasarguard/db.sqlite3"',
+        'SQLALCHEMY_DATABASE_URL = "sqlite+aiosqlite://///var/lib/pasarguard/db.sqlite3"',
+        'UVICORN_PORT = 8880',
+    ])
     before = len(re.findall(_sqlalchemy_url_line_pattern(), text))
     assert before >= 2, f"expected duplicate URLs in fixture, got {before}"
 
-    install = "\n".join([
-        'SQLALCHEMY_DATABASE_URL="postgresql+asyncpg://pasarguard:Secret123@127.0.0.1:6432/pasarguard"',
-        'DB_USER="pasarguard"',
-        'DB_NAME="pasarguard"',
-        'DB_PASSWORD="Secret123"',
-    ])
-    out = finalize_pasarguard_env_after_restore(
-        text, "timescaledb", "Secret123", install,
-        db_user="pasarguard", db_name="pasarguard",
-    )
-    after = re.findall(_sqlalchemy_url_line_pattern(), out)
-    assert len(after) == 1, f"must collapse to exactly 1 URL line, got {len(after)}: {after}"
-    assert "sqlite" not in after[0].lower()
-    assert env_points_to_db(out, "timescaledb")
-    assert "6432/pasarguard" in out
-    print(f"OK: collapsed {before} duplicate sqlite URLs → 1 timescaledb URL")
+    for final_db, install_url in (
+        ("timescaledb", "postgresql+asyncpg://pasarguard:Secret123@127.0.0.1:6432/pasarguard"),
+        ("postgresql", "postgresql+asyncpg://pasarguard:Secret123@127.0.0.1:5432/pasarguard"),
+        ("mysql", "mysql+asyncmy://pasarguard:Secret123@127.0.0.1:3306/pasarguard"),
+        ("mariadb", "mariadb+asyncmy://pasarguard:Secret123@127.0.0.1:3306/pasarguard"),
+    ):
+        install = "\n".join([
+            f'SQLALCHEMY_DATABASE_URL="{install_url}"',
+            'DB_USER="pasarguard"',
+            'DB_NAME="pasarguard"',
+            'DB_PASSWORD="Secret123"',
+        ])
+        out = finalize_pasarguard_env_after_restore(
+            text, final_db, "Secret123", install,
+            db_user="pasarguard", db_name="pasarguard",
+        )
+        after = re.findall(_sqlalchemy_url_line_pattern(), out)
+        assert len(after) == 1, f"{final_db}: must be 1 URL line, got {len(after)}: {after}"
+        assert "sqlite" not in after[0].lower(), f"{final_db}: leftover sqlite URL"
+        assert env_points_to_db(out, final_db), f"{final_db}: URL does not match engine"
+    print(f"OK: collapsed {before} duplicate sqlite URLs for all server engines")
 
 
 def test_finalize_prefers_install_url_over_sqlite_merge():

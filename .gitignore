@@ -13,3 +13,8 @@ tests/_tmp_*
 __pycache__/
 *.pyc
 
+# Local-only harnesses / personal backup extracts — never commit
+scripts/_local_*
+_backup_test/
+*.sqlite3.bak*
+pgmig-backup-*/

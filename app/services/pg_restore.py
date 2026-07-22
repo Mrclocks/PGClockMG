@@ -383,11 +383,10 @@ def _read_current_env() -> str:
 
 
 def _set_env_var(text: str, key: str, value: str) -> str:
-    pattern = rf"(?m)^\s*#?\s*{re.escape(key)}\s*=.*$"
-    line = f'{key}="{value}"'
-    if re.search(pattern, text):
-        return re.sub(pattern, lambda _m: line, text, count=1)
-    return text.rstrip() + "\n" + line + "\n"
+    """Set KEY=value and remove any duplicate prior assignments of KEY."""
+    from app.services.env_migration import _set_env_var_simple
+
+    return _set_env_var_simple(text, key, value)
 
 
 async def _compose(job: MigrationJob, *args: str, timeout: int = 300) -> tuple[bool, str]:
@@ -1812,6 +1811,12 @@ async def _merge_env_after_restore(
     App settings from backup win (ports, telegram, subscription) — this is the
     previous panel. Install only fills missing keys and provides DB auth.
     """
+    from app.services.env_migration import (
+        _set_sqlalchemy_url,
+        _sqlalchemy_url_line_pattern,
+    )
+    import re as _re
+
     text = backup_env
     # Only fill panel listen settings if backup omitted them
     for key in ("UVICORN_PORT", "UVICORN_HOST", "UVICORN_ROOT_PATH", "ALLOWED_ORIGINS"):
@@ -1822,8 +1827,11 @@ async def _merge_env_after_restore(
             text = _set_env_var(text, key, cur)
 
     for key, val in preserve.items():
-        if val:
-            text = _set_env_var(text, key, val)
+        if not val:
+            continue
+        if key == "SQLALCHEMY_DATABASE_URL":
+            continue  # handled below — must collapse duplicates
+        text = _set_env_var(text, key, val)
 
     db_pass = preserve.get("DB_PASSWORD") or preserve.get("POSTGRES_PASSWORD")
     if db_pass:
@@ -1831,10 +1839,25 @@ async def _merge_env_after_restore(
         if "POSTGRES_PASSWORD" in current_env or read_env_var(current_env, "POSTGRES_PASSWORD"):
             text = _set_env_var(text, "POSTGRES_PASSWORD", db_pass)
 
+    # Always normalize SQLALCHEMY to a single line. Backup .env files sometimes
+    # contain the same sqlite URL 2–3 times; docker last-wins would ignore a later
+    # finalize that only rewrote the first line.
+    preserved_url = preserve.get("SQLALCHEMY_DATABASE_URL")
+    if preserved_url:
+        text = _set_sqlalchemy_url(text, str(preserved_url))
+    else:
+        # Hard convert path: strip backup engine URLs; finalize writes the target URL.
+        text = _re.sub(_sqlalchemy_url_line_pattern(), "", text)
+        text = _re.sub(r"\n{3,}", "\n\n", text)
+
     if PASARGUARD_ENV.exists():
         shutil.copy2(PASARGUARD_ENV, PASARGUARD_ENV.with_suffix(".env.bak-before-restore"))
     PASARGUARD_ENV.write_text(text, encoding="utf-8")
-    job.log("Merged .env (backup app settings; DB URL finalized after convert)")
+    n = len(_re.findall(_sqlalchemy_url_line_pattern(), text))
+    job.log(
+        "Merged .env (backup app settings; "
+        f"SQLALCHEMY lines={n}; DB URL finalized after convert)"
+    )
 
 
 def _copy_tree_replace(src: Path, dest: Path) -> int:

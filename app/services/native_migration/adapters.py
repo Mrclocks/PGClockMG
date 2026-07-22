@@ -225,6 +225,10 @@ class SqliteWriter(TableWriter):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(path)
         self._bulk_prepared = False
+        self._bulk_load_active = False
+        # Keep FK off for the lifetime of bulk replace — SQLite "foreign key mismatch"
+        # also fires when unique indexes are missing/rebuilt mid-copy.
+        self._conn.execute("PRAGMA foreign_keys = OFF")
 
     def _coerce_row(self, table: str, columns: list[str], values: tuple) -> tuple:
         out = []
@@ -239,27 +243,41 @@ class SqliteWriter(TableWriter):
         return sqlite_columns(self._conn, table)
 
     def prepare_replace(self, tables: list[str]) -> None:
+        self._conn.execute("PRAGMA foreign_keys = OFF")
         for t in tables:
             safe = "".join(c for c in t if c.isalnum() or c == "_")
             if safe != t:
                 continue
             try:
-                self._conn.execute(f"DELETE FROM {safe}")
+                self._conn.execute(f'DELETE FROM "{safe}"')
             except Exception:
                 pass
         self._conn.commit()
         self._bulk_prepared = True
+        self._bulk_load_active = True
+
+    def begin_bulk_load(self) -> None:
+        self._conn.execute("PRAGMA foreign_keys = OFF")
+        self._bulk_load_active = True
+
+    def end_bulk_load(self) -> None:
+        if not getattr(self, "_bulk_load_active", False):
+            return
+        self._conn.commit()
+        # Re-enable for any post-copy verification the caller may do on this connection.
+        self._conn.execute("PRAGMA foreign_keys = ON")
+        self._bulk_load_active = False
 
     def truncate(self, table: str) -> None:
         if self._bulk_prepared:
             return
-        self._conn.execute(f"DELETE FROM {table}")
+        self._conn.execute(f'DELETE FROM "{table}"')
 
     def insert(self, table: str, columns: list[str], values: tuple) -> None:
         values = self._coerce_row(table, columns, values)
-        cols = ", ".join(columns)
+        cols = ", ".join(f'"{c}"' for c in columns)
         ph = ", ".join(["?"] * len(columns))
-        self._conn.execute(f"INSERT INTO {table} ({cols}) VALUES ({ph})", values)
+        self._conn.execute(f'INSERT INTO "{table}" ({cols}) VALUES ({ph})', values)
 
     def reset_sequence(self, table: str) -> None:
         pass
@@ -283,7 +301,7 @@ class SqliteWriter(TableWriter):
         self._conn.commit()
 
     def row_count(self, table: str) -> int:
-        cur = self._conn.execute(f"SELECT COUNT(*) FROM {table}")
+        cur = self._conn.execute(f'SELECT COUNT(*) FROM "{table}"')
         return int(cur.fetchone()[0])
 
     def recover(self) -> None:
