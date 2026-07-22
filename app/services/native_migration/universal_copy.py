@@ -51,6 +51,14 @@ async def copy_database_universal(
             f"Copy complete: {total} rows across {len(stats)} tables "
             f"(source: {Path(source_path).name})"
         )
+        if report.get("has_gaps"):
+            migrator.job.log(
+                "WARNING: copy report has gaps — "
+                + ", ".join(
+                    f"{i['table']} {i['copied']}/{i['source']}"
+                    for i in report.get("incomplete", [])[:8]
+                )
+            )
         return stats
     finally:
         reader.close()

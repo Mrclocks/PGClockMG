@@ -559,7 +559,7 @@ async def _maybe_cross_db_after_restore(
 ) -> str:
     """Convert restored backup engine → installed PasarGuard DB (auto)."""
     if not target_db or backup_db == target_db or soft_db_family(backup_db, target_db):
-        return target_db or backup_db
+        return target_db or backup_db, {}, {}
 
     job.set_progress(85, f"Converting {backup_db} → {target_db}…")
     job.log(f"Auto DB convert: {backup_db} → {target_db}")
@@ -586,6 +586,8 @@ async def _maybe_cross_db_after_restore(
             def __init__(self, j, p):
                 self.job = j
                 self.params = p
+                self.copy_stats = {}
+                self.copy_report = {}
 
             async def _run_cmd(self, cmd, cwd=None, timeout=600):
                 if isinstance(cmd, str):
@@ -631,8 +633,11 @@ async def _maybe_cross_db_after_restore(
         mig_params["_auto_db_credentials"] = True
         mini = _Mini(job, mig_params)
         await run_cross_db_migration(mini, path, backup_db, target_db)
+        stats = getattr(mini, "copy_stats", None) or {}
+        report = getattr(mini, "copy_report", None) or {}
+        job.result = {**(job.result or {}), "copy_stats": stats, "copy_report": report}
         job.log(f"DB convert finished: now {target_db}")
-        return target_db
+        return target_db, stats, report
     except Exception as e:
         job.log(f"DB convert failed (data still on {backup_db}): {e}")
         explain = explain_restore_error(e, backup_db, target_db)
@@ -684,7 +689,14 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
             "بکاپ SSL دارد ولی cert/key روی سرور جدید کپی نشده — در v2.3.6+ SSL نامعتبر حذف می‌شود",
             "پوشه certs را از بکاپ بررسی کنید یا نصب بدون SSL (--no-ssl) را حفظ کنید",
         ]
-    elif "restore verification failed" in low or "expected ≥" in low:
+    elif "migration incomplete" in low:
+        fa = "بخشی از داده‌ها کپی نشد (کاربر/هاست/گروه/نود ناقص)."
+        en = "Incomplete data copy (users/hosts/groups/nodes)."
+        causes_fa = [
+            "تبدیل باید ۱۰۰٪ باشد — در v2.3.9+ کپی ناقص fail می‌شود",
+            "لاگ Row skip را برای جدول مشکل‌دار ببینید",
+        ]
+    elif "restore verification failed" in low or "data incomplete" in low:
         fa = "داده‌ها به موتور دیتابیس مقصد کپی نشده‌اند (موفقیت کاذب)."
         en = "Restored data not found in target database engine."
         causes_fa = [
@@ -772,13 +784,13 @@ def _relocate_sqlite_after_convert(job: MigrationJob) -> None:
     job.log(f"Moved SQLite aside → {bak.name} (panel uses server DB)")
 
 
-def _count_sqlite_users(path: Path) -> int:
+def _count_sqlite_table(path: Path, table: str) -> int:
     if not path.exists():
         return 0
     try:
         conn = sqlite3.connect(str(path))
         try:
-            row = conn.execute("SELECT COUNT(*) FROM users").fetchone()
+            row = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()
             return int(row[0]) if row else 0
         finally:
             conn.close()
@@ -786,18 +798,37 @@ def _count_sqlite_users(path: Path) -> int:
         return 0
 
 
-async def _count_pg_users(
+def _count_sqlite_users(path: Path) -> int:
+    return _count_sqlite_table(path, "users")
+
+
+def _snapshot_sqlite_counts(path: Path) -> dict[str, int]:
+    from app.services.native_migration.copy_core import VERIFY_TABLES
+
+    out: dict[str, int] = {}
+    for table in VERIFY_TABLES:
+        n = _count_sqlite_table(path, table)
+        if n > 0:
+            out[table] = n
+    return out
+
+
+async def _count_pg_table(
     job: MigrationJob,
     svc: str,
     password: str,
     user: str,
     db_name: str,
+    table: str,
 ) -> int:
+    safe = "".join(c for c in table if c.isalnum() or c == "_")
+    if safe != table:
+        return -1
     cmd = [
         "docker", "compose", "exec", "-T",
         "-e", f"PGPASSWORD={password}",
         svc, "psql", "-t", "-A", "-U", user, "-d", db_name,
-        "-c", "SELECT COUNT(*) FROM users;",
+        "-c", f'SELECT COUNT(*) FROM "{safe}";',
     ]
     ok, out = await _run(job, cmd, timeout=60)
     if not ok:
@@ -809,51 +840,131 @@ async def _count_pg_users(
     return -1
 
 
+async def _count_pg_users(
+    job: MigrationJob,
+    svc: str,
+    password: str,
+    user: str,
+    db_name: str,
+) -> int:
+    return await _count_pg_table(job, svc, password, user, db_name, "users")
+
+
 async def _verify_restored_data(
     job: MigrationJob,
     final_db: str,
     password: str,
     user: str,
     db_name: str,
-    expected_min_users: int,
-) -> None:
-    """Fail restore if target DB has fewer users than the backup (false-success guard)."""
-    if expected_min_users <= 0:
-        return
+    expected: dict[str, int] | int | None,
+) -> dict[str, int]:
+    """Fail restore if critical tables lost rows after convert/restore."""
+    if isinstance(expected, int):
+        expected = {"users": expected} if expected > 0 else {}
+    expected = expected or {}
+    if not expected:
+        return {}
 
-    count = 0
+    from app.services.native_migration.copy_core import VERIFY_TABLES
+
+    actual: dict[str, int] = {}
     if final_db == "sqlite":
-        count = _count_sqlite_users(PASARGUARD_DATA / "db.sqlite3")
+        path = PASARGUARD_DATA / "db.sqlite3"
+        for table in VERIFY_TABLES:
+            if table in expected:
+                actual[table] = _count_sqlite_table(path, table)
     elif final_db in ("postgresql", "timescaledb"):
         svc = "timescaledb" if final_db == "timescaledb" else await _detect_db_container(job, final_db)
-        if svc:
-            count = await _count_pg_users(job, svc, password, user, db_name)
+        if not svc:
+            job.log("Could not verify table counts — DB service missing (non-fatal)")
+            return {}
+        for table in VERIFY_TABLES:
+            if table not in expected:
+                continue
+            n = await _count_pg_table(job, svc, password, user, db_name, table)
+            if n >= 0:
+                actual[table] = n
     elif final_db in ("mysql", "mariadb"):
         svc = await _detect_db_container(job, final_db)
-        if svc:
-            mysql_cmd = "mariadb" if final_db == "mariadb" else "mysql"
+        if not svc:
+            return {}
+        mysql_cmd = "mariadb" if final_db == "mariadb" else "mysql"
+        for table in VERIFY_TABLES:
+            if table not in expected:
+                continue
+            safe = "".join(c for c in table if c.isalnum() or c == "_")
+            if safe != table:
+                continue
             cmd = [
                 "docker", "compose", "exec", "-T",
                 "-e", f"MYSQL_PWD={password}",
                 svc, mysql_cmd, "-N", "-u", user, db_name,
-                "-e", "SELECT COUNT(*) FROM users;",
+                "-e", f"SELECT COUNT(*) FROM `{safe}`;",
             ]
             ok, out = await _run(job, cmd, timeout=60)
             if ok:
                 for line in (out or "").splitlines():
                     if line.strip().isdigit():
-                        count = int(line.strip())
+                        actual[table] = int(line.strip())
                         break
 
-    if count < 0:
-        job.log("Could not verify user count in target DB (non-fatal)")
-        return
-    if count < expected_min_users:
+    gaps = []
+    for table, want in expected.items():
+        got = actual.get(table, -1)
+        if got < 0:
+            job.log(f"Verify skip {table}: could not count")
+            continue
+        if got < want:
+            gaps.append(f"{table}: {got}/{want}")
+        else:
+            job.log(f"Verified {table}: {got} rows (expected ≥{want})")
+
+    if gaps:
         raise RuntimeError(
-            f"Restore verification failed: expected ≥{expected_min_users} users in {final_db}, found {count}. "
-            "Data may not have been copied to the target engine."
+            "Restore verification failed — data incomplete after convert:\n"
+            + "\n".join(gaps)
+            + "\nUsers/hosts/groups/nodes/inbounds/admins/settings must all transfer."
         )
-    job.log(f"Verified {count} users in {final_db}")
+    return actual
+
+
+def _env_completeness_checklist(job: MigrationJob, final_db: str, backup_env: str) -> dict:
+    """Log that panel env (port, subscription, telegram) survived change-DB."""
+    text = _read_current_env()
+    keys = [
+        "SQLALCHEMY_DATABASE_URL",
+        "UVICORN_PORT",
+        "UVICORN_HOST",
+        "SUBSCRIPTION_URL_PREFIX",
+        "SUBSCRIPTION_PATH",
+        "TELEGRAM_API_TOKEN",
+        "TELEGRAM_ADMIN_ID",
+        "XRAY_JSON",
+        "SUDO_USERNAME",
+    ]
+    report: dict[str, str] = {}
+    for key in keys:
+        val = read_env_var(text, key)
+        bak = read_env_var(backup_env, key)
+        if key == "SQLALCHEMY_DATABASE_URL":
+            ok = env_points_to_db(text, final_db)
+            report[key] = "ok" if ok else "WRONG_ENGINE"
+            job.log(f"Env check {key}: {'matches ' + final_db if ok else 'MISMATCH'}")
+            continue
+        if bak and not val:
+            report[key] = "MISSING"
+            job.log(f"Env check {key}: missing (was in backup)")
+        elif val:
+            report[key] = "ok"
+            job.log(f"Env check {key}: present")
+        else:
+            report[key] = "empty"
+    missing = [k for k, v in report.items() if v in ("MISSING", "WRONG_ENGINE")]
+    if "SQLALCHEMY_DATABASE_URL" in missing:
+        raise RuntimeError(
+            f".env SQLALCHEMY_DATABASE_URL does not match final engine {final_db}"
+        )
+    return report
 
 
 async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> dict:
@@ -931,13 +1042,16 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         job.set_progress(40, "Restoring database...")
         await _compose(job, "stop", "pasarguard", timeout=120)
 
-        expected_min_users = 0
+        expected_counts: dict[str, int] = {}
         restore_engine = backup_db
         if backup_db == "sqlite" or analysis.get("layout") == "sqlite_file":
             await _restore_sqlite(job, root)
-            expected_min_users = _count_sqlite_users(PASARGUARD_DATA / "db.sqlite3")
-            if expected_min_users:
-                job.log(f"Backup SQLite has {expected_min_users} users")
+            expected_counts = _snapshot_sqlite_counts(PASARGUARD_DATA / "db.sqlite3")
+            if expected_counts:
+                job.log(
+                    "Backup SQLite counts: "
+                    + ", ".join(f"{k}={v}" for k, v in expected_counts.items())
+                )
         elif backup_db in ("mysql", "mariadb"):
             await _restore_mysql(job, root, backup_db, current_env, backup_env)
         elif backup_db in ("postgresql", "timescaledb"):
@@ -980,14 +1094,20 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                 convert_source = str(dump)
 
         final_db = restore_engine
+        copy_stats: dict = {}
+        copy_report: dict = {}
         if target_db and restore_engine != target_db and not soft_db_family(restore_engine, target_db):
-            final_db = await _maybe_cross_db_after_restore(
+            final_db, copy_stats, copy_report = await _maybe_cross_db_after_restore(
                 job, params, restore_engine, target_db,
                 cur_db_pass or cur_pg_pass or "",
                 cur_user or "pasarguard",
                 cur_name or "pasarguard",
                 source_path=convert_source,
             )
+            # Prefer source_counts from convert report when available
+            src_from_copy = (copy_report or {}).get("source_counts") or {}
+            if src_from_copy:
+                expected_counts = {k: v for k, v in src_from_copy.items() if isinstance(v, int) and v > 0}
         elif target_db and soft_db_family(restore_engine, target_db):
             final_db = target_db
 
@@ -999,6 +1119,11 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             cur_db_pass or cur_pg_pass,
             cur_user or "pasarguard",
             cur_name or "pasarguard",
+        )
+        _env_completeness_checklist(
+            job,
+            final_db or target_db or restore_engine or backup_db,
+            backup_env,
         )
 
         if final_db and final_db != "sqlite" and (needs_convert or restore_engine == "sqlite"):
@@ -1044,13 +1169,13 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         except Exception as e:
             job.log(f"Alembic sync note: {e}")
 
-        await _verify_restored_data(
+        verified = await _verify_restored_data(
             job,
             final_engine,
             cur_db_pass or cur_pg_pass or "",
             cur_user or "pasarguard",
             cur_name or "pasarguard",
-            expected_min_users,
+            expected_counts,
         )
 
         from app.services.pasarguard_ops import verify_pasarguard_healthy
@@ -1065,6 +1190,11 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         access["auto_db_convert"] = bool(
             backup_db and final_db and backup_db != final_db and not soft_db_family(backup_db, final_db)
         )
+        access["copy_stats"] = copy_stats or verified
+        access["copy_report"] = copy_report
+        access["verified_counts"] = verified
+        if copy_report.get("has_gaps"):
+            access["data_incomplete"] = True
         return access
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -1304,9 +1434,16 @@ async def _restore_postgres(
 async def _merge_env_after_restore(
     job: MigrationJob, backup_env: str, current_env: str, preserve: dict
 ) -> None:
-    """Write backup .env but keep live DB credentials; SSL/pgAdmin finalized later."""
+    """Write backup .env (panel settings) but keep live DB credentials.
+
+    App settings from backup win (ports, telegram, subscription) — this is the
+    previous panel. Install only fills missing keys and provides DB auth.
+    """
     text = backup_env
+    # Only fill panel listen settings if backup omitted them
     for key in ("UVICORN_PORT", "UVICORN_HOST", "UVICORN_ROOT_PATH", "ALLOWED_ORIGINS"):
+        if read_env_var(text, key):
+            continue
         cur = read_env_var(current_env, key)
         if cur is not None:
             text = _set_env_var(text, key, cur)
@@ -1324,7 +1461,7 @@ async def _merge_env_after_restore(
     if PASARGUARD_ENV.exists():
         shutil.copy2(PASARGUARD_ENV, PASARGUARD_ENV.with_suffix(".env.bak-before-restore"))
     PASARGUARD_ENV.write_text(text, encoding="utf-8")
-    job.log("Merged .env (app settings from backup; DB URL finalized after convert)")
+    job.log("Merged .env (backup app settings; DB URL finalized after convert)")
 
 
 async def _restore_data_files(job: MigrationJob, root: Path) -> None:

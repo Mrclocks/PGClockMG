@@ -13,6 +13,7 @@ from app.services.native_migration.copy_core import (
     SKIP_TABLES,
     SUBSCRIPTION_TABLES,
     MIGRATION_ABORT_IF_ZERO,
+    STRICT_COMPLETE_TABLES,
     OPTIONAL_FK_COLUMNS,
     TARGET_INSERT_DEFAULTS,
     JSON_COLUMNS,
@@ -922,7 +923,11 @@ def build_copy_report(
 ) -> dict:
     """Summarize tables that were not fully copied (for post-migration UI)."""
     incomplete: list[dict] = []
-    for table in TABLE_ORDER:
+    seen: set[str] = set()
+    for table in list(TABLE_ORDER) + sorted(source_counts.keys()):
+        if table in seen:
+            continue
+        seen.add(table)
         src = source_counts.get(table, 0)
         if src <= 0:
             continue
@@ -958,7 +963,24 @@ def copy_tables_universal(
         elif n < 0:
             log(f"Warning: could not count source rows for {t}")
 
-    for table in TABLE_ORDER:
+    # Copy whitelist first, then any extra tables present in both schemas
+    ordered = list(TABLE_ORDER)
+    for t in sorted(source_tables):
+        if (
+            t in SKIP_TABLES
+            or t in ordered
+            or t.startswith("sqlite_")
+            or t.startswith("pg_")
+        ):
+            continue
+        if writer.target_columns(t):
+            ordered.append(t)
+            n = _count_source_rows(reader, t)
+            if n > 0:
+                source_counts[t] = n
+            log(f"Extra table queued for copy: {t}" + (f" ({n} rows)" if n > 0 else ""))
+
+    for table in ordered:
         if table in SKIP_TABLES or table not in source_tables:
             continue
 
@@ -1095,20 +1117,23 @@ def copy_tables_universal(
                     f"0 were copied to target. First error: {hint}"
                 )
 
-    # Hosts: never abort whole migration — report loudly if incomplete
-    src_hosts = source_counts.get("hosts", 0)
-    dst_hosts = stats.get("hosts", 0)
-    if src_hosts > 0 and dst_hosts < src_hosts and "hosts" in attempted_tables:
-        hint = (table_first_errors.get("hosts") or "")[:300]
-        log(
-            f"WARNING hosts incomplete: {dst_hosts}/{src_hosts} copied"
-            + (f" — {hint}" if hint else "")
-        )
+        for table in STRICT_COMPLETE_TABLES:
+            src_n = source_counts.get(table, 0)
+            dst_n = stats.get(table, 0)
+            if src_n > 0 and dst_n < src_n and table in attempted_tables:
+                hint = (table_first_errors.get(table) or "")[:400]
+                raise RuntimeError(
+                    f"Migration incomplete: {table} copied {dst_n}/{src_n} rows"
+                    + (f". First error: {hint}" if hint else "")
+                    + ". Nothing should be lost — fix and retry."
+                )
 
     report = build_copy_report(source_counts, stats)
+    report["source_counts"] = dict(source_counts)
+    report["copied_counts"] = dict(stats)
     for item in report.get("incomplete", []):
         tbl = item["table"]
-        if tbl in SUBSCRIPTION_TABLES:
+        if tbl in SUBSCRIPTION_TABLES or tbl in STRICT_COMPLETE_TABLES:
             log(
                 f"INCOMPLETE {tbl}: {item['copied']}/{item['source']} copied "
                 f"({item['missing']} missing) — check row-skip errors above"

@@ -106,10 +106,79 @@ def test_resolve_container_cert_path():
     print("OK: resolve container SSL path to host")
 
 
+def test_strict_complete_hosts_fails_hard():
+    """Partial hosts copy must abort when fail_hard (change-DB completeness)."""
+    import tempfile
+    import sqlite3
+    from app.services.native_migration.adapters import SqliteReader, SqliteWriter, copy_tables_universal
+
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "src.db"
+        dst = Path(td) / "dst.db"
+        for path in (src, dst):
+            conn = sqlite3.connect(str(path))
+            conn.executescript("""
+                CREATE TABLE hosts (
+                    id INTEGER PRIMARY KEY,
+                    remark TEXT NOT NULL,
+                    address TEXT NOT NULL,
+                    security TEXT,
+                    fingerprint TEXT,
+                    priority INTEGER,
+                    random_user_agent INTEGER,
+                    use_sni_as_host INTEGER,
+                    is_disabled INTEGER
+                );
+                CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT);
+            """)
+            if path == src:
+                conn.execute(
+                    "INSERT INTO hosts (remark, address, security, fingerprint, priority, random_user_agent, use_sni_as_host, is_disabled) "
+                    "VALUES ('a','1.1.1.1','inbound_default','none',0,0,0,0)"
+                )
+                conn.execute(
+                    "INSERT INTO hosts (remark, address, security, fingerprint, priority, random_user_agent, use_sni_as_host, is_disabled) "
+                    "VALUES ('b','2.2.2.2','inbound_default','none',0,0,0,0)"
+                )
+                conn.execute("INSERT INTO users (username) VALUES ('u1')")
+            conn.commit()
+            conn.close()
+
+        # Writer that rejects second host insert
+        class FlakyWriter(SqliteWriter):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                self._n = 0
+
+            def insert(self, table, columns, values):
+                if table == "hosts":
+                    self._n += 1
+                    if self._n > 1:
+                        raise RuntimeError("forced host skip")
+                return super().insert(table, columns, values)
+
+        reader = SqliteReader(str(src))
+        writer = FlakyWriter(str(dst))
+        logs = []
+        try:
+            raised = False
+            try:
+                copy_tables_universal(reader, writer, logs.append, fail_hard=True)
+            except RuntimeError as e:
+                raised = True
+                assert "hosts" in str(e).lower() or "incomplete" in str(e).lower()
+            assert raised, "expected fail_hard on incomplete hosts"
+        finally:
+            reader.close()
+            writer.close()
+    print("OK: strict complete hosts fails hard")
+
+
 if __name__ == "__main__":
     test_detect_db_type_sqlalchemy_beats_pgadmin()
     test_finalize_sqlite_to_timescaledb_url()
     test_finalize_prefers_install_url_over_sqlite_merge()
     test_sanitize_ssl_keeps_valid_files()
     test_resolve_container_cert_path()
+    test_strict_complete_hosts_fails_hard()
     print("\nAll env_finalize tests passed")

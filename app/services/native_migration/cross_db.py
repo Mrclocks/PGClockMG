@@ -268,9 +268,12 @@ async def run_two_phase_migration(
             stamp_alembic=False,
         )
         migrator.job.log(
-            f"Two-phase done: users={stats.get('users', 0)} admins={stats.get('admins', 0)}"
+            f"Two-phase done: users={stats.get('users', 0)} admins={stats.get('admins', 0)} "
+            f"hosts={stats.get('hosts', 0)} groups={stats.get('groups', 0)} nodes={stats.get('nodes', 0)}"
         )
         await _flush_pg_type_caches(migrator, target_db)
+        migrator.copy_stats = stats
+        migrator.copy_report = getattr(migrator, "copy_report", None) or {}
         return stats
     finally:
         container = (staging_conn or {}).get("_ephemeral_container")

@@ -944,6 +944,19 @@ function showRestoreDone(result) {
     link.href = url || '#';
     link.textContent = t('restore.openPanel');
   }
+  const msg = document.getElementById('restoreDoneMsg');
+  if (msg) {
+    const counts = access.verified_counts || access.copy_stats || {};
+    const parts = ['users', 'hosts', 'groups', 'nodes', 'inbounds', 'admins']
+      .filter(k => counts[k] != null)
+      .map(k => `${k}=${counts[k]}`);
+    const convert = access.auto_db_convert
+      ? ` (${access.backup_db || '?'} → ${access.final_db || '?'})`
+      : '';
+    msg.textContent = parts.length
+      ? `${t('restore.verifiedCounts') || 'Verified'}: ${parts.join(', ')}${convert}`
+      : (t('restore.doneTitle') || '');
+  }
   renderGuideSections(document.getElementById('restoreAccessNotes'), access);
   const tip = document.getElementById('restoreUninstallTip');
   const btn = document.getElementById('btnUninstallRestore');

@@ -827,6 +827,9 @@ def finalize_pasarguard_env_after_restore(
             text = _set_env_var_simple(text, "MYSQL_ROOT_PASSWORD", root_pw)
 
     for key in ("UVICORN_PORT", "UVICORN_HOST", "UVICORN_ROOT_PATH", "ALLOWED_ORIGINS"):
+        # Keep backup panel port/host when present — change-DB must match old panel
+        if read_env_var(text, key):
+            continue
         val = read_env_var(install_env_snapshot, key)
         if val:
             text = _set_env_var_simple(text, key, val)

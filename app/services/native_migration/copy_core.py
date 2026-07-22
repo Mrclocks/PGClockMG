@@ -66,7 +66,41 @@ MIGRATION_ABORT_IF_ZERO = frozenset({
     "inbounds",
     "groups",
     "nodes",
+    "hosts",
+    "admins",
+    "settings",
 })
+
+# When fail_hard: abort if any of these copy fewer rows than source (partial = fail)
+STRICT_COMPLETE_TABLES = frozenset({
+    "users",
+    "hosts",
+    "inbounds",
+    "groups",
+    "nodes",
+    "admins",
+    "settings",
+    "users_groups_association",
+    "inbounds_groups_association",
+    "exclude_inbounds_association",
+    "core_configs",
+    "client_templates",
+    "user_templates",
+})
+
+# Tables verified after change-DB / restore convert
+VERIFY_TABLES = (
+    "users",
+    "hosts",
+    "groups",
+    "nodes",
+    "inbounds",
+    "admins",
+    "settings",
+    "users_groups_association",
+    "inbounds_groups_association",
+    "core_configs",
+)
 
 # PasarGuard ALPN enum labels (Marzban aliases → canonical)
 HOST_ALPN_MAP = {
