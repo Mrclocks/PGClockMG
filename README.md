@@ -8,7 +8,7 @@
 
 **مهاجرت پنل‌های VPN به PasarGuard — ویزارد وب روی سرور خودتان**
 
-`v2.5.5` · پورت `7000` · FA / EN / RU
+`v2.5.6` · پورت `7000` · FA / EN / RU
 
 </div>
 
@@ -93,3 +93,4 @@ systemctl stop pg-migrator && systemctl disable pg-migrator
 **MIT** — استفاده با مسئولیت خودتان
 
 </div>
+

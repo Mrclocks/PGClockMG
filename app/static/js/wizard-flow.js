@@ -50,20 +50,57 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
+function writeClipboard(text) {
+  // navigator.clipboard is only available in secure contexts (https or localhost).
+  // The wizard is usually served over http://SERVER_IP:7000, so fall back to
+  // the legacy execCommand('copy') via a temporary textarea.
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text);
+  }
+  return new Promise((resolve, reject) => {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '0';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      ok ? resolve() : reject(new Error('execCommand copy failed'));
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
 async function copyText(codeOrId, raw) {
   const el = typeof codeOrId === 'string' ? document.getElementById(codeOrId) : null;
-  const text = raw != null ? String(raw) : (el?.textContent || codeOrId || '');
+  const text = (raw != null ? String(raw) : (el?.textContent || codeOrId || '')).trim();
+  // Capture the button synchronously — `event` is not reliable after an await.
+  const btn = (typeof event !== 'undefined' && (event?.currentTarget || event?.target)) || null;
+  const flash = (label, cls) => {
+    if (!btn || !btn.classList) return;
+    const prev = btn.dataset.origLabel || btn.textContent;
+    btn.dataset.origLabel = prev;
+    btn.textContent = label;
+    if (cls) btn.classList.add(cls);
+    setTimeout(() => {
+      btn.textContent = btn.dataset.origLabel || prev;
+      if (cls) btn.classList.remove(cls);
+    }, 1600);
+  };
   try {
-    await navigator.clipboard.writeText(text.trim());
-    const btn = (typeof event !== 'undefined' && event?.currentTarget) || null;
-    if (btn && btn.classList) {
-      const prev = btn.textContent;
-      btn.textContent = t('copied');
-      btn.classList.add('copied');
-      setTimeout(() => { btn.textContent = prev; btn.classList.remove('copied'); }, 1600);
-    }
+    await writeClipboard(text);
+    flash(t('copied'), 'copied');
   } catch (e) {
-    alert(text);
+    // Last resort: show the text so the user can copy manually.
+    flash(t('copyFailed') || 'Copy failed', 'copy-failed');
+    window.prompt(t('copy') || 'Copy', text);
   }
 }
 

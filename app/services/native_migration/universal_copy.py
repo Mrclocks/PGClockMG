@@ -41,6 +41,35 @@ async def copy_database_universal(
 
     try:
         migrator.job.log(f"Universal copy: {source_db} → {target_db}")
+        # Diagnostics: show exactly where we read from and write to, so a
+        # "success but empty panel" can be traced to a wrong DB/host/user.
+        try:
+            if source_db == "sqlite":
+                migrator.job.log(f"  source: sqlite file {reader_path}")
+            else:
+                migrator.job.log(
+                    "  source: {db} {u}@{h}:{p}/{n}".format(
+                        db=source_db,
+                        u=source_conn.get("user"),
+                        h=source_conn.get("host"),
+                        p=source_conn.get("port"),
+                        n=source_conn.get("database"),
+                    )
+                )
+            if target_db == "sqlite":
+                migrator.job.log(f"  target: sqlite file {target_path}")
+            else:
+                migrator.job.log(
+                    "  target: {db} {u}@{h}:{p}/{n}".format(
+                        db=target_db,
+                        u=target_conn.get("user"),
+                        h=target_conn.get("host"),
+                        p=target_conn.get("port"),
+                        n=target_conn.get("database"),
+                    )
+                )
+        except Exception:
+            pass
         stats, report = copy_tables_universal(
             reader, writer, log, source_version, fail_hard=fail_hard,
             stamp_alembic=stamp_alembic,
@@ -51,6 +80,16 @@ async def copy_database_universal(
             f"Copy complete: {total} rows across {len(stats)} tables "
             f"(source: {Path(source_path).name})"
         )
+        # Highlight the entities the operator actually cares about.
+        key_tables = [
+            "admins", "users", "hosts", "inbounds", "nodes",
+            "core_configs", "groups",
+        ]
+        summary = ", ".join(
+            f"{name}={stats[name]}" for name in key_tables if name in stats
+        )
+        if summary:
+            migrator.job.log(f"Key entities copied: {summary}")
         if report.get("has_gaps"):
             migrator.job.log(
                 "WARNING: copy report has gaps — "

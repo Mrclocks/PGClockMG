@@ -537,10 +537,39 @@ class PostgresWriter(TableWriter):
         self._enum_labels: dict[str, frozenset[str]] = {}
         self._bulk_prepared = False
         self._bulk_load_active = False
+        self._fk_disabled = False
+
+    def _note(self, msg: str) -> None:
+        fn = getattr(self, "_log", None)
+        if callable(fn):
+            try:
+                fn(msg)
+            except Exception:
+                pass
+
+    def _set_replication_role(self, role: str) -> bool:
+        """Best-effort SET session_replication_role. Requires superuser/replication
+        rights; if it fails we roll back so the connection is never left in an
+        aborted-transaction state, and the caller falls back to parent-first order."""
+        try:
+            cur = self._conn.cursor()
+            cur.execute(
+                self._psql.SQL("SET session_replication_role = {}").format(
+                    self._psql.Literal(role)
+                )
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+            self._note(f"session_replication_role={role} not applied ({exc})")
+            return False
 
     def prepare_replace(self, tables: list[str]) -> None:
-        """Wipe all copy targets once. Per-table TRUNCATE CASCADE was wiping users/admins
-        when a later parent table (e.g. admin_roles) was truncated."""
+        """Wipe all copy targets once, up front. Per-table TRUNCATE CASCADE was wiping
+        users/admins when a later parent table (e.g. admin_roles) was truncated."""
         existing = []
         for t in tables:
             safe = "".join(c for c in t if c.isalnum() or c == "_")
@@ -550,9 +579,18 @@ class PostgresWriter(TableWriter):
                 existing.append(t)
         if not existing:
             return
+        # Best-effort: disable FK triggers so insert order cannot cause FK errors.
+        # If we are not superuser this is a no-op and we rely on parent-first TABLE_ORDER.
+        self._fk_disabled = self._set_replication_role("replica")
+        self._note(
+            "FK enforcement during copy: "
+            + (
+                "disabled (session_replication_role=replica)"
+                if self._fk_disabled
+                else "ENABLED — relying on parent-first table order"
+            )
+        )
         cur = self._conn.cursor()
-        # Disable FK triggers so TRUNCATE order does not matter; we refill in TABLE_ORDER.
-        cur.execute("SET session_replication_role = 'replica'")
         idents = self._psql.SQL(", ").join(self._psql.Identifier(t) for t in existing)
         cur.execute(
             self._psql.SQL("TRUNCATE TABLE {} RESTART IDENTITY CASCADE").format(idents)
@@ -563,18 +601,20 @@ class PostgresWriter(TableWriter):
         self._bulk_load_active = True
 
     def begin_bulk_load(self) -> None:
-        cur = self._conn.cursor()
-        cur.execute("SET session_replication_role = 'replica'")
-        self._conn.commit()
+        # If prepare_replace already put us in replica mode, keep it (session-level
+        # SET survives COMMIT). Otherwise try once more; harmless if it fails.
+        if not getattr(self, "_fk_disabled", False):
+            self._fk_disabled = self._set_replication_role("replica")
         self._bulk_load_active = True
 
     def end_bulk_load(self) -> None:
         if not getattr(self, "_bulk_load_active", False):
             return
-        cur = self._conn.cursor()
-        cur.execute("SET session_replication_role = 'origin'")
+        if getattr(self, "_fk_disabled", False):
+            self._set_replication_role("origin")
         self._conn.commit()
         self._bulk_load_active = False
+        self._fk_disabled = False
 
     def truncate(self, table: str) -> None:
         if self._bulk_prepared:
@@ -1070,6 +1110,11 @@ def copy_tables_universal(
 ) -> tuple[dict[str, int], dict]:
     """Copy shared PasarGuard/Marzban tables from any reader to any writer."""
     stats: dict[str, int] = {}
+    # Let writers emit diagnostics (e.g. whether FK enforcement was disabled).
+    try:
+        setattr(writer, "_log", log)
+    except Exception:
+        pass
     source_tables = reader.source_tables()
     source_counts: dict[str, int] = {}
     attempted_tables: set[str] = set()
@@ -1114,6 +1159,14 @@ def copy_tables_universal(
             log(f"Pre-wiped {len(wipe_tables)} target tables before copy (safe bulk replace)")
         except Exception as exc:
             log(f"Bulk prepare_replace note: {str(exc)[:200]} — falling back to per-table truncate")
+            # Never leave the connection in an aborted-transaction state.
+            for meth in ("rollback",):
+                fn = getattr(getattr(writer, "_conn", None), meth, None)
+                if callable(fn):
+                    try:
+                        fn()
+                    except Exception:
+                        pass
 
     try:
         writer.begin_bulk_load()

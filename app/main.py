@@ -25,7 +25,7 @@ from app.services.pg_restore import (
 from app.services.self_uninstall import uninstall_preview, schedule_self_uninstall
 from app.config import WEB_PORT
 
-APP_VERSION = "2.5.5"
+APP_VERSION = "2.5.6"
 app = FastAPI(title="PG-Migrator", version=APP_VERSION)
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -332,4 +332,5 @@ async def api_self_uninstall_preview():
 async def api_self_uninstall():
     """Remove MrClock-MG service and /opt/pg-migrator after a short delay."""
     return await schedule_self_uninstall(delay_sec=2.0)
+
 

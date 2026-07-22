@@ -749,6 +749,97 @@ def test_postgres_writer_truncate_noop_after_bulk_prepare():
     print("OK: postgres_writer_truncate_noop_after_bulk_prepare")
 
 
+def test_postgres_writer_prepare_replace_survives_non_superuser():
+    """When SET session_replication_role is denied (non-superuser), prepare_replace
+    must NOT raise and must NOT leave the connection in an aborted-transaction state:
+    it rolls back, still TRUNCATEs, and relies on parent-first TABLE_ORDER instead."""
+    import types
+    import sys as _sys
+
+    fake_psycopg2 = types.ModuleType("psycopg2")
+
+    class _FakeCursor:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def execute(self, sql, params=None):
+            text = getattr(sql, "text", str(sql))
+            self.conn.executed.append(text)
+            if "session_replication_role" in text:
+                self.conn.aborted = True
+                raise RuntimeError("permission denied to set parameter")
+
+        def fetchall(self):
+            return []
+
+        def close(self):
+            pass
+
+    class _FakeConn:
+        def __init__(self):
+            self.executed = []
+            self.rolled = 0
+            self.committed = 0
+            self.aborted = False
+
+        def cursor(self):
+            return _FakeCursor(self)
+
+        def commit(self):
+            if self.aborted:
+                raise RuntimeError("current transaction is aborted")
+            self.committed += 1
+
+        def rollback(self):
+            self.rolled += 1
+            self.aborted = False
+
+    fake_psycopg2.connect = lambda **kw: _FakeConn()
+    fake_sql_mod = types.ModuleType("psycopg2.sql")
+
+    class _SQL:
+        def __init__(self, text):
+            self.text = text
+
+        def format(self, *a, **kw):
+            return self
+
+        def join(self, items):
+            return self
+
+    fake_sql_mod.Identifier = lambda name: name
+    fake_sql_mod.SQL = _SQL
+    fake_sql_mod.Literal = lambda v: v
+    fake_sql_mod.Placeholder = lambda: "%s"
+    fake_psycopg2.sql = fake_sql_mod
+    _sys.modules["psycopg2"] = fake_psycopg2
+    _sys.modules["psycopg2.sql"] = fake_sql_mod
+
+    mod_name = "app.services.native_migration.adapters"
+    if mod_name in _sys.modules:
+        del _sys.modules[mod_name]
+    from app.services.native_migration.adapters import PostgresWriter
+
+    writer = PostgresWriter({
+        "host": "x", "port": 5432, "database": "x", "user": "x", "password": "x",
+    })
+    writer.target_columns = lambda t: {"id": "integer"}
+
+    # Must not raise even though SET session_replication_role is denied.
+    writer.prepare_replace(["admins", "users"])
+
+    assert writer._fk_disabled is False, "should detect FK-disable is unavailable"
+    assert writer._bulk_prepared is True, "bulk prepare must still complete"
+    assert writer._conn.rolled >= 1, "must rollback after failed SET (no aborted txn)"
+    assert any("TRUNCATE" in s for s in writer._conn.executed), "must still TRUNCATE targets"
+    assert writer._conn.committed >= 1, "commit must succeed after rollback"
+
+    # begin/end must be safe no-ops (no superuser) and not raise.
+    writer.begin_bulk_load()
+    writer.end_bulk_load()
+    print("OK: postgres_writer_prepare_replace_survives_non_superuser")
+
+
 def test_admin_roles_before_admins_in_table_order():
     from app.services.native_migration.copy_core import TABLE_ORDER
 
@@ -970,6 +1061,7 @@ if __name__ == "__main__":
     test_build_copy_report()
     test_no_duplicate_methods_in_adapters()
     test_postgres_writer_truncate_noop_after_bulk_prepare()
+    test_postgres_writer_prepare_replace_survives_non_superuser()
     test_admin_roles_before_admins_in_table_order()
     test_admin_roles_copied_before_admins_fk()
     test_prepare_replace_blocks_cascade_wipe()
