@@ -1069,9 +1069,11 @@ def copy_tables_universal(
                 errors += 1
                 if first_error is None:
                     first_error = row_err
-                log_limit = errors <= 20 or table in SUBSCRIPTION_TABLES
+                log_limit = errors <= 3 or table in SUBSCRIPTION_TABLES or table in STRICT_COMPLETE_TABLES
                 if log_limit:
                     log(f"Row skip {table}: {(row_err or '')[:200]}")
+                elif errors == 4:
+                    log(f"Row skip {table}: … further skips suppressed (non-critical orphans)")
         stats[table] = count
         if first_error:
             table_first_errors[table] = first_error

@@ -267,6 +267,18 @@ async def run_two_phase_migration(
             fail_hard=True,
             stamp_alembic=False,
         )
+        # Pin alembic_version to head so panel does not re-run old migrations over data
+        try:
+            from app.services.pasarguard_ops import get_alembic_head_revision, set_target_alembic_version
+
+            head = await get_alembic_head_revision(migrator)
+            if head:
+                if await set_target_alembic_version(migrator, target_db, head):
+                    migrator.job.log(f"Pinned alembic_version to head ({head}) after data copy")
+                else:
+                    migrator.job.log("Warning: could not pin alembic_version after copy")
+        except Exception as e:
+            migrator.job.log(f"Alembic pin note: {e}")
         migrator.job.log(
             f"Two-phase done: users={stats.get('users', 0)} admins={stats.get('admins', 0)} "
             f"hosts={stats.get('hosts', 0)} groups={stats.get('groups', 0)} nodes={stats.get('nodes', 0)}"

@@ -662,6 +662,13 @@ async def _maybe_cross_db_after_restore(
         await run_cross_db_migration(mini, path, backup_db, target_db)
         stats = getattr(mini, "copy_stats", None) or {}
         report = getattr(mini, "copy_report", None) or {}
+        # Remember credentials that actually worked during convert
+        if target_db != "sqlite":
+            report["live_admin"] = {
+                "user": mig_params.get("target_db_user"),
+                "password": mig_params.get("target_db_password"),
+                "database": mig_params.get("target_db_name") or db_name or "pasarguard",
+            }
         job.result = {**(job.result or {}), "copy_stats": stats, "copy_report": report}
         job.log(f"DB convert finished: now {target_db}")
         return target_db, stats, report
@@ -972,13 +979,32 @@ async def _count_pg_table(
     safe = "".join(c for c in table if c.isalnum() or c == "_")
     if safe != table:
         return -1
+    cwd = str(PASARGUARD_DIR)
     cmd = [
         "docker", "compose", "exec", "-T",
         "-e", f"PGPASSWORD={password}",
         svc, "psql", "-t", "-A", "-U", user, "-d", db_name,
         "-c", f'SELECT COUNT(*) FROM "{safe}";',
     ]
-    ok, out = await _run(job, cmd, timeout=60)
+    ok, out = await _run(job, cmd, cwd=cwd, timeout=60)
+    # Fallback: named container when compose cwd/project is confused
+    if not ok or "no configuration file" in (out or "").lower():
+        ok2, names = await _run(
+            job, ["docker", "ps", "--format", "{{.Names}}"], timeout=20,
+        )
+        container = None
+        for line in (names or "").splitlines():
+            n = line.strip()
+            if svc in n.lower() or (svc == "timescaledb" and "timescale" in n.lower()):
+                container = n
+                break
+        if container:
+            cmd2 = [
+                "docker", "exec", "-e", f"PGPASSWORD={password}",
+                container, "psql", "-t", "-A", "-U", user, "-d", db_name,
+                "-c", f'SELECT COUNT(*) FROM "{safe}";',
+            ]
+            ok, out = await _run(job, cmd2, timeout=60)
     if not ok:
         return -1
     for line in (out or "").splitlines():
@@ -1026,20 +1052,27 @@ async def _verify_restored_data(
         svc = await _detect_db_container(job, final_db)
         if not svc:
             svc = "timescaledb" if final_db == "timescaledb" else "postgresql"
-        # Probe which service actually answers
+        # Probe which service actually answers (try install user, then live_admin)
         probed = None
-        for cand in ([svc, "timescaledb", "postgresql"] if final_db in ("postgresql", "timescaledb") else [svc]):
+        candidates_svc = [svc, "timescaledb", "postgresql"] if final_db in ("postgresql", "timescaledb") else [svc]
+        pwd_tries = [password]
+        # If install password fails, try common env aliases already tried via caller
+        for cand in candidates_svc:
             if not cand:
                 continue
-            n = await _count_pg_table(job, cand, password, user, db_name, "users")
-            if n >= 0:
-                probed = cand
-                actual["users"] = n
+            for pwd in pwd_tries:
+                n = await _count_pg_table(job, cand, pwd, user, db_name, "users")
+                if n >= 0:
+                    probed = cand
+                    password = pwd
+                    actual["users"] = n
+                    break
+            if probed:
                 break
         if not probed:
             raise RuntimeError(
-                f"Could not verify restored data — DB service for {final_db} is not reachable. "
-                "Restore cannot be marked successful without row counts."
+                f"Could not verify restored data — DB service for {final_db} is not reachable "
+                f"(compose cwd / auth). Tried user={user}."
             )
         for table in tables_to_check:
             if table == "users" and "users" in actual:
@@ -1068,7 +1101,7 @@ async def _verify_restored_data(
                 svc, mysql_cmd, "-N", "-u", user, db_name,
                 "-e", f"SELECT COUNT(*) FROM `{safe}`;",
             ]
-            ok, out = await _run(job, cmd, timeout=60)
+            ok, out = await _run(job, cmd, cwd=str(PASARGUARD_DIR), timeout=60)
             if ok:
                 for line in (out or "").splitlines():
                     if line.strip().isdigit():
@@ -1385,14 +1418,40 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         elif target_db and soft_db_family(restore_engine, target_db):
             final_db = target_db
 
+        # After convert: force DB roles to match the password we keep in .env (install)
+        # Convert may have temporarily synced a different resolved password.
+        final_engine_pre = final_db or target_db or restore_engine or backup_db
+        live_admin = (copy_report or {}).get("live_admin") or {}
+        verify_user = (
+            cur_user
+            or live_admin.get("user")
+            or "pasarguard"
+        )
+        verify_pass = cur_db_pass or cur_pg_pass or live_admin.get("password") or ""
+        verify_db = cur_name or live_admin.get("database") or "pasarguard"
+        if (
+            final_engine_pre in ("postgresql", "timescaledb")
+            and verify_pass
+            and (needs_convert or soft_db_family(restore_engine, target_db))
+        ):
+            svc = await _detect_db_container(job, final_engine_pre)
+            if svc:
+                job.log(
+                    f"Aligning DB roles to install password (user={verify_user}) "
+                    "so .env and Timescale/Postgres match"
+                )
+                await _sync_pg_role_passwords(
+                    job, svc, verify_pass, verify_user, verify_db,
+                )
+
         job.set_progress(88, "Finalizing .env for target database...")
         await _finalize_env_after_restore(
             job,
             install_env_snapshot,
             final_db or target_db or restore_engine or backup_db,
-            cur_db_pass or cur_pg_pass,
-            cur_user or "pasarguard",
-            cur_name or "pasarguard",
+            verify_pass,
+            verify_user,
+            verify_db,
         )
         _env_completeness_checklist(
             job,
@@ -1426,34 +1485,59 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
 
         await _heal_panel_auth_if_needed(
             job,
-            cur_db_pass or cur_pg_pass or "",
-            cur_user or "postgres",
-            cur_name or "pasarguard",
+            verify_pass,
+            verify_user,
+            verify_db,
             final_db or restore_engine or "",
         )
 
-        # Best-effort schema align
+        # Best-effort schema align — use live credentials, never blind postgres/default
         final_engine = final_db or installed_db or backup_db
-        mini = _RestoreMini(job, {
+        mini_params: dict = {
             "target_db": final_engine,
-            "target_db_password": cur_db_pass or cur_pg_pass,
-            "target_db_user": cur_user,
-            "target_db_name": cur_name or "pasarguard",
+            "target_db_password": verify_pass,
+            "target_db_user": verify_user,
+            "target_db_name": verify_db,
             "target_db_host": "127.0.0.1",
-        })
-        try:
-            from app.services.pasarguard_ops import sync_alembic_for_startup
+            "_auto_db_credentials": True,
+        }
+        if final_engine in ("postgresql", "timescaledb"):
+            mini_params["_resolved_target_conn"] = {
+                "user": verify_user,
+                "password": verify_pass,
+                "database": verify_db,
+                "host": "127.0.0.1",
+                "port": "5432",
+                "db_type": final_engine,
+            }
+        mini = _RestoreMini(job, mini_params)
+        # Convert already upgraded to head + pinned alembic_version — only heal if needed
+        if not needs_convert:
+            try:
+                from app.services.pasarguard_ops import sync_alembic_for_startup
 
-            await sync_alembic_for_startup(mini, final_engine)
-        except Exception as e:
-            job.log(f"Alembic sync note: {e}")
+                await sync_alembic_for_startup(mini, final_engine)
+            except Exception as e:
+                job.log(f"Alembic sync note: {e}")
+        else:
+            job.log("Skipping full alembic re-sync after convert (schema already at head)")
+
+        # Re-read password from finalized .env in case finalize adjusted it
+        env_now = _read_current_env()
+        verify_pass = (
+            read_env_var(env_now, "DB_PASSWORD")
+            or read_env_var(env_now, "POSTGRES_PASSWORD")
+            or verify_pass
+        )
+        verify_user = read_env_var(env_now, "DB_USER") or verify_user
+        verify_db = read_env_var(env_now, "DB_NAME") or verify_db
 
         verified = await _verify_restored_data(
             job,
             final_engine,
-            cur_db_pass or cur_pg_pass or "",
-            cur_user or "pasarguard",
-            cur_name or "pasarguard",
+            verify_pass,
+            verify_user,
+            verify_db,
             expected_counts,
             require_any_data=bool(expected_counts) or bool(analysis.get("table_counts")),
         )
