@@ -237,13 +237,19 @@ class SqliteWriter(TableWriter):
         pass
 
     def set_alembic_version(self, version: str) -> None:
+        from app.services.native_migration.source_version import alembic_revisions_for_stamp
+
+        revisions = alembic_revisions_for_stamp(version)
+        if not revisions:
+            return
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32))"
         )
         self._conn.execute("DELETE FROM alembic_version")
-        self._conn.execute(
-            "INSERT INTO alembic_version (version_num) VALUES (?)", (version,)
-        )
+        for rev in revisions:
+            self._conn.execute(
+                "INSERT INTO alembic_version (version_num) VALUES (?)", (rev,)
+            )
 
     def commit(self) -> None:
         self._conn.commit()
@@ -435,11 +441,17 @@ class MysqlWriter(TableWriter):
         cur.execute(f"ALTER TABLE `{table}` AUTO_INCREMENT = {int(nxt)}")
 
     def set_alembic_version(self, version: str) -> None:
+        from app.services.native_migration.source_version import alembic_revisions_for_stamp
+
+        revisions = alembic_revisions_for_stamp(version)
+        if not revisions:
+            return
         cur = self._conn.cursor()
         cur.execute("DELETE FROM alembic_version")
-        cur.execute(
-            "INSERT INTO alembic_version (version_num) VALUES (%s)", (version,)
-        )
+        for rev in revisions:
+            cur.execute(
+                "INSERT INTO alembic_version (version_num) VALUES (%s)", (rev,)
+            )
 
     def close(self) -> None:
         self._conn.close()
@@ -628,11 +640,17 @@ class PostgresWriter(TableWriter):
         )
 
     def set_alembic_version(self, version: str) -> None:
+        from app.services.native_migration.source_version import alembic_revisions_for_stamp
+
+        revisions = alembic_revisions_for_stamp(version)
+        if not revisions:
+            return
         cur = self._conn.cursor()
         cur.execute("DELETE FROM alembic_version")
-        cur.execute(
-            "INSERT INTO alembic_version (version_num) VALUES (%s)", (version,)
-        )
+        for rev in revisions:
+            cur.execute(
+                "INSERT INTO alembic_version (version_num) VALUES (%s)", (rev,)
+            )
 
     def commit(self) -> None:
         self._conn.commit()
@@ -925,6 +943,7 @@ def copy_tables_universal(
     log: Callable[[str], None],
     source_version: str | None = None,
     fail_hard: bool = True,
+    stamp_alembic: bool = True,
 ) -> tuple[dict[str, int], dict]:
     """Copy shared PasarGuard/Marzban tables from any reader to any writer."""
     stats: dict[str, int] = {}
@@ -1049,9 +1068,19 @@ def copy_tables_universal(
             if verified >= 0:
                 stats[table] = verified
 
-    if source_version and source_version != "head":
-        writer.set_alembic_version(source_version)
-        writer.commit()
+    if stamp_alembic and source_version and source_version != "head":
+        from app.services.native_migration.source_version import alembic_revisions_for_stamp
+
+        revisions = alembic_revisions_for_stamp(source_version)
+        if revisions:
+            writer.set_alembic_version(source_version)
+            writer.commit()
+            log(f"alembic_version stamped: {', '.join(revisions)}")
+        else:
+            log(
+                "Skipping alembic_version stamp — target schema already at head "
+                f"(unparsed stamp {source_version[:64]!r})"
+            )
     else:
         writer.commit()
 

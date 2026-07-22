@@ -257,15 +257,15 @@ async def run_two_phase_migration(
         )
 
         migrator.job.set_progress(75, f"Phase 2: copy {inter_db} → {target_db}...")
-        head = await read_target_alembic_version(migrator, target_db)
         stats = await copy_database_universal(
             migrator,
             inter_path,
             inter_db,
             target_db,
-            head or "head",
+            "head",
             staging_conn=staging_conn,
             fail_hard=True,
+            stamp_alembic=False,
         )
         migrator.job.log(
             f"Two-phase done: users={stats.get('users', 0)} admins={stats.get('admins', 0)}"

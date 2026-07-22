@@ -21,6 +21,7 @@ async def copy_database_universal(
     source_version: str,
     staging_conn: dict | None = None,
     fail_hard: bool = True,
+    stamp_alembic: bool = True,
 ) -> dict[str, int]:
     """Copy data from any supported source engine to any supported target engine."""
     source_conn = staging_conn or get_source_connection(migrator.params)
@@ -42,6 +43,7 @@ async def copy_database_universal(
         migrator.job.log(f"Universal copy: {source_db} → {target_db}")
         stats, report = copy_tables_universal(
             reader, writer, log, source_version, fail_hard=fail_hard,
+            stamp_alembic=stamp_alembic,
         )
         migrator.copy_report = report
         total = sum(v for v in stats.values() if isinstance(v, int) and v >= 0)

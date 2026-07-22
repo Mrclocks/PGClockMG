@@ -44,11 +44,11 @@ def mysql_password_candidates(env_text: str | None) -> list[str]:
 
 def postgres_admin_users(env_text: str | None) -> list[str]:
     text = env_text or ""
-    return _unique_strings(
-        read_env_var(text, "POSTGRES_USER"),
-        "postgres",
+    users = _unique_strings(
         read_env_var(text, "DB_USER"),
+        read_env_var(text, "POSTGRES_USER"),
     )
+    return users or ["postgres"]
 
 
 def mysql_admin_users(env_text: str | None) -> list[str]:
@@ -239,11 +239,11 @@ async def sync_postgres_roles_to_app_password(
 
     roles = _unique_strings(
         read_env_var(text, "DB_USER"),
-        read_env_var(text, "POSTGRES_USER"),
-        "postgres",
-        "pasarguard",
         db_name,
     )
+    pg_user = read_env_var(text, "POSTGRES_USER")
+    if pg_user:
+        roles.insert(0, pg_user)
     migrator.job.log(f"Syncing PostgreSQL role passwords ({len(roles)} roles)...")
     lit = _lit(app_pwd)
     cwd = str(PASARGUARD_DIR)

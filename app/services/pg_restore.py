@@ -463,9 +463,12 @@ async def _sync_pg_role_passwords(
     if not password:
         return
     roles = []
-    for r in (user, "postgres", "pasarguard", db_name):
+    for r in (user, db_name):
         if r and r not in roles:
             roles.append(r)
+    pg_super = read_env_var(_read_current_env(), "POSTGRES_USER")
+    if pg_super and pg_super not in roles:
+        roles.append(pg_super)
     lit = _sql_literal(password)
     for role in roles:
         ok, out = await _run(
@@ -648,6 +651,13 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
             "رمز POSTGRES_PASSWORD در .env با رمز واقعی کانتینر TimescaleDB/PostgreSQL یکی نیست",
             "PgBouncer کش قدیمی دارد — ویزارد نقش‌ها را هم‌تراز و pgbouncer را ریستارت می‌کند",
             "بعد از ریستور postgres، globals.sql ممکن است نقش‌ها را با رمز بکاپ برگرداند",
+        ]
+    elif "character varying(32)" in low or "stringdatarighttruncation" in low:
+        fa = "خطای ثبت نسخه alembic بعد از کپی داده (نسخه نامعتبر)."
+        en = "Alembic version stamp failed after data copy (invalid revision string)."
+        causes_fa = [
+            "خروجی docker compose با نسخه alembic قاطی شده بود — در v2.3.5+ اصلاح شد",
+            "اسکیمای target قبلاً با alembic upgrade head ساخته شده و دیگر نیاز به stamp دستی نیست",
         ]
     elif "timescale" in low and "version" in low:
         fa = "نسخه TimescaleDB بکاپ با سرور هم‌خوان نیست."

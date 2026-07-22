@@ -39,8 +39,8 @@ def test_postgres_password_candidates_order():
 
 def test_postgres_admin_users():
     users = postgres_admin_users(ENV_PG)
-    assert users[0] == "postgres"
-    assert "pasarguard" in users
+    assert users[0] == "pasarguard"
+    assert "postgres" in users
     print("OK: postgres admin users")
 
 

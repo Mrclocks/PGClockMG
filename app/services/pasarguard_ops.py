@@ -389,7 +389,9 @@ async def read_target_alembic_version(migrator, target_db: str) -> str | None:
     if proc.returncode != 0:
         return None
     version = (stdout or b"").decode("utf-8", errors="ignore").strip()
-    return version or None
+    from app.services.native_migration.source_version import normalize_alembic_revision
+
+    return normalize_alembic_revision(version)
 
 
 async def run_alembic_upgrade(migrator) -> bool:
