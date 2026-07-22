@@ -56,7 +56,11 @@ function togglePassword(inputId, btn) {
   if (!el) return;
   const show = el.type === 'password';
   el.type = show ? 'text' : 'password';
-  btn.textContent = show ? '🙈' : '👁';
+  if (typeof icon === 'function') {
+    btn.innerHTML = show ? icon('eyeOff') : icon('eye');
+  } else {
+    btn.textContent = show ? 'hide' : 'show';
+  }
 }
 
 function getSourceEnvSummary() {
@@ -471,7 +475,7 @@ async function loadSystemCheck() {
     console.error(e);
     const el = document.getElementById('globalChecks');
     if (el) {
-      el.innerHTML += `<div class="check-item"><span class="check-icon">❌</span><div><div>Server check</div><div class="check-detail">${e.message}</div></div></div>`;
+      el.innerHTML += `<div class="check-item"><span class="check-icon">${statusIcon(false)}</span><div><div>Server check</div><div class="check-detail">${e.message}</div></div></div>`;
     }
   }
 }
@@ -720,14 +724,14 @@ async function selectPanel(id) {
   const notesEl = document.getElementById('panelInstallNotes');
   if (panel.prerequisites?.install_notes) {
     notesEl.classList.remove('hidden');
-    notesEl.innerHTML = `<strong>📋 ${t('step1.prereqTitle')}</strong><p style="margin-top:8px;font-size:0.9rem">${tr(panel.prerequisites.install_notes, lang)}</p>`;
+    notesEl.innerHTML = `<strong class="status-inline">${icon('list')} <span>${t('step1.prereqTitle')}</span></strong><p style="margin-top:8px;font-size:0.9rem">${tr(panel.prerequisites.install_notes, lang)}</p>`;
   } else notesEl.classList.add('hidden');
 
   const warnEl = document.getElementById('panelWarnings');
   const warnings = tr(panel.warnings, lang);
   if (Array.isArray(warnings) && warnings.length) {
     warnEl.classList.remove('hidden');
-    warnEl.innerHTML = warnings.map(w => `<p style="font-size:0.85rem;margin:4px 0">⚠️ ${w}</p>`).join('');
+    warnEl.innerHTML = warnings.map(w => `<p class="warn-line">${statusIcon('warn')}<span>${w}</span></p>`).join('');
   } else warnEl.classList.add('hidden');
 
   await renderPanelPrereqs(id);
@@ -751,7 +755,7 @@ async function renderPanelPrereqs(id) {
 
     prereqEl.innerHTML = data.checks.map(c => `
       <div class="check-item">
-        <span class="check-icon">${c.ok ? '✅' : (c.optional ? '⚠️' : '❌')}</span>
+        <span class="check-icon">${statusIcon(c.ok ? 'ok' : (c.optional ? 'warn' : false))}</span>
         <div>
           <div>${tr(c.label, lang)}</div>
           <div class="check-detail">${tr(c.detail, lang)}</div>
@@ -759,13 +763,13 @@ async function renderPanelPrereqs(id) {
       </div>`).join('');
 
     if (!data.ok) {
-      prereqEl.innerHTML += `<div class="info-box" style="margin-top:12px">💡 ${t('step1.uploadHint')}</div>`;
+      prereqEl.innerHTML += `<div class="info-box" style="margin-top:12px"><span class="status-inline">${icon('info')} <span>${t('step1.uploadHint')}</span></span></div>`;
     }
 
     document.getElementById('btnStep1').disabled = !!canProceedStep1();
     updateStepButtons();
   } catch (e) {
-    prereqEl.innerHTML = `<div class="check-item"><span class="check-icon">❌</span><div>Error</div></div>`;
+    prereqEl.innerHTML = `<div class="check-item"><span class="check-icon">${statusIcon(false)}</span><div>Error</div></div>`;
   }
 }
 
@@ -921,7 +925,7 @@ function renderSummary() {
   const warnEl = document.getElementById('finalWarnings');
   const warnings = tr(panel.warnings, lang);
   if (Array.isArray(warnings) && warnings.length) {
-    warnEl.innerHTML = warnings.map(w => `<p style="font-size:0.85rem;margin:4px 0">⚠️ ${w}</p>`).join('');
+    warnEl.innerHTML = warnings.map(w => `<p class="warn-line">${statusIcon('warn')}<span>${w}</span></p>`).join('');
     warnEl.classList.remove('hidden');
   } else warnEl.classList.add('hidden');
 }
@@ -1075,10 +1079,10 @@ function showSuccess(result) {
   const warnings = result?.warnings;
   if (warnings) {
     const w = tr(warnings, state.lang);
-    if (Array.isArray(w)) details = '<ul>' + w.map(x => `<li>⚠️ ${x}</li>`).join('') + '</ul>';
+    if (Array.isArray(w)) details = '<ul>' + w.map(x => `<li class="warn-line">${statusIcon('warn')}<span>${x}</span></li>`).join('') + '</ul>';
   }
   if (result?.redirect_installed) {
-    details += `<p>✅ Redirect server installed</p>`;
+    details += `<p class="status-inline">${statusIcon('ok')} <span>Redirect server installed</span></p>`;
   }
   if (result?.users_migrated) {
     details += `<p>${result.users_migrated} / ${result.users_total} users</p>`;
@@ -1186,7 +1190,7 @@ async function renderUploadSection() {
       const accept = (s.accept || ['.zip']).join(',');
       const reqLabel = s.required ? t('upload.required') : t('upload.optional');
       const st = (state.bundleStatus?.slots || []).find(x => x.id === s.id);
-      const done = st?.ok ? '✅' : s.required ? '⏳' : '○';
+      const done = statusIcon(st?.ok ? 'ok' : (s.required ? 'wait' : 'empty'));
       return `
         <div class="upload-slot ${st?.ok ? 'done' : ''}" data-slot="${s.id}">
           <div class="upload-slot-head">
@@ -1252,7 +1256,7 @@ async function uploadSlotFile(slot, file) {
 
     const bs = data.bundle_status || {};
     const ok = bs.complete;
-    status.textContent = `${ok ? '✅' : '⚠️'} ${file.name} ${t('uploaded')}`;
+    status.innerHTML = `<span class="status-inline">${statusIcon(ok ? 'ok' : 'warn')} <span>${file.name} ${t('uploaded')}</span></span>`;
     status.style.background = ok ? 'var(--success-bg)' : 'var(--warning-bg)';
     status.style.color = ok ? 'var(--success)' : 'var(--warning)';
 
@@ -1268,7 +1272,7 @@ async function uploadSlotFile(slot, file) {
     if (state.selectedPanel) await renderPanelPrereqs(state.selectedPanel.id);
     updateStepButtons();
   } catch (e) {
-    status.textContent = `❌ ${t('uploadErr')}: ${e.message}`;
+    status.innerHTML = `<span class="status-inline">${statusIcon(false)} <span>${t('uploadErr')}: ${e.message}</span></span>`;
     status.style.background = 'var(--error-bg)';
     status.style.color = 'var(--error)';
   }
@@ -1297,13 +1301,13 @@ function renderBundleStatus(bs) {
   const lang = state.lang;
   const rows = (bs.slots || []).map(s => {
     const label = s.label ? tr(s.label, lang) : t(`upload.slot.${s.id}`) || s.id;
-    const icon = s.ok ? '✅' : (s.required ? '❌' : '○');
+    const slotIcon = statusIcon(s.ok ? 'ok' : (s.required ? false : 'empty'));
     const via = s.via === 'bundle_zip' ? ` (${t('upload.viaZip')})` : '';
     return `<div class="check-item"><span class="check-icon">${icon}</span><div><div>${label}${via}</div><div class="check-detail">${s.filename || (s.required ? t('upload.missing') : t('upload.optional'))}</div></div></div>`;
   }).join('');
   const head = bs.complete
-    ? `<p style="color:var(--success);margin-bottom:8px">✅ ${t('upload.allReady')}</p>`
-    : `<p style="color:var(--warning);margin-bottom:8px">⏳ ${t('upload.waitingFiles')}</p>`;
+    ? `<p class="status-inline" style="color:var(--success);margin-bottom:8px">${statusIcon('ok')} <span>${t('upload.allReady')}</span></p>`
+    : `<p class="status-inline" style="color:var(--warning);margin-bottom:8px">${statusIcon('wait')} <span>${t('upload.waitingFiles')}</span></p>`;
   el.innerHTML = head + rows;
   el.classList.remove('hidden');
 }
@@ -1338,8 +1342,8 @@ function renderUploadInventory(data) {
     `<li><code>${m.from}</code> → <code>${m.to}</code></li>`
   ).join('');
 
-  const warnings = (a.warnings || []).map(w => `<p class="check-detail">⚠️ ${tr(w, lang)}</p>`).join('');
-  const missing = (a.missing || []).map(m => `<p class="check-detail">❌ ${tr(m, lang)}</p>`).join('');
+  const warnings = (a.warnings || []).map(w => `<p class="check-detail warn-line">${statusIcon('warn')}<span>${tr(w, lang)}</span></p>`).join('');
+  const missing = (a.missing || []).map(m => `<p class="check-detail warn-line">${statusIcon(false)}<span>${tr(m, lang)}</span></p>`).join('');
 
   el.innerHTML = `
     <h4>${t('upload.inventoryTitle')}</h4>

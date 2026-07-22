@@ -9,10 +9,12 @@ const I18N = {
     copy: 'Copy',
     dbRecommended: 'Recommended',
     uninstall: {
-      tip: 'When you are done, it is better to remove this wizard from the server.',
-      button: 'Remove MrClock-MG',
-      confirm: 'Remove MrClock-MG service and files from this server?',
-      scheduled: 'Uninstall started. This page will stop responding shortly.',
+      title: 'Please remove this wizard',
+      tip: 'For security and a clean server, remove MrClock-MG now. It is no longer needed after you finish.',
+      button: 'Remove MrClock-MG now',
+      confirm: 'Remove MrClock-MG service and all files from this server?',
+      scheduled: 'Removal started. This page will stop responding shortly.',
+      failed: 'Could not remove the wizard. Try again or run: systemctl stop pg-migrator && rm -rf /opt/pg-migrator',
     },
     finishModal: {
       title: 'Open panel?',
@@ -98,9 +100,9 @@ const I18N = {
       desc: 'Migration wizard for PasarGuard — check your server is ready.',
       info: 'Runs on your Ubuntu server with root access. Panel-specific requirements appear after you choose a source.',
       checks: [
-        ['🖥️', 'Ubuntu server', 'Wizard on port 7000'],
-        ['🔑', 'Root access', 'Required for .env & Docker'],
-        ['💾', 'Backup', 'Always backup before migrating'],
+        ['server', 'Ubuntu server', 'Wizard on port 7000'],
+        ['key', 'Root access', 'Required for .env & Docker'],
+        ['disk', 'Backup', 'Always backup before migrating'],
       ],
       start: 'Get Started',
       pasarguardCheck: 'PasarGuard on server',
@@ -181,7 +183,7 @@ const I18N = {
       h2: 'Review & Confirm',
       desc: 'Check the summary before starting.',
       redirect: 'Install redirect server to keep old 3x-ui subscription links working (recommended)',
-      start: '🚀 Start Migration',
+      start: 'Start Migration',
       back: '← Back',
       summary: {
         source: 'Source panel',
@@ -234,7 +236,7 @@ const I18N = {
       },
     },
     support: { full: 'Full', partial: 'Partial', experimental: 'Experimental', db_only: 'DB only' },
-    sub: { native: '✓ Links preserved', redirect: '✓ Links preserved via redirect', changed: '⚠ Links will change' },
+    sub: { native: 'Links preserved', redirect: 'Links preserved via redirect', changed: 'Links will change' },
     footer: { docs: 'PasarGuard Docs', github: 'GitHub' },
     uploading: 'Uploading',
     uploaded: 'uploaded',
@@ -324,10 +326,12 @@ const I18N = {
     copy: 'کپی',
     dbRecommended: 'توصیه‌شده',
     uninstall: {
-      tip: 'بعد از اتمام کار، بهتر است این ویزارد را از سرور حذف کنید.',
-      button: 'حذف MrClock-MG',
-      confirm: 'سرویس و فایل‌های MrClock-MG از این سرور حذف شود؟',
-      scheduled: 'حذف شروع شد. به‌زودی این صفحه از دسترس خارج می‌شود.',
+      title: 'حتماً این ویزارد را حذف کنید',
+      tip: 'برای امنیت و تمیزی سرور، الان MrClock-MG را حذف کنید. بعد از اتمام کار دیگر به آن نیاز ندارید.',
+      button: 'حذف همین حالا',
+      confirm: 'سرویس و همه فایل‌های MrClock-MG از این سرور حذف شود؟',
+      scheduled: 'حذف شروع شد. به‌زودی این صفحه قطع می‌شود.',
+      failed: 'حذف انجام نشد. دوباره تلاش کنید یا دستی بزنید: systemctl stop pg-migrator && rm -rf /opt/pg-migrator',
     },
     finishModal: {
       title: 'ورود به پنل؟',
@@ -413,9 +417,9 @@ const I18N = {
       desc: 'ویزارد مهاجرت به PasarGuard — آمادگی سرور را بررسی کنید.',
       info: 'روی سرور Ubuntu با دسترسی root اجرا می‌شود. نیازمندی‌های هر پنل پس از انتخاب مبدأ نمایش داده می‌شود.',
       checks: [
-        ['🖥️', 'سرور Ubuntu', 'ویزارد روی پورت ۷۰۰۰'],
-        ['🔑', 'دسترسی root', 'برای .env و Docker'],
-        ['💾', 'بکاپ', 'قبل از مهاجرت حتماً بکاپ بگیرید'],
+        ['server', 'سرور Ubuntu', 'ویزارد روی پورت ۷۰۰۰'],
+        ['key', 'دسترسی root', 'برای .env و Docker'],
+        ['disk', 'بکاپ', 'قبل از مهاجرت حتماً بکاپ بگیرید'],
       ],
       start: 'شروع',
       pasarguardCheck: 'PasarGuard روی سرور',
@@ -496,7 +500,7 @@ const I18N = {
       h2: 'تأیید نهایی',
       desc: 'خلاصه را بررسی کنید.',
       redirect: 'نصب redirect server برای حفظ لینک‌های قدیمی 3x-ui (توصیه‌شده)',
-      start: '🚀 شروع مهاجرت',
+      start: 'شروع مهاجرت',
       back: '→ بازگشت',
       summary: {
         source: 'پنل مبدأ',
@@ -546,7 +550,7 @@ const I18N = {
       },
     },
     support: { full: 'کامل', partial: 'جزئی', experimental: 'آزمایشی', db_only: 'فقط DB' },
-    sub: { native: '✓ لینک‌ها حفظ می‌شوند', redirect: '✓ لینک‌ها با redirect حفظ می‌شوند', changed: '⚠ لینک‌ها تغییر می‌کنند' },
+    sub: { native: 'لینک‌ها حفظ می‌شوند', redirect: 'لینک‌ها با redirect حفظ می‌شوند', changed: 'لینک‌ها تغییر می‌کنند' },
     footer: { docs: 'مستندات', github: 'GitHub' },
     uploading: 'در حال آپلود',
     uploaded: 'آپلود شد',
@@ -636,10 +640,12 @@ const I18N = {
     copy: 'Копировать',
     dbRecommended: 'Рекомендуется',
     uninstall: {
-      tip: 'После завершения лучше удалить этот мастер с сервера.',
-      button: 'Удалить MrClock-MG',
-      confirm: 'Удалить службу и файлы MrClock-MG с этого сервера?',
+      title: 'Удалите этот мастер',
+      tip: 'Для безопасности удалите MrClock-MG сейчас. После завершения он больше не нужен.',
+      button: 'Удалить сейчас',
+      confirm: 'Удалить службу и все файлы MrClock-MG с этого сервера?',
       scheduled: 'Удаление запущено. Страница скоро станет недоступна.',
+      failed: 'Не удалось удалить. Повторите или вручную: systemctl stop pg-migrator && rm -rf /opt/pg-migrator',
     },
     finishModal: {
       title: 'Открыть панель?',
@@ -725,9 +731,9 @@ const I18N = {
       desc: 'Мастер миграции в PasarGuard — проверьте готовность сервера.',
       info: 'Работает на Ubuntu с root. Требования панели появятся после выбора источника.',
       checks: [
-        ['🖥️', 'Сервер Ubuntu', 'Порт 7000'],
-        ['🔑', 'Root доступ', 'Для .env и Docker'],
-        ['💾', 'Резервная копия', 'Сделайте бэкап'],
+        ['server', 'Сервер Ubuntu', 'Порт 7000'],
+        ['key', 'Root доступ', 'Для .env и Docker'],
+        ['disk', 'Резервная копия', 'Сделайте бэкап'],
       ],
       start: 'Начать',
       pasarguardCheck: 'PasarGuard на сервере',
@@ -808,7 +814,7 @@ const I18N = {
       h2: 'Подтверждение',
       desc: 'Проверьте сводку.',
       redirect: 'Установить redirect server для старых ссылок 3x-ui (рекомендуется)',
-      start: '🚀 Начать миграцию',
+      start: 'Начать миграцию',
       back: '← Назад',
       summary: {
         source: 'Исходная панель',
@@ -858,7 +864,7 @@ const I18N = {
       },
     },
     support: { full: 'Полная', partial: 'Частичная', experimental: 'Эксперимент', db_only: 'Только БД' },
-    sub: { native: '✓ Ссылки сохранены', redirect: '✓ Ссылки через redirect', changed: '⚠ Ссылки изменятся' },
+    sub: { native: 'Ссылки сохранены', redirect: 'Ссылки через redirect', changed: 'Ссылки изменятся' },
     footer: { docs: 'Документация', github: 'GitHub' },
     uploading: 'Загрузка',
     uploaded: 'загружено',
@@ -1056,28 +1062,28 @@ function renderGlobalChecks() {
   if (!el) return;
   const checks = t('step0.checks');
   if (!Array.isArray(checks)) return;
-  let html = checks.map(([icon, title, detail]) => `
-    <div class="check-item"><span class="check-icon">${icon}</span><div><div>${title}</div><div class="check-detail">${detail}</div></div></div>`).join('');
+  let html = checks.map(([ic, title, detail]) => `
+    <div class="check-item"><span class="check-icon">${typeof icon==='function'?icon(ic):ic}</span><div><div>${title}</div><div class="check-detail">${detail}</div></div></div>`).join('');
 
   const sys = state.systemCheck;
   if (sys) {
-    const pgIcon = sys.pasarguard ? '✅' : '❌';
+    const pgIcon = statusIcon(sys.pasarguard ? 'ok' : false);
     const pgDetail = sys.pasarguard
       ? `${t('step0.pasarguardYes')}${sys.pasarguard_path ? ` — ${sys.pasarguard_path}` : ''}${sys.pasarguard_db ? ` (${sys.pasarguard_db})` : ''}`
       : t('step0.pasarguardNo');
     html += `<div class="check-item check-live"><span class="check-icon">${pgIcon}</span><div><div><strong>${t('step0.pasarguardCheck')}</strong></div><div class="check-detail">${pgDetail}</div></div></div>`;
 
-    const mzIcon = sys.marzban ? '✅' : '⚠️';
+    const mzIcon = statusIcon(sys.marzban ? 'ok' : 'warn');
     const mzDetail = sys.marzban
       ? `${t('step0.marzbanYes')}${sys.marzban_path ? ` — ${sys.marzban_path}` : ''}${sys.marzban_db ? ` (${sys.marzban_db})` : ''}`
       : t('step0.marzbanNo');
     html += `<div class="check-item check-live"><span class="check-icon">${mzIcon}</span><div><div><strong>${t('step0.marzbanCheck')}</strong></div><div class="check-detail">${mzDetail}</div></div></div>`;
 
-    const dkIcon = sys.docker ? '✅' : '❌';
+    const dkIcon = statusIcon(sys.docker ? 'ok' : false);
     const dkDetail = sys.docker ? t('step0.dockerYes') : t('step0.dockerNo');
     html += `<div class="check-item check-live"><span class="check-icon">${dkIcon}</span><div><div><strong>${t('step0.dockerCheck')}</strong></div><div class="check-detail">${dkDetail}</div></div></div>`;
   } else {
-    html += `<div class="check-item"><span class="check-icon">⏳</span><div><div>${t('step0.checking')}</div><div class="check-detail">${t('step0.checkingDetail')}</div></div></div>`;
+    html += `<div class="check-item"><span class="check-icon">${statusIcon('wait')}</span><div><div>${t('step0.checking')}</div><div class="check-detail">${t('step0.checkingDetail')}</div></div></div>`;
   }
 
   document.getElementById('globalChecks').innerHTML = html;

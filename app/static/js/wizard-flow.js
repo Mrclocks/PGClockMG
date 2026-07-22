@@ -124,14 +124,31 @@ function bindFinishModal() {
 }
 
 async function uninstallWizard(skipConfirm) {
+  const errEls = [
+    document.getElementById('restoreUninstallErr'),
+    document.getElementById('migrateUninstallErr'),
+  ];
+  errEls.forEach(el => { if (el) { el.textContent = ''; el.classList.add('hidden'); } });
+
   if (!skipConfirm && !confirm(t('uninstall.confirm'))) return;
   try {
     const res = await fetch('/api/self-uninstall', { method: 'POST' });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || 'uninstall failed');
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const msg = (typeof data.detail === 'string' ? data.detail : null)
+        || data.message
+        || t('uninstall.failed');
+      throw new Error(msg);
+    }
     if (!skipConfirm) alert(t('uninstall.scheduled'));
   } catch (e) {
-    alert(e.message || String(e));
+    const msg = e.message || String(e) || t('uninstall.failed');
+    errEls.forEach(el => {
+      if (!el) return;
+      el.textContent = msg;
+      el.classList.remove('hidden');
+    });
+    if (skipConfirm) alert(msg);
   }
 }
 
@@ -204,9 +221,17 @@ function renderFlowSteps() {
     labels = t('stepsSetup') || [];
   }
 
-  nav.innerHTML = (labels || []).map((label, i) => {
+  const list = labels || [];
+  const max = Math.max(1, list.length - 1);
+  const pct = Math.round((Math.min(activeIdx, max) / max) * 100);
+  nav.style.setProperty('--steps-progress', `${pct}%`);
+  const checkSvg = (typeof icon === 'function')
+    ? icon('check')
+    : '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 12.5l2.5 2.5L16 9"/></svg>';
+  nav.innerHTML = list.map((label, i) => {
     const cls = i === activeIdx ? 'active' : (i < activeIdx ? 'done' : '');
-    return `<div class="step ${cls}" data-step="${i}"><span class="step-num">${i}</span><span class="step-label">${label}</span></div>`;
+    const numInner = i < activeIdx ? checkSvg : String(i + 1);
+    return `<div class="step ${cls}" data-step="${i}"><span class="step-num">${numInner}</span><span class="step-label">${label}</span></div>`;
   }).join('');
 }
 
@@ -263,8 +288,10 @@ function applyPhaseI18n() {
   set('restoreExperimentalLabel', 'restore.experimentalLabel');
   set('restoreExperimentalBadge', 'restore.experimentalBadge');
   set('btnCopyRestorePath', 'copy');
+  set('restoreUninstallTitle', 'uninstall.title');
   set('restoreUninstallTip', 'uninstall.tip');
   set('btnUninstallRestore', 'uninstall.button');
+  set('migrateUninstallTitle', 'uninstall.title');
   set('migrateUninstallTip', 'uninstall.tip');
   set('btnUninstallMigrate', 'uninstall.button');
 }
@@ -617,7 +644,8 @@ async function uploadRestoreZip(file) {
     status.classList.toggle('is-ok', !!analysis.ok);
     status.classList.toggle('is-warn', !analysis.ok);
   } catch (e) {
-    status.textContent = `❌ ${e.message}`;
+    status.textContent = e.message;
+    status.classList.add('is-warn');
     btn.disabled = true;
   }
 }
@@ -631,13 +659,13 @@ function renderRestoreAnalysis(a) {
   card.innerHTML = `
     <div class="summary-row"><span class="summary-label">${s.backupDb || 'Backup DB'}</span><span>${a.backup_db || '—'}</span></div>
     <div class="summary-row"><span class="summary-label">${s.installedDb || 'Installed DB'}</span><span>${a.installed_db || '—'}</span></div>
-    <div class="summary-row"><span class="summary-label">${s.match || 'Match'}</span><span>${a.db_match === true ? '✅' : a.db_match === false ? '❌' : '—'}</span></div>
+    <div class="summary-row"><span class="summary-label">${s.match || 'Match'}</span><span class="status-inline">${a.db_match === true ? statusIcon('ok') : a.db_match === false ? statusIcon(false) : '—'}</span></div>
     <div class="summary-row"><span class="summary-label">${s.layout || 'Layout'}</span><span>${a.layout || '—'}</span></div>
     ${a.timescaledb_versions?.length ? `<div class="summary-row"><span class="summary-label">TimescaleDB</span><span>${a.timescaledb_versions.join(', ')}</span></div>` : ''}
   `;
   if (warn) {
     const lang = state.lang;
-    const items = (a.warnings || []).map(w => `<p class="warn-line">${tr(w, lang)}</p>`).join('');
+    const items = (a.warnings || []).map(w => `<p class="warn-line">${statusIcon('warn')}<span>${tr(w, lang)}</span></p>`).join('');
     warn.innerHTML = items;
     warn.classList.toggle('hidden', !items);
   }
@@ -814,6 +842,8 @@ function showRestoreDone(result) {
   renderGuideSections(document.getElementById('restoreAccessNotes'), access);
   const tip = document.getElementById('restoreUninstallTip');
   const btn = document.getElementById('btnUninstallRestore');
+  const title = document.getElementById('restoreUninstallTitle');
+  if (title) title.textContent = t('uninstall.title');
   if (tip) tip.textContent = t('uninstall.tip');
   if (btn) btn.textContent = t('uninstall.button');
   renderFlowSteps();
