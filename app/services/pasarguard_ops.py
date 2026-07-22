@@ -28,6 +28,8 @@ FAIL_LOG_PATTERNS = (
     "cache lookup failed for type",
     "Application startup failed",
     "ValueError:",
+    "SSL certificate file",
+    "does not exist.",
     "column \"user_template_id\" of relation \"next_plans\" already exists",
 )
 

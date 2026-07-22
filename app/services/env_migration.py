@@ -144,10 +144,18 @@ def _compose_has_pgbouncer() -> bool:
 
 
 def detect_db_type_from_env(text: str) -> str | None:
-    """Detect database engine from .env content."""
-    if read_env_var(text, "PGADMIN_EMAIL") or read_env_var(text, "PGADMIN_PASSWORD"):
-        svc = _compose_db_service()
-        return "timescaledb" if svc == "timescaledb" else "postgresql"
+    """Detect database engine from .env content (SQLALCHEMY URL wins over pgAdmin hints)."""
+    url = read_env_var(text, "SQLALCHEMY_DATABASE_URL") or ""
+    if url:
+        low = url.lower()
+        if "sqlite" in low:
+            return "sqlite"
+        if "mariadb" in low:
+            return "mariadb"
+        if "mysql" in low or "pymysql" in low or "asyncmy" in low:
+            return "mysql"
+        if "postgres" in low or "asyncpg" in low or "timescale" in low:
+            return "timescaledb" if "timescale" in low else "postgresql"
 
     db_creds = read_compose_db_credentials(text)
     if db_creds.get("database") and db_creds.get("user"):
@@ -163,15 +171,18 @@ def detect_db_type_from_env(text: str) -> str | None:
         if "mysql" in text.lower():
             return "mysql"
 
-    url = read_env_var(text, "SQLALCHEMY_DATABASE_URL") or ""
-    low = (url + text).lower()
+    if read_env_var(text, "PGADMIN_EMAIL") or read_env_var(text, "PGADMIN_PASSWORD"):
+        svc = _compose_db_service()
+        return "timescaledb" if svc == "timescaledb" else "postgresql"
+
+    low = text.lower()
     if "sqlite" in low:
         return "sqlite"
     if "mariadb" in low:
         return "mariadb"
-    if "mysql" in low or "pymysql" in low or "asyncmy" in low:
+    if "mysql" in low:
         return "mysql"
-    if "postgres" in low or "asyncpg" in low or "timescale" in low:
+    if "postgres" in low or "timescale" in low:
         return "timescaledb" if "timescale" in low else "postgresql"
     return None
 
@@ -595,6 +606,170 @@ def transform_pasarguard_env_for_target(text: str, target_db: str, password: str
             count=1,
         )
     return text.rstrip() + f"\n{url_line}\n"
+
+
+def _set_env_var_simple(text: str, key: str, value: str) -> str:
+    pattern = rf"(?m)^\s*#?\s*{re.escape(key)}\s*=.*$"
+    line = f'{key}="{value}"'
+    if re.search(pattern, text):
+        return re.sub(pattern, line, text, count=1)
+    return text.rstrip() + "\n" + line + "\n"
+
+
+def _unset_env_var(text: str, key: str) -> str:
+    pattern = rf"(?m)^\s*#?\s*{re.escape(key)}\s*=.*\n?"
+    return re.sub(pattern, "", text)
+
+
+def _compose_has_pgadmin() -> bool:
+    from app.config import PASARGUARD_DIR
+
+    compose = PASARGUARD_DIR / "docker-compose.yml"
+    if not compose.exists():
+        return False
+    body = compose.read_text(encoding="utf-8", errors="ignore")
+    return bool(re.search(r"^\s*pgadmin\s*:", body, re.MULTILINE))
+
+
+def _resolve_ssl_cert_path(path_str: str) -> Path | None:
+    """Map container SSL paths to host paths under PasarGuard install."""
+    from app.config import PASARGUARD_DIR
+
+    if not path_str:
+        return None
+    normalized = path_str.replace("\\", "/")
+    if normalized.startswith("/var/lib/pasarguard/"):
+        host = PASARGUARD_DATA / normalized[len("/var/lib/pasarguard/"):]
+        if host.is_file():
+            return host
+    if normalized.startswith("/opt/pasarguard/"):
+        host = PASARGUARD_DIR / normalized[len("/opt/pasarguard/"):]
+        if host.is_file():
+            return host
+    p = Path(path_str)
+    if p.is_file():
+        return p
+    for base in (PASARGUARD_DATA, PASARGUARD_DIR):
+        candidate = base / path_str
+        if candidate.is_file():
+            return candidate
+    return p if p.is_absolute() else PASARGUARD_DIR / path_str
+
+
+def ssl_cert_files_exist(cert: str | None, key: str | None) -> bool:
+    if not cert or not key:
+        return False
+    cp = _resolve_ssl_cert_path(cert)
+    kp = _resolve_ssl_cert_path(key)
+    return bool(cp and kp and cp.is_file() and kp.is_file())
+
+
+def sanitize_ssl_env(text: str, install_env: str | None = None) -> str:
+    """
+    Keep SSL only when cert/key files exist on disk.
+    Falls back to install SSL, otherwise strips SSL vars (avoids startup crash).
+    """
+    cert = read_env_var(text, "UVICORN_SSL_CERTFILE")
+    key = read_env_var(text, "UVICORN_SSL_KEYFILE")
+    if ssl_cert_files_exist(cert, key):
+        return text
+
+    if install_env:
+        ic = read_env_var(install_env, "UVICORN_SSL_CERTFILE")
+        ik = read_env_var(install_env, "UVICORN_SSL_KEYFILE")
+        if ssl_cert_files_exist(ic, ik):
+            text = _set_env_var_simple(text, "UVICORN_SSL_CERTFILE", ic)
+            text = _set_env_var_simple(text, "UVICORN_SSL_KEYFILE", ik)
+            ca = read_env_var(install_env, "UVICORN_SSL_CA_TYPE")
+            if ca:
+                text = _set_env_var_simple(text, "UVICORN_SSL_CA_TYPE", ca)
+            return text
+
+    for key_name in ("UVICORN_SSL_CERTFILE", "UVICORN_SSL_KEYFILE", "UVICORN_SSL_CA_TYPE"):
+        text = _unset_env_var(text, key_name)
+
+    if install_env:
+        for key_name in ("UVICORN_PORT", "UVICORN_HOST"):
+            val = read_env_var(install_env, key_name)
+            if val:
+                text = _set_env_var_simple(text, key_name, val)
+    return text
+
+
+def ensure_pgadmin_env(text: str, install_env: str) -> str:
+    """Preserve pgAdmin credentials from live install when compose includes pgadmin."""
+    if not _compose_has_pgadmin():
+        return text
+
+    for key in ("PGADMIN_EMAIL", "PGADMIN_PASSWORD"):
+        if not read_env_var(text, key):
+            val = read_env_var(install_env, key)
+            if val:
+                text = _set_env_var_simple(text, key, val)
+
+    if not read_env_var(text, "PGADMIN_EMAIL"):
+        text = _set_env_var_simple(text, "PGADMIN_EMAIL", "admin@local")
+    if not read_env_var(text, "PGADMIN_PASSWORD"):
+        live = read_env_var(install_env, "PGADMIN_PASSWORD")
+        if live:
+            text = _set_env_var_simple(text, "PGADMIN_PASSWORD", live)
+    return text
+
+
+def env_points_to_db(text: str, target_db: str) -> bool:
+    """True when SQLALCHEMY_DATABASE_URL matches the expected engine family."""
+    url = (read_env_var(text, "SQLALCHEMY_DATABASE_URL") or "").lower()
+    if not url:
+        return False
+    if target_db == "sqlite":
+        return "sqlite" in url
+    if target_db == "mariadb":
+        return "mariadb" in url or "mysql" in url or "asyncmy" in url
+    if target_db == "mysql":
+        return "mysql" in url or "asyncmy" in url or "pymysql" in url
+    if target_db == "timescaledb":
+        return "asyncpg" in url or "postgresql" in url
+    if target_db == "postgresql":
+        return "asyncpg" in url or "postgresql" in url
+    return False
+
+
+def finalize_pasarguard_env_after_restore(
+    text: str,
+    final_db: str,
+    password: str | None,
+    install_env_snapshot: str,
+    *,
+    db_user: str | None = None,
+    db_name: str | None = None,
+) -> str:
+    """
+    Pin .env to the restored/converted DB engine, valid SSL, and pgAdmin vars.
+    Called after data restore and optional cross-DB convert, before compose up.
+    """
+    text = transform_pasarguard_env_for_target(text, final_db, password)
+
+    if final_db != "sqlite":
+        user = db_user or read_env_var(install_env_snapshot, "DB_USER") or "pasarguard"
+        name = db_name or read_env_var(install_env_snapshot, "DB_NAME") or "pasarguard"
+        pwd = password or read_env_var(install_env_snapshot, "DB_PASSWORD") or ""
+        text = _set_env_var_simple(text, "DB_USER", user)
+        text = _set_env_var_simple(text, "DB_NAME", name)
+        if pwd:
+            text = _set_env_var_simple(text, "DB_PASSWORD", pwd)
+        if final_db in ("postgresql", "timescaledb") and pwd:
+            text = _set_env_var_simple(text, "POSTGRES_PASSWORD", pwd)
+        if final_db in ("mysql", "mariadb") and pwd:
+            text = _set_env_var_simple(text, "MYSQL_ROOT_PASSWORD", pwd)
+
+    for key in ("UVICORN_PORT", "UVICORN_HOST", "UVICORN_ROOT_PATH", "ALLOWED_ORIGINS"):
+        val = read_env_var(install_env_snapshot, key)
+        if val:
+            text = _set_env_var_simple(text, key, val)
+
+    text = sanitize_ssl_env(text, install_env_snapshot)
+    text = ensure_pgadmin_env(text, install_env_snapshot)
+    return text
 
 
 def transform_compose_marzban_to_pasarguard(text: str) -> str:

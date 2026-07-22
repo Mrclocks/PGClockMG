@@ -6,6 +6,7 @@ import asyncio
 import os
 import re
 import shutil
+import sqlite3
 import tempfile
 import traceback
 import zipfile
@@ -15,7 +16,9 @@ from typing import Callable
 from app.config import PASARGUARD_DIR, PASARGUARD_ENV, PASARGUARD_DATA, UPLOAD_DIR
 from app.services.env_migration import (
     detect_db_type_from_env,
+    env_points_to_db,
     extract_env_summary,
+    finalize_pasarguard_env_after_restore,
     read_env_var,
 )
 from app.services.migrators.base import MigrationJob
@@ -338,6 +341,17 @@ async def _run(job: MigrationJob, cmd: list[str], cwd: str | None = None, timeou
         return proc.returncode == 0, out
     except Exception as e:
         return False, str(e)
+
+
+class _RestoreMini:
+    """Lightweight migrator shim for restore-time PasarGuard ops."""
+
+    def __init__(self, job: MigrationJob, params: dict):
+        self.job = job
+        self.params = params
+
+    async def _run_cmd(self, cmd, cwd=None, timeout=600):
+        return await _run(self.job, cmd, cwd=cwd, timeout=timeout)
 
 
 def _read_current_env() -> str:
@@ -663,6 +677,24 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         fa = "نسخه TimescaleDB بکاپ با سرور هم‌خوان نیست."
         en = "TimescaleDB version mismatch between backup and server."
         causes_fa = ["ویزارد معمولاً ایمیج را هم‌تراز می‌کند — دوباره تلاش کنید یا لاگ کامل را ببینید."]
+    elif "ssl certificate file" in low and "does not exist" in low:
+        fa = "فایل گواهی SSL در .env تعریف شده ولی روی دیسک وجود ندارد."
+        en = "SSL certificate path in .env points to a missing file."
+        causes_fa = [
+            "بکاپ SSL دارد ولی cert/key روی سرور جدید کپی نشده — در v2.3.6+ SSL نامعتبر حذف می‌شود",
+            "پوشه certs را از بکاپ بررسی کنید یا نصب بدون SSL (--no-ssl) را حفظ کنید",
+        ]
+    elif "restore verification failed" in low or "expected ≥" in low:
+        fa = "داده‌ها به موتور دیتابیس مقصد کپی نشده‌اند (موفقیت کاذب)."
+        en = "Restored data not found in target database engine."
+        causes_fa = [
+            "تبدیل sqlite→timescaledb انجام شده ولی .env هنوز SQLite بود — در v2.3.6+ .env بعد از تبدیل اصلاح می‌شود",
+            "فایل db.sqlite3 بعد از تبدیل کنار گذاشته می‌شود تا پنل به TimescaleDB وصل شود",
+        ]
+    elif "pasarguard failed to start" in low or "did not reach ready state" in low:
+        fa = "پنل PasarGuard بعد از ریستور بالا نیامد."
+        en = "PasarGuard panel did not start after restore."
+        causes_fa = ["لاگ pasarguard-1 را ببینید", "ممکن است SSL یا SQLALCHEMY_DATABASE_URL اشتباه باشد"]
     elif "no such file" in low or "missing" in low or "not found" in low:
         fa = "فایل دامپ یا دیتابیس منبع پیدا نشد."
         en = "Source dump/database file was not found."
@@ -687,6 +719,135 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
     }
 
 
+async def _finalize_env_after_restore(
+    job: MigrationJob,
+    install_env_snapshot: str,
+    final_db: str,
+    password: str | None,
+    user: str | None,
+    db_name: str | None,
+) -> None:
+    """Write finalized .env: correct DB URL, valid SSL, pgAdmin vars."""
+    text = (
+        PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+        if PASARGUARD_ENV.exists()
+        else install_env_snapshot
+    )
+    finalized = finalize_pasarguard_env_after_restore(
+        text,
+        final_db,
+        password,
+        install_env_snapshot,
+        db_user=user,
+        db_name=db_name,
+    )
+    if not env_points_to_db(finalized, final_db):
+        raise RuntimeError(
+            f".env SQLALCHEMY_DATABASE_URL does not match final engine {final_db}"
+        )
+    if PASARGUARD_ENV.exists():
+        shutil.copy2(PASARGUARD_ENV, PASARGUARD_ENV.with_suffix(".env.bak-before-finalize"))
+    PASARGUARD_ENV.write_text(finalized, encoding="utf-8")
+    url = read_env_var(finalized, "SQLALCHEMY_DATABASE_URL") or ""
+    job.log(f"Finalized .env for {final_db} (URL driver: {url.split('://')[0] if '://' in url else '?'})")
+
+
+def _relocate_sqlite_after_convert(job: MigrationJob) -> None:
+    """Prevent PasarGuard from falling back to local SQLite after server DB convert."""
+    sqlite_path = PASARGUARD_DATA / "db.sqlite3"
+    if not sqlite_path.exists():
+        return
+    bak = PASARGUARD_DATA / f"db.sqlite3.pre-convert-{job.job_id}.bak"
+    if bak.exists():
+        bak.unlink()
+    shutil.move(str(sqlite_path), str(bak))
+    job.log(f"Moved SQLite aside → {bak.name} (panel uses server DB)")
+
+
+def _count_sqlite_users(path: Path) -> int:
+    if not path.exists():
+        return 0
+    try:
+        conn = sqlite3.connect(str(path))
+        try:
+            row = conn.execute("SELECT COUNT(*) FROM users").fetchone()
+            return int(row[0]) if row else 0
+        finally:
+            conn.close()
+    except Exception:
+        return 0
+
+
+async def _count_pg_users(
+    job: MigrationJob,
+    svc: str,
+    password: str,
+    user: str,
+    db_name: str,
+) -> int:
+    cmd = [
+        "docker", "compose", "exec", "-T",
+        "-e", f"PGPASSWORD={password}",
+        svc, "psql", "-t", "-A", "-U", user, "-d", db_name,
+        "-c", "SELECT COUNT(*) FROM users;",
+    ]
+    ok, out = await _run(job, cmd, timeout=60)
+    if not ok:
+        return -1
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if line.isdigit():
+            return int(line)
+    return -1
+
+
+async def _verify_restored_data(
+    job: MigrationJob,
+    final_db: str,
+    password: str,
+    user: str,
+    db_name: str,
+    expected_min_users: int,
+) -> None:
+    """Fail restore if target DB has fewer users than the backup (false-success guard)."""
+    if expected_min_users <= 0:
+        return
+
+    count = 0
+    if final_db == "sqlite":
+        count = _count_sqlite_users(PASARGUARD_DATA / "db.sqlite3")
+    elif final_db in ("postgresql", "timescaledb"):
+        svc = "timescaledb" if final_db == "timescaledb" else await _detect_db_container(job, final_db)
+        if svc:
+            count = await _count_pg_users(job, svc, password, user, db_name)
+    elif final_db in ("mysql", "mariadb"):
+        svc = await _detect_db_container(job, final_db)
+        if svc:
+            mysql_cmd = "mariadb" if final_db == "mariadb" else "mysql"
+            cmd = [
+                "docker", "compose", "exec", "-T",
+                "-e", f"MYSQL_PWD={password}",
+                svc, mysql_cmd, "-N", "-u", user, db_name,
+                "-e", "SELECT COUNT(*) FROM users;",
+            ]
+            ok, out = await _run(job, cmd, timeout=60)
+            if ok:
+                for line in (out or "").splitlines():
+                    if line.strip().isdigit():
+                        count = int(line.strip())
+                        break
+
+    if count < 0:
+        job.log("Could not verify user count in target DB (non-fatal)")
+        return
+    if count < expected_min_users:
+        raise RuntimeError(
+            f"Restore verification failed: expected ≥{expected_min_users} users in {final_db}, found {count}. "
+            "Data may not have been copied to the target engine."
+        )
+    job.log(f"Verified {count} users in {final_db}")
+
+
 async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> dict:
     upload_id = params["upload_id"]
     zip_path = Path(analysis["zip_path"])
@@ -709,6 +870,7 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         backup_env = backup_env_path.read_text(encoding="utf-8", errors="ignore")
         backup_db = detect_db_type_from_env(backup_env) or analysis.get("backup_db")
         current_env = _read_current_env()
+        install_env_snapshot = current_env
         installed_db = detect_db_type_from_env(current_env) or get_pasarguard_db_type()
 
         job.log(f"Backup DB={backup_db}, installed DB={installed_db}, layout={analysis.get('layout')}")
@@ -750,15 +912,24 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
 
         # Destination = installed panel DB. Soft-family (mysql↔mariadb, pg↔timescale) needs no convert.
         target_db = installed_db or params.get("target_db") or backup_db
-        if backup_db and target_db and not soft_db_family(backup_db, target_db) and backup_db != target_db:
+        needs_convert = bool(
+            backup_db and target_db
+            and backup_db != target_db
+            and not soft_db_family(backup_db, target_db)
+        )
+        if needs_convert:
             job.log(f"DB mismatch — restore {backup_db} first, then auto-convert → {target_db}")
 
         job.set_progress(40, "Restoring database...")
         await _compose(job, "stop", "pasarguard", timeout=120)
 
+        expected_min_users = 0
         restore_engine = backup_db
         if backup_db == "sqlite" or analysis.get("layout") == "sqlite_file":
             await _restore_sqlite(job, root)
+            expected_min_users = _count_sqlite_users(PASARGUARD_DATA / "db.sqlite3")
+            if expected_min_users:
+                job.log(f"Backup SQLite has {expected_min_users} users")
         elif backup_db in ("mysql", "mariadb"):
             await _restore_mysql(job, root, backup_db, current_env, backup_env)
         elif backup_db in ("postgresql", "timescaledb"):
@@ -774,16 +945,19 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             raise RuntimeError(f"Unsupported backup database: {backup_db}")
 
         job.set_progress(75, "Merging configuration...")
+        preserve: dict[str, str | None] = {
+            "DB_PASSWORD": cur_db_pass,
+            "MYSQL_ROOT_PASSWORD": cur_mysql_root,
+            "DB_USER": cur_user,
+            "DB_NAME": cur_name,
+            "POSTGRES_PASSWORD": cur_pg_pass,
+        }
+        if not needs_convert and cur_url:
+            preserve["SQLALCHEMY_DATABASE_URL"] = cur_url
+
         await _merge_env_after_restore(
-            job, backup_env, current_env,
-            preserve={
-                "SQLALCHEMY_DATABASE_URL": cur_url,
-                "DB_PASSWORD": cur_db_pass,
-                "MYSQL_ROOT_PASSWORD": cur_mysql_root,
-                "DB_USER": cur_user,
-                "DB_NAME": cur_name,
-                "POSTGRES_PASSWORD": cur_pg_pass,
-            },
+            job, backup_env, install_env_snapshot,
+            preserve=preserve,
         )
 
         await _restore_data_files(job, root)
@@ -809,6 +983,19 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         elif target_db and soft_db_family(restore_engine, target_db):
             final_db = target_db
 
+        job.set_progress(88, "Finalizing .env for target database...")
+        await _finalize_env_after_restore(
+            job,
+            install_env_snapshot,
+            final_db or target_db or restore_engine or backup_db,
+            cur_db_pass or cur_pg_pass,
+            cur_user or "pasarguard",
+            cur_name or "pasarguard",
+        )
+
+        if final_db and final_db != "sqlite" and (needs_convert or restore_engine == "sqlite"):
+            _relocate_sqlite_after_convert(job)
+
         job.set_progress(90, "Starting PasarGuard...")
         ok, out = await _compose(job, "up", "-d", timeout=300)
         if not ok:
@@ -830,26 +1017,33 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         )
 
         # Best-effort schema align
+        final_engine = final_db or installed_db or backup_db
+        mini = _RestoreMini(job, {
+            "target_db": final_engine,
+            "target_db_password": cur_db_pass or cur_pg_pass,
+            "target_db_user": cur_user,
+            "target_db_name": cur_name or "pasarguard",
+            "target_db_host": "127.0.0.1",
+        })
         try:
             from app.services.pasarguard_ops import sync_alembic_for_startup
 
-            class _Mini:
-                def __init__(self, j, p):
-                    self.job = j
-                    self.params = p
-                async def _run_cmd(self, cmd, cwd=None, timeout=600):
-                    return await _run(self.job, cmd, cwd=cwd, timeout=timeout)
-
-            mini = _Mini(job, {
-                "target_db": final_db or installed_db or backup_db,
-                "target_db_password": cur_db_pass or cur_pg_pass,
-                "target_db_user": cur_user,
-                "target_db_name": cur_name or "pasarguard",
-                "target_db_host": "127.0.0.1",
-            })
-            await sync_alembic_for_startup(mini, final_db or installed_db or backup_db)
+            await sync_alembic_for_startup(mini, final_engine)
         except Exception as e:
             job.log(f"Alembic sync note: {e}")
+
+        await _verify_restored_data(
+            job,
+            final_engine,
+            cur_db_pass or cur_pg_pass or "",
+            cur_user or "pasarguard",
+            cur_name or "pasarguard",
+            expected_min_users,
+        )
+
+        from app.services.pasarguard_ops import verify_pasarguard_healthy
+
+        await verify_pasarguard_healthy(mini)
 
         access = get_panel_access_info()
         access["restored"] = True
@@ -1098,14 +1292,9 @@ async def _restore_postgres(
 async def _merge_env_after_restore(
     job: MigrationJob, backup_env: str, current_env: str, preserve: dict
 ) -> None:
-    """Write backup .env but keep live DB credentials so containers still auth."""
-    # Start from backup (app settings, telegram, etc.)
+    """Write backup .env but keep live DB credentials; SSL/pgAdmin finalized later."""
     text = backup_env
-    # Keep SSL/port from CURRENT install (this server's certs/ports)
-    for key in (
-        "UVICORN_SSL_CERTFILE", "UVICORN_SSL_KEYFILE", "UVICORN_SSL_CA_TYPE",
-        "UVICORN_PORT", "UVICORN_HOST", "UVICORN_ROOT_PATH", "ALLOWED_ORIGINS",
-    ):
+    for key in ("UVICORN_PORT", "UVICORN_HOST", "UVICORN_ROOT_PATH", "ALLOWED_ORIGINS"):
         cur = read_env_var(current_env, key)
         if cur is not None:
             text = _set_env_var(text, key, cur)
@@ -1114,17 +1303,16 @@ async def _merge_env_after_restore(
         if val:
             text = _set_env_var(text, key, val)
 
-    # Ensure POSTGRES_PASSWORD mirrors DB_PASSWORD when needed
     db_pass = preserve.get("DB_PASSWORD") or preserve.get("POSTGRES_PASSWORD")
     if db_pass:
         text = _set_env_var(text, "DB_PASSWORD", db_pass)
-        if "POSTGRES_PASSWORD" in current_env or "timescaledb" in (preserve.get("SQLALCHEMY_DATABASE_URL") or ""):
+        if "POSTGRES_PASSWORD" in current_env or read_env_var(current_env, "POSTGRES_PASSWORD"):
             text = _set_env_var(text, "POSTGRES_PASSWORD", db_pass)
 
     if PASARGUARD_ENV.exists():
         shutil.copy2(PASARGUARD_ENV, PASARGUARD_ENV.with_suffix(".env.bak-before-restore"))
     PASARGUARD_ENV.write_text(text, encoding="utf-8")
-    job.log("Merged .env (preserved current DB credentials & SSL/port)")
+    job.log("Merged .env (app settings from backup; DB URL finalized after convert)")
 
 
 async def _restore_data_files(job: MigrationJob, root: Path) -> None:
