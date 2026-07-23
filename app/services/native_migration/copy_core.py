@@ -174,6 +174,19 @@ JSON_COLUMNS = frozenset({
     "http_headers",
     "transport_settings",
     "value",
+    # PasarGuard JSONB columns commonly returned as Python dict by psycopg2
+    "permissions",
+    "access",
+    "limits",
+    "permission_overrides",
+    "notification_enable",
+    "proxy_settings",
+    "config",
+    "extra",
+    "data",
+    "meta",
+    "options",
+    "headers",
 })
 
 # PostgreSQL / MySQL engine families (same copy logic)
@@ -339,7 +352,9 @@ def coerce_json_value(value):
     if value is None:
         return None
     if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False)
+        return json.dumps(value, ensure_ascii=False, default=_json_default)
+    if isinstance(value, tuple):
+        return json.dumps(list(value), ensure_ascii=False, default=_json_default)
     if isinstance(value, bool):
         return json.dumps({"enabled": value})
     if isinstance(value, (int, float)):
@@ -353,7 +368,38 @@ def coerce_json_value(value):
             return stripped
         except json.JSONDecodeError:
             return None
+    # Mapping-like leftovers (e.g. RealDictRow) / unknown objects
+    if hasattr(value, "keys") and hasattr(value, "items"):
+        try:
+            return json.dumps(dict(value), ensure_ascii=False, default=_json_default)
+        except Exception:
+            return json.dumps(str(value), ensure_ascii=False)
     return None
+
+
+def _json_default(obj):
+    """json.dumps default for datetime/UUID/Decimal from Postgres drivers."""
+    if isinstance(obj, datetime):
+        return normalize_datetime_for_sql(obj)
+    if isinstance(obj, date):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        if obj == obj.to_integral_value():
+            return int(obj)
+        return float(obj)
+    if isinstance(obj, (bytes, bytearray, memoryview)):
+        try:
+            return bytes(obj).decode("utf-8")
+        except Exception:
+            return bytes(obj).hex()
+    try:
+        from uuid import UUID
+
+        if isinstance(obj, UUID):
+            return str(obj)
+    except Exception:
+        pass
+    return str(obj)
 
 
 def coerce_mux_settings(value):
@@ -543,6 +589,16 @@ def convert_value(table: str, column: str, value):
             except Exception:
                 pass
         return stripped
+
+    # Never leave dict/list for MySQL/MariaDB/SQLite drivers (PyMySQL:
+    # "dict can not be used as parameter"). Postgres JSONB often arrives as dict
+    # for columns not listed in JSON_COLUMNS (permissions, proxy_settings, …).
+    if isinstance(value, dict):
+        return coerce_json_value(value)
+    if isinstance(value, list):
+        return coerce_json_value(value)
+    if isinstance(value, tuple):
+        return coerce_json_value(list(value))
 
     return value
 
