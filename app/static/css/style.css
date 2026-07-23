@@ -85,8 +85,11 @@ html[lang="fa"] body {
 /* Header */
 .header {
   display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
   padding: 20px 0 28px;
   border-bottom: 1px solid var(--border);
   margin-bottom: 28px;
@@ -96,19 +99,23 @@ html[lang="fa"] body {
   display: flex;
   align-items: center;
   gap: 14px;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .logo {
+  flex: 0 0 auto;
   font-size: 1.6rem;
   width: 48px;
   height: 48px;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--orange);
-  background: hsla(var(--pg-orange), 0.16);
+  color: #fff;
+  background: var(--orange);
   border-radius: 14px;
-  border: 1px solid hsla(var(--pg-orange), 0.45);
+  border: 1px solid hsl(24 90% 42%);
+  box-shadow: none;
 }
 
 .header h1 {
@@ -136,7 +143,9 @@ html[lang="fa"] body {
   display: flex;
   align-items: center;
   gap: 10px;
-  flex-wrap: wrap;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  margin-inline-start: auto;
 }
 
 .lang-accordion {
@@ -1560,7 +1569,9 @@ button.db-card {
 /* Responsive */
 @media (max-width: 768px) {
   .panel-grid { grid-template-columns: repeat(2, 1fr); }
-  .header { gap: 12px; }
+  .header { gap: 10px; }
+  .header-brand { gap: 10px; }
+  .header h1 { font-size: 1.2rem; }
   .choice-card-lg { padding: 16px 14px; }
   .modal-card { width: min(100%, 440px); }
   .db-cred-grid { grid-template-columns: 1fr; }
@@ -1570,8 +1581,21 @@ button.db-card {
 }
 
 @media (max-width: 600px) {
-  .header { flex-direction: column; gap: 12px; align-items: flex-start; }
-  .header-meta { width: 100%; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+  .header {
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 8px;
+  }
+  .header-meta {
+    width: auto;
+    margin-inline-start: auto;
+    justify-content: flex-end;
+    flex-wrap: nowrap;
+  }
+  .logo { width: 42px; height: 42px; border-radius: 12px; }
+  .header-version { font-size: 0.72rem; }
+  .lang-summary { padding: 5px 10px; min-height: 34px; }
   .panel-grid { grid-template-columns: 1fr; }
   .choice-grid { grid-template-columns: 1fr; }
   .choice-card-lg { min-height: 0; }
@@ -1833,7 +1857,7 @@ button.db-card {
   stroke-linejoin: round;
 }
 .icon-lg { width: 2.25rem; height: 2.25rem; }
-.logo .icon { width: 1.4rem; height: 1.4rem; color: var(--orange); }
+.logo .icon { width: 1.4rem; height: 1.4rem; color: #fff; }
 .result-icon {
   display: flex;
   justify-content: center;
@@ -1963,8 +1987,6 @@ button.db-card {
 .upload-status.is-ok { color: var(--success); }
 .upload-status.is-warn { color: var(--warning); }
 .warn-line { color: var(--warning); font-size: 0.88rem; margin: 6px 0; }
-.logo { border-radius: var(--radius); }
-
 /* Manual install guide */
 .section-title {
   margin: 22px 0 8px;
