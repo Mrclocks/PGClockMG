@@ -2,7 +2,7 @@
 
 const I18N = {
   en: {
-    title: 'MrClock-MG',
+    title: 'PGClockMG',
     subtitle: 'Migrate & restore PasarGuard',
     copied: 'Copied!',
     copyFailed: 'Copy failed',
@@ -10,15 +10,15 @@ const I18N = {
     dbRecommended: 'Recommended',
     uninstall: {
       title: 'Please remove this wizard',
-      tip: 'For security and a clean server, remove MrClock-MG now. It is no longer needed after you finish.',
-      button: 'Remove MrClock-MG now',
-      confirm: 'Remove MrClock-MG service and all files from this server?',
+      tip: 'For security and a clean server, remove PGClockMG now. It is no longer needed after you finish.',
+      button: 'Remove PGClockMG now',
+      confirm: 'Remove PGClockMG service and all files from this server?',
       scheduled: 'Removal started. This page will stop responding shortly.',
       failed: 'Could not remove the wizard. Try again or run: systemctl stop pg-migrator && rm -rf /opt/pg-migrator',
     },
     finishModal: {
       title: 'Open panel?',
-      desc: 'Do you also want to remove MrClock-MG from this server?',
+      desc: 'Do you also want to remove PGClockMG from this server?',
       cancel: 'Cancel',
       uninstall: 'Remove wizard, then open panel',
       continue: 'Open panel (keep wizard)',
@@ -30,7 +30,7 @@ const I18N = {
     stepsInstall: ['Welcome', 'Guide', 'Done'],
     stepsSetup: ['Welcome', 'Guide', 'Next'],
     welcome: {
-      h2: 'Welcome to MrClock-MG',
+      h2: 'Welcome to PGClockMG',
       desc: 'What do you want to do on this server?',
       note: 'Everything runs on your own server. Backups, passwords and logs never leave this machine.',
       goalHint: 'For restore or migrate, PasarGuard must already be on this server. The Guide tab only shows how to install it yourself.',
@@ -349,7 +349,7 @@ const I18N = {
     },
   },
   fa: {
-    title: 'MrClock-MG',
+    title: 'PGClockMG',
     subtitle: 'مهاجرت و ریستور PasarGuard',
     copied: 'کپی شد!',
     copyFailed: 'کپی نشد',
@@ -357,15 +357,15 @@ const I18N = {
     dbRecommended: 'توصیه‌شده',
     uninstall: {
       title: 'حتماً این ویزارد را حذف کنید',
-      tip: 'برای امنیت و تمیزی سرور، الان MrClock-MG را حذف کنید. بعد از اتمام کار دیگر به آن نیاز ندارید.',
+      tip: 'برای امنیت و تمیزی سرور، الان PGClockMG را حذف کنید. بعد از اتمام کار دیگر به آن نیاز ندارید.',
       button: 'حذف همین حالا',
-      confirm: 'سرویس و همه فایل‌های MrClock-MG از این سرور حذف شود؟',
+      confirm: 'سرویس و همه فایل‌های PGClockMG از این سرور حذف شود؟',
       scheduled: 'حذف شروع شد. به‌زودی این صفحه قطع می‌شود.',
       failed: 'حذف انجام نشد. دوباره تلاش کنید یا دستی بزنید: systemctl stop pg-migrator && rm -rf /opt/pg-migrator',
     },
     finishModal: {
       title: 'ورود به پنل؟',
-      desc: 'می‌خواهید MrClock-MG هم از سرور حذف شود؟',
+      desc: 'می‌خواهید PGClockMG هم از سرور حذف شود؟',
       cancel: 'انصراف',
       uninstall: 'حذف ویزارد و باز کردن پنل',
       continue: 'نگه‌داشتن ویزارد و باز کردن پنل',
@@ -377,7 +377,7 @@ const I18N = {
     stepsInstall: ['خوش‌آمد', 'راهنما', 'پایان'],
     stepsSetup: ['خوش‌آمد', 'راهنما', 'بعد'],
     welcome: {
-      h2: 'به MrClock-MG خوش آمدید',
+      h2: 'به PGClockMG خوش آمدید',
       desc: 'چه کاری می‌خواهید انجام دهید؟',
       note: 'همه‌چیز فقط روی همین سرور اجرا می‌شود. بکاپ و رمزها جایی نمی‌روند.',
       goalHint: 'برای ریستور یا مهاجرت، اول خودتان PasarGuard را نصب کنید. این ویزارد فقط راهنما می‌دهد و چیزی نصب نمی‌کند.',
@@ -693,7 +693,7 @@ const I18N = {
     },
   },
   ru: {
-    title: 'MrClock-MG',
+    title: 'PGClockMG',
     subtitle: 'Миграция и восстановление PasarGuard',
     copied: 'Скопировано!',
     copyFailed: 'Не удалось скопировать',
@@ -701,15 +701,15 @@ const I18N = {
     dbRecommended: 'Рекомендуется',
     uninstall: {
       title: 'Удалите этот мастер',
-      tip: 'Для безопасности удалите MrClock-MG сейчас. После завершения он больше не нужен.',
+      tip: 'Для безопасности удалите PGClockMG сейчас. После завершения он больше не нужен.',
       button: 'Удалить сейчас',
-      confirm: 'Удалить службу и все файлы MrClock-MG с этого сервера?',
+      confirm: 'Удалить службу и все файлы PGClockMG с этого сервера?',
       scheduled: 'Удаление запущено. Страница скоро станет недоступна.',
       failed: 'Не удалось удалить. Повторите или вручную: systemctl stop pg-migrator && rm -rf /opt/pg-migrator',
     },
     finishModal: {
       title: 'Открыть панель?',
-      desc: 'Также удалить MrClock-MG с сервера?',
+      desc: 'Также удалить PGClockMG с сервера?',
       cancel: 'Отмена',
       uninstall: 'Удалить мастер и открыть панель',
       continue: 'Оставить мастер и открыть панель',
@@ -721,7 +721,7 @@ const I18N = {
     stepsInstall: ['Старт', 'Гид', 'Готово'],
     stepsSetup: ['Старт', 'Гид', 'Далее'],
     welcome: {
-      h2: 'Добро пожаловать в MrClock-MG',
+      h2: 'Добро пожаловать в PGClockMG',
       desc: 'Что вы хотите сделать на этом сервере?',
       note: 'Всё выполняется на вашем сервере. Бэкапы, пароли и логи не уходят наружу.',
       goalHint: 'Для восстановления или миграции PasarGuard уже должен быть на сервере. Вкладка «Гид» только показывает, как установить его самому.',
@@ -1080,16 +1080,16 @@ function applyI18n() {
   if (brandTitle) brandTitle.textContent = t('title');
   const map = {
     subtitle: '.subtitle',
-    'step1.h2': '#step1 h2', 'step1.desc': '#step1 .desc', 'step1.back': '#step1 .btn-ghost',
+    'step1.h2': '#step1 h2', 'step1.desc': '#step1 .desc', 'step1.back': '#step1 .btn-back',
     'step1.next': '#btnStep1',
     'step2.h2': '#step2 h2', 'step2.desc': '#step2 .desc',
     'step2.uploadH3': '.upload-section h3', 'step2.uploadDesc': '.upload-section .desc-sm',
-    'step2.back': '#step2 .btn-ghost', 'step2.next': '#btnStep2',
+    'step2.back': '#step2 .btn-back', 'step2.next': '#btnStep2',
     'step3.h2': '#step3 h2', 'step3.desc': '#step3 .desc',
     'step3.pgMissing': '#installPgMissingTitle', 'step3.pgMissingDesc': '#installPgMissingDesc',
-    'step3.recheckPg': '#btnRecheckPg', 'step3.back': '#step3 .btn-ghost', 'step3.next': '#btnStep3',
+    'step3.recheckPg': '#btnRecheckPg', 'step3.back': '#step3 .btn-back', 'step3.next': '#btnStep3',
     'step4.h2': '#step4 h2', 'step4.desc': '#step4 .desc', 'step4.start': '#step4 .btn-lg',
-    'step4.back': '#step4 .btn-ghost',
+    'step4.back': '#step4 .btn-back',
     'step5.h2': '#step5 h2',
     'step6.openPanel': '#panelLink', 'step6.retry': '#resultError .btn-secondary',
   };

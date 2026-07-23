@@ -1,4 +1,4 @@
-"""Self-uninstall MrClock-MG (pg-migrator) from the server."""
+"""Self-uninstall PGClockMG (pg-migrator) from the server."""
 
 from __future__ import annotations
 

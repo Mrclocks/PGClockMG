@@ -1,48 +1,39 @@
-> ⚠️ **این تنها یک نسخه آزمایشی می‌باشد و احتمال وجود باگ زیاد است.**
+> ⚠️ نسخه آزمایشی — احتمال باگ وجود دارد.
 
 <div align="center">
 
-<img src="preview.png" alt="MrClock-MG Wizard Preview" width="720">
+<img src="preview.png" alt="PGClockMG" width="720">
 
-# MrClock-MG
+# PGClockMG
 
-**مهاجرت پنل‌های VPN به PasarGuard — ویزارد وب روی سرور خودتان**
-
-`v2.8.2` · پورت `7000` · FA / EN / RU
+**ریستور و مهاجرت به PasarGuard**  
+ویزارد وب روی سرور خودتان · `v2.8.3` · پورت `7000` · FA / EN / RU
 
 </div>
 
 ---
 
-## حریم خصوصی
+## چه کاری می‌کند؟
 
-> **همه مراحل روی سرور خود شما اجرا می‌شود.**
->
-> بکاپ، دیتابیس، رمزها و لاگ‌ها از سرور خارج نمی‌شوند. ویزارد فقط روی `localhost` / IP سرور شما گوش می‌دهد و مستقیماً با Docker و دیتابیس محلی کار می‌کند.
+| هدف | توضیح |
+|-----|--------|
+| **ریستور / تغییر DB** | بکاپ PasarGuard را برمی‌گرداند — حتی اگر نوع دیتابیس فرق کند |
+| **مهاجرت** | انتقال از Marzban، 3x-ui، Remnawave، Hiddify و … |
+| **راهنما** | اگر پنل نصب است مشخصاتش را نشان می‌دهد؛ اگر نه، فقط دستور نصب رسمی |
 
-| | |
-|---|---|
-| داده به ابر ارسال نمی‌شود | مهاجرت local است |
-| API خارجی برای DB ندارد | فقط سرور شما |
-| بعد از اتمام کار سرویس را خاموش کنید | `systemctl stop pg-migrator` |
+> ویزارد **خودش PasarGuard نصب نمی‌کند**. اول خودتان نصب کنید، بعد ریستور یا مهاجرت.
 
 ---
 
-## فلو ویزارد
+## تبدیل دیتابیس
 
-1. **خوش‌آمد** → انتخاب هدف
-2. **راهنما / وضعیت پنل** — اگر PasarGuard نصب است مشخصاتش را می‌بینید؛ اگر نه، فقط دستور نصب رسمی + آموزش Owner (ویزارد خودش چیزی نصب نمی‌کند)
-3. **ادامه کار:** ریستور بکاپ / تغییر DB · مهاجرت از پنل‌های دیگر
-
-> **پیش‌نیاز ریستور و مهاجرت:** PasarGuard از قبل روی سرور نصب باشد. اگر نصب نباشد، مودال شما را به تب راهنما می‌برد.
-
-### قوانین تبدیل دیتابیس
-
-| مبدأ → مقصد | وضعیت |
-|-------------|--------|
+| مبدأ → مقصد | |
+|-------------|---|
 | SQLite → هر موتور | ✅ |
-| MySQL / MariaDB / PostgreSQL / Timescale ↔ یکدیگر | ✅ |
-| هر موتور غیر SQLite → SQLite | ❌ |
+| MySQL ↔ MariaDB · PostgreSQL ↔ Timescale · و بقیه به هم | ✅ |
+| غیر SQLite → SQLite | ❌ |
+
+مقصد همیشه دیتابیس **نصب‌شده** روی سرور است.
 
 ---
 
@@ -52,42 +43,41 @@
 sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
 ```
 
-سپس: **`http://SERVER_IP:7000`**
+باز کنید: **`http://SERVER_IP:7000`**
 
-**پیش‌نیاز:** Ubuntu/Debian · root · Docker · پورت 7000 آزاد
-
-نصب خود PasarGuard را خودتان با دستورهای رسمی در تب راهنمای ویزارد (از [مستندات PasarGuard](https://docs.pasarguard.org/en/panel/installation/)) انجام دهید.
+Ubuntu/Debian · root · Docker · پورت ۷۰۰۰
 
 ---
 
-## پنل‌های پشتیبانی‌شده
+## پنل‌ها
 
-| مبدأ | وضعیت | لینک اشتراک |
-|------|--------|-------------|
-| **Marzban** | کامل | حفظ می‌شود |
-| **3x-ui** | جزئی | با redirect server |
-| **PasarGuard** | تغییر DB / ریستور بکاپ | حفظ می‌شود |
-| Remnawave | آزمایشی | تغییر می‌کند |
-| Hiddify | آزمایشی | تغییر می‌کند |
+| مبدأ | وضعیت |
+|------|--------|
+| Marzban | کامل |
+| PasarGuard (ریستور) | کامل |
+| 3x-ui | جزئی |
+| Remnawave / Hiddify | آزمایشی |
 
 ---
 
 ## دستورات
 
 ```bash
-systemctl status pg-migrator          # وضعیت
-systemctl restart pg-migrator         # ری‌استارت ویزارد
-journalctl -u pg-migrator -f          # لاگ سرویس
+systemctl status pg-migrator
+systemctl restart pg-migrator
+journalctl -u pg-migrator -f
 
-# آپدیت به آخرین نسخه
+# آپدیت
 sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
 
-# بعد از مهاجرت موفق — خاموش کردن ویزارد
+# بعد از اتمام کار
 systemctl stop pg-migrator && systemctl disable pg-migrator
 ```
 
 ---
 
-## لایسنس
+## حریم خصوصی
+
+همه‌چیز فقط روی سرور شماست. بکاپ و رمزها جایی نمی‌روند.
 
 MIT

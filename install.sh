@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# PG-Migrator — PasarGuard Panel Migration Wizard
+# PGClockMG — PasarGuard restore & migration wizard
 #
 # Usage:
 #   sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh)"
 #
 set -eo pipefail
 
-readonly SCRIPT_VERSION="2.8.2"
+readonly SCRIPT_VERSION="2.8.3"
 readonly INSTALL_DIR="/opt/pg-migrator"
 readonly SERVICE_NAME="pg-migrator"
 readonly WEB_PORT=7000
