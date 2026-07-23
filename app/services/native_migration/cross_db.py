@@ -240,10 +240,13 @@ async def run_two_phase_migration(
     migrator.job.log(f"Two-phase migration: {source_db} → {target_db}")
     await _stop_panel(migrator)
 
+    # Stay monotonic with caller progress (restore convert starts ~85)
+    base = max(int(getattr(migrator.job, "progress", 0) or 0), 80)
+
     staging_conn: dict | None = None
     try:
         # Phase 1 — land + upgrade intermediate to head
-        migrator.job.set_progress(45, "Phase 1: intermediate DB → alembic head...")
+        migrator.job.set_progress(min(92, base + 3), "Phase 1: intermediate DB → alembic head...")
         inter_path, inter_db, staging_conn = await _phase1_land_intermediate(
             migrator, source_path, source_db,
         )
@@ -288,7 +291,7 @@ async def run_two_phase_migration(
             migrator.job.log(f"Phase1 pre-count note: {e}")
 
         # Phase 2 — empty target at head, then copy head→head
-        migrator.job.set_progress(60, f"Phase 2: create {target_db} schema at head...")
+        migrator.job.set_progress(min(94, base + 8), f"Phase 2: create {target_db} schema at head...")
         await _prepare_target_for_migration(migrator, target_db)
         await _reset_target_schema(migrator, target_db)
         if target_db in ("postgresql", "timescaledb"):
@@ -303,7 +306,7 @@ async def run_two_phase_migration(
             heal_db=target_db,
         )
 
-        migrator.job.set_progress(75, f"Phase 2: copy {inter_db} → {target_db}...")
+        migrator.job.set_progress(min(97, base + 12), f"Phase 2: copy {inter_db} → {target_db}...")
         stats = await copy_database_universal(
             migrator,
             inter_path,

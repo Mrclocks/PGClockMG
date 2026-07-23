@@ -93,6 +93,20 @@ async function copyText(codeOrId, raw) {
   }
 }
 
+function applyUiProgress(fillEl, textEl, pct, key) {
+  const next = Math.max(0, Math.min(100, Number(pct) || 0));
+  const prev = Number(state[key] || 0);
+  const shown = Math.max(prev, next);
+  state[key] = shown;
+  if (fillEl) fillEl.style.width = `${shown}%`;
+  if (textEl) textEl.textContent = `${Math.round(shown)}%`;
+  return shown;
+}
+
+function resetUiProgress(key) {
+  state[key] = 0;
+}
+
 function renderGuideSections(container, access) {
   if (!container) return;
   const lang = state.lang || 'fa';
@@ -814,6 +828,7 @@ async function startRestore() {
   stopRestorePoll();
   setRestoreStage('running');
   applyPhaseI18n();
+  resetUiProgress('_restoreUiProgress');
   const fill = document.getElementById('restoreProgressFill');
   const text = document.getElementById('restoreProgressText');
   const status = document.getElementById('restoreStatusMsg');
@@ -856,8 +871,7 @@ async function pollRestore(jobId) {
     try {
       const res = await fetch(`/api/pasarguard/restore/${jobId}`);
       const job = await res.json();
-      if (fill) fill.style.width = `${job.progress || 0}%`;
-      if (text) text.textContent = `${job.progress || 0}%`;
+      applyUiProgress(fill, text, job.progress || 0, '_restoreUiProgress');
       if (status) status.textContent = job.message || t('restore.restoring');
       appendJobLogs(term, job.logs, cursor);
 
@@ -927,20 +941,23 @@ function showRestoreDone(result) {
     link.href = url || '#';
     link.textContent = t('restore.openPanel');
   }
+  const urlLine = document.getElementById('restorePanelUrl');
+  if (urlLine) {
+    if (url) {
+      urlLine.textContent = url;
+      urlLine.classList.remove('hidden');
+    } else {
+      urlLine.textContent = '';
+      urlLine.classList.add('hidden');
+    }
+  }
   const msg = document.getElementById('restoreDoneMsg');
   if (msg) {
-    const counts = access.verified_counts || access.copy_stats || {};
-    const parts = ['users', 'hosts', 'groups', 'nodes', 'inbounds', 'admins']
-      .filter(k => counts[k] != null)
-      .map(k => `${k}=${counts[k]}`);
     const convert = access.auto_db_convert
       ? ` (${access.backup_db || '?'} → ${access.final_db || '?'})`
       : '';
-    msg.textContent = parts.length
-      ? `${t('restore.verifiedCounts') || 'Verified'}: ${parts.join(', ')}${convert}`
-      : (t('restore.doneTitle') || '');
+    msg.textContent = `${t('restore.doneTitle') || ''}${convert}`.trim();
   }
-  renderGuideSections(document.getElementById('restoreAccessNotes'), access);
   const tip = document.getElementById('restoreUninstallTip');
   const btn = document.getElementById('btnUninstallRestore');
   const title = document.getElementById('restoreUninstallTitle');
@@ -957,5 +974,7 @@ window.continueAfterPgReady = continueAfterPgReady;
 window.backFromRestore = backFromRestore;
 window.choosePath = choosePath;
 window.startRestore = startRestore;
+window.applyUiProgress = applyUiProgress;
+window.resetUiProgress = resetUiProgress;
 window.resetRestoreForm = resetRestoreForm;
 window.setRestoreStage = setRestoreStage;

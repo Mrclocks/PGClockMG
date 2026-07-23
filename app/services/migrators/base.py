@@ -28,7 +28,14 @@ class MigrationJob:
                 pass
 
     def set_progress(self, pct: int, msg: str = ""):
-        self.progress = min(100, max(0, pct))
+        """Update progress; never move backwards (avoids UI jumping 85→45→75)."""
+        try:
+            pct_i = int(pct)
+        except (TypeError, ValueError):
+            pct_i = self.progress
+        pct_i = min(100, max(0, pct_i))
+        if pct_i >= self.progress:
+            self.progress = pct_i
         if msg:
             self.message = msg
 

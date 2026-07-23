@@ -1065,9 +1065,14 @@ function setLang(lang) {
   localStorage.setItem('pg-migrator-lang', lang);
   document.documentElement.lang = lang;
   document.documentElement.dir = lang === 'fa' ? 'rtl' : 'ltr';
-  document.querySelectorAll('.lang-btn').forEach(b => {
-    b.classList.toggle('active', b.dataset.lang === lang);
+  const labels = { fa: 'FA', en: 'EN', ru: 'RU' };
+  const current = document.getElementById('langCurrentLabel');
+  if (current) current.textContent = labels[lang] || lang.toUpperCase();
+  document.querySelectorAll('.lang-option').forEach((b) => {
+    b.classList.toggle('is-active', b.dataset.lang === lang);
   });
+  const accordion = document.getElementById('langAccordion');
+  if (accordion) accordion.open = false;
   applyI18n();
   renderGlobalChecks();
   if (state.selectedPanel) renderPanelPrereqs(state.selectedPanel.id);

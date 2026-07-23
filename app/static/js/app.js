@@ -405,6 +405,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Paint UI text immediately — never wait on /api/* before i18n (mobile often
   // looks "empty" until a refresh when the first system-check is slow).
   setLang(state.lang);
+  document.addEventListener('click', (ev) => {
+    const acc = document.getElementById('langAccordion');
+    if (acc && acc.open && !acc.contains(ev.target)) acc.open = false;
+  });
   if (typeof bindFinishModal === 'function') bindFinishModal();
   const drag = document.getElementById('uploadDragText');
   const sel = document.getElementById('uploadSelectText');
@@ -473,8 +477,6 @@ async function loadInfo() {
     state.panels = data.panels;
     state.subscriptionLabels = data.subscription_labels || {};
     state.serverIp = data.server_ip;
-    const ipEl = document.getElementById('serverIp');
-    if (ipEl) ipEl.textContent = `${data.server_ip}:${data.web_port}`;
     if (data.version) {
       const verEl = document.getElementById('appVersion');
       if (verEl) verEl.textContent = `v${data.version}`;
@@ -955,6 +957,11 @@ async function startMigration() {
   await goStep(5);
   const terminal = document.getElementById('logTerminal');
   terminal.textContent = '';
+  if (typeof resetUiProgress === 'function') resetUiProgress('_migrateUiProgress');
+  const fill = document.getElementById('progressFill');
+  const text = document.getElementById('progressText');
+  if (fill) fill.style.width = '0%';
+  if (text) text.textContent = '0%';
 
   const body = buildMigrationBody();
 
@@ -987,8 +994,17 @@ function connectWebSocket(jobId) {
       terminal.scrollTop = terminal.scrollHeight;
     }
     if (msg.type === 'status') {
-      document.getElementById('progressFill').style.width = msg.progress + '%';
-      document.getElementById('progressText').textContent = msg.progress + '%';
+      if (typeof applyUiProgress === 'function') {
+        applyUiProgress(
+          document.getElementById('progressFill'),
+          document.getElementById('progressText'),
+          msg.progress,
+          '_migrateUiProgress',
+        );
+      } else {
+        document.getElementById('progressFill').style.width = msg.progress + '%';
+        document.getElementById('progressText').textContent = msg.progress + '%';
+      }
       if (msg.message) document.getElementById('statusMsg').textContent = msg.message;
     }
     if (msg.type === 'done') {
@@ -1019,8 +1035,17 @@ async function pollStatus(jobId) {
     try {
       const res = await fetch(`/api/migrate/${jobId}`);
       const data = await res.json();
-      document.getElementById('progressFill').style.width = data.progress + '%';
-      document.getElementById('progressText').textContent = data.progress + '%';
+      if (typeof applyUiProgress === 'function') {
+        applyUiProgress(
+          document.getElementById('progressFill'),
+          document.getElementById('progressText'),
+          data.progress,
+          '_migrateUiProgress',
+        );
+      } else {
+        document.getElementById('progressFill').style.width = data.progress + '%';
+        document.getElementById('progressText').textContent = data.progress + '%';
+      }
       if (data.message) document.getElementById('statusMsg').textContent = data.message;
       appendMigrateLogs(terminal, data.logs, cursor);
       if (data.status === 'success' && !data.result?.error) {
