@@ -47,16 +47,45 @@ def soft_db_family(a: str | None, b: str | None) -> bool:
     return {a, b} <= {"mysql", "mariadb"} or {a, b} <= {"postgresql", "timescaledb"}
 
 
-def filter_timescaledb_extension_sql(sql: str) -> str:
-    """Strip CREATE/DROP EXTENSION timescaledb lines (pre/post restore handles it)."""
-    return "\n".join(
-        ln for ln in sql.splitlines()
-        if not re.search(
+def filter_timescaledb_extension_sql(sql: str, *, strip_all: bool = False) -> str:
+    """Strip TimescaleDB extension / toolkit DDL that plain PostgreSQL cannot run.
+
+    When restoring a Timescale backup into stock PostgreSQL, set strip_all=True to
+    also drop hypertable helpers and any other timescaledb-qualified statements.
+    """
+    out_lines: list[str] = []
+    for ln in sql.splitlines():
+        if re.search(
             r"^\s*(DROP|CREATE)\s+EXTENSION\s+(IF\s+(EXISTS|NOT\s+EXISTS)\s+)?timescaledb\b",
             ln,
             re.I,
-        )
-    )
+        ):
+            continue
+        if re.search(r"^\s*COMMENT\s+ON\s+EXTENSION\s+timescaledb\b", ln, re.I):
+            continue
+        if strip_all:
+            if re.search(
+                r"timescaledb_(pre|post)_restore\s*\("
+                r"|create_hypertable\s*\("
+                r"|add_dimension\s*\("
+                r"|set_chunk_time_interval\s*\("
+                r"|compress_chunk\s*\("
+                r"|decompress_chunk\s*\("
+                r"|alter_job\s*\("
+                r"|add_retention_policy\s*\("
+                r"|remove_retention_policy\s*\("
+                r"|timescaledb\.",
+                ln,
+                re.I,
+            ):
+                continue
+            # Any remaining DDL/DML line that still names the extension
+            if re.search(r"\btimescaledb\b", ln, re.I) and re.search(
+                r"^\s*(CREATE|ALTER|DROP|SELECT|COMMENT|GRANT|REVOKE|SET)\b", ln, re.I
+            ):
+                continue
+        out_lines.append(ln)
+    return "\n".join(out_lines)
 
 
 def _sql_literal(value: str) -> str:
@@ -1943,12 +1972,48 @@ async def _restore_postgres(
     layout = analysis.get("layout")
     manifest = root / "pg_dump" / "manifest.tsv"
     restored_any = False
-    use_timescale = db_type == "timescaledb" or bool(analysis.get("timescaledb_versions"))
+    backup_has_ts = (
+        bool(analysis.get("timescaledb_versions"))
+        or (analysis.get("backup_db") == "timescaledb")
+        or (analysis.get("db_type") == "timescaledb")
+    )
+    # Only use Timescale restore helpers if the TARGET service actually has the extension.
+    # Soft-family timescaledb→postgresql must strip TS DDL — plain PG has no timescaledb.
+    target_has_ts = False
+    if db_type == "timescaledb" or (svc or "").lower() == "timescaledb":
+        target_has_ts = True
+    else:
+        probed = await _read_timescaledb_version(job, svc, password, user=user)
+        target_has_ts = bool(probed)
+    use_timescale = target_has_ts
+    strip_for_plain_pg = backup_has_ts and not target_has_ts
+    if strip_for_plain_pg:
+        job.log(
+            "Backup is TimescaleDB but target is plain PostgreSQL — "
+            "stripping timescaledb extension DDL and restoring as PostgreSQL"
+        )
+
     if layout == "multi" and manifest.exists():
         globals_sql = root / "pg_dump" / "globals.sql"
         if globals_sql.exists():
             job.log("Restoring globals...")
-            await psql("", use_file=globals_sql)
+            # Globals often include extension bits — never hard-fail the whole restore on them
+            gtext = globals_sql.read_text(encoding="utf-8", errors="ignore")
+            if strip_for_plain_pg:
+                gtext = filter_timescaledb_extension_sql(gtext, strip_all=True)
+            cmd = [
+                "docker", "compose", "exec", "-T",
+                "-e", f"PGPASSWORD={password}",
+                svc, "psql", "-v", "ON_ERROR_STOP=0", "-U", user, "-d", "postgres",
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=str(PASARGUARD_DIR),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            await proc.communicate(input=gtext.encode("utf-8"))
 
         for line in manifest.read_text(encoding="utf-8", errors="ignore").splitlines():
             parts = line.split("\t")
@@ -1958,6 +2023,9 @@ async def _restore_postgres(
             dump_path = root / "pg_dump" / filename
             if not dump_path.exists():
                 raise RuntimeError(f"Missing dump file in backup: pg_dump/{filename}")
+            # Skip role-only / globals-style dumps that aren't the app DB
+            if filename.lower() in ("globals.sql", "roles.sql"):
+                continue
             job.log(f"Restoring database {dbn}...")
             await psql(
                 f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
@@ -1968,9 +2036,19 @@ async def _restore_postgres(
             ok, out = await psql(f'CREATE DATABASE "{dbn}" OWNER "{owner_q}";')
             if not ok:
                 raise RuntimeError(f"CREATE DATABASE {dbn} failed:\n{out[-1000:]}")
-            filtered = None
-            if has_ts == "1" or use_timescale:
-                await psql("CREATE EXTENSION IF NOT EXISTS timescaledb;", db=dbn)
+
+            dump_wants_ts = (has_ts == "1") or backup_has_ts
+            filtered: Path | None = None
+            restore_file = dump_path
+
+            if use_timescale and dump_wants_ts:
+                ok_ext, out_ext = await psql(
+                    "CREATE EXTENSION IF NOT EXISTS timescaledb;", db=dbn,
+                )
+                if not ok_ext:
+                    raise RuntimeError(
+                        f"Target cannot create timescaledb extension:\n{out_ext[-800:]}"
+                    )
                 await psql("SELECT timescaledb_pre_restore();", db=dbn)
                 filtered = dump_path.with_suffix(dump_path.suffix + ".filtered")
                 filtered.write_text(
@@ -1979,15 +2057,43 @@ async def _restore_postgres(
                     ),
                     encoding="utf-8",
                 )
-                ok, out = await psql("", db=dbn, use_file=filtered)
+                restore_file = filtered
+                ok, out = await psql("", db=dbn, use_file=restore_file)
                 await psql("SELECT timescaledb_post_restore();", db=dbn)
+            elif dump_wants_ts and not use_timescale:
+                # Timescale backup → plain PostgreSQL
+                filtered = dump_path.with_suffix(dump_path.suffix + ".pg-plain")
+                filtered.write_text(
+                    filter_timescaledb_extension_sql(
+                        dump_path.read_text(encoding="utf-8", errors="ignore"),
+                        strip_all=True,
+                    ),
+                    encoding="utf-8",
+                )
+                restore_file = filtered
+                ok, out = await psql("", db=dbn, use_file=restore_file)
             else:
                 ok, out = await psql("", db=dbn, use_file=dump_path)
+
+            if filtered and filtered.exists():
+                try:
+                    filtered.unlink()
+                except OSError:
+                    pass
+
             if not ok:
-                # Align BEFORE retry — wipe only when this DB was just created empty
+                # Align BEFORE retry — only when target actually has Timescale
                 mismatch = detect_ts_mismatch_from_text(out)
-                if mismatch or ("timescaledb" in (out or "").lower() and "version" in (out or "").lower()):
-                    wanted = (mismatch[0] if mismatch else parse_timescale_wanted(analysis.get("timescaledb_versions"))) or ""
+                if use_timescale and (
+                    mismatch
+                    or ("timescaledb" in (out or "").lower() and "version" in (out or "").lower())
+                ):
+                    wanted = (
+                        (mismatch[0] if mismatch else parse_timescale_wanted(
+                            analysis.get("timescaledb_versions")
+                        ))
+                        or ""
+                    )
                     if wanted:
                         job.log(f"Timescale restore error — aligning to {wanted} and retrying {dbn}")
                         await _align_timescaledb_image(job, wanted, wipe_data=True)
@@ -1996,10 +2102,34 @@ async def _restore_postgres(
                         await psql(f'CREATE DATABASE "{dbn}" OWNER "{owner_q}";')
                         await psql("CREATE EXTENSION IF NOT EXISTS timescaledb;", db=dbn)
                         await psql("SELECT timescaledb_pre_restore();", db=dbn)
-                        ok, out = await psql("", db=dbn, use_file=filtered if filtered else dump_path)
+                        filtered2 = dump_path.with_suffix(dump_path.suffix + ".filtered")
+                        filtered2.write_text(
+                            filter_timescaledb_extension_sql(
+                                dump_path.read_text(encoding="utf-8", errors="ignore")
+                            ),
+                            encoding="utf-8",
+                        )
+                        ok, out = await psql("", db=dbn, use_file=filtered2)
                         await psql("SELECT timescaledb_post_restore();", db=dbn)
                 if not ok:
-                    raise RuntimeError(f"Failed restoring {dbn}:\n{out[-2000:]}")
+                    # Last chance: if failure mentions timescaledb on plain PG, strip & retry
+                    if (
+                        not use_timescale
+                        and "timescaledb" in (out or "").lower()
+                        and restore_file == dump_path
+                    ):
+                        job.log("Retrying dump with aggressive timescaledb SQL strip...")
+                        filtered3 = dump_path.with_suffix(dump_path.suffix + ".pg-plain-retry")
+                        filtered3.write_text(
+                            filter_timescaledb_extension_sql(
+                                dump_path.read_text(encoding="utf-8", errors="ignore"),
+                                strip_all=True,
+                            ),
+                            encoding="utf-8",
+                        )
+                        ok, out = await psql("", db=dbn, use_file=filtered3)
+                    if not ok:
+                        raise RuntimeError(f"Failed restoring {dbn}:\n{out[-2000:]}")
             restored_any = True
             job.log(f"Database {dbn} restored")
         if not restored_any:
@@ -2018,8 +2148,10 @@ async def _restore_postgres(
     ok, out = await psql(f'CREATE DATABASE "{db_name}" OWNER "{user}";')
     if not ok:
         raise RuntimeError(f"CREATE DATABASE failed: {out[-1000:]}")
-    if use_timescale or db_type == "timescaledb":
-        await psql("CREATE EXTENSION IF NOT EXISTS timescaledb;", db=db_name)
+    if use_timescale and (backup_has_ts or db_type == "timescaledb"):
+        ok_ext, out_ext = await psql("CREATE EXTENSION IF NOT EXISTS timescaledb;", db=db_name)
+        if not ok_ext:
+            raise RuntimeError(f"Target cannot create timescaledb extension:\n{out_ext[-800:]}")
         await psql("SELECT timescaledb_pre_restore();", db=db_name)
         filtered = root / "db_backup_filtered.sql"
         filtered.write_text(
@@ -2028,6 +2160,16 @@ async def _restore_postgres(
         )
         ok, out = await psql("", db=db_name, use_file=filtered)
         await psql("SELECT timescaledb_post_restore();", db=db_name)
+    elif backup_has_ts and not use_timescale:
+        filtered = root / "db_backup_pg_plain.sql"
+        filtered.write_text(
+            filter_timescaledb_extension_sql(
+                dump.read_text(encoding="utf-8", errors="ignore"),
+                strip_all=True,
+            ),
+            encoding="utf-8",
+        )
+        ok, out = await psql("", db=db_name, use_file=filtered)
     else:
         ok, out = await psql("", db=db_name, use_file=dump)
     if not ok:

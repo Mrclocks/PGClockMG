@@ -1409,13 +1409,25 @@ button.db-card {
   display: block;
   font-size: 0.9rem;
   font-weight: 600;
-  word-break: break-word;
   line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
 }
-.specs-item code {
+.specs-item code.specs-value,
+.specs-item a.specs-value {
   font-family: var(--font-mono);
   font-size: 0.82rem;
   font-weight: 500;
+  color: inherit;
+  text-decoration: none;
+  direction: ltr;
+  text-align: start;
+}
+.specs-item a.specs-value:hover {
+  color: var(--primary);
+  text-decoration: underline;
 }
 
 .form-group-spaced { margin-top: 16px; }
@@ -1879,5 +1891,14 @@ button.db-card {
   align-items: center;
   gap: 8px;
   margin-top: 16px;
+  min-width: 0;
 }
-#pgDocsBox a { color: var(--primary); }
+#pgDocsBox a {
+  color: var(--primary);
+  max-width: min(100%, 280px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+  vertical-align: bottom;
+}

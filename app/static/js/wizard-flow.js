@@ -575,18 +575,22 @@ function renderInstalledSpecs() {
   const ssl = access.ssl === true ? t('pg.specSslYes') : (access.ssl === false ? t('pg.specSslNo') : '—');
   const url = access.login_url || access.dashboard_url || '';
   const rows = [
-    [t('pg.specPath'), '/opt/pasarguard'],
-    [t('pg.specDb'), db],
-    [t('pg.specPort'), String(port)],
-    [t('pg.specSsl'), ssl],
-    [t('pg.specEnv'), '/opt/pasarguard/.env'],
-    [t('pg.specUrl'), url || '—'],
+    [t('pg.specPath'), '/opt/pasarguard', 'path'],
+    [t('pg.specDb'), db, 'text'],
+    [t('pg.specPort'), String(port), 'text'],
+    [t('pg.specSsl'), ssl, 'text'],
+    [t('pg.specEnv'), '/opt/pasarguard/.env', 'path'],
+    [t('pg.specUrl'), url || '—', url ? 'url' : 'text'],
   ];
-  el.innerHTML = rows.map(([label, value]) => {
-    const isCode = String(value).startsWith('/') || String(value).startsWith('http');
-    const valHtml = isCode
-      ? `<code class="specs-value">${escapeHtml(value)}</code>`
-      : `<span class="specs-value">${escapeHtml(value)}</span>`;
+  el.innerHTML = rows.map(([label, value, kind]) => {
+    let valHtml;
+    if (kind === 'url') {
+      valHtml = `<a class="specs-value" href="${escapeHtml(value)}" target="_blank" rel="noopener" title="${escapeHtml(value)}">${escapeHtml(value)}</a>`;
+    } else if (kind === 'path') {
+      valHtml = `<code class="specs-value" title="${escapeHtml(value)}">${escapeHtml(value)}</code>`;
+    } else {
+      valHtml = `<span class="specs-value" title="${escapeHtml(value)}">${escapeHtml(value)}</span>`;
+    }
     return `<div class="specs-item"><span class="specs-label">${escapeHtml(label)}</span>${valHtml}</div>`;
   }).join('');
 }
