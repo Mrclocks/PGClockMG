@@ -111,10 +111,10 @@ html[lang="fa"] body {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
-  background: var(--orange);
+  color: hsl(24 95% 62%);
+  background: hsla(var(--pg-orange), 0.16);
   border-radius: 14px;
-  border: 1px solid hsl(24 90% 42%);
+  border: 1px solid hsla(var(--pg-orange), 0.45);
   box-shadow: none;
 }
 
@@ -1857,7 +1857,7 @@ button.db-card {
   stroke-linejoin: round;
 }
 .icon-lg { width: 2.25rem; height: 2.25rem; }
-.logo .icon { width: 1.4rem; height: 1.4rem; color: #fff; }
+.logo .icon { width: 1.4rem; height: 1.4rem; color: hsl(24 95% 62%); }
 .result-icon {
   display: flex;
   justify-content: center;
