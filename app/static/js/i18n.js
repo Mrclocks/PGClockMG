@@ -267,7 +267,7 @@ const I18N = {
     },
     support: { full: 'Full', partial: 'Partial', experimental: 'Experimental', db_only: 'DB only' },
     sub: { native: 'Links preserved', redirect: 'Links preserved via redirect', changed: 'Links will change' },
-    footer: { docs: 'PasarGuard Docs', github: 'GitHub' },
+    footer: { github: 'GitHub' },
     uploading: 'Uploading',
     uploaded: 'uploaded',
     uploadErr: 'Upload error',
