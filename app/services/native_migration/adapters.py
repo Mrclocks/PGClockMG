@@ -405,6 +405,10 @@ class MysqlWriter(TableWriter):
             elif data_type == "json":
                 from app.services.native_migration.copy_core import coerce_json_value
                 val = coerce_json_value(val)
+            elif data_type in ("datetime", "timestamp", "date", "time"):
+                from app.services.native_migration.copy_core import normalize_datetime_for_sql
+                if val is not None:
+                    val = normalize_datetime_for_sql(val)
             elif (
                 col in BOOL_COLUMNS
                 or data_type == "bit"

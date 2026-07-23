@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Callable, Iterable
 
@@ -271,6 +271,41 @@ def engine_family(db_type: str) -> str:
     return db_type
 
 
+# Postgres timestamptz → string often keeps +00:00 / Z; MySQL/MariaDB DATETIME rejects it.
+_TZ_TAIL_RE = re.compile(
+    r"(?:Z|[+-]\d{2}:?\d{2}(?::\d{2})?)$",
+    re.IGNORECASE,
+)
+_LOOKS_LIKE_DT_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}",
+)
+
+
+def normalize_datetime_for_sql(value):
+    """Naive ``YYYY-MM-DD HH:MM:SS`` — safe for MySQL/MariaDB DATETIME and SQLite.
+
+    PostgreSQL ``timestamptz`` values (objects or ``…+00:00`` strings) must lose the
+    offset before insert into MariaDB/MySQL or error 1292 is raised.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value.isoformat(sep=" ", timespec="seconds")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return s
+        if "T" in s[:32]:
+            s = s.replace("T", " ", 1)
+        s = _TZ_TAIL_RE.sub("", s).rstrip()
+        return s
+    return value
+
+
 def normalize_raw_value(value):
     """Normalize DB driver return types before column-specific coercion."""
     if value is None:
@@ -282,7 +317,7 @@ def normalize_raw_value(value):
             return int(value)
         return float(value)
     if isinstance(value, datetime):
-        return value.isoformat(sep=" ", timespec="seconds")
+        return normalize_datetime_for_sql(value)
     if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, bytes):
@@ -290,6 +325,12 @@ def normalize_raw_value(value):
             return value.decode("utf-8")
         except Exception:
             return value
+    if isinstance(value, str):
+        s = value.strip()
+        # asyncpg/psycopg sometimes yield timestamptz as text with +00:00
+        if _LOOKS_LIKE_DT_RE.match(s) and _TZ_TAIL_RE.search(s):
+            return normalize_datetime_for_sql(s)
+        return value
     return value
 
 
