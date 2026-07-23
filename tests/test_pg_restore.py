@@ -25,9 +25,12 @@ from app.services.pg_restore import (
 def test_soft_db_family_matrix():
     assert soft_db_family("mysql", "mariadb")
     assert soft_db_family("mariadb", "mysql")
+    # Plain PG → Timescale is soft; Timescale → plain PG needs convert
     assert soft_db_family("postgresql", "timescaledb")
-    assert soft_db_family("timescaledb", "postgresql")
+    assert not soft_db_family("timescaledb", "postgresql")
     assert soft_db_family("sqlite", "sqlite")
+    assert soft_db_family("timescaledb", "timescaledb")
+    assert soft_db_family("postgresql", "postgresql")
     assert not soft_db_family("sqlite", "mysql")
     assert not soft_db_family("mysql", "timescaledb")
     assert not soft_db_family("postgresql", "mysql")
