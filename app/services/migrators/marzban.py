@@ -3,6 +3,7 @@
 import asyncio
 import re
 import shutil
+import sqlite3
 from pathlib import Path
 
 from app.config import (
@@ -20,6 +21,10 @@ from app.services.env_migration import (
     merge_marzban_env_into_pasarguard,
     get_panel_url_from_env,
     _set_sqlalchemy_url,
+    _set_env_var_simple,
+    build_sqlalchemy_url_for_target,
+    finalize_pasarguard_env_after_restore,
+    env_points_to_db,
 )
 from app.services.db_credentials import build_app_sqlalchemy_url, get_source_connection, get_target_connection
 from app.services.pasarguard_ops import (
@@ -27,6 +32,8 @@ from app.services.pasarguard_ops import (
     resolve_db_service,
 )
 from app.services.backup_analyzer import resolve_extract_root, find_file_in_upload
+from app.services.pg_restore import soft_db_family
+from app.services.pg_access import get_panel_access_info
 
 
 class MarzbanMigrator(BaseMigrator):
@@ -90,57 +97,226 @@ class MarzbanMigrator(BaseMigrator):
                 "Run the PasarGuard installer first."
             )
 
+        install_env_snapshot = (
+            PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+            if PASARGUARD_ENV.exists() else ""
+        )
+
         if source_db != target_db:
             self.job.log(f"Cross-database migration: Marzban {source_db} → PasarGuard {target_db}")
 
-        if source_db == target_db and source_db == "sqlite" and source_sqlite:
-            self.job.set_progress(45, "Importing SQLite database...")
-            dest = PASARGUARD_DATA / "db.sqlite3"
-            PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
-            if dest.exists():
-                self._backup_file(dest, BACKUP_DIR)
-            shutil.copy2(source_sqlite, dest)
-            self.job.log(f"Imported SQLite → {dest}")
-            if extra_data_dir:
-                await self._copy_marzban_assets(extra_data_dir)
-            self.job.set_progress(85, "Starting PasarGuard with migrated database...")
-            await safe_start_pasarguard(self)
-        elif source_db == target_db:
-            if source_db in ("mysql", "mariadb") and source_sql:
-                self.job.set_progress(45, "Importing MySQL/MariaDB dump...")
-                await self._import_mysql_dump(source_sql)
-            else:
-                raise RuntimeError("Source database file missing for fresh migration")
-            if extra_data_dir:
-                await self._copy_marzban_assets(extra_data_dir)
-            self.job.set_progress(85, "Starting PasarGuard...")
-            await safe_start_pasarguard(self)
-        else:
-            self.job.set_progress(40, "Preparing two-phase cross-database migration...")
-            if source_db == "sqlite":
-                if not source_sqlite:
-                    raise RuntimeError("SQLite source file missing")
-                migration_source = str(source_sqlite)
-            elif source_db in ("mysql", "mariadb"):
-                if not source_sql:
-                    raise RuntimeError("SQL dump missing for cross-DB migration")
-                migration_source = str(source_sql)
-            else:
-                raise RuntimeError(f"Unsupported Marzban source database: {source_db}")
-            await self._update_env_paths(source_db, target_db)
-            await self._ensure_target_database_stack(target_db)
-            self.job.set_progress(50, f"Two-phase: {source_db} → {target_db}...")
-            await run_cross_db_migration(
-                self, migration_source, source_db, target_db,
+        # Proven path: land Marzban → PasarGuard-shaped via real panel boot (same as
+        # sqlite→sqlite), then convert like restore when target is not sqlite.
+        if source_db == "sqlite" and source_sqlite:
+            await self._migrate_sqlite_like_restore(
+                source_sqlite, target_db, extra_data_dir, install_env_snapshot,
             )
-            await self._update_env_paths(source_db, target_db)
-            if extra_data_dir:
-                await self._copy_marzban_assets(extra_data_dir)
-            self.job.set_progress(90, "Starting PasarGuard...")
-            await safe_start_pasarguard(self)
+        elif source_db in ("mysql", "mariadb") and source_sql:
+            await self._migrate_mysql_like_restore(
+                source_sql, source_db, target_db, extra_data_dir, install_env_snapshot,
+            )
+        else:
+            raise RuntimeError("Source database file missing for Marzban migration")
 
         self.job.set_progress(100, "Marzban migration completed")
         return self._result("fresh", target_db)
+
+    async def _migrate_sqlite_like_restore(
+        self,
+        source_sqlite: Path,
+        target_db: str,
+        extra_data_dir: Path | None,
+        install_env_snapshot: str,
+    ) -> None:
+        """Marzban SQLite → any target via PasarGuard SQLite upgrade + restore-grade convert."""
+        self.job.set_progress(35, "Landing Marzban SQLite into PasarGuard...")
+        await self._force_env_sqlite(install_env_snapshot)
+        dest = PASARGUARD_DATA / "db.sqlite3"
+        PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            self._backup_file(dest, BACKUP_DIR)
+        shutil.copy2(source_sqlite, dest)
+        self.job.log(f"Imported Marzban SQLite → {dest}")
+        if extra_data_dir:
+            await self._copy_marzban_assets(extra_data_dir)
+
+        self.job.set_progress(50, "Upgrading Marzban schema via PasarGuard panel boot...")
+        orig_target = self.params.get("target_db")
+        self.params["target_db"] = "sqlite"
+        await safe_start_pasarguard(self)
+        self.params["target_db"] = orig_target or target_db
+        await self._stop_panel()
+        self._assert_sqlite_pasarguard_ready(dest)
+
+        if target_db == "sqlite":
+            self.job.set_progress(90, "Starting PasarGuard on SQLite...")
+            await safe_start_pasarguard(self)
+            return
+
+        self.job.set_progress(65, f"Converting PasarGuard SQLite → {target_db} (restore-grade)...")
+        await self._convert_pg_sqlite_to_target(dest, target_db, install_env_snapshot)
+        if extra_data_dir:
+            await self._copy_marzban_assets(extra_data_dir)
+        self.job.set_progress(90, "Starting PasarGuard...")
+        await safe_start_pasarguard(self)
+
+    async def _migrate_mysql_like_restore(
+        self,
+        source_sql: Path,
+        source_db: str,
+        target_db: str,
+        extra_data_dir: Path | None,
+        install_env_snapshot: str,
+    ) -> None:
+        """Marzban MySQL/MariaDB → target with panel-boot upgrade + restore-grade convert."""
+        same_family = soft_db_family(source_db, target_db) or source_db == target_db
+
+        if same_family:
+            self.job.set_progress(40, f"Importing Marzban dump into PasarGuard {target_db}...")
+            await self._update_env_paths(source_db, target_db)
+            await self._ensure_target_database_stack(target_db)
+            await self._import_mysql_dump(source_sql)
+            if extra_data_dir:
+                await self._copy_marzban_assets(extra_data_dir)
+            self.job.set_progress(70, "Upgrading Marzban MySQL schema via panel boot...")
+            await safe_start_pasarguard(self)
+            return
+
+        self.job.set_progress(40, "Preparing two-phase Marzban MySQL → target...")
+        await self._update_env_paths(source_db, target_db)
+        await self._ensure_target_database_stack(target_db)
+        if extra_data_dir:
+            await self._copy_marzban_assets(extra_data_dir)
+        self.job.set_progress(50, f"Two-phase: {source_db} → {target_db} (panel-upgrade intermediate)...")
+        await run_cross_db_migration(
+            self, str(source_sql), source_db, target_db,
+            upgrade_via_panel=True,
+        )
+        self._abort_if_copy_gaps()
+        await self._finalize_env_after_convert(target_db, install_env_snapshot)
+        self.job.set_progress(90, "Starting PasarGuard...")
+        await safe_start_pasarguard(self)
+
+    async def _convert_pg_sqlite_to_target(
+        self, sqlite_path: Path, target_db: str, install_env_snapshot: str,
+    ) -> None:
+        """Restore-grade convert: PasarGuard-shaped SQLite → installed server DB."""
+        from app.services.db_auth import (
+            migration_params_from_connection,
+            resolve_live_admin_connection,
+        )
+
+        await self._update_env_paths("sqlite", target_db)
+        await self._ensure_target_database_stack(target_db)
+
+        admin = await resolve_live_admin_connection(
+            self, target_db, env_text=install_env_snapshot or None,
+        )
+        self.params = migration_params_from_connection("sqlite", target_db, admin)
+        self.params["_resolved_target_conn"] = admin
+        self.params["_auto_db_credentials"] = True
+
+        await run_cross_db_migration(self, str(sqlite_path), "sqlite", target_db)
+        self._abort_if_copy_gaps()
+        await self._finalize_env_after_convert(target_db, install_env_snapshot)
+        self._relocate_sqlite_after_convert()
+
+    async def _finalize_env_after_convert(self, target_db: str, install_env_snapshot: str) -> None:
+        if not PASARGUARD_ENV.exists():
+            return
+        text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+        conn = get_target_connection(self.params)
+        finalized = finalize_pasarguard_env_after_restore(
+            text,
+            target_db,
+            conn.get("password"),
+            install_env_snapshot or text,
+            db_user=conn.get("user"),
+            db_name=conn.get("database"),
+        )
+        if not env_points_to_db(finalized, target_db):
+            raise RuntimeError(
+                f".env SQLALCHEMY_DATABASE_URL does not match target engine {target_db}"
+            )
+        PASARGUARD_ENV.write_text(finalized, encoding="utf-8")
+        self.job.log(f".env finalized for {target_db}")
+
+    def _relocate_sqlite_after_convert(self) -> None:
+        sqlite_path = PASARGUARD_DATA / "db.sqlite3"
+        if not sqlite_path.exists():
+            return
+        bak = PASARGUARD_DATA / f"db.sqlite3.pre-convert-{self.job.job_id}.bak"
+        if bak.exists():
+            bak.unlink()
+        shutil.move(str(sqlite_path), str(bak))
+        self.job.log(f"Moved SQLite aside → {bak.name} (panel uses server DB)")
+
+    def _abort_if_copy_gaps(self) -> None:
+        report = self.copy_report or {}
+        if not report.get("has_gaps"):
+            return
+        crit = report.get("critical_incomplete") or report.get("incomplete") or []
+        raise RuntimeError(
+            "Migration incomplete — critical tables were not fully copied:\n"
+            + ", ".join(
+                f"{i.get('table')} {i.get('copied')}/{i.get('source')}" for i in crit
+            )
+        )
+
+    async def _force_env_sqlite(self, install_env_snapshot: str) -> None:
+        """Point live .env at SQLite so panel boot runs Marzban→PasarGuard alembic."""
+        if not PASARGUARD_ENV.exists():
+            raise RuntimeError(".env not found at /opt/pasarguard — cannot migrate")
+        self._backup_file(PASARGUARD_ENV, BACKUP_DIR)
+        base = install_env_snapshot or PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+        url = build_sqlalchemy_url_for_target("sqlite", None, base)
+        text = _set_sqlalchemy_url(base, url)
+        text = _set_env_var_simple(text, "PASARGUARD_DB_ENGINE", "sqlite")
+        PASARGUARD_ENV.write_text(text, encoding="utf-8")
+        self.job.log(".env temporarily pointed at SQLite for schema upgrade")
+
+    async def _stop_panel(self) -> None:
+        await self._run_cmd(
+            ["docker", "compose", "stop", "pasarguard"],
+            cwd=str(PASARGUARD_DIR),
+            timeout=120,
+        )
+
+    def _assert_sqlite_pasarguard_ready(self, path: Path) -> None:
+        """Ensure panel-boot upgrade produced PasarGuard-shaped data."""
+        if not path.exists():
+            raise RuntimeError("SQLite intermediate missing after schema upgrade")
+        critical = ("users", "admins", "hosts", "inbounds", "nodes", "groups")
+        found: dict[str, int] = {}
+        try:
+            conn = sqlite3.connect(str(path))
+            try:
+                tables = {
+                    r[0]
+                    for r in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+                for t in critical:
+                    if t not in tables:
+                        continue
+                    n = int(conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0] or 0)
+                    if n > 0:
+                        found[t] = n
+            finally:
+                conn.close()
+        except Exception as e:
+            raise RuntimeError(f"Could not verify upgraded SQLite: {e}") from e
+
+        if "inbounds" not in found and "hosts" not in found and "users" not in found:
+            raise RuntimeError(
+                "Marzban → PasarGuard schema upgrade left critical tables empty "
+                "(users/hosts/inbounds). Aborting before convert."
+            )
+        self.job.log(
+            "PasarGuard SQLite ready: "
+            + ", ".join(f"{k}={v}" for k, v in found.items())
+        )
 
     # ─── Helpers ─────────────────────────────────────────────────────
 
@@ -362,9 +538,15 @@ class MarzbanMigrator(BaseMigrator):
         fixed = dump_file.parent / "fixed_import.sql"
         text = fix_mysql_dump_for_pasarguard(dump_file.read_text(encoding="utf-8", errors="ignore"))
         fixed.write_text(text, encoding="utf-8")
-        svc = resolve_db_service("mysql") or "mysql"
+        svc = resolve_db_service("mysql") or resolve_db_service("mariadb") or "mysql"
         await self._run_cmd(["docker", "compose", "up", "-d", svc], cwd=str(PASARGUARD_DIR))
         await asyncio.sleep(6)
+        wipe = await asyncio.create_subprocess_shell(
+            f'cd "{PASARGUARD_DIR}" && docker compose exec -T {svc} '
+            f'mysql -u {user} -p"{pwd}" -h {host} -e '
+            f'"DROP DATABASE IF EXISTS `{db}`; CREATE DATABASE `{db}`; "'
+        )
+        await wipe.wait()
         proc = await asyncio.create_subprocess_shell(
             f'cd "{PASARGUARD_DIR}" && docker compose exec -T {svc} '
             f'mysql -u {user} -p"{pwd}" -h {host} {db} < "{fixed}"',
@@ -384,15 +566,21 @@ class MarzbanMigrator(BaseMigrator):
         original = env_path.read_text(encoding="utf-8", errors="ignore")
         sqlalchemy_url = build_app_sqlalchemy_url(self.params)
         text = _set_sqlalchemy_url(original, sqlalchemy_url)
+        text = _set_env_var_simple(text, "PASARGUARD_DB_ENGINE", target_db)
         env_path.write_text(text, encoding="utf-8")
         self.job.log(".env updated for target database")
 
     def _result(self, method: str, target_db: str) -> dict:
+        access = get_panel_access_info()
         env_text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.exists() else None
         port = read_env_var(env_text, "UVICORN_PORT") if env_text else None
+        root = (read_env_var(env_text, "UVICORN_ROOT_PATH") or "").rstrip("/") if env_text else ""
         out = {
-            "panel_url": self._get_panel_url(),
-            "panel_port": port or "8000",
+            "panel_url": access.get("login_url") or get_panel_url_from_env(env_text),
+            "panel_port": port or access.get("port") or "8000",
+            "panel_root_path": root or access.get("root_path") or "/",
+            "login_url": access.get("login_url"),
+            "root_path": access.get("root_path"),
             "subscription_mode": "native",
             "method": method,
             "target_db": target_db,

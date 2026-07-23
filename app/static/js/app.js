@@ -1137,8 +1137,14 @@ function showSuccess(result) {
   document.getElementById('resultError').classList.add('hidden');
   document.querySelector('#resultSuccess h2').textContent = t('step6.success');
 
+  const rootRaw = result?.panel_root_path
+    || state.pasarguardEnvSummary?.panel_root_path
+    || state.systemCheck?.pasarguard_env?.panel_root_path
+    || '';
+  const root = (rootRaw && rootRaw !== '/' ? String(rootRaw).replace(/\/$/, '') : '');
+  const port = result?.panel_port || state.pasarguardEnvSummary?.panel_port || state.systemCheck?.pasarguard_env?.panel_port || '8000';
   const panelUrl = result?.panel_url
-    || `https://${state.serverIp.split(':')[0]}:${result?.panel_port || state.pasarguardEnvSummary?.panel_port || state.systemCheck?.pasarguard_env?.panel_port || '8000'}/dashboard/`;
+    || `https://${state.serverIp.split(':')[0]}:${port}${root}/dashboard/`.replace(/([^:]\/)\/+/g, '$1');
   document.getElementById('panelLink').href = panelUrl;
 
   const mode = result?.subscription_mode || state.selectedPanel?.subscription_mode;

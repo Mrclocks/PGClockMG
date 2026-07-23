@@ -224,11 +224,70 @@ async def _prepare_target_for_migration(migrator, target_db: str) -> None:
         await sync_postgres_roles_to_app_password(migrator, target_db, admin)
 
 
+async def _panel_boot_upgrade_intermediate(
+    migrator,
+    inter_db: str,
+    inter_path: str,
+    staging_conn: dict | None,
+) -> None:
+    """Boot real PasarGuard against intermediate so Marzban→PG alembic runs fully.
+
+    Host-network `alembic upgrade head` can heal/stamp too early on Marzban schemas
+    and skip proxies→inbounds transforms. Panel boot matches the proven sqlite→sqlite path.
+    """
+    from app.services.env_migration import (
+        _set_sqlalchemy_url,
+        _set_env_var_simple,
+        build_sqlalchemy_url_for_target,
+    )
+    from app.services.pasarguard_ops import safe_start_pasarguard
+
+    if not PASARGUARD_ENV.exists():
+        migrator.job.log("No .env — skipping panel-boot upgrade")
+        return
+
+    backup_env = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+    try:
+        if inter_db == "sqlite":
+            url = build_sqlalchemy_url_for_target("sqlite", None, backup_env)
+        else:
+            conn = staging_conn or get_source_connection(migrator.params)
+            pwd = conn.get("password") or ""
+            user = conn.get("user") or (
+                "postgres" if inter_db in ("postgresql", "timescaledb") else "root"
+            )
+            db = conn.get("database") or "pasarguard"
+            host = conn.get("host") or "127.0.0.1"
+            port = str(conn.get("port") or (
+                "5432" if inter_db in ("postgresql", "timescaledb") else "3306"
+            ))
+            if inter_db in ("mysql", "mariadb"):
+                url = f"mysql+asyncmy://{user}:{pwd}@{host}:{port}/{db}"
+            else:
+                url = f"postgresql+asyncpg://{user}:{pwd}@{host}:{port}/{db}"
+
+        text = _set_sqlalchemy_url(backup_env, url)
+        text = _set_env_var_simple(text, "PASARGUARD_DB_ENGINE", inter_db)
+        PASARGUARD_ENV.write_text(text, encoding="utf-8")
+        migrator.job.log(f"Panel-boot upgrade on intermediate {inter_db}...")
+        orig = migrator.params.get("target_db")
+        migrator.params["target_db"] = inter_db
+        await safe_start_pasarguard(migrator)
+        migrator.params["target_db"] = orig
+        await _stop_panel(migrator)
+        migrator.job.log("Panel-boot schema upgrade complete")
+    finally:
+        # Restore pre-boot .env; caller finalizes for target later
+        PASARGUARD_ENV.write_text(backup_env, encoding="utf-8")
+
+
 async def run_two_phase_migration(
     migrator,
     source_path: str,
     source_db: str,
     target_db: str,
+    *,
+    upgrade_via_panel: bool = False,
 ) -> dict[str, int]:
     """Migrate any supported source → any supported target via head→head copy."""
     strategy = migration_strategy(source_db, target_db)
@@ -250,6 +309,15 @@ async def run_two_phase_migration(
         inter_path, inter_db, staging_conn = await _phase1_land_intermediate(
             migrator, source_path, source_db,
         )
+
+        if upgrade_via_panel:
+            migrator.job.set_progress(
+                min(93, base + 5),
+                "Phase 1b: panel-boot Marzban→PasarGuard schema upgrade...",
+            )
+            await _panel_boot_upgrade_intermediate(
+                migrator, inter_db, inter_path, staging_conn,
+            )
 
         if inter_db == target_db and target_db == "sqlite":
             migrator.job.log("Phase1 complete — target is SQLite intermediate; skip Phase2")
@@ -281,12 +349,14 @@ async def run_two_phase_migration(
                         + ", ".join(f"{k}={v}" for k, v in pre_counts.items())
                     )
                 else:
-                    migrator.job.log(
-                        "WARNING: Phase1 intermediate has 0 rows in users/admins/hosts/"
-                        "inbounds/nodes/groups — convert may produce an empty panel"
+                    raise RuntimeError(
+                        "Phase1 intermediate has 0 rows in users/admins/hosts/"
+                        "inbounds/nodes/groups — refusing to wipe target and copy nothing"
                     )
             finally:
                 pre_reader.close()
+        except RuntimeError:
+            raise
         except Exception as e:
             migrator.job.log(f"Phase1 pre-count note: {e}")
 
@@ -349,9 +419,14 @@ async def run_cross_db_migration(
     source_path: str,
     source_db: str,
     target_db: str,
+    *,
+    upgrade_via_panel: bool = False,
 ) -> None:
     """Public entry — always uses two-phase engine."""
-    await run_two_phase_migration(migrator, source_path, source_db, target_db)
+    await run_two_phase_migration(
+        migrator, source_path, source_db, target_db,
+        upgrade_via_panel=upgrade_via_panel,
+    )
 
 
 run_native_cross_db_migration = run_cross_db_migration

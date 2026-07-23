@@ -138,6 +138,9 @@ function renderGuideSections(container, access) {
 
 function resolveLoginUrl(access) {
   const a = access || state.panelAccess || {};
+  // Prefer server-built URL (already includes UVICORN_ROOT_PATH from .env)
+  const preferred = a.login_url || a.panel_url || a.public_url || a.localhost_url || '';
+  if (preferred) return preferred;
   const host = (state.pgDomain || a.domain || state.pgIp || a.host || a.ip || '').trim();
   const port = a.port || '8000';
   const root = (a.root_path && a.root_path !== '/' ? a.root_path : '') || '';
@@ -146,7 +149,7 @@ function resolveLoginUrl(access) {
     const p = path.startsWith('/') ? path : `/${path}`;
     return `https://${host}:${port}${p}`;
   }
-  return a.login_url || a.public_url || a.localhost_url || a.panel_url || '';
+  return '';
 }
 
 function openFinishModal(loginUrl) {
