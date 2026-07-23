@@ -39,7 +39,6 @@ class MigrationRequest(BaseModel):
     upload_id: Optional[str] = None
     upload_bundle_id: Optional[str] = None
     install_redirect: bool = True
-    pasarguard_install: bool = False
     remnawave_url: Optional[str] = None
     remnawave_token: Optional[str] = None
     marzban_mode: Optional[Literal["fresh"]] = "fresh"
@@ -52,16 +51,6 @@ class MigrationStatus(BaseModel):
     message: str = ""
     logs: List[str] = []
     result: Optional[dict] = None
-
-
-class PasarguardInstallRequest(BaseModel):
-    database: Literal["sqlite", "mysql", "mariadb", "postgresql", "timescaledb"] = "timescaledb"
-    ssl: bool = False
-    domain: Optional[str] = None
-    ip: Optional[str] = None
-    ssl_http_port: int = 80
-    wipe_volumes: bool = False
-    force: bool = False
 
 
 class PasarguardRestoreRequest(BaseModel):

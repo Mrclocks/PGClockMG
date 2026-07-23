@@ -48,6 +48,14 @@ def validate_migration(params: dict) -> dict:
     if not upload_path and params.get("upload_id"):
         upload_path = get_upload_path(params["upload_id"])
 
+    from app.panels import can_convert_databases
+    if source_db and target_db and source_db != target_db and not can_convert_databases(source_db, target_db):
+        errors.append(_msg(
+            f"Cannot convert {source_db} → {target_db}. Non-SQLite engines cannot become SQLite.",
+            f"تبدیل {source_db} → {target_db} ممکن نیست. موتور غیر SQLite نمی‌تواند به SQLite برود.",
+            f"Нельзя конвертировать {source_db} → {target_db}. В SQLite только из SQLite.",
+        ))
+
     bundle_status = get_bundle_status(bundle_id) if bundle_id else None
     upload_analysis = (
         params.get("upload_analysis")

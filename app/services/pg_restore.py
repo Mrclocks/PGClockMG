@@ -231,19 +231,37 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
                 "ru": "PasarGuard не установлен",
             })
         experimental_db_change = False
+        convert_blocked = False
         if db_type and installed_db and db_type != installed_db:
+            from app.panels import can_convert_databases
+
             if soft_db_family(db_type, installed_db):
                 warnings.append({
                     "en": f"Related engines (backup={db_type}, installed={installed_db}) — restore continues automatically.",
                     "fa": f"موتورهای هم‌خانواده (بکاپ={db_type}، نصب={installed_db}) — ریستور خودکار ادامه می‌یابد.",
                     "ru": f"Смежные СУБД (backup={db_type}, installed={installed_db}) — восстановление продолжится.",
                 })
+            elif not can_convert_databases(db_type, installed_db):
+                convert_blocked = True
+                ok = False
+                if installed_db == "sqlite" and db_type != "sqlite":
+                    warnings.append({
+                        "en": f"Cannot convert {db_type} → SQLite. Install PasarGuard with MySQL/MariaDB/PostgreSQL/TimescaleDB yourself, then restore.",
+                        "fa": f"نمی‌شود {db_type} را به SQLite تبدیل کرد. خودتان PasarGuard را با دیتابیس سروری نصب کنید، بعد ریستور کنید.",
+                        "ru": f"Нельзя конвертировать {db_type} → SQLite. Установите PasarGuard с серверной БД сами, затем восстановите.",
+                    })
+                else:
+                    warnings.append({
+                        "en": f"Conversion {db_type} → {installed_db} is not supported.",
+                        "fa": f"تبدیل {db_type} به {installed_db} پشتیبانی نمی‌شود.",
+                        "ru": f"Конвертация {db_type} → {installed_db} не поддерживается.",
+                    })
             else:
                 experimental_db_change = True
                 warnings.append({
-                    "en": f"Database differs (backup={db_type}, installed={installed_db}). Confirm auto-convert to continue.",
-                    "fa": f"دیتابیس فرق دارد (بکاپ={db_type}، نصب={installed_db}). برای تبدیل خودکار تأیید کنید.",
-                    "ru": f"Тип БД отличается (backup={db_type}, installed={installed_db}). Подтвердите автоконвертацию.",
+                    "en": f"Database differs (backup={db_type}, installed={installed_db}). Auto-convert will run on restore.",
+                    "fa": f"نوع دیتابیس فرق دارد (بکاپ={db_type}، نصب={installed_db}). موقع ریستور خودش تبدیل می‌شود.",
+                    "ru": f"Тип БД отличается (backup={db_type}, installed={installed_db}). При восстановлении будет автоконвертация.",
                 })
 
         if layout == "none" and db_type != "sqlite":
@@ -284,6 +302,7 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
             "db_match": (db_type == installed_db) if (db_type and installed_db) else None,
             "soft_match": soft_db_family(db_type, installed_db) if (db_type and installed_db) else None,
             "experimental_db_change": experimental_db_change,
+            "convert_blocked": convert_blocked,
             "supported_target_dbs": sorted(SUPPORTED_RESTORE_DBS),
             "layout": layout,
             "timescaledb_versions": sorted(set(ts_versions)),
@@ -393,13 +412,39 @@ async def _compose(job: MigrationJob, *args: str, timeout: int = 300) -> tuple[b
     return await _run(job, ["docker", "compose", *args], cwd=str(PASARGUARD_DIR), timeout=timeout)
 
 
+def _compose_has_service(name: str) -> bool:
+    compose = PASARGUARD_DIR / "docker-compose.yml"
+    if not compose.exists() or not name:
+        return False
+    text = compose.read_text(encoding="utf-8", errors="ignore")
+    return bool(re.search(rf"^\s*{re.escape(name)}\s*:", text, re.MULTILINE))
+
+
+async def _compose_up_services(job: MigrationJob, *services: str, timeout: int = 300) -> tuple[bool, str]:
+    """Start only services that exist in docker-compose.yml (skips missing pgbouncer etc.)."""
+    existing = [s for s in services if s and _compose_has_service(s)]
+    if not existing:
+        return True, ""
+    return await _compose(job, "up", "-d", *existing, timeout=timeout)
+
+
+def _mysql_client_bins(db_type: str, svc: str | None = None) -> list[str]:
+    """Client binaries to try (MariaDB images often ship `mariadb`, MySQL ships `mysql`)."""
+    name = f"{svc or ''} {db_type or ''}".lower()
+    if "maria" in name:
+        return ["mariadb", "mysql"]
+    if "mysql" in name:
+        return ["mysql", "mariadb"]
+    return ["mysql", "mariadb"]
+
+
 async def _detect_db_container(job: MigrationJob, db_type: str) -> str | None:
     ok, out = await _run(job, ["docker", "compose", "ps", "--services"], cwd=str(PASARGUARD_DIR), timeout=30)
     services = set((out or "").split())
     candidates = {
-        "timescaledb": ["timescaledb"],
+        "timescaledb": ["timescaledb", "postgresql", "postgres"],
         "postgresql": ["postgresql", "postgres", "timescaledb"],
-        "mysql": ["mysql"],
+        "mysql": ["mysql", "mariadb"],
         "mariadb": ["mariadb", "mysql"],
     }.get(db_type, [])
     for c in candidates:
@@ -412,7 +457,8 @@ async def _detect_db_container(job: MigrationJob, db_type: str) -> str | None:
         for c in candidates:
             if c in name.lower():
                 return name
-    return candidates[0] if candidates else None
+    # Do not invent a service name that is not running — callers must fail clearly
+    return None
 
 
 async def _read_timescaledb_version(job: MigrationJob, container: str, password: str, user: str = "postgres") -> str | None:
@@ -469,7 +515,10 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
 
     job.set_progress(25, "Recreating TimescaleDB with matching version...")
     await _compose(job, "stop", "pasarguard", timeout=120)
-    await _compose(job, "stop", "timescaledb", "pgbouncer", timeout=120)
+    stop_svcs = ["timescaledb"]
+    if _compose_has_service("pgbouncer"):
+        stop_svcs.append("pgbouncer")
+    await _compose(job, "stop", *stop_svcs, timeout=120)
     data_dir = Path("/var/lib/postgresql/pasarguard")
     if wipe_data and data_dir.exists():
         job.log(f"Resetting DB data directory {data_dir} for version alignment")
@@ -477,7 +526,7 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
         data_dir.mkdir(parents=True, exist_ok=True)
     elif not wipe_data:
         job.log("Timescale image tag updated without wiping data volume")
-    ok, out = await _compose(job, "up", "-d", "timescaledb", "pgbouncer", timeout=300)
+    ok, out = await _compose_up_services(job, "timescaledb", "pgbouncer", timeout=300)
     if not ok:
         raise RuntimeError(f"Failed to recreate TimescaleDB:\n{out[-2000:]}")
     await asyncio.sleep(10)
@@ -490,6 +539,61 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
         job.log(f"Warning: live TimescaleDB={live} after align (wanted {wanted}) — continuing")
     else:
         job.log(f"TimescaleDB ready (version probe: {live or 'n/a'})")
+
+
+async def _sync_mysql_passwords(
+    job: MigrationJob,
+    svc: str,
+    password: str,
+    user: str = "root",
+    db_type: str = "mysql",
+) -> None:
+    """Align MySQL/MariaDB root (and app user) passwords to the value we keep in .env."""
+    if not password or not svc:
+        return
+    # Escape single quotes for SQL
+    lit = (password or "").replace("\\", "\\\\").replace("'", "\\'")
+    statements = [
+        f"ALTER USER 'root'@'%' IDENTIFIED BY '{lit}';",
+        f"ALTER USER 'root'@'localhost' IDENTIFIED BY '{lit}';",
+    ]
+    if user and user != "root":
+        statements.append(f"ALTER USER '{user}'@'%' IDENTIFIED BY '{lit}';")
+        statements.append(f"ALTER USER '{user}'@'localhost' IDENTIFIED BY '{lit}';")
+    statements.append("FLUSH PRIVILEGES;")
+    sql = " ".join(statements)
+    last_out = ""
+    for bin_name in _mysql_client_bins(db_type, svc):
+        ok, out = await _run(
+            job,
+            [
+                "docker", "compose", "exec", "-T",
+                svc, bin_name, "-u", "root", f"-p{password}",
+                "-e", sql,
+            ],
+            cwd=str(PASARGUARD_DIR),
+            timeout=60,
+        )
+        if ok:
+            job.log(f"Synced MySQL passwords on {svc} ({bin_name})")
+            return
+        last_out = out or last_out
+        # Retry without assuming current password (fresh container / dump restored old secret)
+        ok2, out2 = await _run(
+            job,
+            [
+                "docker", "compose", "exec", "-T",
+                svc, bin_name, "-u", "root",
+                "-e", sql,
+            ],
+            cwd=str(PASARGUARD_DIR),
+            timeout=60,
+        )
+        if ok2:
+            job.log(f"Synced MySQL passwords on {svc} ({bin_name}, no-password retry)")
+            return
+        last_out = out2 or last_out
+    job.log(f"MySQL password sync note: {(last_out or '')[-300:]}")
 
 
 async def _sync_pg_role_passwords(
@@ -556,9 +660,15 @@ async def _heal_panel_auth_if_needed(job: MigrationJob, password: str, user: str
         return
     job.log("Detected DB authentication failure in panel logs — auto-healing credentials...")
     if db_type in ("postgresql", "timescaledb"):
-        svc = "timescaledb" if db_type == "timescaledb" else await _detect_db_container(job, db_type)
+        svc = await _detect_db_container(job, db_type)
         if svc:
             await _sync_pg_role_passwords(job, svc, password, user or "postgres", db_name or "pasarguard")
+    elif db_type in ("mysql", "mariadb"):
+        svc = await _detect_db_container(job, db_type)
+        if svc and password:
+            await _sync_mysql_passwords(
+                job, svc, password, user=user or "root", db_type=db_type,
+            )
     await _compose(job, "restart", "pasarguard", timeout=120)
     await asyncio.sleep(6)
     ok2, logs2 = await _run(
@@ -582,7 +692,7 @@ async def _maybe_cross_db_after_restore(
     user: str,
     db_name: str,
     source_path: str | None = None,
-) -> str:
+) -> tuple[str, dict, dict]:
     """Convert restored backup engine → installed PasarGuard DB (auto)."""
     if not target_db or backup_db == target_db or soft_db_family(backup_db, target_db):
         return target_db or backup_db, {}, {}
@@ -599,7 +709,7 @@ async def _maybe_cross_db_after_restore(
             path = ""
     if backup_db == "sqlite" and (not path or not Path(path).exists()):
         path = str(PASARGUARD_DATA / "db.sqlite3")
-    if not path or (backup_db == "sqlite" and not Path(path).exists()):
+    if not path or not Path(path).exists():
         raise RuntimeError(
             f"Cannot convert {backup_db} → {target_db}: source file missing ({path or 'n/a'})"
         )
@@ -634,7 +744,9 @@ async def _maybe_cross_db_after_restore(
         if target_db != "sqlite":
             svc = "timescaledb" if target_db == "timescaledb" else await _detect_db_container(job, target_db)
             if svc:
-                await _compose(job, "up", "-d", svc, "pgbouncer", timeout=300)
+                # MySQL/MariaDB installs have no pgbouncer — only start services that exist
+                extras = ("pgbouncer",) if target_db in ("postgresql", "timescaledb") else ()
+                await _compose_up_services(job, svc, *extras, timeout=300)
                 await asyncio.sleep(5)
             probe_mini = _Mini(job, {"target_db": target_db, "_auto_db_credentials": True})
             admin = await resolve_live_admin_connection(probe_mini, target_db, env_text=env_text)
@@ -755,6 +867,14 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         fa = "پنل PasarGuard بعد از ریستور بالا نیامد."
         en = "PasarGuard panel did not start after restore."
         causes_fa = ["لاگ pasarguard-1 را ببینید", "ممکن است SSL یا SQLALCHEMY_DATABASE_URL اشتباه باشد"]
+    elif "cannot stage" in low and ("timescaledb" in low or "postgresql" in low):
+        fa = "دامپ Timescale/PostgreSQL برای تبدیل استیج نشد (سرویس مبدأ روی سرور نیست)."
+        en = "Could not stage Timescale/PostgreSQL dump for conversion (source engine not running)."
+        causes_fa = [
+            "وقتی مقصد MySQL/MariaDB است، ویزارد باید دامپ را در کانتینر موقت Timescale لود کند",
+            "در v2.6.3+ استیج موقت برای timescaledb→mysql اضافه شد — آپدیت کنید و دوباره ریستور کنید",
+            "دسترسی Docker برای pull ایمیج timescale/timescaledb لازم است",
+        ]
     elif "no such file" in low or "missing" in low or "not found" in low:
         fa = "فایل دامپ یا دیتابیس منبع پیدا نشد."
         en = "Source dump/database file was not found."
@@ -1098,24 +1218,29 @@ async def _verify_restored_data(
             raise RuntimeError(
                 f"Could not verify restored data — {final_db} container missing."
             )
-        mysql_cmd = "mariadb" if final_db == "mariadb" else "mysql"
+        client_bins = _mysql_client_bins(final_db, svc)
         for table in tables_to_check:
             safe = "".join(c for c in table if c.isalnum() or c == "_")
             if safe != table:
                 continue
-            cmd = [
-                "docker", "compose", "exec", "-T",
-                "-e", f"MYSQL_PWD={password}",
-                svc, mysql_cmd, "-N", "-u", user, db_name,
-                "-e", f"SELECT COUNT(*) FROM `{safe}`;",
-            ]
-            ok, out = await _run(job, cmd, cwd=str(PASARGUARD_DIR), timeout=60)
-            if ok:
-                for line in (out or "").splitlines():
-                    if line.strip().isdigit():
-                        actual[table] = int(line.strip())
-                        break
-            elif table in expected:
+            counted = False
+            for mysql_cmd in client_bins:
+                cmd = [
+                    "docker", "compose", "exec", "-T",
+                    "-e", f"MYSQL_PWD={password}",
+                    svc, mysql_cmd, "-N", "-u", user, db_name,
+                    "-e", f"SELECT COUNT(*) FROM `{safe}`;",
+                ]
+                ok, out = await _run(job, cmd, cwd=str(PASARGUARD_DIR), timeout=60)
+                if ok:
+                    for line in (out or "").splitlines():
+                        if line.strip().isdigit():
+                            actual[table] = int(line.strip())
+                            counted = True
+                            break
+                if counted:
+                    break
+            if not counted and table in expected:
                 raise RuntimeError(
                     f"Could not COUNT {table} after restore — verification failed hard."
                 )
@@ -1272,28 +1397,39 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         else:
             job.log("Backup expected counts: unavailable — will require non-empty panel after restore")
 
-        # TimescaleDB version alignment BEFORE restore only (may wipe empty/new volume)
+        # TimescaleDB version alignment ONLY when restoring into a live PG-family engine.
+        # Hard convert (timescale → mysql) must not run psql against the mysql container.
         ts_versions = analysis.get("timescaledb_versions") or []
         wanted_ts = parse_timescale_wanted(ts_versions)
-        if installed_db in ("timescaledb", "postgresql") or backup_db in ("timescaledb", "postgresql"):
-            if wanted_ts and (installed_db == "timescaledb" or soft_db_family(backup_db, "timescaledb")):
-                container = await _detect_db_container(job, installed_db or "timescaledb")
-                live_ver = None
-                if container:
-                    live_ver = await _read_timescaledb_version(
-                        job, container,
-                        cur_pg_pass or "",
-                        user=cur_user or "postgres",
-                    )
-                if live_ver and live_ver != wanted_ts:
-                    job.log(f"TimescaleDB mismatch: live={live_ver} backup={wanted_ts}")
-                    await _align_timescaledb_image(job, wanted_ts, wipe_data=True)
-                elif not live_ver and installed_db == "timescaledb":
-                    job.log("Could not probe live TimescaleDB — pinning image to backup version")
-                    await _align_timescaledb_image(job, wanted_ts, wipe_data=True)
+        if installed_db in ("timescaledb", "postgresql") and wanted_ts:
+            container = await _detect_db_container(job, installed_db)
+            live_ver = None
+            if container:
+                live_ver = await _read_timescaledb_version(
+                    job, container,
+                    cur_pg_pass or "",
+                    user=cur_user or "postgres",
+                )
+            if live_ver and live_ver != wanted_ts:
+                job.log(f"TimescaleDB mismatch: live={live_ver} backup={wanted_ts}")
+                await _align_timescaledb_image(job, wanted_ts, wipe_data=True)
+            elif not live_ver and installed_db == "timescaledb":
+                job.log("Could not probe live TimescaleDB — pinning image to backup version")
+                await _align_timescaledb_image(job, wanted_ts, wipe_data=True)
 
         # Destination = installed panel DB. Soft-family (mysql↔mariadb, pg↔timescale) needs no convert.
         target_db = installed_db or params.get("target_db") or backup_db
+        from app.panels import can_convert_databases
+        if (
+            backup_db and target_db
+            and backup_db != target_db
+            and not soft_db_family(backup_db, target_db)
+            and not can_convert_databases(backup_db, target_db)
+        ):
+            raise RuntimeError(
+                f"Unsupported cross-DB conversion: {backup_db} → {target_db}. "
+                "Non-SQLite backups cannot restore into SQLite — PasarGuard must already use a server DB."
+            )
         needs_convert = bool(
             backup_db and target_db
             and backup_db != target_db
@@ -1301,6 +1437,14 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         )
         if needs_convert:
             job.log(f"DB mismatch — will auto-convert {backup_db} → {target_db}")
+
+        # Backup passwords (same-engine restore must put OLD password into new .env)
+        bak_db_pass = read_env_var(backup_env, "DB_PASSWORD")
+        bak_mysql_root = read_env_var(backup_env, "MYSQL_ROOT_PASSWORD")
+        bak_pg_pass = read_env_var(backup_env, "POSTGRES_PASSWORD") or bak_db_pass
+        bak_user = read_env_var(backup_env, "DB_USER") or read_env_var(backup_env, "POSTGRES_USER")
+        bak_name = read_env_var(backup_env, "DB_NAME") or read_env_var(backup_env, "POSTGRES_DB")
+        bak_url = read_env_var(backup_env, "SQLALCHEMY_DATABASE_URL")
 
         job.set_progress(40, "Restoring database...")
         await _compose(job, "stop", "pasarguard", timeout=120)
@@ -1324,7 +1468,20 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                     f"will import dump → {target_db}"
                 )
             else:
-                await _restore_mysql(job, root, backup_db, current_env, backup_env)
+                # Soft family / same engine: always restore into the INSTALLED service
+                restore_into = installed_db if soft_db_family(backup_db, installed_db) else backup_db
+                await _restore_mysql(
+                    job, root, restore_into or backup_db, current_env, backup_env,
+                )
+                # Same-engine: force MySQL roles to backup password (written into .env next)
+                sync_pass = bak_db_pass or bak_mysql_root or ""
+                svc = await _detect_db_container(job, restore_into or installed_db or backup_db)
+                if svc and sync_pass:
+                    await _sync_mysql_passwords(
+                        job, svc, sync_pass,
+                        user=bak_user or cur_user or "root",
+                        db_type=restore_into or installed_db or backup_db,
+                    )
         elif backup_db in ("postgresql", "timescaledb"):
             if needs_convert:
                 dump = root / "db_backup.sql"
@@ -1341,24 +1498,57 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                     job, root, restore_into or backup_db, current_env, backup_env, analysis,
                 )
                 svc = await _detect_db_container(job, restore_into or installed_db or backup_db)
-                if svc and (cur_pg_pass or cur_db_pass):
+                # Same-engine: sync roles to BACKUP password (globals.sql restores old secrets)
+                sync_pass = bak_pg_pass or bak_db_pass or ""
+                if svc and sync_pass:
                     await _sync_pg_role_passwords(
-                        job, svc, cur_pg_pass or cur_db_pass or "",
-                        cur_user or "postgres", cur_name or "pasarguard",
+                        job, svc, sync_pass,
+                        bak_user or cur_user or "postgres",
+                        bak_name or cur_name or "pasarguard",
                     )
         else:
             raise RuntimeError(f"Unsupported backup database: {backup_db}")
 
         job.set_progress(75, "Merging configuration...")
-        preserve: dict[str, str | None] = {
-            "DB_PASSWORD": cur_db_pass,
-            "MYSQL_ROOT_PASSWORD": cur_mysql_root,
-            "DB_USER": cur_user,
-            "DB_NAME": cur_name,
-            "POSTGRES_PASSWORD": cur_pg_pass,
-        }
-        if not needs_convert and cur_url:
-            preserve["SQLALCHEMY_DATABASE_URL"] = cur_url
+        if needs_convert:
+            # Hard convert into already-installed target — keep install credentials
+            preserve: dict[str, str | None] = {
+                "DB_PASSWORD": cur_db_pass,
+                "MYSQL_ROOT_PASSWORD": cur_mysql_root,
+                "DB_USER": cur_user,
+                "DB_NAME": cur_name,
+                "POSTGRES_PASSWORD": cur_pg_pass,
+            }
+        else:
+            # Same / soft-family engine: put OLD (backup) DB password into the new .env
+            # so panel auth matches roles restored from the dump.
+            same_pass = bak_db_pass or bak_pg_pass or bak_mysql_root or ""
+            same_root = bak_mysql_root or same_pass or ""
+            same_pg = bak_pg_pass or bak_db_pass or same_pass or ""
+            if not same_pass and (backup_db or "") != "sqlite" and (target_db or "") != "sqlite":
+                raise RuntimeError(
+                    "Same-engine restore needs a database password in the backup .env "
+                    "(DB_PASSWORD / POSTGRES_PASSWORD / MYSQL_ROOT_PASSWORD)."
+                )
+            preserve = {
+                "DB_PASSWORD": same_pass,
+                "MYSQL_ROOT_PASSWORD": same_root,
+                "DB_USER": bak_user or cur_user,
+                "DB_NAME": bak_name or cur_name,
+                "POSTGRES_PASSWORD": same_pg,
+            }
+            job.log(
+                "Same-engine restore: writing backup DB password into live .env "
+                "(avoids auth mismatch when dump/globals restored old roles)"
+            )
+            # Keep install URL host/port layout but swap password to backup secret
+            if cur_url and same_pass:
+                from app.services.env_migration import _replace_sqlalchemy_password
+                preserve["SQLALCHEMY_DATABASE_URL"] = _replace_sqlalchemy_password(cur_url, same_pass)
+            elif cur_url:
+                preserve["SQLALCHEMY_DATABASE_URL"] = cur_url
+            elif bak_url:
+                preserve["SQLALCHEMY_DATABASE_URL"] = bak_url
 
         await _merge_env_after_restore(
             job, backup_env, install_env_snapshot,
@@ -1376,16 +1566,27 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             if dump.exists():
                 convert_source = str(dump)
             elif analysis.get("layout") == "multi":
-                # Prefer primary dump from manifest
+                # Prefer the application DB dump (skip globals.sql which has roles only)
                 manifest = root / "pg_dump" / "manifest.tsv"
+                candidates: list[Path] = []
                 if manifest.exists():
                     for line in manifest.read_text(encoding="utf-8", errors="ignore").splitlines():
                         parts = line.split("\t")
                         if len(parts) >= 4:
                             cand = root / "pg_dump" / parts[3]
                             if cand.exists():
-                                convert_source = str(cand)
-                                break
+                                candidates.append(cand)
+                if not candidates and (root / "pg_dump").is_dir():
+                    candidates = sorted((root / "pg_dump").glob("*.sql"))
+                for cand in candidates:
+                    if cand.name.lower() in ("globals.sql", "roles.sql"):
+                        continue
+                    convert_source = str(cand)
+                    break
+                if not convert_source and candidates:
+                    convert_source = str(candidates[0])
+                if convert_source:
+                    job.log(f"Hard convert source dump: {Path(convert_source).name}")
 
         final_db = restore_engine
         copy_stats: dict = {}
@@ -1426,30 +1627,44 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         elif target_db and soft_db_family(restore_engine, target_db):
             final_db = target_db
 
-        # After convert: force DB roles to match the password we keep in .env (install)
-        # Convert may have temporarily synced a different resolved password.
+        # After convert / same-engine: credentials must match what we wrote into .env
         final_engine_pre = final_db or target_db or restore_engine or backup_db
         live_admin = (copy_report or {}).get("live_admin") or {}
-        verify_user = (
-            cur_user
-            or live_admin.get("user")
-            or "pasarguard"
-        )
-        verify_pass = cur_db_pass or cur_pg_pass or live_admin.get("password") or ""
-        verify_db = cur_name or live_admin.get("database") or "pasarguard"
+        if needs_convert:
+            verify_user = cur_user or live_admin.get("user") or "pasarguard"
+            verify_pass = cur_db_pass or cur_pg_pass or live_admin.get("password") or ""
+            verify_db = cur_name or live_admin.get("database") or "pasarguard"
+        else:
+            verify_user = bak_user or cur_user or live_admin.get("user") or "pasarguard"
+            verify_pass = (
+                bak_db_pass or bak_pg_pass or bak_mysql_root
+                or live_admin.get("password") or ""
+            )
+            verify_db = bak_name or cur_name or live_admin.get("database") or "pasarguard"
         if (
             final_engine_pre in ("postgresql", "timescaledb")
             and verify_pass
-            and (needs_convert or soft_db_family(restore_engine, target_db))
         ):
             svc = await _detect_db_container(job, final_engine_pre)
             if svc:
                 job.log(
-                    f"Aligning DB roles to install password (user={verify_user}) "
-                    "so .env and Timescale/Postgres match"
+                    f"Aligning DB roles to {'install' if needs_convert else 'backup'} password "
+                    f"(user={verify_user}) so .env and Timescale/Postgres match"
                 )
                 await _sync_pg_role_passwords(
                     job, svc, verify_pass, verify_user, verify_db,
+                )
+        elif final_engine_pre in ("mysql", "mariadb") and verify_pass:
+            svc = await _detect_db_container(job, final_engine_pre)
+            if svc:
+                job.log(
+                    f"Aligning MySQL roles to {'install' if needs_convert else 'backup'} password "
+                    f"(user={verify_user})"
+                )
+                await _sync_mysql_passwords(
+                    job, svc, verify_pass,
+                    user=verify_user or "root",
+                    db_type=final_engine_pre,
                 )
 
         job.set_progress(88, "Finalizing .env for target database...")
@@ -1596,11 +1811,27 @@ async def _restore_mysql(
     if not svc:
         raise RuntimeError("MySQL/MariaDB container not found")
 
-    root_pw = read_env_var(current_env, "MYSQL_ROOT_PASSWORD") or read_env_var(backup_env, "MYSQL_ROOT_PASSWORD")
-    db_user = read_env_var(current_env, "DB_USER") or read_env_var(backup_env, "DB_USER") or "root"
-    db_pass = read_env_var(current_env, "DB_PASSWORD") or read_env_var(backup_env, "DB_PASSWORD")
-    db_name = read_env_var(current_env, "DB_NAME") or read_env_var(backup_env, "DB_NAME") or "pasarguard"
-    mysql_cmd = "mariadb" if db_type == "mariadb" else "mysql"
+    # Prefer backup secrets for dump restore (roles inside dump match backup passwords),
+    # then fall back to live install credentials.
+    root_pw = (
+        read_env_var(backup_env, "MYSQL_ROOT_PASSWORD")
+        or read_env_var(current_env, "MYSQL_ROOT_PASSWORD")
+    )
+    db_user = (
+        read_env_var(backup_env, "DB_USER")
+        or read_env_var(current_env, "DB_USER")
+        or "root"
+    )
+    db_pass = (
+        read_env_var(backup_env, "DB_PASSWORD")
+        or read_env_var(current_env, "DB_PASSWORD")
+    )
+    db_name = (
+        read_env_var(backup_env, "DB_NAME")
+        or read_env_var(current_env, "DB_NAME")
+        or "pasarguard"
+    )
+    client_bins = _mysql_client_bins(db_type, svc)
 
     await _compose(job, "up", "-d", svc, timeout=180)
     await asyncio.sleep(5)
@@ -1611,35 +1842,39 @@ async def _restore_mysql(
     if db_user and db_pass:
         attempts.append((db_user, db_pass, db_name))
         attempts.append((db_user, db_pass, None))
-    # also try backup passwords if different
-    b_root = read_env_var(backup_env, "MYSQL_ROOT_PASSWORD")
-    b_pass = read_env_var(backup_env, "DB_PASSWORD")
-    if b_root and b_root != root_pw:
-        attempts.append(("root", b_root, None))
-    if b_pass and b_pass != db_pass:
-        attempts.append((db_user, b_pass, db_name))
+    # also try install passwords if different from backup
+    c_root = read_env_var(current_env, "MYSQL_ROOT_PASSWORD")
+    c_pass = read_env_var(current_env, "DB_PASSWORD")
+    if c_root and c_root != root_pw:
+        attempts.append(("root", c_root, None))
+    if c_pass and c_pass != db_pass:
+        attempts.append((db_user, c_pass, db_name))
 
     last_err = ""
     for user, pwd, db in attempts:
-        cmd = ["docker", "compose", "exec", "-T", "-e", f"MYSQL_PWD={pwd}", svc, mysql_cmd, "-u", user]
-        if db:
-            cmd.append(db)
-        job.log(f"Trying MySQL restore as {user}" + (f"/{db}" if db else ""))
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=str(PASARGUARD_DIR),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        data = dump.read_bytes()
-        out_b, _ = await proc.communicate(input=data)
-        out = (out_b or b"").decode("utf-8", errors="replace")
-        if proc.returncode == 0:
-            job.log("MySQL/MariaDB dump restored")
-            return
-        last_err = out[-1500:]
-        job.log(f"Attempt failed: {last_err[:300]}")
+        for mysql_cmd in client_bins:
+            cmd = [
+                "docker", "compose", "exec", "-T",
+                "-e", f"MYSQL_PWD={pwd}", svc, mysql_cmd, "-u", user,
+            ]
+            if db:
+                cmd.append(db)
+            job.log(f"Trying MySQL restore as {user}" + (f"/{db}" if db else "") + f" ({mysql_cmd})")
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=str(PASARGUARD_DIR),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            data = dump.read_bytes()
+            out_b, _ = await proc.communicate(input=data)
+            out = (out_b or b"").decode("utf-8", errors="replace")
+            if proc.returncode == 0:
+                job.log("MySQL/MariaDB dump restored")
+                return
+            last_err = out[-1500:]
+            job.log(f"Attempt failed: {last_err[:300]}")
     raise RuntimeError(f"MySQL restore failed after password attempts:\n{last_err}")
 
 
@@ -1663,9 +1898,7 @@ async def _restore_postgres(
     if not svc:
         svc = "timescaledb" if db_type == "timescaledb" else "postgresql"
     job.log(f"PostgreSQL restore into service `{svc}` (engine={db_type})")
-    await _compose(job, "up", "-d", svc, timeout=180)
-    # pgbouncer if present
-    await _compose(job, "up", "-d", "pgbouncer", timeout=120)
+    await _compose_up_services(job, svc, "pgbouncer", timeout=180)
     await asyncio.sleep(6)
 
     password = (

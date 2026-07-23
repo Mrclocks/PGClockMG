@@ -962,9 +962,17 @@ def finalize_pasarguard_env_after_restore(
             text = _set_env_var_simple(text, "DB_PASSWORD", pwd)
         if final_db in ("postgresql", "timescaledb") and pwd:
             text = _set_env_var_simple(text, "POSTGRES_PASSWORD", pwd)
-        if final_db in ("mysql", "mariadb") and pwd:
-            root_pw = read_env_var(install_env_snapshot, "MYSQL_ROOT_PASSWORD") or pwd
-            text = _set_env_var_simple(text, "MYSQL_ROOT_PASSWORD", root_pw)
+        if final_db in ("mysql", "mariadb") and (pwd or read_env_var(text, "MYSQL_ROOT_PASSWORD")):
+            # Prefer password already merged from backup; never revert to install snapshot first
+            # (same-engine restore writes backup MYSQL_ROOT_PASSWORD into .env).
+            root_pw = (
+                read_env_var(text, "MYSQL_ROOT_PASSWORD")
+                or pwd
+                or read_env_var(install_env_snapshot, "MYSQL_ROOT_PASSWORD")
+                or ""
+            )
+            if root_pw:
+                text = _set_env_var_simple(text, "MYSQL_ROOT_PASSWORD", root_pw)
 
     # Never overwrite backup UVICORN_PORT/HOST — only fill if missing
     for key in ("UVICORN_PORT", "UVICORN_HOST", "UVICORN_ROOT_PATH", "ALLOWED_ORIGINS"):

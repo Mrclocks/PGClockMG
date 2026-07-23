@@ -863,9 +863,11 @@ button.db-card {
 /* Buttons */
 .actions {
   display: flex;
-  gap: 12px;
-  margin-top: 28px;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 24px;
   justify-content: flex-start;
+  align-items: center;
 }
 
 .btn {
@@ -1354,24 +1356,103 @@ button.db-card {
   display: block;
 }
 
+/* Specs grid (installed PasarGuard) */
+.specs-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+  margin: 14px 0 4px;
+}
+.specs-item {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  min-width: 0;
+}
+.specs-item .specs-label {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.specs-item .specs-value {
+  display: block;
+  font-size: 0.9rem;
+  font-weight: 600;
+  word-break: break-word;
+  line-height: 1.4;
+}
+.specs-item code {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  font-weight: 500;
+}
+
+.form-group-spaced { margin-top: 16px; }
+.info-box-spaced { margin-top: 12px; }
+.actions-spaced { margin-top: 16px; }
+.actions-spaced-lg { margin-top: 20px; }
+.actions-center { justify-content: center; }
+
 /* Responsive */
 @media (max-width: 768px) {
   .panel-grid { grid-template-columns: repeat(2, 1fr); }
+  .header { gap: 12px; }
+  .choice-card-lg { padding: 16px 14px; }
+  .modal-card { width: min(100%, 440px); }
+  .db-cred-grid { grid-template-columns: 1fr; }
+  .upload-mode-tabs { flex-wrap: wrap; }
+  .result-card .btn-lg { width: 100%; max-width: 100%; }
+  .uninstall-card .btn { width: 100%; }
 }
 
 @media (max-width: 600px) {
   .header { flex-direction: column; gap: 12px; align-items: flex-start; }
+  .header-meta { width: 100%; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
   .panel-grid { grid-template-columns: 1fr; }
-  .steps { padding: 12px 8px 10px; flex-wrap: nowrap; overflow: hidden; }
-  .step { min-width: 44px; max-width: 72px; }
+  .choice-grid { grid-template-columns: 1fr; }
+  .choice-card-lg { min-height: 0; }
+  .env-summary-grid { grid-template-columns: 1fr; }
+  .specs-grid { grid-template-columns: 1fr; }
+  .db-grid { grid-template-columns: 1fr; }
+  .incomplete-transfer-grid { grid-template-columns: 1fr; }
+  .steps {
+    padding: 12px 6px 10px;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .steps::-webkit-scrollbar { display: none; }
+  .step { min-width: 52px; max-width: 88px; flex: 0 0 auto; }
   .step-label { font-size: 0.65rem; }
   html[lang="fa"] .step-label { font-size: 0.68rem; }
-  .step-rail { min-width: 8px; max-width: 28px; margin: 13px 3px 0; }
+  .step-rail { min-width: 8px; max-width: 20px; margin: 13px 2px 0; flex: 0 0 auto; }
   .step-num { width: 26px; height: 26px; font-size: 0.7rem; }
-  .welcome-card { padding: 20px 18px; }
-  .install-cmd-row { flex-direction: column; }
+  .welcome-card { padding: 18px 14px; }
+  .app { padding-left: 12px; padding-right: 12px; }
+  .install-cmd-row { flex-direction: column; align-items: stretch; }
+  .install-cmd-row .btn-copy { width: 100%; }
   .pwd-field-controls { flex-direction: column; }
   .btn-confirm-pwd { width: 100%; }
+  .actions, .actions-wrap {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .actions .btn, .actions-wrap .btn { width: 100%; justify-content: center; }
+  .modal-overlay { padding: 12px; align-items: flex-end; }
+  .modal-card { padding: 18px 16px; width: 100%; border-radius: var(--radius) var(--radius) 0 0; }
+  .modal-actions {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .modal-actions .btn { width: 100%; min-height: 44px; }
+  .form-group { margin-bottom: 14px; }
+  .guide-steps { margin-inline-start: 1rem; padding-inline-start: 0.4rem; }
+  .success-card, .warning-card, .info-box { padding: 14px; }
 }
 
 .choice-grid {
@@ -1697,12 +1778,77 @@ button.db-card {
 }
 .modal-actions {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  justify-content: flex-end;
+  flex-direction: column;
+  gap: 10px;
+  align-items: stretch;
+}
+.modal-actions .btn {
+  width: 100%;
+  text-align: center;
+  justify-content: center;
+  min-height: 44px;
+}
+@media (min-width: 601px) {
+  .modal-actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .modal-actions .btn { width: auto; min-width: 140px; }
+  html[dir="rtl"] .modal-actions { justify-content: flex-start; }
 }
 
 .upload-status.is-ok { color: var(--success); }
 .upload-status.is-warn { color: var(--warning); }
 .warn-line { color: var(--warning); font-size: 0.88rem; margin: 6px 0; }
 .logo { border-radius: var(--radius); }
+
+/* Manual install guide */
+.section-title {
+  margin: 22px 0 8px;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+.install-cmd-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 12px 0 8px;
+}
+.install-cmd-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+}
+.install-cmd-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.install-cmd-card .install-cmd-box {
+  flex: 1;
+  min-width: 0;
+}
+.install-cmd-card code {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+.guide-steps {
+  margin: 8px 0 4px 1.2rem;
+  color: var(--text-muted);
+  font-size: 0.92rem;
+  line-height: 1.7;
+}
+.guide-steps li { margin-bottom: 4px; }
+#pgDocsBox {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+}
+#pgDocsBox a { color: var(--primary); }

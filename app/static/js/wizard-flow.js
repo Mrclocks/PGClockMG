@@ -1,13 +1,10 @@
-/* Pre-migration wizard phases: welcome(goal) → pg(if needed) → install|change_db|migrate */
+/* Pre-migration wizard phases: welcome → install guide | change_db | migrate */
 
 Object.assign(state, {
   phase: 'welcome', // welcome | pg | choose | restore | migrate
   wizardGoal: null, // install | change_db | migrate
   panelAccess: null,
-  pgDb: 'timescaledb',
-  pgSsl: null, // true | false | null
-  pgDomain: '',
-  pgIp: '',
+  installGuide: null,
   restoreUploadId: null,
   restoreAnalysis: null,
   restoreStage: 'form', // form | running | error | done
@@ -15,19 +12,11 @@ Object.assign(state, {
 });
 
 let _restorePollTimer = null;
-let _pgInstallPollTimer = null;
 
 function stopRestorePoll() {
   if (_restorePollTimer) {
     clearTimeout(_restorePollTimer);
     _restorePollTimer = null;
-  }
-}
-
-function stopPgInstallPoll() {
-  if (_pgInstallPollTimer) {
-    clearTimeout(_pgInstallPollTimer);
-    _pgInstallPollTimer = null;
   }
 }
 
@@ -255,17 +244,20 @@ async function startWizardGoal(goal) {
   state.wizardGoal = goal;
   await loadSystemCheck();
   await refreshPanelAccess();
-  // Change-DB / restore always confirms target engine on the setup screen first
-  if (goal === 'change_db') {
+  const installed = !!(state.systemCheck?.pasarguard || state.panelAccess?.installed);
+
+  // Install tab = official command guide (never auto-installs)
+  if (goal === 'install') {
     showPhase('pg');
     return;
   }
-  const installed = !!(state.systemCheck?.pasarguard || state.panelAccess?.installed);
-  if (installed) {
-    await continueAfterPgReady();
-  } else {
-    showPhase('pg');
+
+  // Restore / migrate require PasarGuard first
+  if (!installed) {
+    openNeedPgModal();
+    return;
   }
+  await continueAfterPgReady();
 }
 
 /** Legacy entry — keep for any leftover callers */
@@ -273,11 +265,17 @@ function startWizard() {
   startWizardGoal(state.wizardGoal || 'install');
 }
 
-/** After PG is ready (already installed or just installed), jump to chosen goal. */
+/** After PG is confirmed installed, jump to chosen goal. */
 async function continueAfterPgReady() {
+  const installed = !!(state.systemCheck?.pasarguard || state.panelAccess?.installed);
+  if (!installed) {
+    openNeedPgModal();
+    return;
+  }
   const goal = state.wizardGoal || 'install';
+  // Guide tab never "installs" — if user came from guide, stay/return home
   if (goal === 'install') {
-    await choosePath('finish');
+    showPhase('pg');
     return;
   }
   if (goal === 'change_db') {
@@ -292,35 +290,7 @@ async function continueAfterPgReady() {
 }
 
 function backFromRestore() {
-  // After change_db we always came through pg setup
-  if (state.wizardGoal === 'change_db') {
-    showPhase('pg');
-    return;
-  }
-  showPhase(state.wizardGoal ? 'welcome' : 'choose');
-}
-
-function cancelPgInstall() {
-  stopPgInstallPoll();
-  document.getElementById('pgInstallProgress')?.classList.add('hidden');
-  document.getElementById('pgInstallDone')?.classList.add('hidden');
-  // Prefer returning to the form so the user can change DB/SSL and retry.
-  const form = document.getElementById('pgInstallForm');
-  const installed = document.getElementById('pgInstalledCard');
-  if (form && !form.classList.contains('hidden')) {
-    // already on form
-  } else if (installed && state.panelAccess?.installed) {
-    installed.classList.remove('hidden');
-    form?.classList.add('hidden');
-  } else {
-    form?.classList.remove('hidden');
-    installed?.classList.add('hidden');
-  }
-  const block = document.getElementById('pgInstallBlock');
-  if (block) {
-    block.textContent = t('pg.installCancelled') || '';
-    if (block.textContent) block.classList.remove('hidden');
-  }
+  showPhase('welcome');
 }
 
 function cancelMigrationRun() {
@@ -332,18 +302,26 @@ function cancelMigrationRun() {
   goStep(4);
 }
 
-window.cancelPgInstall = cancelPgInstall;
 window.cancelMigrationRun = cancelMigrationRun;
 
-function showPgReinstallForm() {
-  document.getElementById('pgInstalledCard')?.classList.add('hidden');
-  const form = document.getElementById('pgInstallForm');
-  form?.classList.remove('hidden');
-  state.pgSsl = null;
-  bindPgSslButtons();
-  renderPgDbGrid();
-  selectPgSsl(null);
+function openNeedPgModal() {
+  applyPhaseI18n();
+  document.getElementById('needPgModal')?.classList.remove('hidden');
 }
+
+function closeNeedPgModal() {
+  document.getElementById('needPgModal')?.classList.add('hidden');
+}
+
+function goToInstallGuide() {
+  closeNeedPgModal();
+  if (!state.wizardGoal) state.wizardGoal = 'change_db';
+  showPhase('pg');
+}
+
+window.openNeedPgModal = openNeedPgModal;
+window.closeNeedPgModal = closeNeedPgModal;
+window.goToInstallGuide = goToInstallGuide;
 
 async function refreshPanelAccess() {
   try {
@@ -442,36 +420,39 @@ function applyPhaseI18n() {
   set('pgDesc', 'pg.desc');
   set('pgInstalledTitle', 'pg.installedTitle');
   set('pgInstalledDetail', 'pg.installedDetail');
-  set('btnPgContinue', 'pg.continue');
   set('btnPgBack', 'pg.back');
   set('btnPgInstalledBack', 'pg.back');
-  set('btnPgProgressBack', 'pg.back');
-  set('btnPgDoneBack', 'pg.back');
-  set('btnPgInstall', 'pg.install');
-  set('lblPgDb', 'pg.dbLabel');
-  set('lblPgSsl', 'pg.sslLabel');
-  set('pgSslMustChoose', 'pg.sslMustChoose');
-  set('pgSslYes', 'pg.sslYes');
-  set('pgSslYesDesc', 'pg.sslYesDesc');
-  set('pgSslNo', 'pg.sslNo');
-  set('pgSslNoDesc', 'pg.sslNoDesc');
-  set('lblPgDomain', 'pg.domain');
-  set('pgDomainHint', 'pg.domainHint');
-  set('lblPgIp', 'pg.ip');
-  set('pgIpHint', 'pg.ipHint');
-  set('lblPgSslPort', 'pg.sslPort');
-  set('pgSslPortHint', 'pg.sslPortHint');
-  set('pgDbMatchTip', state.wizardGoal === 'change_db' ? 'pg.dbMatchTipChange' : 'pg.dbMatchTip');
-  set('pgDoneTitle', 'pg.doneTitle');
-  set('btnPgDoneNext', 'pg.next');
-  bindPgSslButtons();
+  set('btnPgOpenPanel', 'pg.openPanel');
+  set('pgGuideIntro', 'pg.guideIntro');
+  set('pgCmdsTitle', 'pg.cmdsTitle');
+  set('pgCmdsHint', 'pg.cmdsHint');
+  set('pgTutorialTitle', 'pg.tutorialTitle');
+  set('lblOwnerKey', 'pg.ownerKeyLabel');
+  set('pgOwnerKeyHint', 'pg.ownerKeyHint');
+  set('lblSshTunnel', 'pg.sshTunnelLabel');
+  set('pgSshTunnelHint', 'pg.sshTunnelHint');
+  set('pgDocsLink', 'pg.docsLink');
+  set('pgGithubLink', 'pg.githubLink');
+  set('btnPgRecheck', 'pg.recheck');
+  set('btnCopyOwnerKey', 'copy');
+  set('btnCopySshTunnel', 'copy');
 
+  set('needPgModalTitle', 'needPg.title');
+  set('needPgModalDesc', 'needPg.desc');
+  set('btnNeedPgCancel', 'needPg.cancel');
+  set('btnNeedPgGoInstall', 'needPg.goInstall');
+
+  set('installPgMissingTitle', 'step3.pgMissing');
+  set('installPgMissingDesc', 'step3.pgMissingDesc');
+  const goInstallBtn = document.getElementById('btnGoInstallTab');
+  if (goInstallBtn) goInstallBtn.textContent = t('needPg.goInstall');
+
+  renderInstallCmdList();
+  renderTutorialSteps();
   applyChooseI18n();
 
-  const restoreH2Key = 'restore.h2ChangeDb';
-  const restoreDescKey = 'restore.descChangeDb';
-  set('restoreH2', restoreH2Key);
-  set('restoreDesc', restoreDescKey);
+  set('restoreH2', 'restore.h2ChangeDb');
+  set('restoreDesc', 'restore.descChangeDb');
   set('restoreDbTipText', 'restore.tip');
   set('restoreDragText', 'restore.drag');
   set('restoreSelectText', 'restore.select');
@@ -514,276 +495,159 @@ function applyChooseI18n() {
   set('btnChooseBack', 'choose.back');
 }
 
+function defaultInstallGuide() {
+  const script = 'https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh';
+  const mk = (db) => (
+    db === 'sqlite'
+      ? `curl -fsSL ${script} -o /tmp/pg.sh \\\n  && sudo bash /tmp/pg.sh install`
+      : `curl -fsSL ${script} -o /tmp/pg.sh \\\n  && sudo bash /tmp/pg.sh install --database ${db}`
+  );
+  return {
+    docs_url: 'https://docs.pasarguard.org/en/panel/installation/',
+    github_url: 'https://github.com/PasarGuard/panel',
+    owner_temp_key_cmd: 'pasarguard cli generate-temp-key',
+    ssh_tunnel_cmd: 'ssh -L 8000:localhost:8000 user@serverip',
+    commands: {
+      timescaledb: { label: { en: 'TimescaleDB (Recommended)', fa: 'TimescaleDB (پیشنهادی)', ru: 'TimescaleDB' }, desc: { en: '', fa: '', ru: '' }, cmd: mk('timescaledb') },
+      postgresql: { label: { en: 'PostgreSQL', fa: 'PostgreSQL', ru: 'PostgreSQL' }, desc: { en: '', fa: '', ru: '' }, cmd: mk('postgresql') },
+      mysql: { label: { en: 'MySQL', fa: 'MySQL', ru: 'MySQL' }, desc: { en: '', fa: '', ru: '' }, cmd: mk('mysql') },
+      mariadb: { label: { en: 'MariaDB', fa: 'MariaDB', ru: 'MariaDB' }, desc: { en: '', fa: '', ru: '' }, cmd: mk('mariadb') },
+      sqlite: { label: { en: 'SQLite', fa: 'SQLite', ru: 'SQLite' }, desc: { en: '', fa: '', ru: '' }, cmd: mk('sqlite') },
+    },
+  };
+}
+
+function renderInstallCmdList() {
+  const list = document.getElementById('pgInstallCmdList');
+  if (!list) return;
+  const guide = state.installGuide || defaultInstallGuide();
+  const order = ['timescaledb', 'postgresql', 'mysql', 'mariadb', 'sqlite'];
+  const lang = state.lang || 'fa';
+  list.innerHTML = order.map((id) => {
+    const item = guide.commands?.[id];
+    if (!item) return '';
+    const label = (item.label && (item.label[lang] || item.label.fa || item.label.en)) || id;
+    const desc = (item.desc && (item.desc[lang] || item.desc.fa || item.desc.en)) || '';
+    const cmd = item.cmd || '';
+    const codeId = `pgInstallCmd_${id}`;
+    const rec = id === 'timescaledb' ? `<span class="db-badge">${escapeHtml(t('dbRecommended'))}</span>` : '';
+    return `<div class="install-cmd-card">
+      <div class="install-cmd-card-head">
+        <strong>${escapeHtml(label)}</strong>${rec}
+      </div>
+      ${desc ? `<p class="desc-sm">${escapeHtml(desc)}</p>` : ''}
+      <div class="install-cmd-row">
+        <div class="install-cmd-box"><code id="${codeId}">${escapeHtml(cmd)}</code></div>
+        <button type="button" class="btn btn-copy" data-copy-id="${codeId}">${escapeHtml(t('copy'))}</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  list.querySelectorAll('[data-copy-id]').forEach((btn) => {
+    btn.addEventListener('click', () => copyText(btn.getAttribute('data-copy-id')));
+  });
+
+  const owner = document.getElementById('pgOwnerKeyCmd');
+  if (owner) owner.textContent = guide.owner_temp_key_cmd || 'pasarguard cli generate-temp-key';
+  const ssh = document.getElementById('pgSshTunnelCmd');
+  if (ssh) ssh.textContent = guide.ssh_tunnel_cmd || 'ssh -L 8000:localhost:8000 user@serverip';
+  const docs = document.getElementById('pgDocsLink');
+  if (docs && guide.docs_url) docs.href = guide.docs_url;
+  const gh = document.getElementById('pgGithubLink');
+  if (gh && guide.github_url) gh.href = guide.github_url;
+}
+
+function renderTutorialSteps() {
+  const ol = document.getElementById('pgTutorialSteps');
+  if (!ol) return;
+  const steps = t('pg.tutorialSteps');
+  const items = Array.isArray(steps) ? steps : [];
+  ol.innerHTML = items.map((s) => `<li>${escapeHtml(s)}</li>`).join('');
+}
+
+function renderInstalledSpecs() {
+  const el = document.getElementById('pgInstalledSpecs');
+  if (!el) return;
+  const access = state.panelAccess || {};
+  const sys = state.systemCheck || {};
+  const db = sys.pasarguard_db || access.db_type || '—';
+  const port = access.port || sys.pasarguard_env?.panel_port || '8000';
+  const ssl = access.ssl === true ? t('pg.specSslYes') : (access.ssl === false ? t('pg.specSslNo') : '—');
+  const url = access.login_url || access.dashboard_url || '';
+  const rows = [
+    [t('pg.specPath'), '/opt/pasarguard'],
+    [t('pg.specDb'), db],
+    [t('pg.specPort'), String(port)],
+    [t('pg.specSsl'), ssl],
+    [t('pg.specEnv'), '/opt/pasarguard/.env'],
+    [t('pg.specUrl'), url || '—'],
+  ];
+  el.innerHTML = rows.map(([label, value]) => {
+    const isCode = String(value).startsWith('/') || String(value).startsWith('http');
+    const valHtml = isCode
+      ? `<code class="specs-value">${escapeHtml(value)}</code>`
+      : `<span class="specs-value">${escapeHtml(value)}</span>`;
+    return `<div class="specs-item"><span class="specs-label">${escapeHtml(label)}</span>${valHtml}</div>`;
+  }).join('');
+}
+
+function openInstalledPanel() {
+  const url = resolveLoginUrl(state.panelAccess) || state.panelAccess?.login_url;
+  if (url) window.open(url, '_blank', 'noopener');
+}
+window.openInstalledPanel = openInstalledPanel;
+
 async function renderPgSetup() {
   await loadSystemCheck();
   await refreshPanelAccess();
   const installed = !!(state.systemCheck?.pasarguard || state.panelAccess?.installed);
   const installedCard = document.getElementById('pgInstalledCard');
-  const form = document.getElementById('pgInstallForm');
-  const prog = document.getElementById('pgInstallProgress');
-  const done = document.getElementById('pgInstallDone');
-  prog?.classList.add('hidden');
-  done?.classList.add('hidden');
+  const guide = document.getElementById('pgInstallGuide');
 
+  // If installed: ONLY specs. If not: ONLY manual guide. Never auto-install.
   if (installed) {
+    guide?.classList.add('hidden');
     installedCard?.classList.remove('hidden');
-    // For change_db: keep form available via "reinstall" but default to continue
-    if (state.wizardGoal === 'change_db') {
-      form?.classList.add('hidden');
-    } else {
-      form?.classList.add('hidden');
-    }
     const detail = document.getElementById('pgInstalledDetail');
-    if (detail) {
-      const db = state.systemCheck?.pasarguard_db || state.panelAccess?.db_type || '';
-      detail.textContent = `${t('pg.installedDetail')}${db ? ` (${db})` : ''}`;
-    }
-    const reinstallBtn = document.getElementById('btnPgReinstall');
-    if (reinstallBtn) {
-      reinstallBtn.classList.toggle('hidden', state.wizardGoal !== 'change_db');
-      reinstallBtn.textContent = t('pg.reinstallOther');
-    }
+    if (detail) detail.textContent = t('pg.installedDetail');
+    const openBtn = document.getElementById('btnPgOpenPanel');
+    if (openBtn) openBtn.textContent = t('pg.openPanel');
+    renderInstalledSpecs();
+    // Title/desc for status mode
+    const h2 = document.getElementById('pgH2');
+    const desc = document.getElementById('pgDesc');
+    if (h2) h2.textContent = t('pg.h2Installed');
+    if (desc) desc.textContent = t('pg.descInstalled');
   } else {
     installedCard?.classList.add('hidden');
-    form?.classList.remove('hidden');
-    // Always require a fresh SSL choice before showing next fields / install
-    state.pgSsl = null;
-    bindPgSslButtons();
-    renderPgDbGrid();
-    selectPgSsl(null);
+    guide?.classList.remove('hidden');
+    renderInstallCmdList();
+    renderTutorialSteps();
+    const h2 = document.getElementById('pgH2');
+    const desc = document.getElementById('pgDesc');
+    if (h2) h2.textContent = t('pg.h2');
+    if (desc) desc.textContent = t('pg.desc');
   }
 }
 
-function renderPgDbGrid() {
-  const grid = document.getElementById('pgDbGrid');
-  if (!grid) return;
-  if (!state.pgDb) state.pgDb = 'timescaledb';
-  const dbs = (state.pasarguardInstallDbs?.length
-    ? state.pasarguardInstallDbs
-    : ['sqlite', 'mysql', 'mariadb', 'postgresql', 'timescaledb']);
-  grid.innerHTML = dbs.map(db => {
-    const name = (typeof dbDisplayName === 'function' ? dbDisplayName(db) : db);
-    const selected = state.pgDb === db ? 'selected' : '';
-    const rec = db === 'timescaledb'
-      ? `<span class="db-badge">${t('dbRecommended')}</span>`
-      : '';
-    return `<button type="button" class="db-card ${selected}" data-db="${db}"><h4>${name}</h4>${rec}</button>`;
-  }).join('');
-
-  if (!grid.dataset.bound) {
-    grid.dataset.bound = '1';
-    grid.addEventListener('click', (e) => {
-      const btn = e.target.closest('.db-card[data-db]');
-      if (!btn) return;
-      e.preventDefault();
-      selectPgDb(btn.dataset.db);
-    });
-  }
-}
-
-function selectPgDb(db) {
-  if (!db) return;
-  state.pgDb = db;
-  renderPgDbGrid();
-  const block = document.getElementById('pgInstallBlock');
-  if (block) block.classList.add('hidden');
-}
-
-function bindPgSslButtons() {
-  const yes = document.getElementById('btnPgSslYes');
-  const no = document.getElementById('btnPgSslNo');
-  if (yes && !yes.dataset.bound) {
-    yes.dataset.bound = '1';
-    yes.addEventListener('click', (e) => { e.preventDefault(); selectPgSsl(true); });
-  }
-  if (no && !no.dataset.bound) {
-    no.dataset.bound = '1';
-    no.addEventListener('click', (e) => { e.preventDefault(); selectPgSsl(false); });
-  }
-}
-
-function selectPgSsl(yes) {
-  state.pgSsl = yes;
-  document.querySelectorAll('#pgSslGrid .choice-card').forEach(el => {
-    const v = el.dataset.ssl === 'yes';
-    el.classList.toggle('selected', yes !== null && yes !== undefined && v === !!yes);
-    el.classList.toggle('active', yes !== null && yes !== undefined && v === !!yes);
-  });
-
-  const after = document.getElementById('pgAfterSsl');
-  const yesFields = document.getElementById('pgSslYesFields');
-  const noHint = document.getElementById('pgSslNoHint');
-  const must = document.getElementById('pgSslMustChoose');
-
-  // Until Yes/No is chosen — hide everything after SSL
-  if (yes !== true && yes !== false) {
-    after?.classList.add('hidden');
-    yesFields?.classList.add('hidden');
-    noHint?.classList.add('hidden');
-    if (must) must.classList.remove('hidden');
-    return;
-  }
-
-  if (must) must.classList.add('hidden');
-  after?.classList.remove('hidden');
-
-  if (yes === true) {
-    yesFields?.classList.remove('hidden');
-    noHint?.classList.add('hidden');
-    const ipEl = document.getElementById('pgIp');
-    if (ipEl && !ipEl.value) ipEl.value = (state.serverIp || '').split(':')[0];
-    const portEl = document.getElementById('pgSslHttpPort');
-    if (portEl && !portEl.value) portEl.value = '80';
-  } else {
-    yesFields?.classList.add('hidden');
-    noHint?.classList.remove('hidden');
-    const access = state.panelAccess || {};
-    const notes = (access.no_ssl_notes && access.no_ssl_notes[state.lang]) || [];
-    if (noHint) {
-      noHint.innerHTML = notes.map(n => `<p>${n}</p>`).join('')
-        || `<p>ssh -L 8000:localhost:8000 user@${state.serverIp}</p><p>http://localhost:8000/dashboard/</p>`;
-    }
-  }
-  const block = document.getElementById('pgInstallBlock');
-  if (block) block.classList.add('hidden');
-}
-
-function validatePgForm() {
-  if (!state.pgDb) return t('pg.pickDb');
-  if (state.pgSsl === null || state.pgSsl === undefined) return t('pg.pickSsl');
-  if (state.pgSsl === true) {
-    const domain = document.getElementById('pgDomain')?.value?.trim();
-    const ip = document.getElementById('pgIp')?.value?.trim();
-    if (!domain && !ip) return t('pg.needDomainOrIp');
-    const port = document.getElementById('pgSslHttpPort')?.value?.trim() || '80';
-    const n = parseInt(port, 10);
-    if (!Number.isFinite(n) || n < 1 || n > 65535) return t('pg.badSslPort');
-  }
-  return null;
-}
-
-async function startPgInstall() {
-  const block = validatePgForm();
-  const blockEl = document.getElementById('pgInstallBlock');
-  if (block) {
-    if (blockEl) { blockEl.textContent = block; blockEl.classList.remove('hidden'); }
-    return;
-  }
-  blockEl?.classList.add('hidden');
-
-  document.getElementById('pgInstallForm')?.classList.add('hidden');
-  document.getElementById('pgInstalledCard')?.classList.add('hidden');
-  document.getElementById('pgInstallProgress')?.classList.remove('hidden');
-  document.getElementById('pgInstallDone')?.classList.add('hidden');
-  const term = document.getElementById('pgLogTerminal');
-  if (term) {
-    term.classList.remove('hidden');
-    term.textContent = '';
-  }
-
-  const domain = document.getElementById('pgDomain')?.value?.trim() || null;
-  const ip = document.getElementById('pgIp')?.value?.trim() || null;
-  state.pgDomain = domain || '';
-  state.pgIp = ip || '';
-  const sslPort = parseInt(document.getElementById('pgSslHttpPort')?.value || '80', 10) || 80;
-  const body = {
-    database: state.pgDb,
-    ssl: !!state.pgSsl,
-    domain: state.pgSsl && domain ? domain : null,
-    ip: state.pgSsl && !domain ? ip : null,
-    ssl_http_port: sslPort,
-    wipe_volumes: false,
-    force: false,
-  };
-
-  const status = document.getElementById('pgStatusMsg');
-  if (status) status.textContent = t('pg.installing');
-
+async function recheckAfterManualInstall() {
+  const btn = document.getElementById('btnPgRecheck');
+  if (btn) btn.disabled = true;
   try {
-    const res = await fetch('/api/pasarguard/install', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      const detail = data.detail;
-      const msg = typeof detail === 'string' ? detail
-        : Array.isArray(detail) ? detail.map(d => d.msg || d).join(', ')
-        : (detail?.errors ? detail.errors.join(', ') : null)
-        || data.message || res.statusText || 'Install request failed';
-      throw new Error(msg);
+    await loadSystemCheck();
+    await refreshPanelAccess();
+    await renderPgSetup();
+    const installed = !!(state.systemCheck?.pasarguard || state.panelAccess?.installed);
+    // After user installs manually, resume pending restore/migrate
+    if (installed && state.wizardGoal && state.wizardGoal !== 'install') {
+      await continueAfterPgReady();
     }
-    pollPgInstall(data.job_id);
-  } catch (e) {
-    showPgInstallError(e.message || String(e));
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
-function showPgInstallError(msg) {
-  document.getElementById('pgInstallProgress')?.classList.add('hidden');
-  document.getElementById('pgInstallDone')?.classList.add('hidden');
-  document.getElementById('pgInstallForm')?.classList.remove('hidden');
-  const blockEl = document.getElementById('pgInstallBlock');
-  if (blockEl) {
-    blockEl.textContent = msg;
-    blockEl.classList.remove('hidden');
-  }
-  const status = document.getElementById('pgStatusMsg');
-  if (status) status.textContent = '';
-}
-
-async function pollPgInstall(jobId) {
-  stopPgInstallPoll();
-  const fill = document.getElementById('pgProgressFill');
-  const text = document.getElementById('pgProgressText');
-  const status = document.getElementById('pgStatusMsg');
-  const term = document.getElementById('pgLogTerminal');
-  if (term) term.textContent = '';
-  const cursor = { lastLen: 0 };
-
-  const tick = async () => {
-    try {
-      const res = await fetch(`/api/pasarguard/install/${jobId}`);
-      const job = await res.json();
-      if (fill) fill.style.width = `${job.progress || 0}%`;
-      if (text) text.textContent = `${job.progress || 0}%`;
-      if (status) status.textContent = job.status === 'error'
-        ? ''
-        : (job.message || t('pg.installing'));
-      if (term) {
-        term.classList.remove('hidden');
-        appendJobLogs(term, job.logs, cursor);
-      }
-
-      if (job.status === 'success') {
-        stopPgInstallPoll();
-        await loadSystemCheck();
-        await refreshPanelAccess();
-        showPgInstallDone(job.result || state.panelAccess);
-        return;
-      }
-      if (job.status === 'error') {
-        stopPgInstallPoll();
-        showPgInstallError(job.message || job.result?.error || 'Installation failed');
-        return;
-      }
-      _pgInstallPollTimer = setTimeout(tick, 1000);
-    } catch (e) {
-      _pgInstallPollTimer = setTimeout(tick, 2000);
-    }
-  };
-  tick();
-}
-
-function showPgInstallDone(result) {
-  document.getElementById('pgInstallProgress')?.classList.add('hidden');
-  const done = document.getElementById('pgInstallDone');
-  done?.classList.remove('hidden');
-  const access = result || state.panelAccess || {};
-  state.panelAccess = access;
-  renderGuideSections(document.getElementById('pgDoneNotes'), access);
-}
+window.recheckAfterManualInstall = recheckAfterManualInstall;
 
 async function choosePath(path) {
   if (path === 'finish') {
@@ -797,11 +661,21 @@ async function choosePath(path) {
   }
   if (path === 'restore') {
     state.wizardGoal = 'change_db';
+    const installed = !!(state.systemCheck?.pasarguard || state.panelAccess?.installed);
+    if (!installed) {
+      openNeedPgModal();
+      return;
+    }
     showPhase('restore');
     return;
   }
   if (path === 'migrate') {
     state.wizardGoal = 'migrate';
+    const installed = !!(state.systemCheck?.pasarguard || state.panelAccess?.installed);
+    if (!installed) {
+      openNeedPgModal();
+      return;
+    }
     state.phase = 'migrate';
     state.currentStep = 1;
     hideAllMainPanels();
@@ -906,7 +780,8 @@ function renderRestoreAnalysis(a) {
       || (['postgresql', 'timescaledb'].includes(a.backup_db) && ['postgresql', 'timescaledb'].includes(a.installed_db))
     );
   if (note) {
-    note.classList.toggle('hidden', !needsConvert);
+    const show = needsConvert && !a.convert_blocked;
+    note.classList.toggle('hidden', !show);
     const noteText = document.getElementById('restoreConvertNoteText');
     if (noteText) noteText.textContent = t('restore.autoConvertNote');
   }
@@ -918,7 +793,8 @@ function updateRestoreConfirmEnabled() {
   const btn = document.getElementById('btnRestoreConfirm');
   const a = state.restoreAnalysis;
   if (!btn || !a) return;
-  btn.disabled = !a.ok;
+  // Blocked conversions (e.g. mysql → sqlite) set ok=false
+  btn.disabled = !a.ok || !!a.convert_blocked;
 }
 
 async function startRestore() {
@@ -1075,10 +951,6 @@ window.startWizard = startWizard;
 window.startWizardGoal = startWizardGoal;
 window.continueAfterPgReady = continueAfterPgReady;
 window.backFromRestore = backFromRestore;
-window.showPgReinstallForm = showPgReinstallForm;
-window.selectPgDb = selectPgDb;
-window.selectPgSsl = selectPgSsl;
-window.startPgInstall = startPgInstall;
 window.choosePath = choosePath;
 window.startRestore = startRestore;
 window.resetRestoreForm = resetRestoreForm;
