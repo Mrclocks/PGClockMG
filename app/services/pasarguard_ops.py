@@ -59,7 +59,8 @@ BANNER_NOISE_PATTERNS = (
 DB_SERVICES = {
     "timescaledb": ("timescaledb", "postgresql"),
     "postgresql": ("postgresql", "timescaledb"),
-    "mysql": ("mysql",),
+    # Soft family: MariaDB stacks may use service name ``mysql:`` (or vice versa)
+    "mysql": ("mysql", "mariadb"),
     "mariadb": ("mariadb", "mysql"),
     "sqlite": tuple(),
 }
@@ -79,7 +80,9 @@ def resolve_db_service(target_db: str) -> str | None:
     for name in DB_SERVICES.get(target_db, (target_db,)):
         if name and re.search(rf"^\s*{re.escape(name)}\s*:", text, re.MULTILINE):
             return name
-    return DB_SERVICES.get(target_db, (None,))[0]
+    # Do not invent a missing service name (avoids targeting plain postgresql for
+    # Timescale dumps, or a non-existent ``mysql`` when only ``mariadb`` exists).
+    return None
 
 
 def _target_conn(migrator) -> dict:

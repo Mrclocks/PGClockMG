@@ -875,11 +875,31 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
     elif is_auth_failure_text(raw) or ("password" in low and "auth" in low) or "authentication failed" in low:
         fa = "احراز هویت دیتابیس شکست خورد (پسورد/SASL)."
         en = "Database authentication failed (password/SASL)."
-        causes_fa = [
-            "رمز POSTGRES_PASSWORD در .env با رمز واقعی کانتینر TimescaleDB/PostgreSQL یکی نیست",
-            "PgBouncer کش قدیمی دارد — ویزارد نقش‌ها را هم‌تراز و pgbouncer را ریستارت می‌کند",
-            "بعد از ریستور postgres، globals.sql ممکن است نقش‌ها را با رمز بکاپ برگرداند",
-        ]
+        tgt = (target_db or "").lower()
+        bak = (backup_db or "").lower()
+        if tgt in ("mysql", "mariadb") or (not tgt and ("mysql" in low or "mariadb" in low)):
+            causes_fa = [
+                "رمز MYSQL_ROOT_PASSWORD / DB_PASSWORD در .env با رمز واقعی کانتینر MySQL/MariaDB یکی نیست",
+                "بعد از تبدیل از Postgres/Timescale، کلیدهای POSTGRES_* در .env ممکن است گیج‌کننده بمانند — ویزارد آن‌ها را پاک می‌کند",
+                "کاربر root یا DB_USER در کانتینر با مقدار .env هم‌خوان نیست — ویزارد نقش‌ها را هم‌تراز می‌کند",
+            ]
+            if bak in ("postgresql", "timescaledb"):
+                causes_fa.insert(
+                    0,
+                    f"بکاپ={bak} → نصب={tgt or 'mysql'}: باید رمز نصب MySQL/MariaDB حفظ شود نه رمز Postgres بکاپ",
+                )
+        elif tgt in ("postgresql", "timescaledb") or bak in ("postgresql", "timescaledb"):
+            causes_fa = [
+                "رمز POSTGRES_PASSWORD در .env با رمز واقعی کانتینر TimescaleDB/PostgreSQL یکی نیست",
+                "PgBouncer کش قدیمی دارد — ویزارد نقش‌ها را هم‌تراز و pgbouncer را ریستارت می‌کند",
+                "بعد از ریستور postgres، globals.sql ممکن است نقش‌ها را با رمز بکاپ برگرداند",
+            ]
+        else:
+            causes_fa = [
+                "رمز دیتابیس در .env با رمز واقعی کانتینر یکی نیست",
+                "بعد از ریستور/تبدیل، نقش‌ها ممکن است با رمز دیگری هم‌خوان شده باشند",
+                "لاگ کامل کانتینر دیتابیس را برای جزئیات auth ببینید",
+            ]
     elif "character varying(32)" in low or "stringdatarighttruncation" in low:
         fa = "خطای ثبت نسخه alembic بعد از کپی داده (نسخه نامعتبر)."
         en = "Alembic version stamp failed after data copy (invalid revision string)."
@@ -1574,14 +1594,16 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
 
         job.set_progress(75, "Merging configuration...")
         if needs_convert:
-            # Hard convert into already-installed target — keep install credentials
-            preserve: dict[str, str | None] = {
+            # Hard convert into already-installed target — keep install credentials only
+            preserve = {
                 "DB_PASSWORD": cur_db_pass,
-                "MYSQL_ROOT_PASSWORD": cur_mysql_root,
                 "DB_USER": cur_user,
                 "DB_NAME": cur_name,
-                "POSTGRES_PASSWORD": cur_pg_pass,
             }
+            if (target_db or "") in ("mysql", "mariadb"):
+                preserve["MYSQL_ROOT_PASSWORD"] = cur_mysql_root or cur_db_pass
+            elif (target_db or "") in ("postgresql", "timescaledb"):
+                preserve["POSTGRES_PASSWORD"] = cur_pg_pass or cur_db_pass
         else:
             # Same / soft-family engine: put OLD (backup) DB password into the new .env
             # so panel auth matches roles restored from the dump.
@@ -1595,11 +1617,14 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                 )
             preserve = {
                 "DB_PASSWORD": same_pass,
-                "MYSQL_ROOT_PASSWORD": same_root,
                 "DB_USER": bak_user or cur_user,
                 "DB_NAME": bak_name or cur_name,
-                "POSTGRES_PASSWORD": same_pg,
             }
+            family_eng = (target_db or backup_db or "").lower()
+            if family_eng in ("mysql", "mariadb"):
+                preserve["MYSQL_ROOT_PASSWORD"] = same_root
+            elif family_eng in ("postgresql", "timescaledb"):
+                preserve["POSTGRES_PASSWORD"] = same_pg
             job.log(
                 "Same-engine restore: writing backup DB password into live .env "
                 "(avoids auth mismatch when dump/globals restored old roles)"
@@ -1616,6 +1641,7 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         await _merge_env_after_restore(
             job, backup_env, install_env_snapshot,
             preserve=preserve,
+            target_db=target_db or backup_db,
         )
 
         await _restore_data_files(job, root)
@@ -1695,8 +1721,16 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         live_admin = (copy_report or {}).get("live_admin") or {}
         if needs_convert:
             verify_user = cur_user or live_admin.get("user") or "pasarguard"
-            verify_pass = cur_db_pass or cur_pg_pass or live_admin.get("password") or ""
             verify_db = cur_name or live_admin.get("database") or "pasarguard"
+            if (final_engine_pre or "") in ("mysql", "mariadb"):
+                verify_pass = (
+                    cur_mysql_root or cur_db_pass or live_admin.get("password") or ""
+                )
+                if not verify_user or verify_user == "pasarguard":
+                    # MySQL convert auth uses root more often than app user
+                    verify_user = cur_user or "root"
+            else:
+                verify_pass = cur_db_pass or cur_pg_pass or live_admin.get("password") or ""
         else:
             verify_user = bak_user or cur_user or live_admin.get("user") or "pasarguard"
             verify_pass = (
@@ -1810,11 +1844,19 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
 
         # Re-read password from finalized .env in case finalize adjusted it
         env_now = _read_current_env()
-        verify_pass = (
-            read_env_var(env_now, "DB_PASSWORD")
-            or read_env_var(env_now, "POSTGRES_PASSWORD")
-            or verify_pass
-        )
+        if final_engine in ("mysql", "mariadb"):
+            verify_pass = (
+                read_env_var(env_now, "DB_PASSWORD")
+                or read_env_var(env_now, "MYSQL_ROOT_PASSWORD")
+                or read_env_var(env_now, "MYSQL_PASSWORD")
+                or verify_pass
+            )
+        else:
+            verify_pass = (
+                read_env_var(env_now, "DB_PASSWORD")
+                or read_env_var(env_now, "POSTGRES_PASSWORD")
+                or verify_pass
+            )
         verify_user = read_env_var(env_now, "DB_USER") or verify_user
         verify_db = read_env_var(env_now, "DB_NAME") or verify_db
 
@@ -2255,7 +2297,12 @@ async def _restore_postgres(
 
 
 async def _merge_env_after_restore(
-    job: MigrationJob, backup_env: str, current_env: str, preserve: dict
+    job: MigrationJob,
+    backup_env: str,
+    current_env: str,
+    preserve: dict,
+    *,
+    target_db: str | None = None,
 ) -> None:
     """Write backup .env (panel settings) but keep live DB credentials.
 
@@ -2265,6 +2312,7 @@ async def _merge_env_after_restore(
     from app.services.env_migration import (
         _set_sqlalchemy_url,
         _sqlalchemy_url_line_pattern,
+        _unset_env_var,
     )
     import re as _re
 
@@ -2284,11 +2332,47 @@ async def _merge_env_after_restore(
             continue  # handled below — must collapse duplicates
         text = _set_env_var(text, key, val)
 
-    db_pass = preserve.get("DB_PASSWORD") or preserve.get("POSTGRES_PASSWORD")
+    db_pass = preserve.get("DB_PASSWORD") or preserve.get("POSTGRES_PASSWORD") or preserve.get(
+        "MYSQL_ROOT_PASSWORD"
+    )
     if db_pass:
         text = _set_env_var(text, "DB_PASSWORD", db_pass)
-        if "POSTGRES_PASSWORD" in current_env or read_env_var(current_env, "POSTGRES_PASSWORD"):
+        # Only mirror into engine-specific secret keys that belong on the target
+        tgt = (target_db or "").lower()
+        if tgt in ("postgresql", "timescaledb") and (
+            "POSTGRES_PASSWORD" in preserve
+            or "POSTGRES_PASSWORD" in current_env
+            or read_env_var(current_env, "POSTGRES_PASSWORD")
+        ):
             text = _set_env_var(text, "POSTGRES_PASSWORD", db_pass)
+        if tgt in ("mysql", "mariadb") and (
+            "MYSQL_ROOT_PASSWORD" in preserve
+            or read_env_var(current_env, "MYSQL_ROOT_PASSWORD")
+        ):
+            text = _set_env_var(text, "MYSQL_ROOT_PASSWORD", db_pass)
+
+    # Strip foreign-engine secrets left over from a Timescale/Postgres backup
+    # when converting into MySQL/MariaDB (and the reverse).
+    tgt = (target_db or "").lower()
+    if tgt in ("mysql", "mariadb"):
+        for key in (
+            "POSTGRES_PASSWORD",
+            "POSTGRES_USER",
+            "POSTGRES_DB",
+            "POSTGRES_HOST",
+            "POSTGRES_PORT",
+        ):
+            text = _unset_env_var(text, key)
+    elif tgt in ("postgresql", "timescaledb"):
+        for key in (
+            "MYSQL_ROOT_PASSWORD",
+            "MYSQL_PASSWORD",
+            "MYSQL_USER",
+            "MYSQL_DATABASE",
+            "MYSQL_HOST",
+            "MYSQL_PORT",
+        ):
+            text = _unset_env_var(text, key)
 
     # Always normalize SQLALCHEMY to a single line. Backup .env files sometimes
     # contain the same sqlite URL 2–3 times; docker last-wins would ignore a later
