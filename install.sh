@@ -7,7 +7,7 @@
 #
 set -eo pipefail
 
-readonly SCRIPT_VERSION="2.8.13"
+readonly SCRIPT_VERSION="2.8.14"
 readonly INSTALL_DIR="/opt/pg-migrator"
 readonly SERVICE_NAME="pg-migrator"
 readonly WEB_PORT=7000
