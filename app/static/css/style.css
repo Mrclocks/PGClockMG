@@ -132,43 +132,96 @@ html[lang="fa"] body {
   flex-wrap: wrap;
 }
 
-.lang-switch {
-  display: flex;
-  gap: 2px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 2px;
+.lang-accordion {
+  position: relative;
+  z-index: 40;
 }
 
-.lang-btn {
-  padding: 4px 10px;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 0.75rem;
+.lang-accordion > summary {
+  list-style: none;
+}
+
+.lang-accordion > summary::-webkit-details-marker {
+  display: none;
+}
+
+.lang-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: 0.8rem;
   font-weight: 600;
   cursor: pointer;
-  border-radius: 6px;
+  user-select: none;
+  min-height: 36px;
+}
+
+.lang-summary:hover {
+  border-color: hsla(var(--pg-primary), 0.45);
+}
+
+.lang-chevron {
+  width: 14px;
+  height: 14px;
+  opacity: 0.7;
+  transition: transform 0.2s ease;
+}
+
+.lang-accordion[open] .lang-chevron {
+  transform: rotate(180deg);
+}
+
+.lang-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  inset-inline-end: 0;
+  min-width: 148px;
+  padding: 6px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-card, var(--bg-elevated));
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  display: grid;
+  gap: 2px;
+}
+
+.lang-option {
+  display: block;
+  width: 100%;
+  text-align: start;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
   font-family: inherit;
 }
 
-.lang-btn.active {
-  background: var(--primary);
-  color: white;
+.lang-option:hover {
+  background: hsla(var(--pg-primary), 0.12);
 }
 
-.lang-btn:hover:not(.active) {
-  color: var(--text);
+.lang-option.is-active {
+  background: hsla(var(--pg-primary), 0.2);
+  color: var(--primary);
+  font-weight: 650;
 }
 
-.badge {
+.version {
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   padding: 4px 12px;
   border-radius: 20px;
   font-size: 0.8rem;
-  color: var(--primary);
+  color: var(--text-muted);
   font-family: var(--font-mono);
   direction: ltr;
 }
@@ -906,6 +959,76 @@ button.db-card {
 .btn-lg { padding: 14px 28px; font-size: 1rem; min-height: 48px; }
 
 /* Progress */
+.progress-panel {
+  margin-bottom: 18px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, hsla(220, 20%, 16%, 0.9), hsla(220, 18%, 12%, 0.75));
+}
+
+.progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.progress-status {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  font-size: 0.88rem;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+.progress-pct {
+  flex-shrink: 0;
+  min-width: 3.2rem;
+  text-align: end;
+  font-size: 0.95rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: var(--primary);
+  font-family: var(--font-mono);
+  direction: ltr;
+}
+
+.progress-track {
+  height: 10px;
+  background: hsla(220, 16%, 22%, 0.95);
+  border-radius: 999px;
+  overflow: hidden;
+  position: relative;
+}
+
+.progress-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #3b82f6, #60a5fa 55%, #93c5fd);
+  box-shadow: 0 0 16px hsla(213, 94%, 68%, 0.35);
+  transition: width 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+  position: relative;
+}
+
+.progress-fill::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, hsla(0, 0%, 100%, 0.28), transparent);
+  transform: translateX(-100%);
+  animation: progress-sheen 1.8s ease-in-out infinite;
+}
+
+@keyframes progress-sheen {
+  0% { transform: translateX(-100%); }
+  60%, 100% { transform: translateX(100%); }
+}
+
 .progress-wrap {
   display: flex;
   align-items: center;
@@ -921,13 +1044,6 @@ button.db-card {
   overflow: hidden;
 }
 
-.progress-fill {
-  height: 100%;
-  background: linear-gradient(90deg, var(--primary), #60a5fa);
-  border-radius: 4px;
-  transition: width 0.5s ease;
-}
-
 .progress-text {
   font-size: 0.9rem;
   font-weight: 600;
@@ -939,6 +1055,19 @@ button.db-card {
   color: var(--text-muted);
   margin-bottom: 16px;
   font-size: 0.9rem;
+}
+
+.panel-url-line {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-family: var(--font-mono);
+  word-break: break-all;
+  text-align: start;
 }
 
 /* Terminal */
