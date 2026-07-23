@@ -121,6 +121,32 @@ def test_mysql_password_candidates():
     print("OK: mysql password candidates")
 
 
+def test_mysql_password_candidates_from_sqlalchemy_url():
+    env = (
+        'SQLALCHEMY_DATABASE_URL="mysql+asyncmy://pasarguard:urlsecret@127.0.0.1:3306/pasarguard"\n'
+        "DB_PASSWORD=apppw\n"
+    )
+    c = mysql_password_candidates(env)
+    assert "urlsecret" in c
+    assert "apppw" in c
+    print("OK: mysql password from SQLAlchemy URL")
+
+
+def test_explain_auth_mariadb_target_from_timescale():
+    from app.services.pg_restore import explain_restore_error
+
+    info = explain_restore_error(
+        RuntimeError("MySQL/MariaDB authentication failed — check MYSQL_ROOT_PASSWORD"),
+        "timescaledb",
+        "mariadb",
+    )
+    blob = "\n".join(info.get("causes_fa") or [])
+    assert "MYSQL" in blob or "MariaDB" in blob or "mariadb" in blob.lower()
+    assert "PgBouncer" not in blob
+    assert "POSTGRES_PASSWORD" not in blob
+    print("OK: timescale→mariadb auth tips are MySQL-aware")
+
+
 if __name__ == "__main__":
     test_postgres_password_candidates_order()
     test_postgres_admin_users()
@@ -129,4 +155,6 @@ if __name__ == "__main__":
     test_get_target_uses_resolved_conn()
     test_get_target_wizard_password_when_manual()
     test_mysql_password_candidates()
+    test_mysql_password_candidates_from_sqlalchemy_url()
+    test_explain_auth_mariadb_target_from_timescale()
     print("\nAll db_auth tests passed")

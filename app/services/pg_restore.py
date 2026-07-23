@@ -755,6 +755,8 @@ async def _maybe_cross_db_after_restore(
     user: str,
     db_name: str,
     source_path: str | None = None,
+    *,
+    install_env_snapshot: str | None = None,
 ) -> tuple[str, dict, dict]:
     """Convert restored backup engine → installed PasarGuard DB (auto)."""
     if not target_db or backup_db == target_db or soft_db_family(backup_db, target_db):
@@ -802,8 +804,9 @@ async def _maybe_cross_db_after_restore(
                 ok, out = await _run(self.job, cmd, cwd=cwd, timeout=timeout)
                 return ok, out or ""
 
-        # Target DB must be reachable with verified admin credentials before convert
-        env_text = _read_current_env()
+        # Prefer install .env for target auth — merged backup .env often still has
+        # Timescale/Postgres secrets and incomplete MYSQL_* until finalize.
+        env_text = install_env_snapshot or _read_current_env()
         if target_db != "sqlite":
             svc = "timescaledb" if target_db == "timescaledb" else await _detect_db_container(job, target_db)
             if svc:
@@ -812,7 +815,19 @@ async def _maybe_cross_db_after_restore(
                 await _compose_up_services(job, svc, *extras, timeout=300)
                 await asyncio.sleep(5)
             probe_mini = _Mini(job, {"target_db": target_db, "_auto_db_credentials": True})
-            admin = await resolve_live_admin_connection(probe_mini, target_db, env_text=env_text)
+            try:
+                admin = await resolve_live_admin_connection(
+                    probe_mini, target_db, env_text=env_text,
+                )
+            except RuntimeError:
+                # Fallback: try live merged .env (same-engine soft path may have updated it)
+                if install_env_snapshot:
+                    job.log("Install-snapshot auth failed — retrying with live .env")
+                    admin = await resolve_live_admin_connection(
+                        probe_mini, target_db, env_text=_read_current_env(),
+                    )
+                else:
+                    raise
             if target_db in ("postgresql", "timescaledb"):
                 await _sync_pg_role_passwords(
                     job,
@@ -877,18 +892,26 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         en = "Database authentication failed (password/SASL)."
         tgt = (target_db or "").lower()
         bak = (backup_db or "").lower()
-        if tgt in ("mysql", "mariadb") or (not tgt and ("mysql" in low or "mariadb" in low)):
+        mysqlish = (
+            tgt in ("mysql", "mariadb")
+            or "mysql/mariadb authentication" in low
+            or "access denied for user" in low
+            or (not tgt and ("mysql" in low or "mariadb" in low))
+        )
+        if mysqlish:
             causes_fa = [
-                "رمز MYSQL_ROOT_PASSWORD / DB_PASSWORD در .env با رمز واقعی کانتینر MySQL/MariaDB یکی نیست",
-                "بعد از تبدیل از Postgres/Timescale، کلیدهای POSTGRES_* در .env ممکن است گیج‌کننده بمانند — ویزارد آن‌ها را پاک می‌کند",
-                "کاربر root یا DB_USER در کانتینر با مقدار .env هم‌خوان نیست — ویزارد نقش‌ها را هم‌تراز می‌کند",
+                "رمز MYSQL_ROOT_PASSWORD / DB_PASSWORD در .env نصب با رمز واقعی کانتینر MySQL/MariaDB یکی نیست",
+                "کانتینر MariaDB ممکن است فقط باینری mariadb داشته باشد — ویزارد هر دو کلاینت را امتحان می‌کند",
+                "بعد از تبدیل از Timescale، ویزارد باید از رمز نصب (نه رمز Postgres بکاپ) استفاده کند",
             ]
             if bak in ("postgresql", "timescaledb"):
                 causes_fa.insert(
                     0,
-                    f"بکاپ={bak} → نصب={tgt or 'mysql'}: باید رمز نصب MySQL/MariaDB حفظ شود نه رمز Postgres بکاپ",
+                    f"بکاپ={bak} → نصب={tgt or 'mysql/mariadb'}: رمز نصب MySQL/MariaDB را نگه دارید",
                 )
-        elif tgt in ("postgresql", "timescaledb") or bak in ("postgresql", "timescaledb"):
+        elif tgt in ("postgresql", "timescaledb") or (
+            bak in ("postgresql", "timescaledb") and tgt not in ("mysql", "mariadb")
+        ):
             causes_fa = [
                 "رمز POSTGRES_PASSWORD در .env با رمز واقعی کانتینر TimescaleDB/PostgreSQL یکی نیست",
                 "PgBouncer کش قدیمی دارد — ویزارد نقش‌ها را هم‌تراز و pgbouncer را ریستارت می‌کند",
@@ -1683,10 +1706,11 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         if target_db and restore_engine != target_db and not soft_db_family(restore_engine, target_db):
             final_db, copy_stats, copy_report = await _maybe_cross_db_after_restore(
                 job, params, restore_engine, target_db,
-                cur_db_pass or cur_pg_pass or "",
-                cur_user or "pasarguard",
+                cur_mysql_root or cur_db_pass or cur_pg_pass or "",
+                cur_user or ("root" if (target_db or "") in ("mysql", "mariadb") else "pasarguard"),
                 cur_name or "pasarguard",
                 source_path=convert_source,
+                install_env_snapshot=install_env_snapshot,
             )
             src_from_copy = (copy_report or {}).get("source_counts") or {}
             if src_from_copy:

@@ -24,21 +24,35 @@ def _unique_strings(*values: str | None) -> list[str]:
 def postgres_password_candidates(env_text: str | None) -> list[str]:
     text = env_text or ""
     compose = read_compose_db_credentials(text)
+    url_pwd = None
+    url = read_env_var(text, "SQLALCHEMY_DATABASE_URL") or ""
+    if url:
+        from app.services.env_migration import parse_sqlalchemy_url
+
+        url_pwd = parse_sqlalchemy_url(url).get("password")
     return _unique_strings(
         read_env_var(text, "POSTGRES_PASSWORD"),
         compose.get("password"),
         read_env_var(text, "DB_PASSWORD"),
+        url_pwd,
     )
 
 
 def mysql_password_candidates(env_text: str | None) -> list[str]:
     text = env_text or ""
     compose = read_compose_db_credentials(text)
+    url_pwd = None
+    url = read_env_var(text, "SQLALCHEMY_DATABASE_URL") or ""
+    if url:
+        from app.services.env_migration import parse_sqlalchemy_url
+
+        url_pwd = parse_sqlalchemy_url(url).get("password")
     return _unique_strings(
         read_env_var(text, "MYSQL_ROOT_PASSWORD"),
         read_env_var(text, "MYSQL_PASSWORD"),
         compose.get("password"),
         read_env_var(text, "DB_PASSWORD"),
+        url_pwd,
     )
 
 
@@ -116,12 +130,21 @@ async def _probe_mysql(
         return False
     cwd = str(PASARGUARD_DIR)
     pwd = password.replace('"', '\\"')
-    cmd = (
-        f'cd "{cwd}" && docker compose exec -T {service} '
-        f'mysql -u {user} -p"{pwd}" -N -e "SELECT 1" {database} 2>/dev/null'
-    )
-    ok, out = await migrator._run_cmd(cmd, timeout=25)
-    return ok and "1" in (out or "")
+    # MariaDB images often ship `mariadb` only; MySQL ships `mysql`.
+    # Prefer service-aware order (mariadb service → try mariadb client first).
+    bins = ("mariadb", "mysql") if "maria" in (service or "").lower() else ("mysql", "mariadb")
+    for bin_name in bins:
+        # Prefer named DB; fall back to no-DB probe (avoids false auth fail on missing schema)
+        for db_arg in (database, ""):
+            db_part = f" {db_arg}" if db_arg else ""
+            cmd = (
+                f'cd "{cwd}" && docker compose exec -T {service} '
+                f'{bin_name} -u {user} -p"{pwd}" -N -e "SELECT 1"{db_part} 2>/dev/null'
+            )
+            ok, out = await migrator._run_cmd(cmd, timeout=25)
+            if ok and "1" in (out or ""):
+                return True
+    return False
 
 
 async def resolve_live_admin_connection(
