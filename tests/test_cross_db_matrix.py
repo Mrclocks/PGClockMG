@@ -46,15 +46,28 @@ def test_engine_families():
 
 
 def test_normalize_raw_value():
-    from datetime import datetime
-    from app.services.native_migration.copy_core import normalize_raw_value
+    from datetime import datetime, timezone
+    from app.services.native_migration.copy_core import (
+        normalize_datetime_for_sql,
+        normalize_raw_value,
+    )
 
     assert normalize_raw_value(Decimal("10")) == 10
     assert normalize_raw_value(Decimal("10.5")) == 10.5
     dt = datetime(2024, 1, 2, 3, 4, 5)
     assert normalize_raw_value(dt) == "2024-01-02 03:04:05"
     assert normalize_raw_value(b"hello") == "hello"
-    print("OK: normalize_raw_value")
+
+    aware = datetime(2026, 7, 23, 8, 37, 41, tzinfo=timezone.utc)
+    assert normalize_raw_value(aware) == "2026-07-23 08:37:41"
+    assert "+00:00" not in normalize_raw_value(aware)
+    assert normalize_raw_value("2026-07-23 08:37:41+00:00") == "2026-07-23 08:37:41"
+    assert normalize_raw_value("2026-07-23T08:37:41+00:00") == "2026-07-23 08:37:41"
+    assert normalize_raw_value("2026-07-23 08:37:41Z") == "2026-07-23 08:37:41"
+    assert normalize_datetime_for_sql("2026-07-23 08:37:41.123456+00:00") == (
+        "2026-07-23 08:37:41.123456"
+    )
+    print("OK: normalize_raw_value (incl. timestamptz → MySQL-safe)")
 
 
 def test_parse_not_null_column():

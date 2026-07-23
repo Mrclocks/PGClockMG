@@ -154,6 +154,24 @@ def test_explain_auth_mysql_target_not_postgres_tips():
     print("OK: auth tips are MySQL-aware for timescale→mysql")
 
 
+def test_explain_incorrect_datetime_mysql():
+    from app.services.pg_restore import explain_restore_error
+
+    info = explain_restore_error(
+        RuntimeError(
+            "Migration failed: nodes was 1 in source but 0 after full copy. "
+            "First error: (1292, \"Incorrect datetime value: "
+            "'2026-07-23 08:37:41+00:00' for column "
+            "`pasarguard`.`nodes`.`last_status_change` at row 1\")"
+        ),
+        "timescaledb",
+        "mariadb",
+    )
+    assert "datetime" in info["en"].lower() or "timestamptz" in info["en"].lower()
+    assert info.get("causes_fa")
+    print("OK: explain incorrect datetime for timescale→mariadb")
+
+
 if __name__ == "__main__":
     test_detect_timescale_from_compose_not_url()
     test_detect_postgresql_from_compose()
@@ -166,4 +184,5 @@ if __name__ == "__main__":
     test_detect_mysql_from_compose()
     test_backup_mysql_url_ignores_live_mariadb_compose()
     test_explain_auth_mysql_target_not_postgres_tips()
+    test_explain_incorrect_datetime_mysql()
     print("\nAll detect/estimate tests passed")
