@@ -156,7 +156,7 @@ create_systemd_service() {
   info "Creating systemd service..."
   cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
-Description=PG-Migrator — PasarGuard Migration Wizard
+Description=PGClockMG — PasarGuard restore & migration wizard
 After=network.target docker.service
 Wants=docker.service
 
@@ -195,7 +195,7 @@ print_success() {
   rm -f "$REEXEC_MARKER"
   log ""
   log "${C_CYAN}${C_BOLD}====================================================${C_RESET}"
-  log "${C_WHITE}${C_BOLD}  PG-Migrator installed successfully!${C_RESET}"
+  log "${C_WHITE}${C_BOLD}  PGClockMG installed successfully!${C_RESET}"
   log "${C_CYAN}${C_BOLD}====================================================${C_RESET}"
   log ""
   log "  ${C_GREEN}Web panel:${C_RESET}  http://${ip}:${WEB_PORT}"
@@ -209,7 +209,7 @@ print_success() {
 
 main() {
   log ""
-  log "${C_CYAN}${C_BOLD}  PG-Migrator Installer${C_RESET}"
+  log "${C_CYAN}${C_BOLD}  PGClockMG Installer${C_RESET}"
   log "  ${C_DIM}installer script ${SCRIPT_VERSION} — app version shown after sync${C_RESET}"
   log ""
   require_root
