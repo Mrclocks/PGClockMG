@@ -199,7 +199,21 @@ async def _prepare_target_for_migration(migrator, target_db: str) -> None:
     )
 
     await _ensure_db_running(migrator, target_db)
-    admin = await resolve_live_admin_connection(migrator, target_db)
+    # Restore convert already probed with install-snapshot credentials — reuse them.
+    # Re-reading the merged backup .env often loses MYSQL_ROOT / confuses POSTGRES_*.
+    existing = migrator.params.get("_resolved_target_conn")
+    if (
+        isinstance(existing, dict)
+        and existing.get("password")
+        and (existing.get("db_type") in (None, target_db) or not existing.get("db_type"))
+    ):
+        admin = dict(existing)
+        admin["db_type"] = target_db
+        migrator.job.log(
+            f"Reusing verified target admin ({admin.get('user')}) for {target_db}"
+        )
+    else:
+        admin = await resolve_live_admin_connection(migrator, target_db)
     migrator.params = migration_params_from_connection(
         migrator.params.get("source_db") or migrator.params.get("source_db_type") or "sqlite",
         target_db,

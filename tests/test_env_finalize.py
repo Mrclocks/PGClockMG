@@ -136,6 +136,36 @@ def test_finalize_keeps_backup_mysql_root_over_install():
     print("OK: finalize keeps backup MYSQL_ROOT_PASSWORD")
 
 
+def test_finalize_strips_postgres_secrets_for_mysql_target():
+    """Timescale→MySQL convert must not leave POSTGRES_* in the live .env."""
+    from app.services.env_migration import read_env_var
+
+    merged = "\n".join([
+        'SQLALCHEMY_DATABASE_URL="postgresql+asyncpg://pasarguard:old@127.0.0.1:6432/pasarguard"',
+        'DB_PASSWORD="old"',
+        'POSTGRES_PASSWORD="old"',
+        'POSTGRES_USER="pasarguard"',
+        'TELEGRAM_API_TOKEN="tok"',
+    ])
+    install = "\n".join([
+        'SQLALCHEMY_DATABASE_URL="mysql+asyncmy://pasarguard:live@127.0.0.1:3306/pasarguard"',
+        'DB_USER="pasarguard"',
+        'DB_NAME="pasarguard"',
+        'DB_PASSWORD="live"',
+        'MYSQL_ROOT_PASSWORD="liveroot"',
+    ])
+    out = finalize_pasarguard_env_after_restore(
+        merged, "mysql", "live", install,
+        db_user="pasarguard", db_name="pasarguard",
+    )
+    assert env_points_to_db(out, "mysql")
+    assert read_env_var(out, "POSTGRES_PASSWORD") is None
+    assert read_env_var(out, "POSTGRES_USER") is None
+    assert read_env_var(out, "MYSQL_ROOT_PASSWORD") in ("live", "liveroot")
+    assert "TELEGRAM_API_TOKEN" in out
+    print("OK: finalize strips POSTGRES_* for mysql target")
+
+
 def test_sanitize_ssl_keeps_valid_files():
     with tempfile.TemporaryDirectory() as td:
         base = Path(td)
@@ -241,6 +271,7 @@ if __name__ == "__main__":
     test_finalize_sqlite_to_timescaledb_url()
     test_finalize_prefers_install_url_over_sqlite_merge()
     test_finalize_keeps_backup_mysql_root_over_install()
+    test_finalize_strips_postgres_secrets_for_mysql_target()
     test_sanitize_ssl_keeps_valid_files()
     test_resolve_container_cert_path()
     test_strict_complete_hosts_fails_hard()

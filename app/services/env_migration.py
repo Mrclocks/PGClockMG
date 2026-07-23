@@ -120,6 +120,16 @@ def read_compose_db_credentials(text: str) -> dict:
     return creds
 
 
+def _compose_image_mentions(body: str, needle: str) -> bool:
+    """True when a compose ``image:`` line mentions *needle* (e.g. mariadb, mysql)."""
+    return bool(
+        re.search(
+            rf"(?im)^\s*image:\s*[\"']?[^\"'\n]*{re.escape(needle)}",
+            body or "",
+        )
+    )
+
+
 def _compose_db_service() -> str | None:
     from app.config import PASARGUARD_DIR
 
@@ -127,9 +137,30 @@ def _compose_db_service() -> str | None:
     if not compose.exists():
         return None
     body = compose.read_text(encoding="utf-8", errors="ignore")
-    for svc in ("timescaledb", "postgresql", "mariadb", "mysql"):
-        if re.search(rf"^\s*{re.escape(svc)}\s*:", body, re.MULTILINE):
-            return svc
+    has = {
+        svc: bool(re.search(rf"^\s*{re.escape(svc)}\s*:", body, re.MULTILINE))
+        for svc in ("timescaledb", "postgresql", "mariadb", "mysql")
+    }
+    if has["timescaledb"]:
+        return "timescaledb"
+    if has["postgresql"]:
+        return "postgresql"
+    if has["mariadb"]:
+        return "mariadb"
+    if has["mysql"]:
+        # Official MariaDB stacks often name the service ``mysql:`` with a mariadb image
+        if _compose_image_mentions(body, "mariadb"):
+            return "mariadb"
+        return "mysql"
+    # Custom service names — fall back to image heuristics
+    if _compose_image_mentions(body, "timescale"):
+        return "timescaledb"
+    if _compose_image_mentions(body, "postgres"):
+        return "postgresql"
+    if _compose_image_mentions(body, "mariadb"):
+        return "mariadb"
+    if _compose_image_mentions(body, "mysql"):
+        return "mysql"
     return None
 
 
@@ -147,8 +178,10 @@ def detect_db_type_from_env(text: str, *, prefer_compose: bool = True) -> str | 
     """Detect database engine from .env (+ live docker-compose when available).
 
     Official Timescale installs use ``postgresql+asyncpg://…`` without the word
-    ``timescale`` in the URL. For that case we must prefer the compose service
-    name (``timescaledb:`` vs ``postgresql:``), not the URL substring.
+    ``timescale`` in the URL. Official MariaDB installs often use
+    ``mysql+asyncmy://…`` without ``mariadb`` in the URL. For both cases we must
+    prefer the compose service/image (``timescaledb`` / ``mariadb``), not the
+    URL substring alone.
     """
     # Explicit stamp (written by finalize / install tooling when present)
     stamped = (read_env_var(text, "PASARGUARD_DB_ENGINE") or "").strip().lower()
@@ -163,6 +196,11 @@ def detect_db_type_from_env(text: str, *, prefer_compose: bool = True) -> str | 
         if "mariadb" in low:
             return "mariadb"
         if "mysql" in low or "pymysql" in low or "asyncmy" in low:
+            # URL alone cannot distinguish MariaDB vs MySQL on real installs
+            if prefer_compose:
+                svc = _compose_db_service()
+                if svc in ("mysql", "mariadb"):
+                    return svc
             return "mysql"
         if "postgres" in low or "asyncpg" in low or "timescale" in low:
             # URL alone cannot distinguish Timescale vs PostgreSQL on real installs
@@ -954,10 +992,20 @@ def finalize_pasarguard_env_after_restore(
         text = _set_env_var_simple(text, "DB_USER", user)
         text = _set_env_var_simple(text, "DB_NAME", name)
         # Prefer install DB_HOST/DB_PORT (docker/pgbouncer layout)
-        for key in ("DB_HOST", "DB_PORT", "POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER", "POSTGRES_DB"):
+        for key in ("DB_HOST", "DB_PORT"):
             val = read_env_var(install_env_snapshot, key)
             if val:
                 text = _set_env_var_simple(text, key, val)
+        if final_db in ("postgresql", "timescaledb"):
+            for key in ("POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER", "POSTGRES_DB"):
+                val = read_env_var(install_env_snapshot, key)
+                if val:
+                    text = _set_env_var_simple(text, key, val)
+        if final_db in ("mysql", "mariadb"):
+            for key in ("MYSQL_HOST", "MYSQL_PORT", "MYSQL_USER", "MYSQL_DATABASE"):
+                val = read_env_var(install_env_snapshot, key)
+                if val:
+                    text = _set_env_var_simple(text, key, val)
         if pwd:
             text = _set_env_var_simple(text, "DB_PASSWORD", pwd)
         if final_db in ("postgresql", "timescaledb") and pwd:
@@ -973,6 +1021,27 @@ def finalize_pasarguard_env_after_restore(
             )
             if root_pw:
                 text = _set_env_var_simple(text, "MYSQL_ROOT_PASSWORD", root_pw)
+
+    # Drop secrets belonging to the other engine family (Timescale→MySQL convert, etc.)
+    if final_db in ("mysql", "mariadb", "sqlite"):
+        for key in (
+            "POSTGRES_PASSWORD",
+            "POSTGRES_USER",
+            "POSTGRES_DB",
+            "POSTGRES_HOST",
+            "POSTGRES_PORT",
+        ):
+            text = _unset_env_var(text, key)
+    if final_db in ("postgresql", "timescaledb", "sqlite"):
+        for key in (
+            "MYSQL_ROOT_PASSWORD",
+            "MYSQL_PASSWORD",
+            "MYSQL_USER",
+            "MYSQL_DATABASE",
+            "MYSQL_HOST",
+            "MYSQL_PORT",
+        ):
+            text = _unset_env_var(text, key)
 
     # Never overwrite backup UVICORN_PORT/HOST — only fill if missing
     for key in ("UVICORN_PORT", "UVICORN_HOST", "UVICORN_ROOT_PATH", "ALLOWED_ORIGINS"):
