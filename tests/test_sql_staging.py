@@ -101,6 +101,73 @@ def test_import_sql_dump_routes_to_ephemeral_pg(monkeypatch=None):
         tmp.unlink(missing_ok=True)
 
 
+def test_timescale_never_stages_into_plain_postgres_compose():
+    """Regression: resolve_db_service(timescaledb) may return postgresql — must NOT use it."""
+    import asyncio
+    from app.services.native_migration import sql_staging as mod
+
+    calls = {"ephemeral": 0, "compose": 0}
+
+    async def fake_ephemeral(migrator, dump_path, source_db, conn, staging_db, container):
+        calls["ephemeral"] += 1
+        assert source_db == "timescaledb"
+        return {
+            "host": "127.0.0.1",
+            "port": "54331",
+            "database": staging_db,
+            "user": "postgres",
+            "password": "pgmigrator",
+            "_ephemeral_container": container,
+        }
+
+    async def fake_compose(*_a, **_k):
+        calls["compose"] += 1
+        raise AssertionError("must not stage Timescale dump into compose postgresql")
+
+    class Job:
+        def log(self, *_a, **_k):
+            pass
+
+    class Mini:
+        def __init__(self):
+            self.job = Job()
+
+        async def _run_cmd(self, *a, **k):
+            return True, ""
+
+    orig_compose = mod._compose_text
+    orig_resolve = mod.resolve_db_service
+    orig_ephemeral = mod._import_via_ephemeral_postgres
+    orig_via = mod._import_via_compose_service
+    # Live panel is plain PostgreSQL — the buggy fallback path
+    mod._compose_text = lambda: "services:\n  postgresql:\n    image: postgres:17\n  pgbouncer:\n    image: x\n"
+    mod.resolve_db_service = lambda _db: "postgresql"
+    mod._import_via_ephemeral_postgres = fake_ephemeral
+    mod._import_via_compose_service = fake_compose
+
+    tmp = Path("/tmp/pgmig_stage_ts_pg.sql")
+    tmp.write_text(
+        "CREATE EXTENSION timescaledb;\nCREATE TABLE users (id int);\n",
+        encoding="utf-8",
+    )
+    try:
+        result = asyncio.run(
+            mod.import_sql_dump_to_live_db(
+                Mini(), str(tmp), "timescaledb", {"password": "secret", "user": "pasarguard"},
+            )
+        )
+        assert calls["ephemeral"] == 1
+        assert calls["compose"] == 0
+        assert result.get("_ephemeral_container")
+        print("OK: Timescale dump never stages into plain postgresql compose")
+    finally:
+        mod._compose_text = orig_compose
+        mod.resolve_db_service = orig_resolve
+        mod._import_via_ephemeral_postgres = orig_ephemeral
+        mod._import_via_compose_service = orig_via
+        tmp.unlink(missing_ok=True)
+
+
 def test_create_staging_db_runs_drop_and_create_separately():
     """Regression: DROP+CREATE in one psql -c fails (transaction block)."""
     import asyncio
@@ -146,6 +213,7 @@ if __name__ == "__main__":
     test_compose_has_service_helper()
     test_explain_cannot_stage_timescale()
     test_import_sql_dump_routes_to_ephemeral_pg()
+    test_timescale_never_stages_into_plain_postgres_compose()
     test_create_staging_db_runs_drop_and_create_separately()
     test_transient_pg_error_detection()
     print("\nAll sql staging tests passed.")

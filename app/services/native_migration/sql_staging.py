@@ -55,23 +55,45 @@ async def _import_via_compose_service(
         return
 
     # PostgreSQL / TimescaleDB via compose
-    # CREATE DATABASE cannot share a transaction with DROP — run separately
-    for sql in (
-        f"DROP DATABASE IF EXISTS {staging_db};",
-        f"CREATE DATABASE {staging_db};",
-    ):
-        create_cmd = (
-            f'cd "{cwd}" && docker compose exec -T {service} '
-            f'env PGPASSWORD="{pwd}" psql -U {user} -d postgres -v ON_ERROR_STOP=1 -c '
-            f'"{sql}"'
+    # CREATE DATABASE cannot share a transaction with DROP — run separately.
+    # App role (pasarguard) often lacks CREATEDB — try postgres / superuser too.
+    users_to_try = []
+    for u in (user, "postgres", "pasarguard"):
+        if u and u not in users_to_try:
+            users_to_try.append(u)
+    created = False
+    last_err = ""
+    for u in users_to_try:
+        for sql in (
+            f'DROP DATABASE IF EXISTS "{staging_db}";',
+            f'CREATE DATABASE "{staging_db}";',
+        ):
+            create_cmd = (
+                f'cd "{cwd}" && docker compose exec -T {service} '
+                f'env PGPASSWORD="{pwd}" psql -U {u} -d postgres -v ON_ERROR_STOP=1 -c '
+                f"\"{sql}\""
+            )
+            proc = await asyncio.create_subprocess_shell(
+                create_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out_b, _ = await proc.communicate()
+            out = (out_b or b"").decode("utf-8", errors="replace")
+            if proc.returncode != 0 and "DROP DATABASE" in sql:
+                continue
+            if proc.returncode != 0 and "CREATE DATABASE" in sql:
+                last_err = out
+                break
+            if "CREATE DATABASE" in sql and proc.returncode == 0:
+                created = True
+                user = u  # use the user that could create DB for import too
+        if created:
+            break
+    if not created:
+        raise RuntimeError(
+            f"SQL staging failed creating db={staging_db}: {last_err[-400:]}"
         )
-        proc = await asyncio.create_subprocess_shell(create_cmd)
-        await proc.wait()
-        if proc.returncode != 0 and "DROP DATABASE" not in sql:
-            raise RuntimeError(f"SQL staging failed creating db={staging_db}")
-        if proc.returncode != 0 and "DROP DATABASE" in sql:
-            # ignore missing DB on drop
-            pass
 
     head = ""
     try:
@@ -542,36 +564,95 @@ async def import_sql_dump_to_live_db(
     source_db: str,
     conn: dict,
 ) -> dict:
-    """Import .sql dump into live DB and return DSN for reading."""
+    """Import .sql dump into a staging DB and return DSN for reading.
+
+    Timescale dumps are NEVER staged into plain PostgreSQL (resolve_db_service
+    may fall back to the postgresql compose service — that path always breaks).
+    """
     path = Path(dump_path)
     if not path.exists():
         raise RuntimeError(f"SQL dump not found: {dump_path}")
 
     staging_db = f"pgmig_{uuid.uuid4().hex[:8]}"
-    service = resolve_db_service(source_db)
 
-    if service and _compose_has_service(service):
-        migrator.job.log(f"Staging SQL dump into compose service {service}...")
-        await docker_compose_up(migrator, [service])
-        await asyncio.sleep(5)
-        await _import_via_compose_service(migrator, path, source_db, service, conn, staging_db)
-        from app.services.db_credentials import migration_port
-        return {
-            "host": conn.get("host") or "127.0.0.1",
-            "port": migration_port(conn, source_db),
-            "database": staging_db,
-            "user": conn.get("user") or (
-                "postgres" if source_db in ("postgresql", "timescaledb") else "root"
-            ),
-            "password": conn.get("password") or "",
-        }
+    dump_is_timescale = source_db == "timescaledb"
+    if source_db in ("postgresql", "timescaledb") and not dump_is_timescale:
+        try:
+            head = path.read_text(encoding="utf-8", errors="ignore")[:80_000]
+            dump_is_timescale = "timescaledb" in head.lower()
+        except Exception:
+            pass
 
+    # ── Timescale source dumps ──────────────────────────────────────────
+    if dump_is_timescale or source_db == "timescaledb":
+        # Only a real timescaledb compose service can accept this dump.
+        if _compose_has_service("timescaledb"):
+            migrator.job.log("Staging Timescale dump into compose service timescaledb...")
+            await docker_compose_up(migrator, ["timescaledb"])
+            await asyncio.sleep(5)
+            await _import_via_compose_service(
+                migrator, path, "timescaledb", "timescaledb", conn, staging_db,
+            )
+            from app.services.db_credentials import migration_port
+            return {
+                "host": conn.get("host") or "127.0.0.1",
+                "port": migration_port(conn, "timescaledb"),
+                "database": staging_db,
+                "user": conn.get("user") or "postgres",
+                "password": conn.get("password") or "",
+            }
+        # No Timescale in compose (e.g. target is mysql/postgresql/mariadb) → ephemeral
+        container = f"pgmig-pg-{uuid.uuid4().hex[:6]}"
+        return await _import_via_ephemeral_postgres(
+            migrator, path, "timescaledb", conn, staging_db, container,
+        )
+
+    # ── MySQL / MariaDB source dumps ────────────────────────────────────
     if source_db in ("mysql", "mariadb"):
+        service = resolve_db_service(source_db)
+        # Only stage into a matching engine family — never into the wrong service
+        if service and service in ("mysql", "mariadb") and _compose_has_service(service):
+            migrator.job.log(f"Staging SQL dump into compose service {service}...")
+            await docker_compose_up(migrator, [service])
+            await asyncio.sleep(5)
+            await _import_via_compose_service(
+                migrator, path, source_db, service, conn, staging_db,
+            )
+            from app.services.db_credentials import migration_port
+            return {
+                "host": conn.get("host") or "127.0.0.1",
+                "port": migration_port(conn, source_db),
+                "database": staging_db,
+                "user": conn.get("user") or "root",
+                "password": conn.get("password") or "",
+            }
         container = f"pgmig-mysql-{uuid.uuid4().hex[:6]}"
         migrator.job.log("Staging SQL dump into ephemeral MySQL container...")
         return await _import_via_ephemeral_mysql(migrator, path, conn, staging_db, container)
 
-    if source_db in ("postgresql", "timescaledb"):
+    # ── Plain PostgreSQL source dumps ───────────────────────────────────
+    if source_db == "postgresql":
+        service = None
+        if _compose_has_service("postgresql"):
+            service = "postgresql"
+        elif _compose_has_service("timescaledb"):
+            # Timescale accepts plain PG dumps
+            service = "timescaledb"
+        if service:
+            migrator.job.log(f"Staging PostgreSQL dump into compose service {service}...")
+            await docker_compose_up(migrator, [service])
+            await asyncio.sleep(5)
+            await _import_via_compose_service(
+                migrator, path, source_db, service, conn, staging_db,
+            )
+            from app.services.db_credentials import migration_port
+            return {
+                "host": conn.get("host") or "127.0.0.1",
+                "port": migration_port(conn, source_db),
+                "database": staging_db,
+                "user": conn.get("user") or "postgres",
+                "password": conn.get("password") or "",
+            }
         container = f"pgmig-pg-{uuid.uuid4().hex[:6]}"
         return await _import_via_ephemeral_postgres(
             migrator, path, source_db, conn, staging_db, container,
