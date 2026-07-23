@@ -50,6 +50,23 @@ def test_filter_timescaledb_extension_sql():
     print("OK: filter timescaledb extension sql")
 
 
+def test_filter_timescaledb_strip_all_for_plain_pg():
+    sql = "\n".join([
+        "CREATE TABLE users (id int);",
+        "CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;",
+        "SELECT create_hypertable('metrics', 'time');",
+        "SELECT timescaledb_pre_restore();",
+        "COMMENT ON EXTENSION timescaledb IS 'x';",
+        "INSERT INTO users VALUES (1);",
+    ])
+    out = filter_timescaledb_extension_sql(sql, strip_all=True)
+    assert "CREATE TABLE users" in out
+    assert "INSERT INTO users" in out
+    assert "timescaledb" not in out.lower()
+    assert "create_hypertable" not in out.lower()
+    print("OK: strip_all timescaledb for plain PostgreSQL")
+
+
 def test_parse_timescale_wanted():
     assert parse_timescale_wanted(["2.28.1", "2.28.1"]) == "2.28.1"
     assert parse_timescale_wanted(["latest", "2.17.2"]) == "2.17.2"
@@ -187,6 +204,7 @@ def test_analyze_experimental_hard_mismatch():
 if __name__ == "__main__":
     test_soft_db_family_matrix()
     test_filter_timescaledb_extension_sql()
+    test_filter_timescaledb_strip_all_for_plain_pg()
     test_parse_timescale_wanted()
     test_detect_ts_mismatch_from_official_error()
     test_is_auth_failure_text()
