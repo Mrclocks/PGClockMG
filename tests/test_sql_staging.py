@@ -110,19 +110,35 @@ def test_create_staging_db_runs_drop_and_create_separately():
 
     async def fake_psql(container, pwd, db, sql=None, *, stdin_path=None, on_error_stop=True):
         calls.append(sql or "")
-        return 0, "CREATE DATABASE"
+        return 0, "ok"
+
+    async def fake_running(_name):
+        return True
 
     orig = mod._psql_ephemeral
+    orig_run = mod._container_running
     mod._psql_ephemeral = fake_psql
+    mod._container_running = fake_running
     try:
         asyncio.run(mod._create_pg_staging_db("c", "p", "pgmig_abc123"))
-        assert len(calls) == 2
+        # DROP, CREATE, then SELECT 1 on new DB
+        assert len(calls) >= 2
         assert "DROP DATABASE" in calls[0]
         assert "CREATE DATABASE" in calls[1]
         assert "DROP" not in calls[1]
         print("OK: staging CREATE DATABASE is a separate psql -c")
     finally:
         mod._psql_ephemeral = orig
+        mod._container_running = orig_run
+
+
+def test_transient_pg_error_detection():
+    from app.services.native_migration.sql_staging import _is_transient_pg_error
+
+    assert _is_transient_pg_error("FATAL: the database system is shutting down")
+    assert _is_transient_pg_error("the database system is starting up")
+    assert not _is_transient_pg_error("syntax error at or near")
+    print("OK: transient pg error detection")
 
 
 if __name__ == "__main__":
@@ -131,4 +147,5 @@ if __name__ == "__main__":
     test_explain_cannot_stage_timescale()
     test_import_sql_dump_routes_to_ephemeral_pg()
     test_create_staging_db_runs_drop_and_create_separately()
+    test_transient_pg_error_detection()
     print("\nAll sql staging tests passed.")
