@@ -101,9 +101,34 @@ def test_import_sql_dump_routes_to_ephemeral_pg(monkeypatch=None):
         tmp.unlink(missing_ok=True)
 
 
+def test_create_staging_db_runs_drop_and_create_separately():
+    """Regression: DROP+CREATE in one psql -c fails (transaction block)."""
+    import asyncio
+    from app.services.native_migration import sql_staging as mod
+
+    calls: list[str] = []
+
+    async def fake_psql(container, pwd, db, sql=None, *, stdin_path=None, on_error_stop=True):
+        calls.append(sql or "")
+        return 0, "CREATE DATABASE"
+
+    orig = mod._psql_ephemeral
+    mod._psql_ephemeral = fake_psql
+    try:
+        asyncio.run(mod._create_pg_staging_db("c", "p", "pgmig_abc123"))
+        assert len(calls) == 2
+        assert "DROP DATABASE" in calls[0]
+        assert "CREATE DATABASE" in calls[1]
+        assert "DROP" not in calls[1]
+        print("OK: staging CREATE DATABASE is a separate psql -c")
+    finally:
+        mod._psql_ephemeral = orig
+
+
 if __name__ == "__main__":
     test_filter_timescaledb_extension_in_staging()
     test_compose_has_service_helper()
     test_explain_cannot_stage_timescale()
     test_import_sql_dump_routes_to_ephemeral_pg()
+    test_create_staging_db_runs_drop_and_create_separately()
     print("\nAll sql staging tests passed.")
