@@ -408,8 +408,8 @@ function detectMarzbanSourceDb() {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
-  await loadInfo();
-  if (!state.systemCheck) await loadSystemCheck();
+  // Paint UI text immediately — never wait on /api/* before i18n (mobile often
+  // looks "empty" until a refresh when the first system-check is slow).
   setLang(state.lang);
   if (typeof bindFinishModal === 'function') bindFinishModal();
   const drag = document.getElementById('uploadDragText');
@@ -424,14 +424,43 @@ document.addEventListener('DOMContentLoaded', async () => {
   const rwTok = document.getElementById('remnawaveToken');
   if (rwUrl) rwUrl.placeholder = t('step2.remnawaveUrlPh');
   if (rwTok) rwTok.placeholder = t('step2.remnawaveTokenPh');
-  document.getElementById('footerDocs').textContent = t('footer.docs');
-  document.getElementById('footerGithub').textContent = t('footer.github');
-  document.getElementById('statusMsg').textContent = t('step5.preparing');
+  const footerDocs = document.getElementById('footerDocs');
+  const footerGithub = document.getElementById('footerGithub');
+  if (footerDocs) footerDocs.textContent = t('footer.docs');
+  if (footerGithub) footerGithub.textContent = t('footer.github');
+  const statusMsg = document.getElementById('statusMsg');
+  if (statusMsg) statusMsg.textContent = t('step5.preparing');
   setupUpload();
   setupCredentialListeners();
   updateStepButtons();
   if (typeof showPhase === 'function') showPhase('welcome');
+
+  await loadInfo();
+  if (!state.systemCheck) await loadSystemCheck();
+  // Re-apply after API data arrives (IP, version, checks)
+  setLang(state.lang);
+  updateStepButtons();
+  if (typeof showPhase === 'function' && state.phase) showPhase(state.phase);
 });
+
+async function fetchJson(url, opts = {}, { retries = 2, timeoutMs = 20000 } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
+    try {
+      const res = await fetch(url, { ...opts, signal: ctrl?.signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch (e) {
+      lastErr = e;
+      if (attempt < retries) await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+  throw lastErr || new Error('fetch failed');
+}
 
 function applySystemCheck(sys) {
   if (!sys) return;
@@ -448,13 +477,16 @@ function applySystemCheck(sys) {
 
 async function loadInfo() {
   try {
-    const res = await fetch('/api/info');
-    const data = await res.json();
+    const data = await fetchJson('/api/info');
     state.panels = data.panels;
     state.subscriptionLabels = data.subscription_labels || {};
     state.serverIp = data.server_ip;
-    document.getElementById('serverIp').textContent = `${data.server_ip}:${data.web_port}`;
-    if (data.version) document.getElementById('appVersion').textContent = `v${data.version}`;
+    const ipEl = document.getElementById('serverIp');
+    if (ipEl) ipEl.textContent = `${data.server_ip}:${data.web_port}`;
+    if (data.version) {
+      const verEl = document.getElementById('appVersion');
+      if (verEl) verEl.textContent = `v${data.version}`;
+    }
     if (data.pasarguard_install_dbs) state.pasarguardInstallDbs = data.pasarguard_install_dbs;
     if (data.system) applySystemCheck(data.system);
     if (data.panel_access) state.panelAccess = data.panel_access;
@@ -465,8 +497,7 @@ async function loadInfo() {
 
 async function loadSystemCheck() {
   try {
-    const res = await fetch('/api/system-check');
-    const data = await res.json();
+    const data = await fetchJson('/api/system-check', {}, { retries: 2, timeoutMs: 45000 });
     applySystemCheck(data);
     renderGlobalChecks();
     if (state.currentStep === 3) renderDetectedTargetDb();

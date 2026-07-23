@@ -393,6 +393,22 @@ async def _compose(job: MigrationJob, *args: str, timeout: int = 300) -> tuple[b
     return await _run(job, ["docker", "compose", *args], cwd=str(PASARGUARD_DIR), timeout=timeout)
 
 
+def _compose_has_service(name: str) -> bool:
+    compose = PASARGUARD_DIR / "docker-compose.yml"
+    if not compose.exists() or not name:
+        return False
+    text = compose.read_text(encoding="utf-8", errors="ignore")
+    return bool(re.search(rf"^\s*{re.escape(name)}\s*:", text, re.MULTILINE))
+
+
+async def _compose_up_services(job: MigrationJob, *services: str, timeout: int = 300) -> tuple[bool, str]:
+    """Start only services that exist in docker-compose.yml (skips missing pgbouncer etc.)."""
+    existing = [s for s in services if s and _compose_has_service(s)]
+    if not existing:
+        return True, ""
+    return await _compose(job, "up", "-d", *existing, timeout=timeout)
+
+
 async def _detect_db_container(job: MigrationJob, db_type: str) -> str | None:
     ok, out = await _run(job, ["docker", "compose", "ps", "--services"], cwd=str(PASARGUARD_DIR), timeout=30)
     services = set((out or "").split())
@@ -469,7 +485,10 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
 
     job.set_progress(25, "Recreating TimescaleDB with matching version...")
     await _compose(job, "stop", "pasarguard", timeout=120)
-    await _compose(job, "stop", "timescaledb", "pgbouncer", timeout=120)
+    stop_svcs = ["timescaledb"]
+    if _compose_has_service("pgbouncer"):
+        stop_svcs.append("pgbouncer")
+    await _compose(job, "stop", *stop_svcs, timeout=120)
     data_dir = Path("/var/lib/postgresql/pasarguard")
     if wipe_data and data_dir.exists():
         job.log(f"Resetting DB data directory {data_dir} for version alignment")
@@ -477,7 +496,7 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
         data_dir.mkdir(parents=True, exist_ok=True)
     elif not wipe_data:
         job.log("Timescale image tag updated without wiping data volume")
-    ok, out = await _compose(job, "up", "-d", "timescaledb", "pgbouncer", timeout=300)
+    ok, out = await _compose_up_services(job, "timescaledb", "pgbouncer", timeout=300)
     if not ok:
         raise RuntimeError(f"Failed to recreate TimescaleDB:\n{out[-2000:]}")
     await asyncio.sleep(10)
@@ -634,7 +653,9 @@ async def _maybe_cross_db_after_restore(
         if target_db != "sqlite":
             svc = "timescaledb" if target_db == "timescaledb" else await _detect_db_container(job, target_db)
             if svc:
-                await _compose(job, "up", "-d", svc, "pgbouncer", timeout=300)
+                # MySQL/MariaDB installs have no pgbouncer — only start services that exist
+                extras = ("pgbouncer",) if target_db in ("postgresql", "timescaledb") else ()
+                await _compose_up_services(job, svc, *extras, timeout=300)
                 await asyncio.sleep(5)
             probe_mini = _Mini(job, {"target_db": target_db, "_auto_db_credentials": True})
             admin = await resolve_live_admin_connection(probe_mini, target_db, env_text=env_text)
@@ -755,6 +776,14 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         fa = "پنل PasarGuard بعد از ریستور بالا نیامد."
         en = "PasarGuard panel did not start after restore."
         causes_fa = ["لاگ pasarguard-1 را ببینید", "ممکن است SSL یا SQLALCHEMY_DATABASE_URL اشتباه باشد"]
+    elif "cannot stage" in low and ("timescaledb" in low or "postgresql" in low):
+        fa = "دامپ Timescale/PostgreSQL برای تبدیل استیج نشد (سرویس مبدأ روی سرور نیست)."
+        en = "Could not stage Timescale/PostgreSQL dump for conversion (source engine not running)."
+        causes_fa = [
+            "وقتی مقصد MySQL/MariaDB است، ویزارد باید دامپ را در کانتینر موقت Timescale لود کند",
+            "در v2.6.3+ استیج موقت برای timescaledb→mysql اضافه شد — آپدیت کنید و دوباره ریستور کنید",
+            "دسترسی Docker برای pull ایمیج timescale/timescaledb لازم است",
+        ]
     elif "no such file" in low or "missing" in low or "not found" in low:
         fa = "فایل دامپ یا دیتابیس منبع پیدا نشد."
         en = "Source dump/database file was not found."
@@ -1272,25 +1301,25 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         else:
             job.log("Backup expected counts: unavailable — will require non-empty panel after restore")
 
-        # TimescaleDB version alignment BEFORE restore only (may wipe empty/new volume)
+        # TimescaleDB version alignment ONLY when restoring into a live PG-family engine.
+        # Hard convert (timescale → mysql) must not run psql against the mysql container.
         ts_versions = analysis.get("timescaledb_versions") or []
         wanted_ts = parse_timescale_wanted(ts_versions)
-        if installed_db in ("timescaledb", "postgresql") or backup_db in ("timescaledb", "postgresql"):
-            if wanted_ts and (installed_db == "timescaledb" or soft_db_family(backup_db, "timescaledb")):
-                container = await _detect_db_container(job, installed_db or "timescaledb")
-                live_ver = None
-                if container:
-                    live_ver = await _read_timescaledb_version(
-                        job, container,
-                        cur_pg_pass or "",
-                        user=cur_user or "postgres",
-                    )
-                if live_ver and live_ver != wanted_ts:
-                    job.log(f"TimescaleDB mismatch: live={live_ver} backup={wanted_ts}")
-                    await _align_timescaledb_image(job, wanted_ts, wipe_data=True)
-                elif not live_ver and installed_db == "timescaledb":
-                    job.log("Could not probe live TimescaleDB — pinning image to backup version")
-                    await _align_timescaledb_image(job, wanted_ts, wipe_data=True)
+        if installed_db in ("timescaledb", "postgresql") and wanted_ts:
+            container = await _detect_db_container(job, installed_db)
+            live_ver = None
+            if container:
+                live_ver = await _read_timescaledb_version(
+                    job, container,
+                    cur_pg_pass or "",
+                    user=cur_user or "postgres",
+                )
+            if live_ver and live_ver != wanted_ts:
+                job.log(f"TimescaleDB mismatch: live={live_ver} backup={wanted_ts}")
+                await _align_timescaledb_image(job, wanted_ts, wipe_data=True)
+            elif not live_ver and installed_db == "timescaledb":
+                job.log("Could not probe live TimescaleDB — pinning image to backup version")
+                await _align_timescaledb_image(job, wanted_ts, wipe_data=True)
 
         # Destination = installed panel DB. Soft-family (mysql↔mariadb, pg↔timescale) needs no convert.
         target_db = installed_db or params.get("target_db") or backup_db
@@ -1376,16 +1405,27 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             if dump.exists():
                 convert_source = str(dump)
             elif analysis.get("layout") == "multi":
-                # Prefer primary dump from manifest
+                # Prefer the application DB dump (skip globals.sql which has roles only)
                 manifest = root / "pg_dump" / "manifest.tsv"
+                candidates: list[Path] = []
                 if manifest.exists():
                     for line in manifest.read_text(encoding="utf-8", errors="ignore").splitlines():
                         parts = line.split("\t")
                         if len(parts) >= 4:
                             cand = root / "pg_dump" / parts[3]
                             if cand.exists():
-                                convert_source = str(cand)
-                                break
+                                candidates.append(cand)
+                if not candidates and (root / "pg_dump").is_dir():
+                    candidates = sorted((root / "pg_dump").glob("*.sql"))
+                for cand in candidates:
+                    if cand.name.lower() in ("globals.sql", "roles.sql"):
+                        continue
+                    convert_source = str(cand)
+                    break
+                if not convert_source and candidates:
+                    convert_source = str(candidates[0])
+                if convert_source:
+                    job.log(f"Hard convert source dump: {Path(convert_source).name}")
 
         final_db = restore_engine
         copy_stats: dict = {}
@@ -1663,9 +1703,7 @@ async def _restore_postgres(
     if not svc:
         svc = "timescaledb" if db_type == "timescaledb" else "postgresql"
     job.log(f"PostgreSQL restore into service `{svc}` (engine={db_type})")
-    await _compose(job, "up", "-d", svc, timeout=180)
-    # pgbouncer if present
-    await _compose(job, "up", "-d", "pgbouncer", timeout=120)
+    await _compose_up_services(job, svc, "pgbouncer", timeout=180)
     await asyncio.sleep(6)
 
     password = (
