@@ -70,6 +70,33 @@ def test_normalize_raw_value():
     print("OK: normalize_raw_value (incl. timestamptz → MySQL-safe)")
 
 
+def test_convert_value_serializes_jsonb_dicts():
+    """psycopg2 returns JSONB as dict — must never reach PyMySQL as dict."""
+    import json
+    from app.services.native_migration.copy_core import convert_value
+
+    perms = {"users": {"create": True, "read": True}}
+    out = convert_value("admin_roles", "permissions", perms)
+    assert isinstance(out, str)
+    assert json.loads(out) == perms
+
+    proxy = {"vless": {"id": "x"}}
+    out2 = convert_value("users", "proxy_settings", proxy)
+    assert isinstance(out2, str)
+    assert json.loads(out2)["vless"]["id"] == "x"
+
+    # settings.value (also in JSON_COLUMNS)
+    out3 = convert_value("settings", "value", {"theme": "dark"})
+    assert isinstance(out3, str)
+    assert json.loads(out3) == {"theme": "dark"}
+
+    # Unknown JSON-ish column name still serialized by catch-all
+    out4 = convert_value("core_configs", "config", {"log": {"level": "warning"}})
+    assert isinstance(out4, str)
+    assert "warning" in out4
+    print("OK: convert_value serializes JSONB dicts for MySQL")
+
+
 def test_parse_not_null_column():
     from app.services.native_migration.copy_core import parse_not_null_column
 
@@ -214,6 +241,7 @@ if __name__ == "__main__":
     test_all_migration_strategies()
     test_engine_families()
     test_normalize_raw_value()
+    test_convert_value_serializes_jsonb_dicts()
     test_parse_not_null_column()
     test_reader_writer_pairs_instantiate()
     test_sqlite_to_sqlite_full_schema()

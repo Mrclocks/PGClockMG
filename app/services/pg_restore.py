@@ -946,6 +946,13 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
             "در v2.4.0+ certs به /var/lib/pasarguard/certs کپی و UVICORN_SSL_* روی همان مسیر مپ می‌شود",
             "اگر بکاپ بدون certs گرفته شده، دوباره با certs بکاپ بگیرید یا پنل را بدون SSL نصب کنید",
         ]
+    elif "dict can not be used as parameter" in low or "dict cannot be used as parameter" in low:
+        fa = "مقدار JSON از Postgres به‌صورت dict به MariaDB/MySQL پاس شد."
+        en = "PostgreSQL JSON/JSONB dict was passed raw to MySQL/MariaDB (invalid bind param)."
+        causes_fa = [
+            "ستون‌های permissions / proxy_settings / config باید قبل از insert به JSON string تبدیل شوند",
+            "در v2.8.10+ همه dict/list برای MySQL serialize می‌شوند — آپدیت و دوباره ریستور کنید",
+        ]
     elif "incorrect datetime value" in low or "1292" in low:
         fa = "فرمت تاریخ/زمان Postgres با ستون DATETIME در MySQL/MariaDB سازگار نبود."
         en = "PostgreSQL timestamptz value is incompatible with MySQL/MariaDB DATETIME."

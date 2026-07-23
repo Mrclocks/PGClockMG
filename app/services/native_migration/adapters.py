@@ -388,7 +388,12 @@ class MysqlWriter(TableWriter):
         return sorted(labels)[0] if labels else s
 
     def _coerce_row(self, table: str, columns: list[str], values: tuple) -> tuple:
-        from app.services.native_migration.copy_core import convert_value, to_bool
+        from app.services.native_migration.copy_core import (
+            coerce_json_value,
+            convert_value,
+            normalize_datetime_for_sql,
+            to_bool,
+        )
 
         meta = self._load_meta(table)
         out = []
@@ -402,11 +407,10 @@ class MysqlWriter(TableWriter):
                 val = self._fit_mysql_enum(
                     labels, val, col_meta.get("nullable", True),
                 )
-            elif data_type == "json":
-                from app.services.native_migration.copy_core import coerce_json_value
+            elif data_type == "json" or "json" in column_type:
+                # MariaDB often reports JSON columns as longtext + check constraint
                 val = coerce_json_value(val)
             elif data_type in ("datetime", "timestamp", "date", "time"):
-                from app.services.native_migration.copy_core import normalize_datetime_for_sql
                 if val is not None:
                     val = normalize_datetime_for_sql(val)
             elif (
@@ -416,6 +420,9 @@ class MysqlWriter(TableWriter):
             ):
                 if val is not None:
                     val = 1 if to_bool(val) else 0
+            # Hard guarantee: PyMySQL rejects dict/list bind params
+            if isinstance(val, (dict, list, tuple)):
+                val = coerce_json_value(val if not isinstance(val, tuple) else list(val))
             out.append(val)
         return tuple(out)
 
