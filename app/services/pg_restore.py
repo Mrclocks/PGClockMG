@@ -231,13 +231,31 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
                 "ru": "PasarGuard не установлен",
             })
         experimental_db_change = False
+        convert_blocked = False
         if db_type and installed_db and db_type != installed_db:
+            from app.panels import can_convert_databases
+
             if soft_db_family(db_type, installed_db):
                 warnings.append({
                     "en": f"Related engines (backup={db_type}, installed={installed_db}) — restore continues automatically.",
                     "fa": f"موتورهای هم‌خانواده (بکاپ={db_type}، نصب={installed_db}) — ریستور خودکار ادامه می‌یابد.",
                     "ru": f"Смежные СУБД (backup={db_type}, installed={installed_db}) — восстановление продолжится.",
                 })
+            elif not can_convert_databases(db_type, installed_db):
+                convert_blocked = True
+                ok = False
+                if installed_db == "sqlite" and db_type != "sqlite":
+                    warnings.append({
+                        "en": f"Cannot convert {db_type} → SQLite. Reinstall PasarGuard with MySQL/MariaDB/PostgreSQL/TimescaleDB, then restore.",
+                        "fa": f"تبدیل {db_type} → SQLite ممکن نیست. PasarGuard را با MySQL/MariaDB/PostgreSQL/TimescaleDB نصب کنید، بعد ریستور کنید.",
+                        "ru": f"Нельзя конвертировать {db_type} → SQLite. Переустановите PasarGuard с серверной БД, затем восстановите.",
+                    })
+                else:
+                    warnings.append({
+                        "en": f"Conversion {db_type} → {installed_db} is not supported.",
+                        "fa": f"تبدیل {db_type} → {installed_db} پشتیبانی نمی‌شود.",
+                        "ru": f"Конвертация {db_type} → {installed_db} не поддерживается.",
+                    })
             else:
                 experimental_db_change = True
                 warnings.append({
@@ -284,6 +302,7 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
             "db_match": (db_type == installed_db) if (db_type and installed_db) else None,
             "soft_match": soft_db_family(db_type, installed_db) if (db_type and installed_db) else None,
             "experimental_db_change": experimental_db_change,
+            "convert_blocked": convert_blocked,
             "supported_target_dbs": sorted(SUPPORTED_RESTORE_DBS),
             "layout": layout,
             "timescaledb_versions": sorted(set(ts_versions)),
@@ -1323,6 +1342,17 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
 
         # Destination = installed panel DB. Soft-family (mysql↔mariadb, pg↔timescale) needs no convert.
         target_db = installed_db or params.get("target_db") or backup_db
+        from app.panels import can_convert_databases
+        if (
+            backup_db and target_db
+            and backup_db != target_db
+            and not soft_db_family(backup_db, target_db)
+            and not can_convert_databases(backup_db, target_db)
+        ):
+            raise RuntimeError(
+                f"Unsupported cross-DB conversion: {backup_db} → {target_db}. "
+                "Non-SQLite backups cannot restore into SQLite — install PasarGuard with a server DB first."
+            )
         needs_convert = bool(
             backup_db and target_db
             and backup_db != target_db
@@ -1330,6 +1360,14 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         )
         if needs_convert:
             job.log(f"DB mismatch — will auto-convert {backup_db} → {target_db}")
+
+        # Backup passwords (same-engine restore must put OLD password into new .env)
+        bak_db_pass = read_env_var(backup_env, "DB_PASSWORD")
+        bak_mysql_root = read_env_var(backup_env, "MYSQL_ROOT_PASSWORD")
+        bak_pg_pass = read_env_var(backup_env, "POSTGRES_PASSWORD") or bak_db_pass
+        bak_user = read_env_var(backup_env, "DB_USER") or read_env_var(backup_env, "POSTGRES_USER")
+        bak_name = read_env_var(backup_env, "DB_NAME") or read_env_var(backup_env, "POSTGRES_DB")
+        bak_url = read_env_var(backup_env, "SQLALCHEMY_DATABASE_URL")
 
         job.set_progress(40, "Restoring database...")
         await _compose(job, "stop", "pasarguard", timeout=120)
@@ -1370,24 +1408,52 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                     job, root, restore_into or backup_db, current_env, backup_env, analysis,
                 )
                 svc = await _detect_db_container(job, restore_into or installed_db or backup_db)
-                if svc and (cur_pg_pass or cur_db_pass):
+                # Same-engine: sync roles to BACKUP password (globals.sql restores old secrets)
+                sync_pass = bak_pg_pass or bak_db_pass or cur_pg_pass or cur_db_pass or ""
+                if svc and sync_pass:
                     await _sync_pg_role_passwords(
-                        job, svc, cur_pg_pass or cur_db_pass or "",
-                        cur_user or "postgres", cur_name or "pasarguard",
+                        job, svc, sync_pass,
+                        bak_user or cur_user or "postgres",
+                        bak_name or cur_name or "pasarguard",
                     )
         else:
             raise RuntimeError(f"Unsupported backup database: {backup_db}")
 
         job.set_progress(75, "Merging configuration...")
-        preserve: dict[str, str | None] = {
-            "DB_PASSWORD": cur_db_pass,
-            "MYSQL_ROOT_PASSWORD": cur_mysql_root,
-            "DB_USER": cur_user,
-            "DB_NAME": cur_name,
-            "POSTGRES_PASSWORD": cur_pg_pass,
-        }
-        if not needs_convert and cur_url:
-            preserve["SQLALCHEMY_DATABASE_URL"] = cur_url
+        if needs_convert:
+            # Hard convert into already-installed target — keep install credentials
+            preserve: dict[str, str | None] = {
+                "DB_PASSWORD": cur_db_pass,
+                "MYSQL_ROOT_PASSWORD": cur_mysql_root,
+                "DB_USER": cur_user,
+                "DB_NAME": cur_name,
+                "POSTGRES_PASSWORD": cur_pg_pass,
+            }
+        else:
+            # Same / soft-family engine: put OLD (backup) DB password into the new .env
+            # so panel auth matches roles restored from the dump.
+            same_pass = bak_db_pass or bak_pg_pass or cur_db_pass
+            same_root = bak_mysql_root or same_pass or cur_mysql_root
+            same_pg = bak_pg_pass or bak_db_pass or cur_pg_pass
+            preserve = {
+                "DB_PASSWORD": same_pass,
+                "MYSQL_ROOT_PASSWORD": same_root,
+                "DB_USER": bak_user or cur_user,
+                "DB_NAME": bak_name or cur_name,
+                "POSTGRES_PASSWORD": same_pg,
+            }
+            job.log(
+                "Same-engine restore: writing backup DB password into live .env "
+                "(avoids auth mismatch when dump/globals restored old roles)"
+            )
+            # Keep install URL host/port layout but swap password to backup secret
+            if cur_url and same_pass:
+                from app.services.env_migration import _replace_sqlalchemy_password
+                preserve["SQLALCHEMY_DATABASE_URL"] = _replace_sqlalchemy_password(cur_url, same_pass)
+            elif cur_url:
+                preserve["SQLALCHEMY_DATABASE_URL"] = cur_url
+            elif bak_url:
+                preserve["SQLALCHEMY_DATABASE_URL"] = bak_url
 
         await _merge_env_after_restore(
             job, backup_env, install_env_snapshot,
@@ -1466,27 +1532,30 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         elif target_db and soft_db_family(restore_engine, target_db):
             final_db = target_db
 
-        # After convert: force DB roles to match the password we keep in .env (install)
-        # Convert may have temporarily synced a different resolved password.
+        # After convert / same-engine: credentials must match what we wrote into .env
         final_engine_pre = final_db or target_db or restore_engine or backup_db
         live_admin = (copy_report or {}).get("live_admin") or {}
-        verify_user = (
-            cur_user
-            or live_admin.get("user")
-            or "pasarguard"
-        )
-        verify_pass = cur_db_pass or cur_pg_pass or live_admin.get("password") or ""
-        verify_db = cur_name or live_admin.get("database") or "pasarguard"
+        if needs_convert:
+            verify_user = cur_user or live_admin.get("user") or "pasarguard"
+            verify_pass = cur_db_pass or cur_pg_pass or live_admin.get("password") or ""
+            verify_db = cur_name or live_admin.get("database") or "pasarguard"
+        else:
+            verify_user = bak_user or cur_user or live_admin.get("user") or "pasarguard"
+            verify_pass = (
+                bak_db_pass or bak_pg_pass
+                or cur_db_pass or cur_pg_pass
+                or live_admin.get("password") or ""
+            )
+            verify_db = bak_name or cur_name or live_admin.get("database") or "pasarguard"
         if (
             final_engine_pre in ("postgresql", "timescaledb")
             and verify_pass
-            and (needs_convert or soft_db_family(restore_engine, target_db))
         ):
             svc = await _detect_db_container(job, final_engine_pre)
             if svc:
                 job.log(
-                    f"Aligning DB roles to install password (user={verify_user}) "
-                    "so .env and Timescale/Postgres match"
+                    f"Aligning DB roles to {'install' if needs_convert else 'backup'} password "
+                    f"(user={verify_user}) so .env and Timescale/Postgres match"
                 )
                 await _sync_pg_role_passwords(
                     job, svc, verify_pass, verify_user, verify_db,

@@ -1706,3 +1706,53 @@ button.db-card {
 .upload-status.is-warn { color: var(--warning); }
 .warn-line { color: var(--warning); font-size: 0.88rem; margin: 6px 0; }
 .logo { border-radius: var(--radius); }
+
+/* Manual install guide */
+.section-title {
+  margin: 22px 0 8px;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+.install-cmd-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 12px 0 8px;
+}
+.install-cmd-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+}
+.install-cmd-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.install-cmd-card .install-cmd-box {
+  flex: 1;
+  min-width: 0;
+}
+.install-cmd-card code {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+.guide-steps {
+  margin: 8px 0 4px 1.2rem;
+  color: var(--text-muted);
+  font-size: 0.92rem;
+  line-height: 1.7;
+}
+.guide-steps li { margin-bottom: 4px; }
+#pgDocsBox {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+}
+#pgDocsBox a { color: var(--primary); }

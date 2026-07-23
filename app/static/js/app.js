@@ -38,7 +38,8 @@ function panelLatinName(panel) {
 }
 
 function getPgInstallCmd() {
-  return 'sudo bash -c "$(curl -fsSL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh)" @ install';
+  // Deprecated: Install tab shows per-DB official commands. Kept for any leftover callers.
+  return 'See Install tab — pick your database command';
 }
 
 function dbNeedsPassword(db) {
@@ -488,6 +489,7 @@ async function loadInfo() {
       if (verEl) verEl.textContent = `v${data.version}`;
     }
     if (data.pasarguard_install_dbs) state.pasarguardInstallDbs = data.pasarguard_install_dbs;
+    if (data.pasarguard_install_guide) state.installGuide = data.pasarguard_install_guide;
     if (data.system) applySystemCheck(data.system);
     if (data.panel_access) state.panelAccess = data.panel_access;
   } catch (e) {
@@ -898,11 +900,14 @@ async function renderTargetDbs() {
 
   const needsPg = needsPasarguardInstall();
   const installSection = document.getElementById('installPgSection');
-  // PG is installed via welcome→pg before migrate; keep section only as emergency fallback
   installSection?.classList.toggle('hidden', !needsPg);
   if (needsPg) {
-    const cmdEl = document.getElementById('installPgCmd');
-    if (cmdEl) cmdEl.textContent = getPgInstallCmd();
+    const title = document.getElementById('installPgMissingTitle');
+    const desc = document.getElementById('installPgMissingDesc');
+    const goBtn = document.getElementById('btnGoInstallTab');
+    if (title) title.textContent = t('step3.pgMissing');
+    if (desc) desc.textContent = t('step3.pgMissingDesc');
+    if (goBtn) goBtn.textContent = t('needPg.goInstall');
   }
 
   updateTargetCredentialsVisibility();

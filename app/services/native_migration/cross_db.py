@@ -33,6 +33,9 @@ def migration_strategy(source_db: str, target_db: str) -> str:
         return "same_db"
     if source_db not in SUPPORTED_ENGINES or target_db not in SUPPORTED_ENGINES:
         return "unsupported"
+    # Never convert non-SQLite → SQLite (destination must already be a server DB)
+    if target_db == "sqlite" and source_db != "sqlite":
+        return "unsupported"
     return "two_phase"
 
 

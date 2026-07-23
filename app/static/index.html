@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#0f1218">
   <title>MrClock-MG</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=2.6.3">
+  <link rel="stylesheet" href="/static/css/style.css?v=2.7.0">
   <!-- Fonts: non-blocking so mobile/Iran networks don't stall first paint -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -33,7 +33,7 @@
           <button class="lang-btn" data-lang="ru" onclick="setLang('ru')">RU</button>
         </div>
         <span class="badge" id="serverIp">?</span>
-        <span class="version" id="appVersion">v2.6.3</span>
+        <span class="version" id="appVersion">v2.7.0</span>
       </div>
     </header>
 
@@ -79,7 +79,7 @@
         </div>
       </section>
 
-      <!-- PasarGuard setup -->
+      <!-- PasarGuard install guide (manual — wizard never runs the installer) -->
       <section class="panel" id="panel-pg">
         <h2 id="pgH2"></h2>
         <p class="desc" id="pgDesc"></p>
@@ -89,86 +89,48 @@
           <p id="pgInstalledDetail"></p>
           <div class="actions">
             <button class="btn btn-ghost" onclick="showPhase('welcome')" id="btnPgInstalledBack"></button>
-            <button class="btn btn-ghost hidden" id="btnPgReinstall" onclick="showPgReinstallForm()"></button>
             <button class="btn btn-primary" id="btnPgContinue" onclick="continueAfterPgReady()"></button>
           </div>
         </div>
 
-        <div id="pgInstallForm" class="hidden">
-          <div class="info-box" id="pgDbMatchTip"></div>
+        <div id="pgInstallGuide">
+          <div class="info-box" id="pgGuideIntro"></div>
+
+          <h3 class="section-title" id="pgCmdsTitle"></h3>
+          <p class="desc-sm" id="pgCmdsHint"></p>
+          <div id="pgInstallCmdList" class="install-cmd-list"></div>
+
+          <h3 class="section-title" id="pgTutorialTitle"></h3>
+          <ol class="guide-steps" id="pgTutorialSteps"></ol>
+
+          <div class="form-group" style="margin-top:16px">
+            <label id="lblOwnerKey"></label>
+            <div class="install-cmd-row">
+              <div class="install-cmd-box"><code id="pgOwnerKeyCmd">pasarguard cli generate-temp-key</code></div>
+              <button type="button" class="btn btn-copy" id="btnCopyOwnerKey" onclick="copyText('pgOwnerKeyCmd')"></button>
+            </div>
+            <p class="desc-sm" id="pgOwnerKeyHint"></p>
+          </div>
 
           <div class="form-group">
-            <label id="lblPgDb"></label>
-            <div class="db-grid" id="pgDbGrid"></div>
-          </div>
-
-          <div class="form-group">
-            <label id="lblPgSsl"></label>
-            <p class="desc-sm" id="pgSslMustChoose"></p>
-            <div class="choice-grid" id="pgSslGrid">
-              <button type="button" class="choice-card" data-ssl="yes" id="btnPgSslYes">
-                <strong id="pgSslYes"></strong>
-                <span id="pgSslYesDesc"></span>
-              </button>
-              <button type="button" class="choice-card" data-ssl="no" id="btnPgSslNo">
-                <strong id="pgSslNo"></strong>
-                <span id="pgSslNoDesc"></span>
-              </button>
+            <label id="lblSshTunnel"></label>
+            <div class="install-cmd-row">
+              <div class="install-cmd-box"><code id="pgSshTunnelCmd">ssh -L 8000:localhost:8000 user@serverip</code></div>
+              <button type="button" class="btn btn-copy" id="btnCopySshTunnel" onclick="copyText('pgSshTunnelCmd')"></button>
             </div>
+            <p class="desc-sm" id="pgSshTunnelHint"></p>
           </div>
 
-          <div id="pgAfterSsl" class="hidden">
-            <div id="pgSslYesFields" class="hidden">
-              <div class="form-group">
-                <label id="lblPgDomain"></label>
-                <input type="text" id="pgDomain" placeholder="panel.example.com" autocomplete="off">
-                <p class="desc-sm" id="pgDomainHint"></p>
-              </div>
-              <div class="form-group">
-                <label id="lblPgIp"></label>
-                <input type="text" id="pgIp" placeholder="1.2.3.5" autocomplete="off">
-                <p class="desc-sm" id="pgIpHint"></p>
-              </div>
-              <div class="form-group">
-                <label id="lblPgSslPort"></label>
-                <input type="number" id="pgSslHttpPort" value="80" min="1" max="65535" autocomplete="off">
-                <p class="desc-sm" id="pgSslPortHint"></p>
-              </div>
-            </div>
-
-            <div id="pgSslNoHint" class="info-box hidden"></div>
+          <div class="info-box" id="pgDocsBox">
+            <a href="https://docs.pasarguard.org/en/panel/installation/" target="_blank" rel="noopener" id="pgDocsLink"></a>
+            <span class="footer-sep" aria-hidden="true">&middot;</span>
+            <a href="https://github.com/PasarGuard/panel" target="_blank" rel="noopener" id="pgGithubLink"></a>
           </div>
 
-          <div id="pgInstallBlock" class="block-msg hidden"></div>
           <div class="actions">
             <button class="btn btn-ghost" onclick="showPhase('welcome')" id="btnPgBack"></button>
-            <button class="btn btn-primary" id="btnPgInstall" onclick="startPgInstall()"></button>
-          </div>
-        </div>
-
-        <div id="pgInstallProgress" class="hidden">
-          <div class="progress-wrap">
-            <div class="progress-bar"><div class="progress-fill" id="pgProgressFill" style="width:0%"></div></div>
-            <span class="progress-text" id="pgProgressText">0%</span>
-          </div>
-          <p class="status-msg" id="pgStatusMsg"></p>
-          <div class="log-terminal" id="pgLogTerminal"></div>
-          <div class="actions">
-            <button type="button" class="btn btn-ghost" id="btnPgProgressBack" onclick="cancelPgInstall()"></button>
-          </div>
-        </div>
-
-        <div id="pgInstallDone" class="hidden">
-          <div class="result-card success">
-            <div class="result-icon" aria-hidden="true">
-              <svg class="icon icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5L16 9"/></svg>
-            </div>
-            <h2 id="pgDoneTitle"></h2>
-            <div id="pgDoneNotes" class="guide-sections"></div>
-            <div class="actions" style="justify-content:center;margin-top:16px">
-              <button type="button" class="btn btn-ghost" id="btnPgDoneBack" onclick="showPhase('welcome')"></button>
-              <button class="btn btn-primary" onclick="continueAfterPgReady()" id="btnPgDoneNext"></button>
-            </div>
+            <button class="btn btn-secondary" id="btnPgRecheck" onclick="recheckAfterManualInstall()"></button>
+            <button class="btn btn-primary hidden" id="btnPgContinueFromGuide" onclick="continueAfterPgReady()"></button>
           </div>
         </div>
       </section>
@@ -411,10 +373,9 @@
         </div>
 
         <div id="installPgSection" class="warning-card hidden">
-          <h4></h4>
-          <p></p>
-          <p class="desc-sm" id="installPgHint"></p>
-          <div class="install-cmd-box"><code id="installPgCmd"></code></div>
+          <h4 id="installPgMissingTitle"></h4>
+          <p id="installPgMissingDesc"></p>
+          <button class="btn btn-primary" id="btnGoInstallTab" onclick="goToInstallGuide()"></button>
           <button class="btn btn-secondary" id="btnRecheckPg" onclick="recheckPasarguard()"></button>
         </div>
 
@@ -515,10 +476,22 @@
     </div>
   </div>
 
-  <script src="/static/js/icons.js?v=2.6.3"></script>
-  <script src="/static/js/i18n.js?v=2.6.3"></script>
-  <script src="/static/js/app.js?v=2.6.3"></script>
-  <script src="/static/js/wizard-flow.js?v=2.6.3"></script>
+  <!-- PasarGuard required modal -->
+  <div id="needPgModal" class="modal-overlay hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <h3 id="needPgModalTitle"></h3>
+      <p id="needPgModalDesc"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="btnNeedPgCancel" onclick="closeNeedPgModal()"></button>
+        <button type="button" class="btn btn-primary" id="btnNeedPgGoInstall" onclick="goToInstallGuide()"></button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/icons.js?v=2.7.0"></script>
+  <script src="/static/js/i18n.js?v=2.7.0"></script>
+  <script src="/static/js/app.js?v=2.7.0"></script>
+  <script src="/static/js/wizard-flow.js?v=2.7.0"></script>
 </body>
 </html>
 

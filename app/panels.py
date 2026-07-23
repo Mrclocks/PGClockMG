@@ -2,7 +2,98 @@
 
 from app.models import PanelInfo, PanelPrerequisites
 
-PASARGUARD_INSTALL_DBS = ["sqlite", "mysql", "mariadb", "postgresql", "timescaledb"]
+# Official install engines (links-only guide — wizard never runs the installer)
+PASARGUARD_INSTALL_DBS = ["timescaledb", "postgresql", "mysql", "mariadb", "sqlite"]
+
+SCRIPT_URL = "https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh"
+DOCS_INSTALL_URL = "https://docs.pasarguard.org/en/panel/installation/"
+DOCS_NODE_URL = "https://github.com/PasarGuard/node"
+PANEL_GITHUB_URL = "https://github.com/PasarGuard/panel"
+
+# Official one-liners from docs.pasarguard.org (run on the server as root)
+PASARGUARD_INSTALL_COMMANDS: dict[str, dict] = {
+    "timescaledb": {
+        "label": {"en": "TimescaleDB (Recommended)", "fa": "TimescaleDB (پیشنهادی)", "ru": "TimescaleDB (рекомендуется)"},
+        "desc": {
+            "en": "Best for production — time-series optimized PostgreSQL.",
+            "fa": "بهترین برای پروداکشن — PostgreSQL بهینه‌شده برای سری زمانی.",
+            "ru": "Лучший для продакшена — PostgreSQL для временных рядов.",
+        },
+        "cmd": (
+            f'curl -fsSL {SCRIPT_URL} -o /tmp/pg.sh \\\n'
+            f'  && sudo bash /tmp/pg.sh install --database timescaledb'
+        ),
+    },
+    "postgresql": {
+        "label": {"en": "PostgreSQL", "fa": "PostgreSQL", "ru": "PostgreSQL"},
+        "desc": {
+            "en": "Standard PostgreSQL — advanced features and scalability.",
+            "fa": "PostgreSQL استاندارد — امکانات پیشرفته و مقیاس‌پذیری.",
+            "ru": "Обычный PostgreSQL — расширенные возможности.",
+        },
+        "cmd": (
+            f'curl -fsSL {SCRIPT_URL} -o /tmp/pg.sh \\\n'
+            f'  && sudo bash /tmp/pg.sh install --database postgresql'
+        ),
+    },
+    "mysql": {
+        "label": {"en": "MySQL", "fa": "MySQL", "ru": "MySQL"},
+        "desc": {
+            "en": "Classic MySQL — common for production panels.",
+            "fa": "MySQL کلاسیک — رایج برای پنل‌های پروداکشن.",
+            "ru": "Классический MySQL — часто для продакшена.",
+        },
+        "cmd": (
+            f'curl -fsSL {SCRIPT_URL} -o /tmp/pg.sh \\\n'
+            f'  && sudo bash /tmp/pg.sh install --database mysql'
+        ),
+    },
+    "mariadb": {
+        "label": {"en": "MariaDB", "fa": "MariaDB", "ru": "MariaDB"},
+        "desc": {
+            "en": "Open-source MySQL-compatible engine.",
+            "fa": "موتور متن‌باز سازگار با MySQL.",
+            "ru": "Совместимый с MySQL open-source движок.",
+        },
+        "cmd": (
+            f'curl -fsSL {SCRIPT_URL} -o /tmp/pg.sh \\\n'
+            f'  && sudo bash /tmp/pg.sh install --database mariadb'
+        ),
+    },
+    "sqlite": {
+        "label": {"en": "SQLite", "fa": "SQLite", "ru": "SQLite"},
+        "desc": {
+            "en": "Simple file DB — small deployments and testing only.",
+            "fa": "دیتابیس فایل ساده — فقط تست و استقرار کوچک.",
+            "ru": "Файловая БД — только тесты и малые установки.",
+        },
+        "cmd": (
+            f'curl -fsSL {SCRIPT_URL} -o /tmp/pg.sh \\\n'
+            f'  && sudo bash /tmp/pg.sh install'
+        ),
+    },
+}
+
+OWNER_TEMP_KEY_CMD = "pasarguard cli generate-temp-key"
+SSH_TUNNEL_CMD = "ssh -L 8000:localhost:8000 user@serverip"
+
+
+def can_convert_databases(source_db: str | None, target_db: str | None) -> bool:
+    """sqlite → any; never non-sqlite → sqlite; other engines convert to each other."""
+    if not source_db or not target_db:
+        return False
+    if source_db == target_db:
+        return True
+    soft = {source_db, target_db}
+    if soft <= {"mysql", "mariadb"} or soft <= {"postgresql", "timescaledb"}:
+        return True
+    if target_db == "sqlite" and source_db != "sqlite":
+        return False
+    engines = {"sqlite", "mysql", "mariadb", "postgresql", "timescaledb"}
+    if source_db not in engines or target_db not in engines:
+        return False
+    return True
+
 
 PANELS: dict[str, PanelInfo] = {
     "marzban": PanelInfo(
@@ -227,11 +318,11 @@ DATABASE_TYPES = {
 }
 
 TARGET_DB_RECOMMENDATIONS = {
-    "sqlite": ["sqlite", "timescaledb"],
-    "mysql": ["mysql", "timescaledb", "postgresql"],
-    "mariadb": ["mariadb", "mysql", "timescaledb"],
-    "postgresql": ["postgresql", "timescaledb"],
-    "timescaledb": ["timescaledb"],
+    "sqlite": ["timescaledb", "postgresql", "mysql", "mariadb", "sqlite"],
+    "mysql": ["mysql", "mariadb", "timescaledb", "postgresql"],
+    "mariadb": ["mariadb", "mysql", "timescaledb", "postgresql"],
+    "postgresql": ["postgresql", "timescaledb", "mysql", "mariadb"],
+    "timescaledb": ["timescaledb", "postgresql", "mysql", "mariadb"],
 }
 
 SUBSCRIPTION_LABELS = {

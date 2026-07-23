@@ -7,8 +7,12 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSock
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
 
-from app.models import MigrationRequest, PasarguardInstallRequest, PasarguardRestoreRequest
-from app.panels import PANELS, DATABASE_TYPES, SUBSCRIPTION_LABELS, PASARGUARD_INSTALL_DBS
+from app.models import MigrationRequest, PasarguardRestoreRequest
+from app.panels import (
+    PANELS, DATABASE_TYPES, SUBSCRIPTION_LABELS, PASARGUARD_INSTALL_DBS,
+    PASARGUARD_INSTALL_COMMANDS, DOCS_INSTALL_URL, DOCS_NODE_URL, PANEL_GITHUB_URL,
+    OWNER_TEMP_KEY_CMD, SSH_TUNNEL_CMD, can_convert_databases,
+)
 from app.services.prerequisites import check_prerequisites, get_recommended_target_dbs, get_system_status
 from app.services.orchestrator import start_migration, get_job
 from app.services.validation import validate_migration
@@ -18,14 +22,13 @@ from app.services.upload_bundle import (
 )
 from app.services.upload_requirements import get_upload_requirements
 from app.services.pg_access import get_panel_access_info
-from app.services.pg_installer import start_pasarguard_install, get_install_job, validate_install_request
 from app.services.pg_restore import (
     analyze_pasarguard_backup, start_pasarguard_restore, get_restore_job,
 )
 from app.services.self_uninstall import uninstall_preview, schedule_self_uninstall
 from app.config import WEB_PORT
 
-APP_VERSION = "2.6.3"
+APP_VERSION = "2.7.0"
 app = FastAPI(title="PG-Migrator", version=APP_VERSION)
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -52,9 +55,22 @@ async def api_info():
         "panels": [p.model_dump() for p in PANELS.values()],
         "database_types": DATABASE_TYPES,
         "pasarguard_install_dbs": PASARGUARD_INSTALL_DBS,
+        "pasarguard_install_guide": {
+            "docs_url": DOCS_INSTALL_URL,
+            "github_url": PANEL_GITHUB_URL,
+            "node_url": DOCS_NODE_URL,
+            "owner_temp_key_cmd": OWNER_TEMP_KEY_CMD,
+            "ssh_tunnel_cmd": SSH_TUNNEL_CMD,
+            "commands": PASARGUARD_INSTALL_COMMANDS,
+        },
         "subscription_labels": SUBSCRIPTION_LABELS,
         "system": get_system_status(),
         "panel_access": get_panel_access_info(),
+        "convert_rules": {
+            "sqlite_to_any": True,
+            "non_sqlite_to_sqlite": False,
+            "cross_engine": True,
+        },
     }
 
 
@@ -63,31 +79,18 @@ async def api_pasarguard_status():
     return get_panel_access_info()
 
 
-@app.post("/api/pasarguard/install")
-async def api_pasarguard_install(req: PasarguardInstallRequest):
-    params = req.model_dump()
-    errors = validate_install_request(params)
-    if errors:
-        raise HTTPException(400, {"errors": errors})
-    try:
-        job = await start_pasarguard_install(params)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    return {"job_id": job.job_id, "status": job.status}
-
-
-@app.get("/api/pasarguard/install/{job_id}")
-async def api_pasarguard_install_status(job_id: str):
-    job = get_install_job(job_id)
-    if not job:
-        raise HTTPException(404, "Install job not found")
+@app.get("/api/convert-check")
+async def api_convert_check(source_db: str, target_db: str):
+    ok = can_convert_databases(source_db, target_db)
     return {
-        "job_id": job.job_id,
-        "status": job.status,
-        "progress": job.progress,
-        "message": job.message,
-        "logs": job.logs[-200:],
-        "result": job.result,
+        "ok": ok,
+        "source_db": source_db,
+        "target_db": target_db,
+        "reason": None if ok else (
+            "Cannot convert non-SQLite databases to SQLite. Install PasarGuard with the target engine, then restore."
+            if target_db == "sqlite" and source_db != "sqlite"
+            else "Unsupported conversion"
+        ),
     }
 
 
@@ -286,7 +289,6 @@ async def ws_migrate(websocket: WebSocket, job_id: str):
         await websocket.close(code=4004)
         return
 
-    # Send existing logs
     for log in job.logs:
         await websocket.send_json({"type": "log", "message": log})
 
@@ -332,5 +334,3 @@ async def api_self_uninstall_preview():
 async def api_self_uninstall():
     """Remove MrClock-MG service and /opt/pg-migrator after a short delay."""
     return await schedule_self_uninstall(delay_sec=2.0)
-
-

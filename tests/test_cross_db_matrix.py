@@ -27,9 +27,11 @@ def test_all_migration_strategies():
             strategy = migration_strategy(src, tgt)
             if src == tgt:
                 assert strategy == "same_db", f"{src}→{tgt}"
+            elif tgt == "sqlite" and src != "sqlite":
+                assert strategy == "unsupported", f"{src}→{tgt} got {strategy}"
             else:
                 assert strategy == "two_phase", f"{src}→{tgt} got {strategy}"
-    print("OK: all 25 engine pairs use same_db or two_phase")
+    print("OK: all engine pairs use same_db / two_phase / unsupported(*→sqlite)")
 
 
 def test_engine_families():
