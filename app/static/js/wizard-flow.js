@@ -273,8 +273,9 @@ async function continueAfterPgReady() {
     return;
   }
   const goal = state.wizardGoal || 'install';
+  // Guide tab never "installs" — if user came from guide, stay/return home
   if (goal === 'install') {
-    await choosePath('finish');
+    showPhase('pg');
     return;
   }
   if (goal === 'change_db') {
@@ -419,9 +420,9 @@ function applyPhaseI18n() {
   set('pgDesc', 'pg.desc');
   set('pgInstalledTitle', 'pg.installedTitle');
   set('pgInstalledDetail', 'pg.installedDetail');
-  set('btnPgContinue', 'pg.continue');
   set('btnPgBack', 'pg.back');
   set('btnPgInstalledBack', 'pg.back');
+  set('btnPgOpenPanel', 'pg.openPanel');
   set('pgGuideIntro', 'pg.guideIntro');
   set('pgCmdsTitle', 'pg.cmdsTitle');
   set('pgCmdsHint', 'pg.cmdsHint');
@@ -433,7 +434,6 @@ function applyPhaseI18n() {
   set('pgDocsLink', 'pg.docsLink');
   set('pgGithubLink', 'pg.githubLink');
   set('btnPgRecheck', 'pg.recheck');
-  set('btnPgContinueFromGuide', 'pg.continue');
   set('btnCopyOwnerKey', 'copy');
   set('btnCopySshTunnel', 'copy');
 
@@ -565,29 +565,68 @@ function renderTutorialSteps() {
   ol.innerHTML = items.map((s) => `<li>${escapeHtml(s)}</li>`).join('');
 }
 
+function renderInstalledSpecs() {
+  const el = document.getElementById('pgInstalledSpecs');
+  if (!el) return;
+  const access = state.panelAccess || {};
+  const sys = state.systemCheck || {};
+  const db = sys.pasarguard_db || access.db_type || '—';
+  const port = access.port || sys.pasarguard_env?.panel_port || '8000';
+  const ssl = access.ssl === true ? t('pg.specSslYes') : (access.ssl === false ? t('pg.specSslNo') : '—');
+  const url = access.login_url || access.dashboard_url || '';
+  const rows = [
+    [t('pg.specPath'), '/opt/pasarguard'],
+    [t('pg.specDb'), db],
+    [t('pg.specPort'), String(port)],
+    [t('pg.specSsl'), ssl],
+    [t('pg.specEnv'), '/opt/pasarguard/.env'],
+    [t('pg.specUrl'), url || '—'],
+  ];
+  el.innerHTML = rows.map(([label, value]) => {
+    const isCode = String(value).startsWith('/') || String(value).startsWith('http');
+    const valHtml = isCode
+      ? `<code class="specs-value">${escapeHtml(value)}</code>`
+      : `<span class="specs-value">${escapeHtml(value)}</span>`;
+    return `<div class="specs-item"><span class="specs-label">${escapeHtml(label)}</span>${valHtml}</div>`;
+  }).join('');
+}
+
+function openInstalledPanel() {
+  const url = resolveLoginUrl(state.panelAccess) || state.panelAccess?.login_url;
+  if (url) window.open(url, '_blank', 'noopener');
+}
+window.openInstalledPanel = openInstalledPanel;
+
 async function renderPgSetup() {
   await loadSystemCheck();
   await refreshPanelAccess();
   const installed = !!(state.systemCheck?.pasarguard || state.panelAccess?.installed);
   const installedCard = document.getElementById('pgInstalledCard');
   const guide = document.getElementById('pgInstallGuide');
-  const continueFromGuide = document.getElementById('btnPgContinueFromGuide');
 
-  guide?.classList.remove('hidden');
-  renderInstallCmdList();
-  renderTutorialSteps();
-
+  // If installed: ONLY specs. If not: ONLY manual guide. Never auto-install.
   if (installed) {
+    guide?.classList.add('hidden');
     installedCard?.classList.remove('hidden');
     const detail = document.getElementById('pgInstalledDetail');
-    if (detail) {
-      const db = state.systemCheck?.pasarguard_db || state.panelAccess?.db_type || '';
-      detail.textContent = `${t('pg.installedDetail')}${db ? ` (${db})` : ''}`;
-    }
-    continueFromGuide?.classList.remove('hidden');
+    if (detail) detail.textContent = t('pg.installedDetail');
+    const openBtn = document.getElementById('btnPgOpenPanel');
+    if (openBtn) openBtn.textContent = t('pg.openPanel');
+    renderInstalledSpecs();
+    // Title/desc for status mode
+    const h2 = document.getElementById('pgH2');
+    const desc = document.getElementById('pgDesc');
+    if (h2) h2.textContent = t('pg.h2Installed');
+    if (desc) desc.textContent = t('pg.descInstalled');
   } else {
     installedCard?.classList.add('hidden');
-    continueFromGuide?.classList.add('hidden');
+    guide?.classList.remove('hidden');
+    renderInstallCmdList();
+    renderTutorialSteps();
+    const h2 = document.getElementById('pgH2');
+    const desc = document.getElementById('pgDesc');
+    if (h2) h2.textContent = t('pg.h2');
+    if (desc) desc.textContent = t('pg.desc');
   }
 }
 
@@ -599,6 +638,7 @@ async function recheckAfterManualInstall() {
     await refreshPanelAccess();
     await renderPgSetup();
     const installed = !!(state.systemCheck?.pasarguard || state.panelAccess?.installed);
+    // After user installs manually, resume pending restore/migrate
     if (installed && state.wizardGoal && state.wizardGoal !== 'install') {
       await continueAfterPgReady();
     }

@@ -174,11 +174,6 @@ async def _phase1_land_intermediate(
     # MySQL/MariaDB/PG source: .sql dump → staging, or live connection
     if path.suffix.lower() == ".sql":
         conn = get_source_connection(migrator.params)
-        if not conn.get("password"):
-            tgt = get_target_connection(migrator.params)
-            conn["password"] = tgt.get("password")
-            conn["user"] = conn.get("user") or tgt.get("user")
-            conn["database"] = conn.get("database") or tgt.get("database")
         staging_conn = await import_sql_dump_to_live_db(
             migrator, source_path, source_db, conn,
         )

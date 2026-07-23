@@ -8,8 +8,6 @@ const state = {
   selectedPanel: null,
   sourceDb: null,
   targetDb: null,
-  sourcePassword: '',
-  targetPassword: '',
   uploadId: null,
   uploadInfo: null,
   uploadBundleId: null,
@@ -20,7 +18,6 @@ const state = {
   serverIp: '',
   detected: {},
   prereqData: null,
-  pasarguardInstallDbs: [],
   sourceEnvSummary: null,
   pasarguardEnvSummary: null,
   systemCheck: null,
@@ -37,10 +34,6 @@ function panelLatinName(panel) {
   return panel?.name?.en || panel?.id || '';
 }
 
-function getPgInstallCmd() {
-  // Deprecated: Install tab shows per-DB official commands. Kept for any leftover callers.
-  return 'See Install tab — pick your database command';
-}
 
 function dbNeedsPassword(db) {
   return ['mysql', 'mariadb', 'postgresql', 'timescaledb'].includes(db);
@@ -488,7 +481,6 @@ async function loadInfo() {
       const verEl = document.getElementById('appVersion');
       if (verEl) verEl.textContent = `v${data.version}`;
     }
-    if (data.pasarguard_install_dbs) state.pasarguardInstallDbs = data.pasarguard_install_dbs;
     if (data.pasarguard_install_guide) state.installGuide = data.pasarguard_install_guide;
     if (data.system) applySystemCheck(data.system);
     if (data.panel_access) state.panelAccess = data.panel_access;
@@ -896,7 +888,6 @@ async function renderTargetDbs() {
   }
 
   renderDetectedTargetDb();
-  updateCrossDbWarning();
 
   const needsPg = needsPasarguardInstall();
   const installSection = document.getElementById('installPgSection');
@@ -914,18 +905,7 @@ async function renderTargetDbs() {
   updateStepButtons();
 }
 
-function updateCrossDbWarning() {
-  // Change-DB is a separate welcome goal (restore), never offered inside migrate
-  const crossEl = document.getElementById('crossDbWarning');
-  if (crossEl) crossEl.classList.add('hidden');
-}
 
-function selectTargetDb(db) {
-  if (!db) return;
-  state.targetDb = db;
-  updateTargetCredentialsVisibility();
-  updateStepButtons();
-}
 
 async function recheckPasarguard() {
   const btn = document.getElementById('btnRecheckPg');

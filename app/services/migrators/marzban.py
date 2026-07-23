@@ -301,8 +301,8 @@ class MarzbanMigrator(BaseMigrator):
         if svc not in text:
             raise RuntimeError(
                 f"Database service `{svc}` is not in /opt/pasarguard/docker-compose.yml. "
-                f"Install/reinstall PasarGuard with --database {target_db} first "
-                "(see the Install tab), then retry migration."
+                f"Install PasarGuard yourself with --database {target_db} first "
+                "(see the Guide tab), then retry migration."
             )
 
         self.job.log(f"Starting {svc} container...")
@@ -370,6 +370,11 @@ class MarzbanMigrator(BaseMigrator):
             f'mysql -u {user} -p"{pwd}" -h {host} {db} < "{fixed}"',
         )
         await proc.wait()
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"Failed to import Marzban MySQL dump into PasarGuard "
+                f"(exit {proc.returncode}). Check DB credentials and container logs."
+            )
 
     async def _update_env_paths(self, source_db: str, target_db: str):
         env_path = PASARGUARD_DIR / ".env"

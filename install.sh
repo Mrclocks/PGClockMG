@@ -7,7 +7,7 @@
 #
 set -eo pipefail
 
-readonly SCRIPT_VERSION="2.7.0"
+readonly SCRIPT_VERSION="2.8.0"
 readonly INSTALL_DIR="/opt/pg-migrator"
 readonly SERVICE_NAME="pg-migrator"
 readonly WEB_PORT=7000
@@ -15,6 +15,7 @@ readonly TOOLS_DIR="${INSTALL_DIR}/tools"
 readonly DEFAULT_REPO="https://github.com/Mrclocks/PGClockMG.git"
 readonly DEFAULT_INSTALL_URL="https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh"
 readonly REEXEC_MARKER="/tmp/.pg-migrator-reexec"
+readonly DEFAULT_BRANCH="main"
 
 if [[ ! -t 0 ]] && [[ ! -f "$REEXEC_MARKER" ]]; then
   tmpfile="$(mktemp /tmp/pg-migrator-install-XXXXXX.sh)"
@@ -103,9 +104,11 @@ copy_app_files() {
   mkdir -p "$INSTALL_DIR" "$TOOLS_DIR" "${INSTALL_DIR}/uploads" "${INSTALL_DIR}/backups" "${INSTALL_DIR}/logs"
 
   local repo="${PG_MIGRATOR_REPO:-$DEFAULT_REPO}"
+  local branch="${PG_MIGRATOR_BRANCH:-$DEFAULT_BRANCH}"
   rm -rf /tmp/pg-migrator-src
-  git clone --depth 1 --branch main "$repo" /tmp/pg-migrator-src \
-    || fail "Could not clone ${repo}"
+  info "Cloning ${repo} (branch: ${branch})..."
+  git clone --depth 1 --branch "$branch" "$repo" /tmp/pg-migrator-src \
+    || fail "Could not clone ${repo} @ ${branch}"
 
   cp -r /tmp/pg-migrator-src/app "${INSTALL_DIR}/"
   cp -f /tmp/pg-migrator-src/requirements.txt "${INSTALL_DIR}/"
@@ -114,6 +117,19 @@ copy_app_files() {
 
   [[ -f "${INSTALL_DIR}/app/main.py" ]] || fail "Application files not found after sync."
   ok "Application synced to ${INSTALL_DIR}"
+}
+
+read_app_version() {
+  # Prefer version from the synced app (source of truth), not this installer banner alone.
+  local v=""
+  if [[ -f "${INSTALL_DIR}/app/main.py" ]]; then
+    v="$(grep -E '^APP_VERSION\s*=' "${INSTALL_DIR}/app/main.py" | head -1 | sed -E 's/.*["'"'"']([^"'"'"']+)["'"'"'].*/\1/')"
+  fi
+  if [[ -n "$v" ]]; then
+    printf '%s' "$v"
+  else
+    printf '%s' "$SCRIPT_VERSION"
+  fi
 }
 
 clone_migration_tools() {
@@ -173,8 +189,9 @@ open_firewall() {
 }
 
 print_success() {
-  local ip
+  local ip app_ver
   ip="$(hostname -I 2>/dev/null | awk '{print $1}' || echo "SERVER_IP")"
+  app_ver="$(read_app_version)"
   rm -f "$REEXEC_MARKER"
   log ""
   log "${C_CYAN}${C_BOLD}====================================================${C_RESET}"
@@ -182,16 +199,18 @@ print_success() {
   log "${C_CYAN}${C_BOLD}====================================================${C_RESET}"
   log ""
   log "  ${C_GREEN}Web panel:${C_RESET}  http://${ip}:${WEB_PORT}"
-  log "  ${C_DIM}Version:${C_RESET}    ${SCRIPT_VERSION}"
+  log "  ${C_DIM}Version:${C_RESET}    ${app_ver}"
   log "  ${C_DIM}Path:${C_RESET}       ${INSTALL_DIR}"
   log ""
   log "  ${C_YELLOW}Next:${C_RESET} Open the URL above and follow the wizard."
+  log "  ${C_DIM}Note:${C_RESET}     This wizard does NOT install PasarGuard — only migrate/restore."
   log ""
 }
 
 main() {
   log ""
-  log "${C_CYAN}${C_BOLD}  PG-Migrator Installer v${SCRIPT_VERSION}${C_RESET}"
+  log "${C_CYAN}${C_BOLD}  PG-Migrator Installer${C_RESET}"
+  log "  ${C_DIM}installer script ${SCRIPT_VERSION} — app version shown after sync${C_RESET}"
   log ""
   require_root
   check_ubuntu

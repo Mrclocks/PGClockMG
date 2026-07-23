@@ -113,6 +113,29 @@ def test_finalize_prefers_install_url_over_sqlite_merge():
     print("OK: finalize keeps install postgresql URL")
 
 
+def test_finalize_keeps_backup_mysql_root_over_install():
+    """Same-engine MySQL: merged backup MYSQL_ROOT must not be overwritten by install snapshot."""
+    # Text already has backup root (as after merge); install snapshot has a different root
+    merged = (
+        'SQLALCHEMY_DATABASE_URL="mysql+asyncmy://pasarguard:bakpass@mysql:3306/pasarguard"\n'
+        'DB_USER="pasarguard"\n'
+        'DB_PASSWORD="bakpass"\n'
+        'DB_NAME="pasarguard"\n'
+        'MYSQL_ROOT_PASSWORD="bakroot"\n'
+    )
+    install = (
+        'SQLALCHEMY_DATABASE_URL="mysql+asyncmy://pasarguard:installpass@mysql:3306/pasarguard"\n'
+        'DB_USER="pasarguard"\n'
+        'DB_PASSWORD="installpass"\n'
+        'MYSQL_ROOT_PASSWORD="installroot"\n'
+    )
+    out = finalize_pasarguard_env_after_restore(merged, "mysql", "bakpass", install)
+    from app.services.env_migration import read_env_var
+    assert read_env_var(out, "MYSQL_ROOT_PASSWORD") == "bakroot"
+    assert read_env_var(out, "DB_PASSWORD") == "bakpass"
+    print("OK: finalize keeps backup MYSQL_ROOT_PASSWORD")
+
+
 def test_sanitize_ssl_keeps_valid_files():
     with tempfile.TemporaryDirectory() as td:
         base = Path(td)
@@ -217,6 +240,7 @@ if __name__ == "__main__":
     test_detect_db_type_sqlalchemy_beats_pgadmin()
     test_finalize_sqlite_to_timescaledb_url()
     test_finalize_prefers_install_url_over_sqlite_merge()
+    test_finalize_keeps_backup_mysql_root_over_install()
     test_sanitize_ssl_keeps_valid_files()
     test_resolve_container_cert_path()
     test_strict_complete_hosts_fails_hard()
