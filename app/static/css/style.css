@@ -893,6 +893,16 @@ button.db-card {
 .btn-secondary:hover { border-color: var(--border-hover); }
 .btn-ghost { background: transparent; color: var(--text-muted); border: 1px solid var(--border); }
 .btn-ghost:hover { color: var(--text); border-color: var(--border-hover); background: var(--bg-elevated); }
+.btn-back {
+  background: transparent;
+  color: var(--error);
+  border: 1px solid hsla(0, 72%, 51%, 0.5);
+}
+.btn-back:hover {
+  color: #fff;
+  background: hsla(0, 72%, 51%, 0.85);
+  border-color: var(--error);
+}
 .btn-lg { padding: 14px 28px; font-size: 1rem; min-height: 48px; }
 
 /* Progress */
@@ -957,7 +967,18 @@ button.db-card {
 
 .result-icon { font-size: 4rem; margin-bottom: 16px; }
 .result-card h2 { margin-bottom: 12px; }
-.result-card p { color: var(--text-muted); margin-bottom: 24px; }
+.result-card p { color: var(--text-muted); margin-bottom: 20px; }
+.result-card > .btn,
+.result-card > a.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 4px 0 28px;
+}
+.result-card .guide-sections {
+  margin: 0 0 8px;
+  text-align: start;
+}
 
 .result-card.success {
   background: var(--bg-card);
@@ -1209,25 +1230,33 @@ button.db-card {
   flex-shrink: 0;
   padding: 8px 14px;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--bg-elevated);
-  color: var(--text-muted);
+  border: 1px solid hsla(210, 90%, 52%, 0.45);
+  background: hsla(210, 90%, 52%, 0.16);
+  color: hsl(210 90% 72%);
   font-family: var(--font);
   font-size: 0.78rem;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
   white-space: nowrap;
 }
 
 .btn-copy:hover {
+  background: hsla(210, 90%, 52%, 0.28);
   border-color: var(--primary);
-  color: var(--primary);
+  color: #fff;
 }
 
 .btn-copy.copied {
-  border-color: var(--success);
-  color: var(--success);
+  border-color: hsla(152, 60%, 40%, 0.55);
+  background: hsla(152, 60%, 40%, 0.18);
+  color: hsl(152 55% 62%);
+}
+
+.btn-copy.copy-failed {
+  border-color: hsla(0, 72%, 51%, 0.55);
+  background: hsla(0, 72%, 51%, 0.14);
+  color: hsl(0 80% 70%);
 }
 
 .pwd-candidates {
