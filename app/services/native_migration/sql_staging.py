@@ -131,29 +131,56 @@ async def _import_via_compose_service(
 async def _import_via_ephemeral_mysql(
     migrator, dump_path: Path, conn: dict, staging_db: str, container: str,
 ) -> dict:
-    pwd = conn.get("password") or "pgmigrator"
-    user = conn.get("user") or "root"
-    port = "33060"
+    pwd = "pgmigrator"
+    user = "root"
+    port = _pick_free_host_port(33060)
 
+    await migrator._run_cmd(["docker", "rm", "-f", container], timeout=30)
     await migrator._run_cmd([
-        "docker", "run", "-d", "--rm", "--name", container,
+        "docker", "run", "-d", "--name", container,
         "-e", f"MYSQL_ROOT_PASSWORD={pwd}",
-        "-p", f"{port}:3306",
+        "-p", f"127.0.0.1:{port}:3306",
         "mysql:8",
-    ], timeout=120)
-    await asyncio.sleep(15)
+    ], timeout=180)
+
+    # Wait until mysql accepts connections (init can take a while)
+    ready = False
+    last = ""
+    for i in range(60):
+        if not await _container_running(container):
+            raise RuntimeError(
+                f"Ephemeral MySQL exited early:\n{(await _container_logs_tail(container))[-800:]}"
+            )
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "exec", container,
+            "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", f"-p{pwd}", "--silent",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        out_b, _ = await proc.communicate()
+        last = (out_b or b"").decode("utf-8", errors="replace")
+        if proc.returncode == 0:
+            ready = True
+            break
+        await asyncio.sleep(2)
+    if not ready:
+        await migrator._run_cmd(["docker", "rm", "-f", container], timeout=30)
+        raise RuntimeError(f"Ephemeral MySQL did not become ready: {last[-300:]}")
 
     init_cmd = (
-        f'docker exec -i {container} mysql -u root -p"{pwd}" -e '
+        f'docker exec -i {container} mysql -h127.0.0.1 -u root -p"{pwd}" -e '
         f'"CREATE DATABASE `{staging_db}`;"'
     )
     proc = await asyncio.create_subprocess_shell(init_cmd)
     await proc.wait()
+    if proc.returncode != 0:
+        await migrator._run_cmd(["docker", "rm", "-f", container], timeout=30)
+        raise RuntimeError(f"Failed to create ephemeral MySQL database {staging_db}")
 
     with open(dump_path, "rb") as fh:
         proc = await asyncio.create_subprocess_exec(
             "docker", "exec", "-i", container,
-            "mysql", "-u", "root", f"-p{pwd}", staging_db,
+            "mysql", "-h127.0.0.1", "-u", "root", f"-p{pwd}", staging_db,
             stdin=fh,
         )
         await proc.wait()
@@ -165,10 +192,27 @@ async def _import_via_ephemeral_mysql(
         "host": "127.0.0.1",
         "port": port,
         "database": staging_db,
-        "user": "root",
+        "user": user,
         "password": pwd,
         "_ephemeral_container": container,
     }
+
+
+_PG_TRANSIENT = (
+    "shutting down",
+    "starting up",
+    "connection refused",
+    "could not connect",
+    "server closed the connection",
+    "the database system is",
+    "connection reset",
+    "too many connections",
+)
+
+
+def _is_transient_pg_error(text: str) -> bool:
+    low = (text or "").lower()
+    return any(t in low for t in _PG_TRANSIENT)
 
 
 async def _container_running(name: str) -> bool:
@@ -179,6 +223,16 @@ async def _container_running(name: str) -> bool:
     )
     out_b, _ = await proc.communicate()
     return (out_b or b"").decode().strip().lower() == "true"
+
+
+async def _container_logs_tail(name: str, n: int = 60) -> str:
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "logs", "--tail", str(n), name,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    out_b, _ = await proc.communicate()
+    return (out_b or b"").decode("utf-8", errors="replace")
 
 
 def _pick_free_host_port(preferred: int = 54330) -> str:
@@ -196,42 +250,6 @@ def _pick_free_host_port(preferred: int = 54330) -> str:
     return str(preferred)
 
 
-async def _wait_ephemeral_pg_ready(container: str, pwd: str, attempts: int = 60) -> None:
-    """Wait until Postgres accepts connections (pg_isready + SELECT 1)."""
-    last = ""
-    for i in range(attempts):
-        if not await _container_running(container):
-            # Surface crash logs (OOM / image pull / bad arch)
-            proc = await asyncio.create_subprocess_exec(
-                "docker", "logs", "--tail", "40", container,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            logs_b, _ = await proc.communicate()
-            raise RuntimeError(
-                f"Ephemeral PostgreSQL container {container} exited early:\n"
-                f"{(logs_b or b'').decode('utf-8', errors='replace')[-800:]}"
-            )
-        proc = await asyncio.create_subprocess_exec(
-            "docker", "exec", "-e", f"PGPASSWORD={pwd}", container,
-            "pg_isready", "-U", "postgres",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        out_b, _ = await proc.communicate()
-        if proc.returncode == 0:
-            rc, out = await _psql_ephemeral(container, pwd, "postgres", "SELECT 1;")
-            if rc == 0:
-                return
-            last = out
-        else:
-            last = (out_b or b"").decode("utf-8", errors="replace")
-        await asyncio.sleep(2 if i < 10 else 3)
-    raise RuntimeError(
-        f"Ephemeral PostgreSQL container {container} did not become ready: {last[-400:]}"
-    )
-
-
 async def _psql_ephemeral(
     container: str,
     pwd: str,
@@ -242,25 +260,29 @@ async def _psql_ephemeral(
     on_error_stop: bool = True,
 ) -> tuple[int, str]:
     stop_flag = "ON_ERROR_STOP=1" if on_error_stop else "ON_ERROR_STOP=0"
+    # Force TCP inside the container so we don't race unix-socket reopen during init restart
+    base = [
+        "docker", "exec",
+        "-e", f"PGPASSWORD={pwd}",
+        container,
+        "psql", "-h", "127.0.0.1", "-U", "postgres", "-d", db, "-v", stop_flag,
+    ]
     if stdin_path is not None:
         with open(stdin_path, "rb") as fh:
             proc = await asyncio.create_subprocess_exec(
                 "docker", "exec", "-i",
                 "-e", f"PGPASSWORD={pwd}",
                 container,
-                "psql", "-U", "postgres", "-d", db, "-v", stop_flag,
+                "psql", "-h", "127.0.0.1", "-U", "postgres", "-d", db, "-v", stop_flag,
                 stdin=fh,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
             out_b, _ = await proc.communicate()
             return proc.returncode or 0, (out_b or b"").decode("utf-8", errors="replace")
-    # One statement per -c — CREATE/DROP DATABASE cannot run inside a multi-statement transaction
+    # One statement per -c — CREATE/DROP DATABASE cannot share a transaction
     proc = await asyncio.create_subprocess_exec(
-        "docker", "exec",
-        "-e", f"PGPASSWORD={pwd}",
-        container,
-        "psql", "-U", "postgres", "-d", db, "-v", stop_flag, "-c", sql or "SELECT 1",
+        *base, "-c", sql or "SELECT 1",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
@@ -268,22 +290,102 @@ async def _psql_ephemeral(
     return proc.returncode or 0, (out_b or b"").decode("utf-8", errors="replace")
 
 
+async def _wait_ephemeral_pg_ready(container: str, pwd: str, attempts: int = 90) -> None:
+    """
+    Wait until Postgres is *stably* ready.
+
+    Official Postgres/Timescale images start a temporary postmaster for initdb,
+    shut it down, then start the real server. A single pg_isready/SELECT 1 success
+    during that window causes CREATE DATABASE to fail with "shutting down".
+    Require several consecutive successes spanning multiple seconds.
+    """
+    last = ""
+    streak = 0
+    need_streak = 5  # ~10s of continuous readiness at 2s interval
+    for i in range(attempts):
+        if not await _container_running(container):
+            logs = await _container_logs_tail(container)
+            raise RuntimeError(
+                f"Ephemeral PostgreSQL container {container} exited early:\n{logs[-1000:]}"
+            )
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "exec", "-e", f"PGPASSWORD={pwd}", container,
+            "pg_isready", "-h", "127.0.0.1", "-U", "postgres",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        out_b, _ = await proc.communicate()
+        if proc.returncode == 0:
+            rc, out = await _psql_ephemeral(container, pwd, "postgres", "SELECT 1;")
+            if rc == 0 and not _is_transient_pg_error(out):
+                streak += 1
+                if streak >= need_streak:
+                    return
+            else:
+                streak = 0
+                last = out or (out_b or b"").decode("utf-8", errors="replace")
+        else:
+            streak = 0
+            last = (out_b or b"").decode("utf-8", errors="replace")
+        await asyncio.sleep(2)
+    logs = await _container_logs_tail(container)
+    raise RuntimeError(
+        f"Ephemeral PostgreSQL container {container} did not become ready: {last[-400:]}\n"
+        f"--- docker logs ---\n{logs[-800:]}"
+    )
+
+
+async def _psql_ephemeral_retry(
+    container: str,
+    pwd: str,
+    db: str,
+    sql: str,
+    *,
+    attempts: int = 20,
+    on_error_stop: bool = True,
+    allow_missing_drop: bool = False,
+) -> str:
+    """Run one SQL statement with retries across Postgres init restarts."""
+    last = ""
+    for i in range(attempts):
+        if not await _container_running(container):
+            raise RuntimeError(
+                f"Container {container} stopped during SQL:\n"
+                f"{(await _container_logs_tail(container))[-800:]}"
+            )
+        rc, out = await _psql_ephemeral(
+            container, pwd, db, sql, on_error_stop=on_error_stop,
+        )
+        last = out
+        if rc == 0:
+            return out
+        if allow_missing_drop and "does not exist" in (out or "").lower():
+            return out
+        if _is_transient_pg_error(out):
+            await asyncio.sleep(2 if i < 8 else 3)
+            continue
+        raise RuntimeError(f"psql failed: {sql[:120]} → {out[-500:]}")
+    raise RuntimeError(
+        f"psql still failing after retries ({sql[:80]}): {last[-500:]}"
+    )
+
+
 async def _create_pg_staging_db(container: str, pwd: str, staging_db: str) -> None:
     """CREATE DATABASE must be its own psql -c (cannot share a transaction with DROP)."""
     safe = "".join(c for c in staging_db if c.isalnum() or c == "_")
     if safe != staging_db or not safe:
         raise RuntimeError(f"Invalid staging database name: {staging_db}")
-    rc, out = await _psql_ephemeral(
-        container, pwd, "postgres", f'DROP DATABASE IF EXISTS "{safe}";',
+    await _psql_ephemeral_retry(
+        container, pwd, "postgres",
+        f'DROP DATABASE IF EXISTS "{safe}";',
+        allow_missing_drop=True,
     )
-    # DROP of missing DB is fine; still check for hard failures
-    if rc != 0 and "does not exist" not in out.lower():
-        raise RuntimeError(f"Failed to drop staging database {safe}: {out[-500:]}")
-    rc, out = await _psql_ephemeral(
-        container, pwd, "postgres", f'CREATE DATABASE "{safe}";',
+    await _psql_ephemeral_retry(
+        container, pwd, "postgres",
+        f'CREATE DATABASE "{safe}";',
     )
-    if rc != 0:
-        raise RuntimeError(f"Failed to create staging database {safe}: {out[-500:]}")
+    # Prove the new DB accepts connections (catches post-create restart races)
+    await _psql_ephemeral_retry(container, pwd, safe, "SELECT 1;")
 
 
 async def _import_via_ephemeral_postgres(
@@ -312,10 +414,12 @@ async def _import_via_ephemeral_postgres(
     )
     # Clean leftover name from a previous crash
     await migrator._run_cmd(["docker", "rm", "-f", container], timeout=30)
+    # No --rm until we finish: keeps logs if init crashes; we remove explicitly in finally paths
     ok, out = await migrator._run_cmd([
-        "docker", "run", "-d", "--rm", "--name", container,
+        "docker", "run", "-d", "--name", container,
         "-e", f"POSTGRES_PASSWORD={pwd}",
         "-e", "POSTGRES_USER=postgres",
+        "-e", "POSTGRES_HOST_AUTH_METHOD=trust",
         "-p", f"127.0.0.1:{port}:5432",
         image,
     ], timeout=300)
@@ -323,6 +427,7 @@ async def _import_via_ephemeral_postgres(
         raise RuntimeError(f"Failed to start ephemeral PostgreSQL: {out[-500:]}")
 
     try:
+        migrator.job.log("Waiting for ephemeral Postgres to finish init (stable ready)...")
         await _wait_ephemeral_pg_ready(container, pwd)
         await _create_pg_staging_db(container, pwd, staging_db)
         migrator.job.log(f"Ephemeral staging DB ready: {staging_db}")
@@ -330,13 +435,13 @@ async def _import_via_ephemeral_postgres(
         import_path = dump_path
         filtered: Path | None = None
         if use_ts:
-            rc, out = await _psql_ephemeral(
-                container, pwd, staging_db, "CREATE EXTENSION IF NOT EXISTS timescaledb;",
+            await _psql_ephemeral_retry(
+                container, pwd, staging_db,
+                "CREATE EXTENSION IF NOT EXISTS timescaledb;",
             )
-            if rc != 0:
-                raise RuntimeError(f"Failed to enable timescaledb extension: {out[-500:]}")
-            await _psql_ephemeral(
-                container, pwd, staging_db, "SELECT timescaledb_pre_restore();",
+            await _psql_ephemeral_retry(
+                container, pwd, staging_db,
+                "SELECT timescaledb_pre_restore();",
                 on_error_stop=False,
             )
             filtered = dump_path.with_suffix(dump_path.suffix + ".ephemeral-filtered")
@@ -348,45 +453,76 @@ async def _import_via_ephemeral_postgres(
             )
             import_path = filtered
 
-        # Dump restore: tolerate non-fatal object errors (roles/tablespaces) but require success overall
-        rc, out = await _psql_ephemeral(
-            container, pwd, staging_db, stdin_path=import_path, on_error_stop=False,
-        )
+        # Dump restore: tolerate non-fatal object errors (roles/tablespaces)
+        last_import_err = ""
+        imported = False
+        for attempt in range(5):
+            rc, out = await _psql_ephemeral(
+                container, pwd, staging_db, stdin_path=import_path, on_error_stop=False,
+            )
+            last_import_err = out
+            if rc == 0 or not _is_transient_pg_error(out):
+                # rc!=0 with non-transient may still have loaded most objects — check tables below
+                imported = True
+                if rc != 0 and not _is_transient_pg_error(out):
+                    migrator.job.log(
+                        f"Dump import finished with warnings/errors (will verify tables): "
+                        f"{out[-300:]}"
+                    )
+                break
+            migrator.job.log(f"Transient import failure — retry {attempt + 1}/5")
+            await asyncio.sleep(3)
         if filtered and filtered.exists():
             try:
                 filtered.unlink()
             except OSError:
                 pass
-        if rc != 0:
+        if not imported:
             raise RuntimeError(
                 "Failed to import PostgreSQL dump into ephemeral container:\n"
-                f"{out[-800:]}"
+                f"{last_import_err[-800:]}"
             )
+
         # Confirm panel tables landed (detect empty/wrong dump early)
-        rc, out = await _psql_ephemeral(
-            container, pwd, staging_db,
-            "SELECT COUNT(*) FROM information_schema.tables "
-            "WHERE table_schema = 'public' AND table_type = 'BASE TABLE';",
-        )
         table_count = 0
-        for line in (out or "").splitlines():
-            if line.strip().isdigit():
-                table_count = int(line.strip())
-                break
+        for _ in range(10):
+            rc, out = await _psql_ephemeral(
+                container, pwd, staging_db,
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_schema = 'public' AND table_type = 'BASE TABLE';",
+            )
+            if rc == 0:
+                for line in (out or "").splitlines():
+                    if line.strip().isdigit():
+                        table_count = int(line.strip())
+                        break
+                if table_count >= 1:
+                    break
+            if _is_transient_pg_error(out):
+                await asyncio.sleep(2)
+                continue
+            break
         if table_count < 1:
             raise RuntimeError(
                 "Ephemeral staging DB has no tables after dump import — "
-                "backup dump may be empty or incompatible"
+                f"backup dump may be empty or incompatible.\n{last_import_err[-500:]}"
             )
         migrator.job.log(f"Ephemeral dump import finished ({table_count} tables)")
 
         if use_ts:
-            await _psql_ephemeral(
-                container, pwd, staging_db, "SELECT timescaledb_post_restore();",
+            await _psql_ephemeral_retry(
+                container, pwd, staging_db,
+                "SELECT timescaledb_post_restore();",
                 on_error_stop=False,
             )
     except Exception as e:
         migrator.job.log(f"Ephemeral staging failed — cleaning up ({e})")
+        try:
+            logs = await _container_logs_tail(container)
+            if logs.strip():
+                migrator.job.log(f"Ephemeral container logs:\n{logs[-1200:]}")
+        except Exception:
+            pass
         await migrator._run_cmd(["docker", "rm", "-f", container], timeout=30)
         raise
 
