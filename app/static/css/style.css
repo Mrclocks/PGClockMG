@@ -5,6 +5,7 @@
   --pg-accent: 220 12% 16%;
   --pg-border: 220 10% 22%;
   --pg-primary: 210 90% 52%;
+  --pg-orange: 24 95% 53%;
   --pg-destructive: 0 72% 51%;
   --pg-success: 152 60% 40%;
   --radius: 1rem;
@@ -20,7 +21,8 @@
   --text-dim: hsl(220 6% 48%);
   --primary: hsl(var(--pg-primary));
   --primary-hover: hsl(210 90% 46%);
-  --primary-glow: hsla(210, 90%, 52%, 0.28);
+  --orange: hsl(var(--pg-orange));
+  --primary-glow: transparent;
   --success: hsl(var(--pg-success));
   --success-bg: hsla(152, 60%, 40%, 0.14);
   --warning: hsl(38 92% 50%);
@@ -66,13 +68,7 @@ html[lang="fa"] body {
 }
 
 .bg-grid {
-  position: fixed;
-  inset: 0;
-  background:
-    radial-gradient(ellipse 80% 50% at 50% -20%, hsla(210, 90%, 52%, 0.14), transparent 55%),
-    radial-gradient(ellipse 60% 40% at 100% 100%, hsla(200, 70%, 40%, 0.06), transparent 50%);
-  pointer-events: none;
-  z-index: 0;
+  display: none;
 }
 
 .app {
@@ -109,15 +105,26 @@ html[lang="fa"] body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, rgba(59, 130, 246, 0.15), rgba(59, 130, 246, 0.05));
+  color: var(--orange);
+  background: hsla(var(--pg-orange), 0.16);
   border-radius: 14px;
-  border: 1px solid rgba(59, 130, 246, 0.25);
+  border: 1px solid hsla(var(--pg-orange), 0.45);
 }
 
 .header h1 {
   font-size: 1.4rem;
   font-weight: 700;
   letter-spacing: -0.02em;
+}
+
+.header-version {
+  margin-top: 2px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  direction: ltr;
+  letter-spacing: 0.02em;
 }
 
 .subtitle {
@@ -958,13 +965,13 @@ button.db-card {
 }
 .btn-lg { padding: 14px 28px; font-size: 1rem; min-height: 48px; }
 
-/* Progress */
+/* Progress — same card chrome as .steps */
 .progress-panel {
   margin-bottom: 18px;
-  padding: 14px 16px;
-  border-radius: 14px;
+  padding: 16px 18px 14px;
+  border-radius: var(--radius);
   border: 1px solid var(--border);
-  background: linear-gradient(180deg, hsla(220, 20%, 16%, 0.9), hsla(220, 18%, 12%, 0.75));
+  background: var(--bg-card);
 }
 
 .progress-meta {
@@ -999,7 +1006,8 @@ button.db-card {
 
 .progress-track {
   height: 10px;
-  background: hsla(220, 16%, 22%, 0.95);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
   border-radius: 999px;
   overflow: hidden;
   position: relative;
@@ -1009,24 +1017,8 @@ button.db-card {
   height: 100%;
   width: 0%;
   border-radius: inherit;
-  background: linear-gradient(90deg, #3b82f6, #60a5fa 55%, #93c5fd);
-  box-shadow: 0 0 16px hsla(213, 94%, 68%, 0.35);
+  background: var(--primary);
   transition: width 0.55s cubic-bezier(0.22, 1, 0.36, 1);
-  position: relative;
-}
-
-.progress-fill::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(90deg, transparent, hsla(0, 0%, 100%, 0.28), transparent);
-  transform: translateX(-100%);
-  animation: progress-sheen 1.8s ease-in-out infinite;
-}
-
-@keyframes progress-sheen {
-  0% { transform: translateX(-100%); }
-  60%, 100% { transform: translateX(100%); }
 }
 
 .progress-wrap {
@@ -1841,7 +1833,7 @@ button.db-card {
   stroke-linejoin: round;
 }
 .icon-lg { width: 2.25rem; height: 2.25rem; }
-.logo .icon { width: 1.4rem; height: 1.4rem; color: var(--primary); }
+.logo .icon { width: 1.4rem; height: 1.4rem; color: var(--orange); }
 .result-icon {
   display: flex;
   justify-content: center;
