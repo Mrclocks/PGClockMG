@@ -74,6 +74,9 @@ systemctl stop pg-migrator && systemctl disable pg-migrator
 
 ## مجوز
 
-این پروژه تحت **[GNU Affero General Public License v3.0 (AGPL-3.0)](LICENSE)** منتشر می‌شود — همان لایسنس پنل [PasarGuard](https://github.com/PasarGuard/panel).
+**Copyright (c) 2026 Mrclocks — همه حقوق محفوظ است.**
 
-Copyright (c) 2026 Mrclocks
+نصب و استفادهٔ شخصی روی سرور خودتان آزاد است.  
+کپی، بازنشر، فروش یا استفاده بدون اجازه / بدون ذکر نام **ممنوع** است و قابل پیگیری (از جمله DMCA در GitHub) می‌باشد.
+
+جزئیات: [`LICENSE`](LICENSE) · ریپو: [github.com/Mrclocks/PGClockMG](https://github.com/Mrclocks/PGClockMG)
