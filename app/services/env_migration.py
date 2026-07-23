@@ -590,6 +590,7 @@ def extract_env_summary(text: str) -> dict:
         db_name = Path(parsed.get("sqlite_path") or "db.sqlite3").name
     panel_port = read_env_var(text, "UVICORN_PORT") or "8000"
     panel_host = read_env_var(text, "UVICORN_HOST") or "0.0.0.0"
+    panel_root_path = (read_env_var(text, "UVICORN_ROOT_PATH") or "").rstrip("/") or "/"
     return {
         "db_type": db_type,
         "db_user": db_user,
@@ -601,17 +602,21 @@ def extract_env_summary(text: str) -> dict:
         "postgres_password": postgres_password,
         "panel_port": panel_port,
         "panel_host": panel_host,
+        "panel_root_path": panel_root_path,
         "has_password": bool(db_password),
     }
 
 
 def get_panel_url_from_env(env_text: str | None = None, ip: str | None = None) -> str:
-    """Build PasarGuard dashboard URL using UVICORN_PORT from .env."""
+    """Build PasarGuard dashboard URL from UVICORN_PORT + UVICORN_ROOT_PATH."""
     import socket
+    from app.services.pg_access import build_dashboard_url
 
     port = "8000"
+    root_path = ""
     if env_text:
         port = read_env_var(env_text, "UVICORN_PORT") or "8000"
+        root_path = (read_env_var(env_text, "UVICORN_ROOT_PATH") or "").rstrip("/")
     if not ip:
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -620,7 +625,7 @@ def get_panel_url_from_env(env_text: str | None = None, ip: str | None = None) -
             s.close()
         except Exception:
             ip = "127.0.0.1"
-    return f"https://{ip}:{port}/dashboard/"
+    return build_dashboard_url(ip, port, https=True, root_path=root_path)
 
 
 def transform_marzban_env(
@@ -1111,6 +1116,7 @@ MIGRATE_ENV_KEYS = {
     "UVICORN_SSL_CA_TYPE",
     "UVICORN_HOST",
     "UVICORN_PORT",
+    "UVICORN_ROOT_PATH",
     "XRAY_EXECUTABLE_PATH",
     "XRAY_JSON",
     "SUDO_USERNAME",
