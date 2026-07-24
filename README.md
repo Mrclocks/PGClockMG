@@ -1,33 +1,42 @@
-> ⚠️ نسخه آزمایشی — احتمال باگ وجود دارد.
+> ⚠️ **نسخه بتا (`v1.0beta`)** — عمومی منتشر شده، ولی هنوز آزمایشی است. احتمال باگ وجود دارد؛ با احتیاط استفاده کنید.
 
 <div align="center">
 
 <img src="preview.png" alt="PGClockMG" width="720">
 
-# PGClockMG
+# 🕒 PGClockMG
 
-**ریستور و مهاجرت به PasarGuard**  
-ویزارد وب روی سرور خودتان · `v2.8.16` · پورت `7000` · FA / EN / RU
+**ریستور و مهاجرت به PasarGuard**
+
+`v1.0beta` · پورت `7000` · FA / EN / RU
 
 </div>
 
 ---
 
-## چه کاری می‌کند؟
+## ⚠️ قبل از استفاده
+
+| | |
+|---|---|
+| 🧪 **بتا** | این نسخه بتا است. روی سرور پروداکشن فقط با آگاهی از ریسک اجرا کنید. |
+| 💾 **بکاپ** | **قبل از هر ریستور یا مهاجرت** از پنل، دیتابیس و فایل‌های مهم بکاپ کامل بگیرید. |
+| 🛠️ **نصب پنل** | ویزارد **خودش PasarGuard نصب نمی‌کند**. اول پنل را نصب کنید، بعد برگردید. |
+
+---
+
+## ✨ چه کاری می‌کند؟
 
 | هدف | توضیح |
 |-----|--------|
-| **ریستور / تغییر DB** | بکاپ PasarGuard را برمی‌گرداند — حتی اگر نوع دیتابیس فرق کند |
-| **مهاجرت** | انتقال از Marzban، 3x-ui، Remnawave، Hiddify و … |
-| **راهنما** | اگر پنل نصب است مشخصاتش را نشان می‌دهد؛ اگر نه، فقط دستور نصب رسمی |
-
-> ویزارد **خودش PasarGuard نصب نمی‌کند**. اول خودتان نصب کنید، بعد ریستور یا مهاجرت.
+| ♻️ **ریستور / تغییر DB** | بکاپ PasarGuard را برمی‌گرداند — حتی اگر نوع دیتابیس فرق کند |
+| 🚚 **مهاجرت** | انتقال از Marzban، 3x-ui، Remnawave، Hiddify و … |
+| 📘 **راهنما** | اگر پنل نصب است مشخصاتش را نشان می‌دهد؛ اگر نه، فقط دستور نصب رسمی |
 
 مقصد ریستور همیشه دیتابیس **نصب‌شده** روی سرور است.
 
 ---
 
-## نصب
+## 🚀 نصب
 
 ```bash
 sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
@@ -35,29 +44,29 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 باز کنید: **`http://SERVER_IP:7000`**
 
-Ubuntu/Debian · root · Docker · پورت ۷۰۰۰
+📋 نیازها: Ubuntu/Debian · root · Docker · پورت `7000`
 
 ---
 
-## پنل‌ها
+## 📦 پنل‌ها
 
 | مبدأ | وضعیت |
 |------|--------|
-| Marzban | کامل |
-| PasarGuard (ریستور) | کامل |
-| 3x-ui | جزئی |
-| Remnawave / Hiddify | آزمایشی |
+| 🟢 Marzban | کامل |
+| 🟢 PasarGuard (ریستور) | کامل |
+| 🟡 3x-ui | جزئی |
+| 🟠 Remnawave / Hiddify | آزمایشی |
 
 ---
 
-## دستورات
+## 🧰 دستورات
 
 ```bash
 systemctl status pg-migrator
 systemctl restart pg-migrator
 journalctl -u pg-migrator -f
 
-# آپدیت
+# آپدیت به آخرین نسخه
 sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
 
 # بعد از اتمام کار
@@ -66,13 +75,13 @@ systemctl stop pg-migrator && systemctl disable pg-migrator
 
 ---
 
-## حریم خصوصی
+## 🔒 حریم خصوصی
 
 همه‌چیز فقط روی سرور شماست. بکاپ و رمزها جایی نمی‌روند.
 
 ---
 
-## مجوز
+## 📄 مجوز
 
 **Copyright (c) 2026 Mrclocks — همه حقوق محفوظ است.**
 
