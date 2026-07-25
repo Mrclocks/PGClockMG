@@ -25,9 +25,10 @@
   --bg: hsl(var(--pg-bg));
   --bg-card: hsl(var(--pg-card));
   --bg-elevated: hsl(var(--pg-accent));
-  --border: hsl(220 10% 18%);
-  --border-soft: hsla(220, 12%, 58%, 0.2);
-  --border-hover: hsl(220 10% 28%);
+  /* Neutral chrome — same soft edge as .steps */
+  --border: hsla(220, 10%, 48%, 0.28);
+  --border-soft: hsla(220, 10%, 48%, 0.28);
+  --border-hover: hsla(220, 10%, 60%, 0.4);
   --text: hsl(0 0% 98%);
   --text-muted: hsl(220 8% 68%);
   --text-dim: hsl(220 6% 48%);
@@ -35,19 +36,19 @@
   --primary-hover: hsl(210 90% 46%);
   --primary-glow: hsla(var(--pg-primary), 0.22);
   --primary-soft: hsla(var(--pg-primary), 0.1);
-  --orange: hsl(var(--pg-orange));
-  --success: hsl(var(--pg-success));
-  /* Soft fills + classic tinted borders (text stays vivid) */
-  --success-bg: hsla(var(--pg-success), 0.08);
-  --success-border: hsla(152, 60%, 45%, 0.32);
-  --warning: hsl(var(--pg-warning));
-  --warning-bg: hsla(var(--pg-warning), 0.08);
-  --warning-border: hsla(38, 92%, 55%, 0.32);
-  --error: hsl(var(--pg-destructive));
-  --error-bg: hsla(var(--pg-destructive), 0.08);
-  --error-border: hsla(0, 72%, 55%, 0.32);
-  --info-bg: hsla(var(--pg-primary), 0.05);
-  --info-border: hsla(var(--pg-primary), 0.28);
+  --orange: hsl(38 92% 55%);
+  --success: hsl(152 62% 48%);
+  /* Colored alerts: vivid border + text, same-hue fill (more transparent) */
+  --success-border: hsla(152, 62%, 48%, 0.7);
+  --success-bg: hsla(152, 62%, 48%, 0.14);
+  --warning: hsl(38 92% 55%);
+  --warning-border: hsla(38, 92%, 55%, 0.7);
+  --warning-bg: hsla(38, 92%, 55%, 0.14);
+  --error: hsl(0 78% 58%);
+  --error-border: hsla(0, 78%, 58%, 0.7);
+  --error-bg: hsla(0, 78%, 58%, 0.14);
+  --info-bg: var(--bg-card);
+  --info-border: var(--border-soft);
   --shadow: 0 8px 28px rgba(0, 0, 0, 0.32);
   --surface-pad: 16px 18px;
   --control-h: 44px;
@@ -525,10 +526,10 @@ html[lang="fa"] .step-label {
 }
 
 .cred-hint-box {
-  border: 1px solid var(--info-border);
+  border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm);
   padding: 10px 12px;
-  background: var(--info-bg);
+  background: var(--bg-card);
 }
 
 .install-cmd-row {
@@ -976,11 +977,18 @@ button.db-card {
 
 .btn-sm { padding: 8px 14px; font-size: 0.8rem; min-height: 36px; border-radius: var(--radius-sm); }
 
-/* Content surfaces — soft borders like tip/info boxes (not bright white) */
-.info-box, .warnings-box, .warning-card, .option-card, .summary-card, .success-card, .block-msg,
-.welcome-card, .progress-panel, .steps, .detected-db-card, .cred-hint-box,
-.install-cmd-card, .install-cmd-box, .specs-item, .check-item, .upload-slot,
-.log-terminal, .log-box, .modal-card, .result-card {
+/* Neutral content surfaces share .steps border; colored alerts override below */
+.info-box, .option-card, .summary-card, .welcome-card, .progress-panel, .steps,
+.detected-db-card, .cred-hint-box, .install-cmd-card, .install-cmd-box,
+.specs-item, .check-item, .upload-slot, .log-terminal, .log-box, .modal-card,
+.result-card {
+  border-color: var(--border-soft);
+}
+
+.panel-card:not(.selected),
+.db-card:not(.selected),
+.choice-card:not(.selected):not(.active),
+.upload-zone:not(.dragover) {
   border-color: var(--border-soft);
 }
 
@@ -992,29 +1000,47 @@ button.db-card {
   margin-bottom: 20px;
 }
 
+/* Neutral tips — same soft edge as steps (not blue) */
 .info-box,
 .option-card,
-.summary-card {
-  border-color: var(--info-border);
-  background: var(--info-bg);
+.summary-card,
+.cred-hint-box,
+.detected-db-card {
+  border-color: var(--border-soft);
+  background: var(--bg-card);
   color: var(--text);
 }
-.warnings-box, .warning-card {
+
+/* Orange warning — vivid border + text, soft same-hue fill */
+.warnings-box,
+.warning-card {
   border-color: var(--warning-border);
   background: var(--warning-bg);
   color: var(--warning);
 }
-.warning-card h4 { color: var(--warning); margin-bottom: 8px; font-size: 0.95rem; }
+.warning-card h4 {
+  color: var(--warning);
+  margin-bottom: 8px;
+  font-size: 0.95rem;
+}
+
+/* Green success — vivid border + text, soft same-hue fill */
 .success-card {
   border-color: var(--success-border);
   background: var(--success-bg);
-  color: var(--text);
+  color: var(--success);
 }
-.success-card h3 { margin-bottom: 8px; color: var(--success); font-family: var(--font); }
+.success-card h3 {
+  margin-bottom: 8px;
+  color: var(--success);
+  font-family: var(--font);
+}
+
+/* Red error / alert */
 .block-msg {
-  background: var(--error-bg);
   border: 1px solid var(--error-border);
   border-radius: var(--radius);
+  background: var(--error-bg);
   color: var(--error);
   font-size: 0.85rem;
   line-height: 1.5;
@@ -1474,7 +1500,7 @@ button.db-card {
 /* Detected target DB (step 3) */
 .detected-db-card {
   background: var(--bg-card);
-  border: 1px solid var(--info-border);
+  border: 1px solid var(--border-soft);
   border-radius: var(--radius);
   padding: 20px 22px;
   margin-bottom: 20px;
@@ -2031,10 +2057,12 @@ button.db-card {
   border: 1px solid var(--success-border);
   border-radius: var(--radius);
   background: var(--success-bg);
+  color: var(--success);
 }
 .result-card.success .guide-block {
   border-color: var(--success-border);
   background: var(--success-bg);
+  color: var(--success);
 }
 .guide-title {
   font-size: 0.92rem;
