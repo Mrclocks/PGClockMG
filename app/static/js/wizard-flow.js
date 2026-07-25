@@ -777,36 +777,34 @@ function resetRestoreForm() {
 }
 
 function renderRestoreAnalysis(a) {
+  // Specs / preview boxes are intentionally hidden — keep analysis in state only.
   const card = document.getElementById('restoreAnalysis');
   const warn = document.getElementById('restoreWarnings');
-  if (!card) return;
-  card.classList.remove('hidden');
-  const s = t('restore.summary') || {};
-  card.innerHTML = `
-    <div class="summary-row"><span class="summary-label">${escapeHtml(s.backupDb || 'Backup DB')}</span><span>${escapeHtml(a.backup_db || '—')}</span></div>
-    <div class="summary-row"><span class="summary-label">${escapeHtml(s.installedDb || 'Installed DB')}</span><span>${escapeHtml(a.installed_db || '—')}</span></div>
-    <div class="summary-row"><span class="summary-label">${escapeHtml(s.match || 'Match')}</span><span class="status-inline">${a.db_match === true ? statusIcon('ok') : a.db_match === false ? statusIcon(false) : '—'}</span></div>
-    <div class="summary-row"><span class="summary-label">${escapeHtml(s.layout || 'Layout')}</span><span>${escapeHtml(a.layout || '—')}</span></div>
-    ${a.timescaledb_versions?.length ? `<div class="summary-row"><span class="summary-label">TimescaleDB</span><span>${escapeHtml(a.timescaledb_versions.join(', '))}</span></div>` : ''}
-  `;
-  if (warn) {
-    const lang = state.lang;
-    const items = (a.warnings || []).map(w => `<p class="warn-line">${statusIcon('warn')}<span>${escapeHtml(tr(w, lang))}</span></p>`).join('');
-    warn.innerHTML = items;
-    warn.classList.toggle('hidden', !items);
-  }
-
   const note = document.getElementById('restoreConvertNote');
-  const needsConvert = a.backup_db && a.installed_db && a.backup_db !== a.installed_db
-    && !(
-      (['mysql', 'mariadb'].includes(a.backup_db) && ['mysql', 'mariadb'].includes(a.installed_db))
-      || (['postgresql', 'timescaledb'].includes(a.backup_db) && ['postgresql', 'timescaledb'].includes(a.installed_db))
-    );
-  if (note) {
-    const show = needsConvert && !a.convert_blocked;
-    note.classList.toggle('hidden', !show);
-    const noteText = document.getElementById('restoreConvertNoteText');
-    if (noteText) noteText.textContent = t('restore.autoConvertNote');
+  if (card) {
+    card.classList.add('hidden');
+    card.innerHTML = '';
+  }
+  if (warn) {
+    warn.classList.add('hidden');
+    warn.innerHTML = '';
+  }
+  if (note) note.classList.add('hidden');
+
+  const block = document.getElementById('restoreBlock');
+  const lang = state.lang || 'fa';
+  const blocking = !(a && a.ok) || !!a?.convert_blocked;
+  if (block) {
+    if (blocking) {
+      const msgs = (a?.warnings || [])
+        .map((w) => tr(w, lang))
+        .filter(Boolean);
+      block.textContent = msgs[0] || t('restore.confirmNeeded');
+      block.classList.remove('hidden');
+    } else {
+      block.textContent = '';
+      block.classList.add('hidden');
+    }
   }
 
   updateRestoreConfirmEnabled();

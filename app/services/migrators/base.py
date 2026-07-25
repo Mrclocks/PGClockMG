@@ -62,17 +62,25 @@ class BaseMigrator(ABC):
             cwd=cwd,
         )
         output_lines = []
+
+        async def _drain_stdout() -> None:
+            while True:
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace").rstrip()
+                output_lines.append(text)
+                self.job.log(text)
+
         try:
-            async with asyncio.timeout(timeout):
-                while True:
-                    line = await proc.stdout.readline()
-                    if not line:
-                        break
-                    text = line.decode("utf-8", errors="replace").rstrip()
-                    output_lines.append(text)
-                    self.job.log(text)
-        except TimeoutError:
+            # wait_for works on Python 3.9+; asyncio.timeout needs 3.11+
+            await asyncio.wait_for(_drain_stdout(), timeout=timeout)
+        except (TimeoutError, asyncio.TimeoutError):
             proc.kill()
+            try:
+                await proc.wait()
+            except Exception:
+                pass
             return False, "Timeout"
         await proc.wait()
         return proc.returncode == 0, "\n".join(output_lines)

@@ -342,19 +342,7 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
                 "ru": f"TimescaleDB в бэкапе: {', '.join(sorted(set(ts_versions)))}. Образ будет выровнен автоматически.",
             })
 
-        if table_counts:
-            preview = ", ".join(f"{k}={v}" for k, v in list(table_counts.items())[:6])
-            warnings.append({
-                "en": f"Backup data preview: {preview}",
-                "fa": f"پیش‌نمایش داده بکاپ: {preview}",
-                "ru": f"Данные в бэкапе: {preview}",
-            })
-        elif layout != "none":
-            warnings.append({
-                "en": "Could not estimate row counts from backup — restore will still verify after import.",
-                "fa": "شمارش ردیف‌های بکاپ ممکن نشد — بعد از ایمپورت حتماً verify می‌شود.",
-                "ru": "Не удалось оценить строки бэкапа — проверка будет после импорта.",
-            })
+        # table_counts kept for server-side verify only — not shown in the wizard UI
 
         return {
             "ok": ok,
