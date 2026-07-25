@@ -1144,6 +1144,14 @@ function applySocialI18n() {
     repo.href = GITHUB_REPO_URL;
   }
   if (copy) copy.textContent = t('footer.copyright');
+  const panelLabels = [
+    document.getElementById('panelLinkLabel'),
+    document.getElementById('restorePanelLabel'),
+  ];
+  panelLabels.forEach((el) => {
+    if (!el) return;
+    el.textContent = el.id === 'restorePanelLabel' ? t('restore.openPanel') : t('step6.openPanel');
+  });
   starLabels.forEach((el) => {
     if (el) el.textContent = t('starCta');
   });
@@ -1186,7 +1194,7 @@ function applyI18n() {
     'step4.h2': '#step4 h2', 'step4.desc': '#step4 .desc', 'step4.start': '#step4 .btn-lg',
     'step4.back': '#step4 .btn-back',
     'step5.h2': '#step5 h2',
-    'step6.openPanel': '#panelLink', 'step6.retry': '#resultError .btn-secondary',
+    'step6.openPanel': '#panelLinkLabel', 'step6.retry': '#resultError .btn-secondary',
   };
   for (const [k, sel] of Object.entries(map)) {
     const el = document.querySelector(sel);

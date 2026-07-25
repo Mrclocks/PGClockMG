@@ -477,9 +477,8 @@ function applyPhaseI18n() {
   set('restoreSelectText', 'restore.select');
   set('btnRestoreConfirm', 'restore.confirm');
   set('btnRestoreBack', 'restore.back');
-  set('btnRestoreDoneBack', 'restore.back');
   set('restoreDoneTitle', 'restore.doneTitle');
-  set('restorePanelLink', 'restore.openPanel');
+  set('restorePanelLabel', 'restore.openPanel');
   set('restoreRunningTitle', 'restore.runningTitle');
   set('restoreRunningDesc', 'restore.runningDesc');
   set('restoreErrorTitle', 'restore.errorTitle');
@@ -1022,7 +1021,8 @@ function showRestoreDone(result) {
   const url = resolveLoginUrl(access);
   if (link) {
     link.href = url || '#';
-    link.textContent = t('restore.openPanel');
+    const label = document.getElementById('restorePanelLabel');
+    if (label) label.textContent = t('restore.openPanel');
   }
   const urlLine = document.getElementById('restorePanelUrl');
   if (urlLine) {
