@@ -1,4 +1,4 @@
-> ⚠️ **Beta (`v1.0beta`)** — publicly available, but still experimental. Bugs are possible; use with caution.
+> ⚠️ **Beta (`v1.1beta`)** — publicly available, but still experimental. Bugs are possible; use with caution.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <b>English</b> · <a href="README.ru.md">Русский</a>
@@ -12,7 +12,7 @@
 
 **Restore and migrate to PasarGuard**
 
-`v1.0beta` · port `7000` · فارسی / English / Русский
+`v1.1beta` · port `7000` · فارسی / English / Русский
 
 </div>
 
