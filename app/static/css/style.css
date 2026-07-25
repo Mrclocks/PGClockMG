@@ -128,14 +128,14 @@ html[lang="fa"] body {
 .logo {
   flex: 0 0 auto;
   font-size: 1.6rem;
-  width: 48px;
-  height: 48px;
+  width: 58px;
+  height: 58px;
   display: flex;
   align-items: center;
   justify-content: center;
   color: hsl(24, 95%, 62%);
   background: hsla(24, 95%, 53%, 0.16);
-  border-radius: 14px;
+  border-radius: 16px;
   border: 1px solid hsla(24, 95%, 53%, 0.45);
   box-shadow: none;
 }
@@ -1021,12 +1021,19 @@ button.db-card {
 .upload-status.is-error,
 .guide-block {
   color: var(--text);
+  text-align: center;
 }
 .warning-card h4,
 .success-card h3,
 .success-card .desc-sm,
 .guide-title {
   color: var(--text);
+}
+/* Data grids inside success cards stay start-aligned */
+.success-card .specs-grid,
+.success-card .guide-sections,
+.guide-block {
+  text-align: start;
 }
 
 /* Orange warning — vivid border, soft fill, white text */
@@ -1483,6 +1490,7 @@ button.db-card {
   font-size: 0.88rem;
   line-height: 1.55;
   color: var(--text);
+  text-align: center;
 }
 
 .checks-refined .check-item {
@@ -1728,26 +1736,26 @@ button.db-card {
   display: block;
 }
 
-/* Specs grid (installed PasarGuard) — no nested gray cards */
+/* Specs grid (installed PasarGuard) — bordered soft tiles */
 .specs-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px 18px;
+  gap: 10px;
   margin: 14px 0 4px;
 }
 .specs-item {
-  background: transparent;
-  border: none;
-  border-radius: 0;
-  padding: 6px 0;
+  background: hsla(0, 0%, 100%, 0.05);
+  border: 1px solid hsla(0, 0%, 100%, 0.16);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
   min-width: 0;
-  border-bottom: 1px solid hsla(0, 0%, 100%, 0.1);
+  text-align: start;
 }
 .specs-item .specs-label {
   display: block;
   font-size: 0.75rem;
-  color: var(--text-muted);
-  margin-bottom: 4px;
+  color: hsla(0, 0%, 100%, 0.72);
+  margin-bottom: 6px;
 }
 .specs-item .specs-value {
   display: block;
@@ -1776,7 +1784,10 @@ button.db-card {
   opacity: 0.9;
 }
 
-#pgInstalledCard .specs-item,
+#pgInstalledCard .specs-item {
+  background: hsla(0, 0%, 100%, 0.06);
+  border-color: hsla(0, 0%, 100%, 0.18);
+}
 #pgInstalledCard .specs-label,
 #pgInstalledCard .specs-value,
 #pgInstalledCard code.specs-value,
@@ -1791,10 +1802,12 @@ button.db-card {
 .welcome-pg-status {
   margin-top: 16px;
   margin-bottom: 0;
+  text-align: center;
 }
 .welcome-pg-status.success-card,
 .welcome-pg-status.warning-card {
   color: var(--text);
+  text-align: center;
 }
 
 .form-group-spaced { margin-top: 16px; }
@@ -1830,7 +1843,8 @@ button.db-card {
     justify-content: flex-end;
     flex-wrap: nowrap;
   }
-  .logo { width: 42px; height: 42px; border-radius: 12px; }
+  .logo { width: 50px; height: 50px; border-radius: 14px; }
+  .logo .icon { width: 1.45rem; height: 1.45rem; }
   .header-version { font-size: 0.72rem; }
   .lang-summary { padding: 5px 10px; min-height: 34px; }
   .panel-grid { grid-template-columns: 1fr; }
@@ -1936,12 +1950,13 @@ button.db-card {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 44px;
-  height: 44px;
-  border-radius: 12px;
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
   background: var(--primary-soft);
   color: var(--primary);
-  margin-bottom: 6px;
+  border: 1px solid hsla(var(--pg-primary), 0.45);
+  margin-bottom: 8px;
   flex-shrink: 0;
   line-height: 0;
 }
@@ -1951,6 +1966,24 @@ button.db-card {
   height: 22px;
   display: block;
   margin: 0 auto;
+  color: currentColor;
+}
+
+/* Welcome goals: header-style logo boxes — red / purple / yellow */
+.welcome-goals .choice-card:nth-child(1) .choice-icon {
+  color: hsl(0, 78%, 62%);
+  background: hsla(0, 78%, 55%, 0.16);
+  border-color: hsla(0, 78%, 55%, 0.45);
+}
+.welcome-goals .choice-card:nth-child(2) .choice-icon {
+  color: hsl(270, 70%, 72%);
+  background: hsla(270, 70%, 58%, 0.16);
+  border-color: hsla(270, 70%, 58%, 0.45);
+}
+.welcome-goals .choice-card:nth-child(3) .choice-icon {
+  color: hsl(48, 96%, 58%);
+  background: hsla(48, 96%, 50%, 0.16);
+  border-color: hsla(48, 96%, 50%, 0.45);
 }
 
 /* shadcn-like helpers */
@@ -2082,7 +2115,7 @@ button.db-card {
   stroke-linejoin: round;
 }
 .icon-lg { width: 2.25rem; height: 2.25rem; }
-.logo .icon { width: 1.4rem; height: 1.4rem; color: hsl(24, 95%, 62%); }
+.logo .icon { width: 1.7rem; height: 1.7rem; color: hsl(24, 95%, 62%); }
 .result-icon {
   display: flex;
   align-items: center;
