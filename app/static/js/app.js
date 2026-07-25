@@ -469,6 +469,7 @@ function applySystemCheck(sys) {
     pasarguard_db: sys.pasarguard_db,
     marzban_db: sys.marzban_db,
   };
+  if (typeof updateWelcomePgStatus === 'function') updateWelcomePgStatus();
 }
 
 async function loadInfo() {

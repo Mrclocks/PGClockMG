@@ -433,7 +433,7 @@ function applyPhaseI18n() {
   set('welcomeGoalChangeDbDesc', 'welcome.goalChangeDbDesc');
   set('welcomeGoalMigrate', 'welcome.goalMigrate');
   set('welcomeGoalMigrateDesc', 'welcome.goalMigrateDesc');
-  set('welcomeBackupTip', 'welcome.backupTip');
+  updateWelcomePgStatus();
 
   set('pgH2', 'pg.h2');
   set('pgDesc', 'pg.desc');
@@ -584,6 +584,36 @@ function renderTutorialSteps() {
   ol.innerHTML = items.map((s) => `<li>${escapeHtml(s)}</li>`).join('');
 }
 
+function formatDbLabel(db) {
+  const raw = String(db || '').trim().toLowerCase();
+  if (!raw || raw === '—' || raw === '-') return '';
+  const map = {
+    sqlite: 'SQLite',
+    mysql: 'MySQL',
+    mariadb: 'MariaDB',
+    postgresql: 'PostgreSQL',
+    postgres: 'PostgreSQL',
+    timescaledb: 'TimescaleDB',
+  };
+  return map[raw] || db;
+}
+
+function updateWelcomePgStatus() {
+  const el = document.getElementById('welcomePgStatus');
+  if (!el) return;
+  const sys = state.systemCheck || {};
+  const installed = !!(sys.pasarguard || state.panelAccess?.installed);
+  el.classList.remove('hidden', 'warning-card', 'success-card');
+  if (installed) {
+    const db = formatDbLabel(sys.pasarguard_db || state.panelAccess?.db_type) || '—';
+    el.classList.add('success-card');
+    el.textContent = String(t('welcome.pgInstalled') || '').replace('{db}', db);
+  } else {
+    el.classList.add('warning-card');
+    el.textContent = t('welcome.pgMissing');
+  }
+}
+
 function renderInstalledSpecs() {
   const el = document.getElementById('pgInstalledSpecs');
   if (!el) return;
@@ -631,10 +661,20 @@ async function renderPgSetup() {
   if (installed) {
     guide?.classList.add('hidden');
     installedCard?.classList.remove('hidden');
+    document.getElementById('pgInstalledActions')?.classList.remove('hidden');
+    const db = formatDbLabel(state.systemCheck?.pasarguard_db || state.panelAccess?.db_type);
+    const title = document.getElementById('pgInstalledTitle');
+    if (title) {
+      title.textContent = db
+        ? String(t('pg.installedTitleDb') || t('pg.installedTitle')).replace('{db}', db)
+        : t('pg.installedTitle');
+    }
     const detail = document.getElementById('pgInstalledDetail');
     if (detail) detail.textContent = t('pg.installedDetail');
     const openBtn = document.getElementById('btnPgOpenPanel');
     if (openBtn) openBtn.textContent = t('pg.openPanel');
+    const backBtn = document.getElementById('btnPgInstalledBack');
+    if (backBtn) backBtn.textContent = t('pg.back');
     renderInstalledSpecs();
     // Title/desc for status mode
     const h2 = document.getElementById('pgH2');
@@ -643,6 +683,7 @@ async function renderPgSetup() {
     if (desc) desc.textContent = t('pg.descInstalled');
   } else {
     installedCard?.classList.add('hidden');
+    document.getElementById('pgInstalledActions')?.classList.add('hidden');
     guide?.classList.remove('hidden');
     renderInstallCmdList();
     renderTutorialSteps();
@@ -651,6 +692,7 @@ async function renderPgSetup() {
     if (h2) h2.textContent = t('pg.h2');
     if (desc) desc.textContent = t('pg.desc');
   }
+  updateWelcomePgStatus();
 }
 
 async function recheckAfterManualInstall() {

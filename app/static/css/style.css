@@ -798,22 +798,22 @@ button.db-card {
   border-radius: var(--radius-sm);
   font-size: 0.88rem;
   line-height: 1.4;
-  color: var(--success);
+  color: var(--text);
 }
 .upload-status.is-ok {
   background: var(--success-bg);
   border-color: var(--success-border);
-  color: var(--success);
+  color: var(--text);
 }
 .upload-status.is-warn {
   background: var(--warning-bg);
   border-color: var(--warning-border);
-  color: var(--warning);
+  color: var(--text);
 }
 .upload-status.is-error {
   background: var(--error-bg);
   border-color: var(--error-border);
-  color: var(--error);
+  color: var(--text);
 }
 .upload-status .status-inline {
   display: inline-flex;
@@ -980,7 +980,7 @@ button.db-card {
 /* Neutral content surfaces share .steps border; colored alerts override below */
 .info-box, .option-card, .summary-card, .welcome-card, .progress-panel, .steps,
 .detected-db-card, .cred-hint-box, .install-cmd-card, .install-cmd-box,
-.specs-item, .check-item, .upload-slot, .log-terminal, .log-box, .modal-card,
+.check-item, .upload-slot, .log-terminal, .log-box, .modal-card,
 .result-card {
   border-color: var(--border-soft);
 }
@@ -1011,28 +1011,46 @@ button.db-card {
   color: var(--text);
 }
 
-/* Orange warning — vivid border + text, soft same-hue fill */
+/* Colored alert boxes: keep tinted border/bg, white titles & body text */
+.warning-card,
+.warnings-box,
+.success-card,
+.block-msg,
+.upload-status.is-ok,
+.upload-status.is-warn,
+.upload-status.is-error,
+.guide-block {
+  color: var(--text);
+}
+.warning-card h4,
+.success-card h3,
+.success-card .desc-sm,
+.guide-title {
+  color: var(--text);
+}
+
+/* Orange warning — vivid border, soft fill, white text */
 .warnings-box,
 .warning-card {
   border-color: var(--warning-border);
   background: var(--warning-bg);
-  color: var(--warning);
+  color: var(--text);
 }
 .warning-card h4 {
-  color: var(--warning);
+  color: var(--text);
   margin-bottom: 8px;
   font-size: 0.95rem;
 }
 
-/* Green success — vivid border + text, soft same-hue fill */
+/* Green success — vivid border, soft fill, white text */
 .success-card {
   border-color: var(--success-border);
   background: var(--success-bg);
-  color: var(--success);
+  color: var(--text);
 }
 .success-card h3 {
   margin-bottom: 8px;
-  color: var(--success);
+  color: var(--text);
   font-family: var(--font);
 }
 
@@ -1041,7 +1059,7 @@ button.db-card {
   border: 1px solid var(--error-border);
   border-radius: var(--radius);
   background: var(--error-bg);
-  color: var(--error);
+  color: var(--text);
   font-size: 0.85rem;
   line-height: 1.5;
   margin: 12px 0;
@@ -1122,9 +1140,10 @@ button.db-card {
   flex-wrap: wrap;
   gap: 10px;
   margin-top: 24px;
-  justify-content: flex-start;
+  justify-content: center;
   align-items: center;
 }
+.actions-wrap { justify-content: center; }
 
 .btn {
   padding: 12px 22px;
@@ -1709,24 +1728,25 @@ button.db-card {
   display: block;
 }
 
-/* Specs grid (installed PasarGuard) */
+/* Specs grid (installed PasarGuard) — no nested gray cards */
 .specs-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px 14px;
+  gap: 10px 18px;
   margin: 14px 0 4px;
 }
 .specs-item {
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  padding: 10px 12px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 6px 0;
   min-width: 0;
+  border-bottom: 1px solid hsla(0, 0%, 100%, 0.1);
 }
 .specs-item .specs-label {
   display: block;
   font-size: 0.75rem;
-  color: var(--text-dim);
+  color: var(--text-muted);
   margin-bottom: 4px;
 }
 .specs-item .specs-value {
@@ -1734,6 +1754,7 @@ button.db-card {
   font-size: 0.9rem;
   font-weight: 600;
   line-height: 1.4;
+  color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1744,14 +1765,36 @@ button.db-card {
   font-family: var(--font-mono);
   font-size: 0.82rem;
   font-weight: 500;
-  color: inherit;
+  color: var(--text);
   text-decoration: none;
   direction: ltr;
   text-align: start;
 }
 .specs-item a.specs-value:hover {
-  color: var(--primary);
+  color: #fff;
   text-decoration: underline;
+  opacity: 0.9;
+}
+
+#pgInstalledCard .specs-item,
+#pgInstalledCard .specs-label,
+#pgInstalledCard .specs-value,
+#pgInstalledCard code.specs-value,
+#pgInstalledCard a.specs-value {
+  color: var(--text);
+}
+
+#pgInstalledActions {
+  margin-top: 18px;
+}
+
+.welcome-pg-status {
+  margin-top: 16px;
+  margin-bottom: 0;
+}
+.welcome-pg-status.success-card,
+.welcome-pg-status.warning-card {
+  color: var(--text);
 }
 
 .form-group-spaced { margin-top: 16px; }
@@ -2057,18 +2100,18 @@ button.db-card {
   border: 1px solid var(--success-border);
   border-radius: var(--radius);
   background: var(--success-bg);
-  color: var(--success);
+  color: var(--text);
 }
 .result-card.success .guide-block {
   border-color: var(--success-border);
   background: var(--success-bg);
-  color: var(--success);
+  color: var(--text);
 }
 .guide-title {
   font-size: 0.92rem;
   font-weight: 600;
   margin-bottom: 10px;
-  color: var(--success);
+  color: var(--text);
 }
 .guide-line {
   font-size: 0.88rem;

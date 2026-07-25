@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#0f1218">
   <title>PGClockMG</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=1.1beta.5">
+  <link rel="stylesheet" href="/static/css/style.css?v=1.1beta.6">
   <!-- Fonts: non-blocking so mobile/Iran networks don't stall first paint -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -79,7 +79,7 @@
                 <span id="welcomeGoalMigrateDesc"></span>
               </button>
             </div>
-            <div class="info-box" id="welcomeBackupTip"></div>
+            <div id="welcomePgStatus" class="welcome-pg-status warning-card hidden" role="status"></div>
           </div>
         </div>
       </section>
@@ -94,10 +94,10 @@
           <h3 id="pgInstalledTitle"></h3>
           <p id="pgInstalledDetail" class="desc-sm"></p>
           <div id="pgInstalledSpecs" class="specs-grid"></div>
-          <div class="actions actions-wrap">
-            <button class="btn btn-back" onclick="showPhase('welcome')" id="btnPgInstalledBack"></button>
-            <button class="btn btn-secondary" id="btnPgOpenPanel" onclick="openInstalledPanel()"></button>
-          </div>
+        </div>
+        <div id="pgInstalledActions" class="actions actions-center hidden">
+          <button class="btn btn-back" onclick="showPhase('welcome')" id="btnPgInstalledBack"></button>
+          <button class="btn btn-primary" id="btnPgOpenPanel" onclick="openInstalledPanel()"></button>
         </div>
 
         <!-- Shown only when PasarGuard is NOT installed: commands + tutorial -->
@@ -135,7 +135,7 @@
             <a href="https://github.com/PasarGuard/panel" target="_blank" rel="noopener" id="pgGithubLink"></a>
           </div>
 
-          <div class="actions actions-wrap">
+          <div class="actions actions-center">
             <button class="btn btn-back" onclick="showPhase('welcome')" id="btnPgBack"></button>
             <button class="btn btn-primary" id="btnPgRecheck" onclick="recheckAfterManualInstall()"></button>
           </div>
@@ -521,10 +521,10 @@
     </div>
   </div>
 
-  <script src="/static/js/icons.js?v=1.1beta.5"></script>
-  <script src="/static/js/i18n.js?v=1.1beta.5"></script>
-  <script src="/static/js/app.js?v=1.1beta.5"></script>
-  <script src="/static/js/wizard-flow.js?v=1.1beta.5"></script>
+  <script src="/static/js/icons.js?v=1.1beta.6"></script>
+  <script src="/static/js/i18n.js?v=1.1beta.6"></script>
+  <script src="/static/js/app.js?v=1.1beta.6"></script>
+  <script src="/static/js/wizard-flow.js?v=1.1beta.6"></script>
 </body>
 </html>
 
