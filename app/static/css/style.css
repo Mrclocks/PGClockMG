@@ -172,24 +172,26 @@ html[lang="fa"] body {
 
 /* Language switcher — always-visible segmented control */
 .lang-switch {
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   align-items: stretch;
   gap: 3px;
   padding: 3px;
   border-radius: 12px;
   border: 1px solid var(--border-soft);
-  background: var(--bg-elevated);
+  background: var(--bg-card);
   z-index: 40;
-  max-width: 100%;
+  width: min(100%, 280px);
 }
 
 .lang-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 64px;
+  width: 100%;
+  min-width: 0;
   min-height: 40px;
-  padding: 8px 12px;
+  padding: 8px 6px;
   border: 1px solid transparent;
   border-radius: 9px;
   background: transparent;
@@ -205,18 +207,21 @@ html[lang="fa"] body {
   font-size: 0.84rem;
   font-weight: 600;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
   color: inherit;
 }
 
 .lang-btn:hover {
   color: var(--text);
-  background: hsla(0, 0%, 100%, 0.05);
+  background: hsla(0, 0%, 100%, 0.04);
 }
 
 .lang-btn.is-active {
-  background: hsla(var(--pg-primary), 0.12);
+  background: hsla(0, 0%, 100%, 0.05);
   color: var(--text);
-  border-color: hsla(var(--pg-primary), 0.4);
+  border-color: var(--border-soft);
 }
 
 .lang-btn.is-active .lang-name {
@@ -1157,6 +1162,27 @@ button.db-card {
 }
 .btn-lg { padding: 14px 28px; font-size: 1rem; min-height: 48px; }
 
+/* Panel enter — header-logo style (soft tint + border, no shadow/underline) */
+.btn-panel-enter,
+a.btn-panel-enter {
+  background: hsla(24, 95%, 53%, 0.16);
+  border: 1px solid hsla(24, 95%, 53%, 0.45);
+  color: hsl(24, 95%, 62%);
+  box-shadow: none;
+  text-decoration: none !important;
+}
+.btn-panel-enter:hover,
+a.btn-panel-enter:hover,
+.btn-panel-enter:focus,
+a.btn-panel-enter:focus {
+  background: hsla(24, 95%, 53%, 0.24);
+  border-color: hsla(24, 95%, 53%, 0.6);
+  color: hsl(24, 95%, 68%);
+  box-shadow: none;
+  transform: none;
+  text-decoration: none !important;
+}
+
 /* Progress — same card chrome as .steps */
 .progress-panel {
   margin-bottom: 18px;
@@ -1168,7 +1194,7 @@ button.db-card {
 
 .progress-meta {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 12px;
@@ -1181,6 +1207,13 @@ button.db-card {
   font-size: 0.88rem;
   color: var(--text-muted);
   line-height: 1.35;
+  padding-top: 3px;
+  padding-bottom: 0;
+}
+
+.progress-meta .status-msg,
+.progress-status.status-msg {
+  margin-bottom: 0;
 }
 
 .progress-pct {
@@ -1194,6 +1227,9 @@ button.db-card {
   color: var(--primary);
   font-family: var(--font-mono);
   direction: ltr;
+  line-height: 1.35;
+  display: inline-flex;
+  align-items: flex-end;
 }
 
 .progress-track {
@@ -1286,6 +1322,13 @@ button.db-card {
   align-items: center;
   justify-content: center;
   margin: 4px 0 28px;
+  text-decoration: none;
+}
+.result-card.success > .btn-github-star {
+  margin: 4px auto 10px;
+}
+.result-card.success > .btn-panel-enter {
+  margin: 0 auto 28px;
 }
 .result-card .guide-sections {
   margin: 0 0 8px;
@@ -1416,20 +1459,22 @@ button.db-card {
   gap: 10px;
   min-height: 48px;
   padding: 12px 16px;
-  border-radius: 12px;
+  border-radius: 14px;
   border: 1px solid transparent;
-  text-decoration: none;
+  text-decoration: none !important;
   font-family: var(--font);
   font-size: 0.9rem;
   font-weight: 650;
   line-height: 1.2;
-  transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
   box-sizing: border-box;
+  box-shadow: none;
 }
 
 .social-btn:hover {
-  transform: translateY(-1px);
-  text-decoration: none;
+  text-decoration: none !important;
+  transform: none;
+  box-shadow: none;
 }
 
 .social-ico {
@@ -1439,29 +1484,29 @@ button.db-card {
   display: block;
 }
 
+/* Same soft logo-box language as header .logo */
 .social-telegram {
-  color: #fff;
-  background: linear-gradient(135deg, #2aabee 0%, #229ed9 100%);
-  border-color: hsla(199, 85%, 48%, 0.55);
-  box-shadow: 0 8px 20px hsla(199, 85%, 45%, 0.28);
+  color: hsl(199, 90%, 62%);
+  background: hsla(199, 90%, 53%, 0.16);
+  border-color: hsla(199, 90%, 53%, 0.45);
 }
 
 .social-telegram:hover {
-  color: #fff;
-  box-shadow: 0 10px 24px hsla(199, 85%, 45%, 0.38);
+  color: hsl(199, 90%, 68%);
+  background: hsla(199, 90%, 53%, 0.24);
+  border-color: hsla(199, 90%, 53%, 0.6);
 }
 
 .social-github {
-  color: #fff;
-  background: linear-gradient(135deg, hsl(220 14% 22%) 0%, hsl(220 16% 16%) 100%);
-  border-color: hsla(0, 0%, 100%, 0.16);
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
+  color: hsl(0, 0%, 88%);
+  background: hsla(0, 0%, 100%, 0.08);
+  border-color: hsla(0, 0%, 100%, 0.2);
 }
 
 .social-github:hover {
   color: #fff;
-  border-color: hsla(0, 0%, 100%, 0.28);
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+  background: hsla(0, 0%, 100%, 0.12);
+  border-color: hsla(0, 0%, 100%, 0.3);
 }
 
 .footer a { color: var(--text-muted); text-decoration: none; }
@@ -1474,32 +1519,39 @@ button.db-card {
   align-items: center;
   justify-content: center;
   gap: 10px;
-  margin-top: 12px;
+  margin-top: 4px;
+  margin-bottom: 12px;
   min-height: 48px;
   padding: 12px 20px;
-  border-radius: var(--radius-sm);
-  border: 1px solid hsla(42, 96%, 55%, 0.45);
-  background: linear-gradient(135deg, hsla(42, 96%, 55%, 0.2) 0%, hsla(32, 95%, 50%, 0.14) 100%);
-  color: hsl(42, 96%, 72%);
+  border-radius: 14px;
+  border: 1px solid hsla(42, 96%, 50%, 0.45);
+  background: hsla(42, 96%, 50%, 0.16);
+  color: hsl(42, 96%, 68%);
   font-family: var(--font);
   font-size: 0.95rem;
   font-weight: 650;
-  text-decoration: none;
-  box-shadow: 0 6px 18px hsla(42, 90%, 40%, 0.12);
-  transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  text-decoration: none !important;
+  box-shadow: none;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
 .btn-github-star:hover {
-  color: #fff;
-  border-color: hsla(42, 96%, 55%, 0.7);
-  background: linear-gradient(135deg, hsla(42, 96%, 55%, 0.32) 0%, hsla(32, 95%, 50%, 0.22) 100%);
-  transform: translateY(-1px);
-  text-decoration: none;
+  color: hsl(42, 96%, 74%);
+  border-color: hsla(42, 96%, 50%, 0.65);
+  background: hsla(42, 96%, 50%, 0.24);
+  transform: none;
+  text-decoration: none !important;
+  box-shadow: none;
 }
 
-.result-card.success > .btn-github-star {
+.result-card.success > .btn-github-star,
+.result-card.success > .btn-panel-enter {
   width: min(100%, 360px);
   margin-inline: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none !important;
 }
 
 .hidden { display: none !important; }
@@ -1918,11 +1970,16 @@ button.db-card {
   .logo { width: 50px; height: 50px; border-radius: 14px; }
   .logo .icon { width: 1.45rem; height: 1.45rem; }
   .header-version { font-size: 0.72rem; }
-  .lang-switch { padding: 2px; gap: 2px; border-radius: 10px; }
+  .lang-switch {
+    padding: 2px;
+    gap: 2px;
+    border-radius: 10px;
+    width: min(100%, 240px);
+  }
   .lang-btn {
     min-width: 0;
     min-height: 36px;
-    padding: 7px 10px;
+    padding: 7px 4px;
   }
   .lang-btn .lang-name { font-size: 0.78rem; }
   .footer-social {
@@ -1981,10 +2038,11 @@ button.db-card {
 }
 
 @media (max-width: 380px) {
+  .lang-switch { width: min(100%, 220px); }
   .lang-btn {
     min-width: 0;
     min-height: 34px;
-    padding: 7px 8px;
+    padding: 7px 3px;
   }
   .lang-btn .lang-name { font-size: 0.72rem; }
   .footer-social {
