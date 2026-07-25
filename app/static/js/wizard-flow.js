@@ -730,33 +730,77 @@ function setupRestoreUpload() {
 }
 
 async function uploadRestoreZip(file) {
-  const status = document.getElementById('restoreUploadStatus');
   const btn = document.getElementById('btnRestoreConfirm');
-  status.classList.remove('hidden');
-  status.textContent = t('restore.analyzing');
-  btn.disabled = true;
+  const progressIds = {
+    zone: 'restoreUploadZone',
+    panel: 'restoreUploadProgress',
+    fill: 'restoreUploadProgressFill',
+    pct: 'restoreUploadProgressPct',
+    msg: 'restoreUploadProgressMsg',
+    status: 'restoreUploadStatus',
+    replaceBtn: 'restoreUploadReplaceBtn',
+    onReplace: () => {
+      setUploadProgressUi(progressIds, { phase: 'idle' });
+      state.restoreUploadId = null;
+      state.restoreAnalysis = null;
+      if (btn) btn.disabled = true;
+      document.getElementById('restoreFileInput')?.click();
+    },
+  };
+
+  if (btn) btn.disabled = true;
   state.restoreAnalysis = null;
+
+  setUploadProgressUi(progressIds, {
+    phase: 'uploading',
+    pct: 0,
+    message: `${t('uploadProgress')} (${file.name})`,
+  });
 
   const fd = new FormData();
   fd.append('file', file);
   try {
-    const res = await fetch('/api/upload', { method: 'POST', body: fd });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || 'upload failed');
+    const data = await uploadFormWithProgress('/api/upload', fd, (pct) => {
+      setUploadProgressUi(progressIds, {
+        phase: 'uploading',
+        pct: pct == null ? 0 : pct,
+        message: `${t('uploadProgress')} (${file.name})`,
+      });
+    });
+    if (!data?.upload_id) throw new Error('upload failed');
     state.restoreUploadId = data.upload_id;
+
+    setUploadProgressUi(progressIds, {
+      phase: 'uploading',
+      pct: 100,
+      message: t('restore.analyzing'),
+    });
+
     const ares = await fetch(`/api/pasarguard/restore/analyze/${data.upload_id}`);
     const analysis = await ares.json();
     if (!ares.ok) throw new Error(analysis.detail || 'analyze failed');
     state.restoreAnalysis = analysis;
     renderRestoreAnalysis(analysis);
-    btn.disabled = !analysis.ok;
-    status.textContent = analysis.ok ? file.name : file.name;
-    status.classList.toggle('is-ok', !!analysis.ok);
-    status.classList.toggle('is-warn', !analysis.ok);
+    if (btn) btn.disabled = !analysis.ok;
+
+    document.getElementById('restoreUploadZone')?.classList.add('hidden');
+    document.getElementById('restoreUploadProgress')?.classList.add('hidden');
+    const status = document.getElementById('restoreUploadStatus');
+    if (status) {
+      status.classList.remove('hidden', 'is-warn');
+      status.classList.add('is-ok');
+      status.style.background = analysis.ok ? 'var(--success-bg)' : 'var(--warning-bg)';
+      status.style.color = analysis.ok ? 'var(--success)' : 'var(--warning)';
+      const msg = analysis.ok ? t('uploadSuccess') : t('uploadSuccess');
+      status.innerHTML = `<span class="status-inline">${statusIcon(analysis.ok ? 'ok' : 'warn')} <span>${msg}</span></span>`
+        + ` <span class="check-detail">(${escapeHtml(file.name)})</span>`
+        + ` <button type="button" class="link upload-replace-btn" id="restoreUploadReplaceBtn">${t('uploadReplace')}</button>`;
+      const rbtn = document.getElementById('restoreUploadReplaceBtn');
+      if (rbtn) rbtn.onclick = (e) => { e.preventDefault(); progressIds.onReplace(); };
+    }
   } catch (e) {
-    status.textContent = e.message;
-    status.classList.add('is-warn');
-    btn.disabled = true;
+    setUploadProgressUi(progressIds, { phase: 'error', message: e.message });
+    if (btn) btn.disabled = true;
   }
 }
 

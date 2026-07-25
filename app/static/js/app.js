@@ -1182,6 +1182,106 @@ function setupUpload() {
   bindZipUploadZone();
 }
 
+/** POST FormData with real upload % (fetch cannot report upload progress). */
+function uploadFormWithProgress(url, formData, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    xhr.upload.onprogress = (e) => {
+      if (!onProgress) return;
+      if (e.lengthComputable && e.total > 0) {
+        onProgress(Math.min(99, Math.round((e.loaded / e.total) * 100)));
+      } else {
+        onProgress(null);
+      }
+    };
+    xhr.onload = () => {
+      let data = null;
+      try {
+        data = JSON.parse(xhr.responseText || 'null');
+      } catch (_) {
+        data = null;
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress?.(100);
+        resolve(data || {});
+        return;
+      }
+      let detail = (data && (data.detail || data.message)) || xhr.statusText || 'upload failed';
+      if (Array.isArray(detail)) detail = detail.map((x) => x.msg || JSON.stringify(x)).join('; ');
+      reject(new Error(typeof detail === 'string' ? detail : JSON.stringify(detail)));
+    };
+    xhr.onerror = () => reject(new Error(t('uploadErr') || 'Network error'));
+    xhr.send(formData);
+  });
+}
+
+function escapeHtmlApp(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function setUploadProgressUi(ids, { phase, pct = 0, message = '', fileName = '' } = {}) {
+  const zone = document.getElementById(ids.zone);
+  const panel = document.getElementById(ids.panel);
+  const fill = document.getElementById(ids.fill);
+  const pctEl = document.getElementById(ids.pct);
+  const msgEl = document.getElementById(ids.msg);
+  const status = document.getElementById(ids.status);
+
+  if (phase === 'uploading') {
+    zone?.classList.add('hidden');
+    panel?.classList.remove('hidden');
+    status?.classList.add('hidden');
+    if (fill) fill.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+    if (pctEl) pctEl.textContent = pct == null ? '…' : `${pct}%`;
+    if (msgEl) msgEl.textContent = message || t('uploadProgress');
+    return;
+  }
+
+  panel?.classList.add('hidden');
+  if (fill) fill.style.width = '0%';
+  if (pctEl) pctEl.textContent = '0%';
+
+  if (phase === 'success') {
+    zone?.classList.add('hidden');
+    if (status) {
+      status.classList.remove('hidden', 'is-warn');
+      status.classList.add('is-ok');
+      status.style.background = 'var(--success-bg)';
+      status.style.color = 'var(--success)';
+      const name = fileName ? ` — ${fileName}` : '';
+      status.innerHTML = `<span class="status-inline">${statusIcon('ok')} <span>${t('uploadSuccess')}${name}</span></span>`
+        + ` <button type="button" class="link upload-replace-btn" id="${ids.replaceBtn || ''}">${t('uploadReplace')}</button>`;
+      const btn = document.getElementById(ids.replaceBtn);
+      if (btn && ids.onReplace) btn.onclick = (e) => { e.preventDefault(); ids.onReplace(); };
+    }
+    return;
+  }
+
+  if (phase === 'error') {
+    zone?.classList.remove('hidden');
+    if (status) {
+      status.classList.remove('hidden', 'is-ok');
+      status.classList.add('is-warn');
+      status.style.background = 'var(--error-bg)';
+      status.style.color = 'var(--error)';
+      status.innerHTML = `<span class="status-inline">${statusIcon(false)} <span>${t('uploadErr')}: ${message}</span></span>`;
+    }
+    return;
+  }
+
+  // idle
+  zone?.classList.remove('hidden');
+  if (status) {
+    status.classList.add('hidden');
+    status.innerHTML = '';
+  }
+}
+
 function bindZipUploadZone() {
   const zone = document.getElementById('uploadZone');
   const input = document.getElementById('fileInputZip');
@@ -1308,8 +1408,31 @@ async function renderUploadSection() {
 async function uploadSlotFile(slot, file) {
   const status = document.getElementById('uploadStatus');
   const inventory = document.getElementById('uploadInventory');
-  status.classList.remove('hidden');
-  status.textContent = `${t('uploading')} ${file.name}...`;
+  const isZip = slot === 'bundle_zip';
+  const progressIds = {
+    zone: 'uploadZone',
+    panel: 'uploadZipProgress',
+    fill: 'uploadZipProgressFill',
+    pct: 'uploadZipProgressPct',
+    msg: 'uploadZipProgressMsg',
+    status: 'uploadStatus',
+    replaceBtn: 'uploadZipReplaceBtn',
+    onReplace: () => {
+      setUploadProgressUi(progressIds, { phase: 'idle' });
+      document.getElementById('fileInputZip')?.click();
+    },
+  };
+
+  if (isZip) {
+    setUploadProgressUi(progressIds, {
+      phase: 'uploading',
+      pct: 0,
+      message: `${t('uploadProgress')} (${file.name})`,
+    });
+  } else {
+    status.classList.remove('hidden');
+    status.textContent = `${t('uploading')} ${file.name}...`;
+  }
 
   const form = new FormData();
   form.append('file', file);
@@ -1320,21 +1443,20 @@ async function uploadSlotFile(slot, file) {
   form.append('marzban_mode', 'fresh');
 
   try {
-    const res = await fetch('/api/upload', { method: 'POST', body: form });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.detail || res.statusText);
-    }
-    const data = await res.json();
+    const data = await uploadFormWithProgress('/api/upload', form, (pct) => {
+      if (!isZip) return;
+      setUploadProgressUi(progressIds, {
+        phase: 'uploading',
+        pct: pct == null ? 0 : pct,
+        message: `${t('uploadProgress')} (${file.name})`,
+      });
+    });
     state.uploadBundleId = data.bundle_id;
     state.bundleStatus = data.bundle_status;
     state.uploadInfo = data.slot_meta;
 
     const bs = data.bundle_status || {};
-    const ok = bs.complete;
-    status.innerHTML = `<span class="status-inline">${statusIcon(ok ? 'ok' : 'warn')} <span>${file.name} ${t('uploaded')}</span></span>`;
-    status.style.background = ok ? 'var(--success-bg)' : 'var(--warning-bg)';
-    status.style.color = ok ? 'var(--success)' : 'var(--warning)';
+    const ok = !!bs.complete;
 
     if (bs.analysis) {
       renderUploadInventory({ analysis: bs.analysis });
@@ -1345,12 +1467,38 @@ async function uploadSlotFile(slot, file) {
     applyBundleAnalysis(bs);
     renderUploadSection();
     renderBundleStatus(bs);
+
+    if (isZip) {
+      document.getElementById('uploadZone')?.classList.add('hidden');
+      document.getElementById('uploadZipProgress')?.classList.add('hidden');
+      if (status) {
+        status.classList.remove('hidden', 'is-warn');
+        status.classList.add('is-ok');
+        status.style.background = 'var(--success-bg)';
+        status.style.color = 'var(--success)';
+        const msg = ok ? t('upload.allReady') : t('uploadSuccess');
+        status.innerHTML = `<span class="status-inline">${statusIcon(ok ? 'ok' : 'warn')} <span>${msg}</span></span>`
+          + ` <span class="check-detail">(${escapeHtmlApp(file.name)})</span>`
+          + ` <button type="button" class="link upload-replace-btn" id="uploadZipReplaceBtn">${t('uploadReplace')}</button>`;
+        const btn = document.getElementById('uploadZipReplaceBtn');
+        if (btn) btn.onclick = (e) => { e.preventDefault(); progressIds.onReplace(); };
+      }
+    } else {
+      status.innerHTML = `<span class="status-inline">${statusIcon(ok ? 'ok' : 'warn')} <span>${escapeHtmlApp(file.name)} ${t('uploaded')}</span></span>`;
+      status.style.background = ok ? 'var(--success-bg)' : 'var(--warning-bg)';
+      status.style.color = ok ? 'var(--success)' : 'var(--warning)';
+    }
+
     if (state.selectedPanel) await renderPanelPrereqs(state.selectedPanel.id);
     updateStepButtons();
   } catch (e) {
-    status.innerHTML = `<span class="status-inline">${statusIcon(false)} <span>${t('uploadErr')}: ${e.message}</span></span>`;
-    status.style.background = 'var(--error-bg)';
-    status.style.color = 'var(--error)';
+    if (isZip) {
+      setUploadProgressUi(progressIds, { phase: 'error', message: e.message });
+    } else {
+      status.innerHTML = `<span class="status-inline">${statusIcon(false)} <span>${t('uploadErr')}: ${escapeHtmlApp(e.message)}</span></span>`;
+      status.style.background = 'var(--error-bg)';
+      status.style.color = 'var(--error)';
+    }
   }
 }
 
@@ -1373,18 +1521,6 @@ function renderBundleStatus(bs) {
   // Slot checklist boxes removed — uploadStatus already shows success/waiting.
   el.innerHTML = '';
   el.classList.add('hidden');
-  if (!bs) return;
-  const status = document.getElementById('uploadStatus');
-  if (!status || status.classList.contains('hidden')) return;
-  if (bs.complete) {
-    status.innerHTML = `<span class="status-inline">${statusIcon('ok')} <span>${t('upload.allReady')}</span></span>`;
-    status.style.background = 'var(--success-bg)';
-    status.style.color = 'var(--success)';
-  } else if (state.uploadBundleId) {
-    status.innerHTML = `<span class="status-inline">${statusIcon('wait')} <span>${t('upload.waitingFiles')}</span></span>`;
-    status.style.background = 'var(--warning-bg)';
-    status.style.color = 'var(--warning)';
-  }
 }
 
 async function uploadFile(file) {

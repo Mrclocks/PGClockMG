@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#0f1218">
   <title>PGClockMG</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=1.0beta.1">
+  <link rel="stylesheet" href="/static/css/style.css?v=1.0beta.4">
   <!-- Fonts: non-blocking so mobile/Iran networks don't stall first paint -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -32,9 +32,9 @@
             <svg class="lang-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
           </summary>
           <div class="lang-menu" role="listbox">
-            <button type="button" class="lang-option" data-lang="fa" onclick="setLang('fa')">فارسی</button>
+            <button type="button" class="lang-option" data-lang="fa" onclick="setLang('fa')">?????</button>
             <button type="button" class="lang-option" data-lang="en" onclick="setLang('en')">English</button>
-            <button type="button" class="lang-option" data-lang="ru" onclick="setLang('ru')">Русский</button>
+            <button type="button" class="lang-option" data-lang="ru" onclick="setLang('ru')">???????</button>
           </div>
         </details>
       </div>
@@ -194,6 +194,15 @@
             </div>
             <p><span id="restoreDragText"></span> <span class="link" id="restoreSelectText"></span></p>
           </div>
+          <div id="restoreUploadProgress" class="progress-panel upload-progress hidden">
+            <div class="progress-meta">
+              <p class="status-msg progress-status" id="restoreUploadProgressMsg"></p>
+              <span class="progress-pct" id="restoreUploadProgressPct">0%</span>
+            </div>
+            <div class="progress-track" aria-hidden="true">
+              <div class="progress-fill" id="restoreUploadProgressFill" style="width:0%"></div>
+            </div>
+          </div>
           <div id="restoreUploadStatus" class="upload-status hidden"></div>
           <div id="restoreAnalysis" class="summary-card hidden"></div>
           <div id="restoreWarnings" class="warnings-box hidden"></div>
@@ -343,6 +352,15 @@
                 <svg class="icon icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>
               </div>
               <p><span id="uploadDragText"></span> <span class="link" id="uploadSelectText"></span></p>
+            </div>
+            <div id="uploadZipProgress" class="progress-panel upload-progress hidden">
+              <div class="progress-meta">
+                <p class="status-msg progress-status" id="uploadZipProgressMsg"></p>
+                <span class="progress-pct" id="uploadZipProgressPct">0%</span>
+              </div>
+              <div class="progress-track" aria-hidden="true">
+                <div class="progress-fill" id="uploadZipProgressFill" style="width:0%"></div>
+              </div>
             </div>
           </div>
 
@@ -503,10 +521,10 @@
     </div>
   </div>
 
-  <script src="/static/js/icons.js?v=1.0beta.3"></script>
-  <script src="/static/js/i18n.js?v=1.0beta.3"></script>
-  <script src="/static/js/app.js?v=1.0beta.3"></script>
-  <script src="/static/js/wizard-flow.js?v=1.0beta.3"></script>
+  <script src="/static/js/icons.js?v=1.0beta.4"></script>
+  <script src="/static/js/i18n.js?v=1.0beta.4"></script>
+  <script src="/static/js/app.js?v=1.0beta.4"></script>
+  <script src="/static/js/wizard-flow.js?v=1.0beta.4"></script>
 </body>
 </html>
 

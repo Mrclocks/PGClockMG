@@ -273,6 +273,9 @@ const I18N = {
     uploading: 'Uploading',
     uploaded: 'uploaded',
     uploadErr: 'Upload error',
+    uploadProgress: 'Uploading backup…',
+    uploadSuccess: 'Backup uploaded successfully',
+    uploadReplace: 'Upload another file',
     detected: 'Detected',
     dbCred: {
       sourceHint: 'Open your Marzban .env on the server, copy DB values, and paste them below.',
@@ -619,6 +622,9 @@ const I18N = {
     uploading: 'در حال آپلود',
     uploaded: 'آپلود شد',
     uploadErr: 'خطا',
+    uploadProgress: 'در حال آپلود بکاپ…',
+    uploadSuccess: 'بکاپ با موفقیت آپلود شد',
+    uploadReplace: 'آپلود فایل دیگر',
     detected: 'تشخیص',
     dbCred: {
       sourceHint: 'فایل .env مرزبان را با nano باز کنید، مقادیر دیتابیس را کپی و در فیلدهای زیر وارد کنید.',
@@ -965,6 +971,9 @@ const I18N = {
     uploading: 'Загрузка',
     uploaded: 'загружено',
     uploadErr: 'Ошибка',
+    uploadProgress: 'Загрузка бэкапа…',
+    uploadSuccess: 'Бэкап успешно загружен',
+    uploadReplace: 'Загрузить другой файл',
     detected: 'Определено',
     dbCred: {
       sourceHint: 'Откройте .env Marzban через nano, скопируйте данные БД и введите ниже.',

@@ -772,6 +772,23 @@ button.db-card {
   color: var(--success);
 }
 
+.upload-progress {
+  margin-top: 4px;
+  margin-bottom: 12px;
+}
+
+.upload-replace-btn {
+  margin-inline-start: 10px;
+  font-size: 0.82rem;
+  vertical-align: baseline;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--primary);
+  text-decoration: underline;
+}
+
 .upload-inventory {
   margin-top: 16px;
   background: var(--bg-card);
