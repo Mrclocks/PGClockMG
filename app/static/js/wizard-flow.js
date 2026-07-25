@@ -785,19 +785,13 @@ async function uploadRestoreZip(file) {
 
     document.getElementById('restoreUploadZone')?.classList.add('hidden');
     document.getElementById('restoreUploadProgress')?.classList.add('hidden');
-    const status = document.getElementById('restoreUploadStatus');
-    if (status) {
-      status.classList.remove('hidden', 'is-warn');
-      status.classList.add('is-ok');
-      status.style.background = analysis.ok ? 'var(--success-bg)' : 'var(--warning-bg)';
-      status.style.color = analysis.ok ? 'var(--success)' : 'var(--warning)';
-      const msg = analysis.ok ? t('uploadSuccess') : t('uploadSuccess');
-      status.innerHTML = `<span class="status-inline">${statusIcon(analysis.ok ? 'ok' : 'warn')} <span>${msg}</span></span>`
-        + ` <span class="check-detail">(${escapeHtml(file.name)})</span>`
-        + ` <button type="button" class="link upload-replace-btn" id="restoreUploadReplaceBtn">${t('uploadReplace')}</button>`;
-      const rbtn = document.getElementById('restoreUploadReplaceBtn');
-      if (rbtn) rbtn.onclick = (e) => { e.preventDefault(); progressIds.onReplace(); };
-    }
+    applyUploadSuccessStatus(document.getElementById('restoreUploadStatus'), {
+      ok: !!analysis.ok,
+      message: t('uploadSuccess'),
+      fileName: file.name,
+      replaceId: 'restoreUploadReplaceBtn',
+      onReplace: progressIds.onReplace,
+    });
   } catch (e) {
     setUploadProgressUi(progressIds, { phase: 'error', message: e.message });
     if (btn) btn.disabled = true;

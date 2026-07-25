@@ -8,8 +8,19 @@
   --pg-orange: 24 95% 53%;
   --pg-destructive: 0 72% 51%;
   --pg-success: 152 60% 40%;
-  --radius: 1rem;
-  --radius-sm: 0.75rem;
+  --pg-warning: 38 92% 50%;
+
+  --radius: 14px;
+  --radius-sm: 10px;
+  --radius-pill: 999px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 28px;
 
   --bg: hsl(var(--pg-bg));
   --bg-card: hsl(var(--pg-card));
@@ -21,15 +32,23 @@
   --text-dim: hsl(220 6% 48%);
   --primary: hsl(var(--pg-primary));
   --primary-hover: hsl(210 90% 46%);
+  --primary-glow: hsla(var(--pg-primary), 0.22);
+  --primary-soft: hsla(var(--pg-primary), 0.1);
   --orange: hsl(var(--pg-orange));
-  --primary-glow: transparent;
   --success: hsl(var(--pg-success));
-  --success-bg: hsla(152, 60%, 40%, 0.14);
-  --warning: hsl(38 92% 50%);
-  --warning-bg: hsla(38, 92%, 50%, 0.12);
+  --success-bg: hsla(var(--pg-success), 0.14);
+  --success-border: hsla(var(--pg-success), 0.35);
+  --warning: hsl(var(--pg-warning));
+  --warning-bg: hsla(var(--pg-warning), 0.12);
+  --warning-border: hsla(var(--pg-warning), 0.35);
   --error: hsl(var(--pg-destructive));
-  --error-bg: hsla(0, 72%, 51%, 0.12);
-  --shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+  --error-bg: hsla(var(--pg-destructive), 0.12);
+  --error-border: hsla(var(--pg-destructive), 0.35);
+  --info-bg: hsla(var(--pg-primary), 0.08);
+  --info-border: hsla(var(--pg-primary), 0.32);
+  --shadow: 0 8px 28px rgba(0, 0, 0, 0.32);
+  --surface-pad: 16px 18px;
+  --control-h: 44px;
   --font: 'Vazirmatn', 'Tahoma', system-ui, sans-serif;
   --font-mono: ui-monospace, 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace;
 }
@@ -313,8 +332,8 @@ html[lang="fa"] body {
 }
 
 .step.done .step-num {
-  background: hsla(142, 76%, 36%, 0.15);
-  border-color: hsla(142, 76%, 36%, 0.55);
+  background: var(--success-bg);
+  border-color: var(--success-border);
   color: var(--success);
   font-size: 0;
 }
@@ -429,11 +448,11 @@ html[lang="fa"] .step-label {
 
 .panel-card {
   background: var(--bg-card);
-  border: 2px solid var(--border);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 16px;
   cursor: pointer;
-  transition: all 0.25s;
+  transition: border-color 0.2s, background 0.2s, box-shadow 0.2s, transform 0.2s;
   position: relative;
   display: flex;
   flex-direction: column;
@@ -448,7 +467,7 @@ html[lang="fa"] .step-label {
 
 .panel-card.selected {
   border-color: var(--primary);
-  background: rgba(59, 130, 246, 0.08);
+  background: var(--primary-soft);
   box-shadow: 0 0 0 3px var(--primary-glow);
 }
 
@@ -503,16 +522,6 @@ html[lang="fa"] .step-label {
   gap: 4px;
 }
 
-.block-msg {
-  margin: 12px 0;
-  padding: 12px 14px;
-  border-radius: var(--radius-sm);
-  background: var(--error-bg);
-  color: var(--error);
-  font-size: 0.85rem;
-  line-height: 1.5;
-}
-
 .cred-hint-box {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -559,12 +568,12 @@ html[lang="fa"] .step-label {
 
 .db-card {
   background: var(--bg-card);
-  border: 2px solid var(--border);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   padding: 16px;
   text-align: center;
   cursor: pointer;
-  transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
+  transition: border-color 0.2s, background 0.2s, box-shadow 0.2s, transform 0.2s;
   color: inherit;
   font: inherit;
   width: 100%;
@@ -577,10 +586,13 @@ button.db-card {
   -webkit-appearance: none;
 }
 
-.db-card:hover { border-color: var(--border-hover); }
+.db-card:hover {
+  border-color: var(--border-hover);
+  transform: translateY(-2px);
+}
 .db-card.selected {
   border-color: var(--primary);
-  background: rgba(59, 130, 246, 0.08);
+  background: var(--primary-soft);
   box-shadow: 0 0 0 3px var(--primary-glow);
 }
 .db-badge {
@@ -626,7 +638,7 @@ button.db-card {
 .mode-card:hover { border-color: var(--border-hover); }
 .mode-card.selected {
   border-color: var(--primary);
-  background: rgba(59, 130, 246, 0.08);
+  background: var(--primary-soft);
   box-shadow: 0 0 0 3px var(--primary-glow);
 }
 .mode-card .mode-icon { font-size: 1.6rem; margin-bottom: 8px; }
@@ -750,44 +762,97 @@ button.db-card {
   border-radius: var(--radius);
   padding: 36px;
   text-align: center;
-  transition: all 0.2s;
+  transition: border-color 0.2s, background 0.2s;
   cursor: pointer;
 }
 
-.upload-zone:hover, .upload-zone.dragover {
+.upload-zone:hover,
+.upload-zone.dragover {
   border-color: var(--primary);
-  background: var(--primary-glow);
+  background: var(--primary-soft);
 }
 
-.upload-icon { font-size: 2.5rem; margin-bottom: 10px; }
+.upload-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 10px;
+  color: var(--text-muted);
+}
 .upload-zone .link { color: var(--primary); cursor: pointer; text-decoration: underline; }
 
+/* Upload result banner — vertically centered content */
 .upload-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
   margin-top: 12px;
-  padding: 12px 16px;
+  min-height: 52px;
+  padding: 14px 16px;
   background: var(--success-bg);
-  border: 1px solid rgba(16,185,129,0.3);
+  border: 1px solid var(--success-border);
   border-radius: var(--radius-sm);
-  font-size: 0.85rem;
+  font-size: 0.88rem;
+  line-height: 1.4;
   color: var(--success);
 }
-
+.upload-status.is-ok {
+  background: var(--success-bg);
+  border-color: var(--success-border);
+  color: var(--success);
+}
+.upload-status.is-warn {
+  background: var(--warning-bg);
+  border-color: var(--warning-border);
+  color: var(--warning);
+}
+.upload-status.is-error {
+  background: var(--error-bg);
+  border-color: var(--error-border);
+  color: var(--error);
+}
+.upload-status .status-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 1.35rem;
+  line-height: 1.35;
+}
+.upload-status .status-inline .icon {
+  flex: 0 0 auto;
+  width: 1.25rem;
+  height: 1.25rem;
+  display: block;
+}
+.upload-status-msg {
+  display: inline;
+  line-height: 1.35;
+}
+.upload-status-file {
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  line-height: 1.35;
+  direction: ltr;
+}
 .upload-progress {
   margin-top: 4px;
   margin-bottom: 12px;
 }
-
 .upload-replace-btn {
-  margin-inline-start: 10px;
+  margin-inline-start: auto;
+  align-self: center;
   font-size: 0.82rem;
-  vertical-align: baseline;
+  line-height: 1.35;
   background: none;
   border: none;
   padding: 0;
   cursor: pointer;
   color: var(--primary);
   text-decoration: underline;
+  font-family: inherit;
 }
+.upload-replace-btn:hover { opacity: 0.85; }
 
 .upload-inventory {
   margin-top: 16px;
@@ -819,7 +884,7 @@ button.db-card {
   border: 1px solid var(--border);
 }
 
-.upload-inventory .inv-badge.ok { border-color: rgba(16,185,129,0.4); color: var(--success); }
+.upload-inventory .inv-badge.ok { border-color: var(--success-border); color: var(--success); }
 .upload-inventory .inv-badge.warn { border-color: rgba(245,158,11,0.4); color: var(--warning); }
 
 .upload-inventory table {
@@ -882,7 +947,7 @@ button.db-card {
   background: var(--bg-elevated);
 }
 
-.upload-slot.done { border-color: rgba(16,185,129,0.4); }
+.upload-slot.done { border-color: var(--success-border); }
 
 .upload-slot-head { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 10px; }
 .upload-slot-icon { font-size: 1.1rem; min-width: 24px; }
@@ -907,26 +972,45 @@ button.db-card {
   border-radius: var(--radius-sm);
 }
 
-.btn-sm { padding: 6px 12px; font-size: 0.8rem; }
+.btn-sm { padding: 8px 14px; font-size: 0.8rem; min-height: 36px; border-radius: var(--radius-sm); }
 
-/* Info / Warning boxes */
-.info-box, .warnings-box, .warning-card, .option-card, .summary-card {
+/* Info / Warning / Success surfaces — one chrome family */
+.info-box, .warnings-box, .warning-card, .option-card, .summary-card, .success-card, .block-msg {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 16px 20px;
+  padding: var(--surface-pad);
   margin-bottom: 20px;
 }
 
-.info-box { border-color: rgba(59,130,246,0.3); background: rgba(59,130,246,0.05); }
-.warnings-box, .warning-card { border-color: rgba(245,158,11,0.3); background: var(--warning-bg); }
+.info-box {
+  border-color: var(--info-border);
+  background: var(--info-bg);
+}
+.warnings-box, .warning-card {
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+}
 .warning-card h4 { color: var(--warning); margin-bottom: 8px; font-size: 0.95rem; }
+.success-card {
+  border-color: var(--success-border);
+  background: var(--success-bg);
+}
+.success-card h3 { margin-bottom: 8px; color: var(--success); font-family: var(--font); }
+.block-msg {
+  background: var(--error-bg);
+  border-color: var(--error-border);
+  color: var(--error);
+  font-size: 0.85rem;
+  line-height: 1.5;
+  margin: 12px 0;
+}
 
 .checks-list { margin-bottom: 20px; }
 
 .check-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 12px;
   padding: 12px 16px;
   background: var(--bg-card);
@@ -936,8 +1020,17 @@ button.db-card {
   font-size: 0.9rem;
 }
 
-.check-icon { font-size: 1.1rem; flex-shrink: 0; }
-.check-detail { font-size: 0.8rem; color: var(--text-dim); }
+.check-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 1.35rem;
+  height: 1.35rem;
+  margin-top: 2px;
+  color: var(--text-muted);
+}
+.check-detail { font-size: 0.8rem; color: var(--text-dim); line-height: 1.45; }
 
 /* Summary */
 .summary-card {
@@ -1069,7 +1162,7 @@ button.db-card {
   height: 10px;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   overflow: hidden;
   position: relative;
 }
@@ -1147,7 +1240,6 @@ button.db-card {
   padding: 40px 24px;
 }
 
-.result-icon { font-size: 4rem; margin-bottom: 16px; }
 .result-card h2 { margin-bottom: 12px; }
 .result-card p { color: var(--text-muted); margin-bottom: 20px; }
 .result-card > .btn,
@@ -1164,9 +1256,9 @@ button.db-card {
 
 .result-card.success {
   background: var(--bg-card);
-  border: 1px solid hsla(142, 76%, 36%, 0.4);
+  border: 1px solid var(--success-border);
   border-radius: var(--radius);
-  box-shadow: 0 0 0 1px hsla(142, 76%, 36%, 0.08);
+  box-shadow: 0 0 0 1px var(--success-bg);
 }
 .result-card.error {
   background: var(--bg-card);
@@ -1197,8 +1289,8 @@ button.db-card {
 
 .post-migrate-tip {
   padding: 14px 16px;
-  background: rgba(59, 130, 246, 0.08);
-  border: 1px solid rgba(59, 130, 246, 0.25);
+  background: var(--primary-soft);
+  border: 1px solid var(--info-border);
   border-radius: var(--radius-sm);
   color: var(--text);
   font-size: 0.9rem;
@@ -1366,7 +1458,7 @@ button.db-card {
 /* Detected target DB (step 3) */
 .detected-db-card {
   background: var(--bg-card);
-  border: 1px solid rgba(59, 130, 246, 0.25);
+  border: 1px solid var(--info-border);
   border-radius: var(--radius);
   padding: 20px 22px;
   margin-bottom: 20px;
@@ -1489,9 +1581,9 @@ button.db-card {
   font-weight: 600;
   padding: 2px 8px;
   border-radius: 999px;
-  background: rgba(59, 130, 246, 0.12);
+  background: var(--primary-soft);
   color: var(--primary);
-  border: 1px solid rgba(59, 130, 246, 0.25);
+  border: 1px solid var(--info-border);
 }
 
 .pwd-field-controls {
@@ -1530,7 +1622,7 @@ button.db-card {
   padding: 10px 16px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--primary);
-  background: rgba(59, 130, 246, 0.1);
+  background: var(--primary-soft);
   color: var(--primary);
   font-family: var(--font);
   font-size: 0.8rem;
@@ -1732,13 +1824,13 @@ button.db-card {
 }
 .choice-card:hover {
   border-color: var(--primary);
-  background: hsl(220 14% 13%);
+  background: var(--bg-elevated);
   transform: translateY(-2px);
 }
 .choice-card.active,
 .choice-card.selected {
   border-color: var(--primary);
-  background: hsla(210, 90%, 52%, 0.1);
+  background: var(--primary-soft);
   box-shadow: 0 0 0 3px var(--primary-glow);
 }
 .choice-card strong {
@@ -1762,7 +1854,7 @@ button.db-card {
   width: 44px;
   height: 44px;
   border-radius: 12px;
-  background: hsla(210, 90%, 52%, 0.12);
+  background: var(--primary-soft);
   color: var(--primary);
   margin-bottom: 6px;
   flex-shrink: 0;
@@ -1774,18 +1866,6 @@ button.db-card {
   height: 22px;
   display: block;
   margin: 0 auto;
-}
-.success-card {
-  background: var(--bg-card);
-  border: 1px solid hsla(142, 76%, 36%, 0.35);
-  border-radius: var(--radius);
-  padding: 18px;
-  margin: 12px 0;
-}
-.success-card h3 { margin-bottom: 8px; color: var(--success); font-family: var(--font); }
-.upload-zone.dragover {
-  border-color: var(--primary);
-  background: rgba(59,130,246,.08);
 }
 
 /* shadcn-like helpers */
@@ -1920,30 +2000,25 @@ button.db-card {
 .logo .icon { width: 1.4rem; height: 1.4rem; color: hsl(24, 95%, 62%); }
 .result-icon {
   display: flex;
+  align-items: center;
   justify-content: center;
   margin-bottom: 12px;
   color: var(--success);
 }
 .result-card.error .result-icon { color: var(--error); }
-.upload-icon {
-  display: flex;
-  justify-content: center;
-  margin-bottom: 10px;
-  color: var(--text-muted);
-}
 
 /* Guide sections after install */
 .guide-sections { text-align: start; margin-top: 12px; }
 .guide-block {
   margin: 12px 0;
   padding: 14px 16px;
-  border: 1px solid hsla(142, 76%, 36%, 0.28);
+  border: 1px solid var(--success-border);
   border-radius: var(--radius);
-  background: hsla(142, 76%, 36%, 0.07);
+  background: var(--success-bg);
 }
 .result-card.success .guide-block {
-  border-color: hsla(142, 76%, 36%, 0.32);
-  background: hsla(142, 76%, 36%, 0.08);
+  border-color: var(--success-border);
+  background: var(--success-bg);
 }
 .guide-title {
   font-size: 0.92rem;
@@ -1966,16 +2041,9 @@ button.db-card {
 }
 .guide-item .install-cmd-box {
   background: hsl(240 2% 9%);
-  border-color: hsla(142, 76%, 36%, 0.2);
+  border-color: var(--success-border);
 }
 
-.check-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.35rem;
-  color: var(--text-muted);
-}
 .check-icon .icon-ok { color: var(--success); }
 .check-icon .icon-err { color: var(--error); }
 .check-icon .icon-warn { color: var(--warning); }
@@ -1987,7 +2055,12 @@ button.db-card {
 .status-inline {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  line-height: 1.35;
+}
+.status-inline .icon {
+  flex: 0 0 auto;
+  display: block;
 }
 .warn-line {
   display: flex;
@@ -2050,9 +2123,6 @@ button.db-card {
   html[dir="rtl"] .modal-actions { justify-content: flex-start; }
 }
 
-.upload-status.is-ok { color: var(--success); }
-.upload-status.is-warn { color: var(--warning); }
-.warn-line { color: var(--warning); font-size: 0.88rem; margin: 6px 0; }
 /* Manual install guide */
 .section-title {
   margin: 28px 0 10px;

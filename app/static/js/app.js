@@ -1224,6 +1224,32 @@ function escapeHtmlApp(s) {
     .replace(/"/g, '&quot;');
 }
 
+function renderUploadSuccessHtml({ ok = true, message, fileName = '', replaceId }) {
+  const tone = ok ? 'ok' : 'warn';
+  const file = fileName
+    ? `<span class="upload-status-file">(${escapeHtmlApp(fileName)})</span>`
+    : '';
+  const replace = replaceId
+    ? `<button type="button" class="link upload-replace-btn" id="${replaceId}">${t('uploadReplace')}</button>`
+    : '';
+  return `<span class="status-inline">${statusIcon(tone)}<span class="upload-status-msg">${message}</span></span>${file}${replace}`;
+}
+
+function applyUploadSuccessStatus(statusEl, opts) {
+  if (!statusEl) return;
+  statusEl.classList.remove('hidden', 'is-warn', 'is-error', 'is-ok');
+  if (opts.error) statusEl.classList.add('is-error');
+  else if (opts.ok) statusEl.classList.add('is-ok');
+  else statusEl.classList.add('is-warn');
+  statusEl.style.background = '';
+  statusEl.style.color = '';
+  statusEl.innerHTML = renderUploadSuccessHtml(opts);
+  if (opts.replaceId && opts.onReplace) {
+    const btn = document.getElementById(opts.replaceId);
+    if (btn) btn.onclick = (e) => { e.preventDefault(); opts.onReplace(); };
+  }
+}
+
 function setUploadProgressUi(ids, { phase, pct = 0, message = '', fileName = '' } = {}) {
   const zone = document.getElementById(ids.zone);
   const panel = document.getElementById(ids.panel);
@@ -1248,28 +1274,28 @@ function setUploadProgressUi(ids, { phase, pct = 0, message = '', fileName = '' 
 
   if (phase === 'success') {
     zone?.classList.add('hidden');
-    if (status) {
-      status.classList.remove('hidden', 'is-warn');
-      status.classList.add('is-ok');
-      status.style.background = 'var(--success-bg)';
-      status.style.color = 'var(--success)';
-      const name = fileName ? ` — ${fileName}` : '';
-      status.innerHTML = `<span class="status-inline">${statusIcon('ok')} <span>${t('uploadSuccess')}${name}</span></span>`
-        + ` <button type="button" class="link upload-replace-btn" id="${ids.replaceBtn || ''}">${t('uploadReplace')}</button>`;
-      const btn = document.getElementById(ids.replaceBtn);
-      if (btn && ids.onReplace) btn.onclick = (e) => { e.preventDefault(); ids.onReplace(); };
-    }
+    applyUploadSuccessStatus(status, {
+      ok: true,
+      message: t('uploadSuccess'),
+      fileName,
+      replaceId: ids.replaceBtn,
+      onReplace: ids.onReplace,
+    });
     return;
   }
 
   if (phase === 'error') {
     zone?.classList.remove('hidden');
     if (status) {
-      status.classList.remove('hidden', 'is-ok');
-      status.classList.add('is-warn');
-      status.style.background = 'var(--error-bg)';
-      status.style.color = 'var(--error)';
-      status.innerHTML = `<span class="status-inline">${statusIcon(false)} <span>${t('uploadErr')}: ${message}</span></span>`;
+      applyUploadSuccessStatus(status, {
+        ok: false,
+        error: true,
+        message: `${t('uploadErr')}: ${escapeHtmlApp(message)}`,
+      });
+      // message already escaped in text content path — use plain for error helper
+      status.innerHTML = `<span class="status-inline">${statusIcon(false)}<span class="upload-status-msg">${t('uploadErr')}: ${escapeHtmlApp(message)}</span></span>`;
+      status.classList.remove('is-ok', 'is-warn');
+      status.classList.add('is-error');
     }
     return;
   }
@@ -1471,22 +1497,18 @@ async function uploadSlotFile(slot, file) {
     if (isZip) {
       document.getElementById('uploadZone')?.classList.add('hidden');
       document.getElementById('uploadZipProgress')?.classList.add('hidden');
-      if (status) {
-        status.classList.remove('hidden', 'is-warn');
-        status.classList.add('is-ok');
-        status.style.background = 'var(--success-bg)';
-        status.style.color = 'var(--success)';
-        const msg = ok ? t('upload.allReady') : t('uploadSuccess');
-        status.innerHTML = `<span class="status-inline">${statusIcon(ok ? 'ok' : 'warn')} <span>${msg}</span></span>`
-          + ` <span class="check-detail">(${escapeHtmlApp(file.name)})</span>`
-          + ` <button type="button" class="link upload-replace-btn" id="uploadZipReplaceBtn">${t('uploadReplace')}</button>`;
-        const btn = document.getElementById('uploadZipReplaceBtn');
-        if (btn) btn.onclick = (e) => { e.preventDefault(); progressIds.onReplace(); };
-      }
+      applyUploadSuccessStatus(status, {
+        ok,
+        message: ok ? t('upload.allReady') : t('uploadSuccess'),
+        fileName: file.name,
+        replaceId: 'uploadZipReplaceBtn',
+        onReplace: progressIds.onReplace,
+      });
     } else {
-      status.innerHTML = `<span class="status-inline">${statusIcon(ok ? 'ok' : 'warn')} <span>${escapeHtmlApp(file.name)} ${t('uploaded')}</span></span>`;
-      status.style.background = ok ? 'var(--success-bg)' : 'var(--warning-bg)';
-      status.style.color = ok ? 'var(--success)' : 'var(--warning)';
+      applyUploadSuccessStatus(status, {
+        ok,
+        message: `${escapeHtmlApp(file.name)} ${t('uploaded')}`,
+      });
     }
 
     if (state.selectedPanel) await renderPanelPrereqs(state.selectedPanel.id);
