@@ -36,16 +36,17 @@
   --primary-soft: hsla(var(--pg-primary), 0.1);
   --orange: hsl(var(--pg-orange));
   --success: hsl(var(--pg-success));
-  --success-bg: hsla(var(--pg-success), 0.14);
-  --success-border: hsla(var(--pg-success), 0.35);
+  /* Soft fills + classic tinted borders (text stays vivid) */
+  --success-bg: hsla(var(--pg-success), 0.08);
+  --success-border: hsla(152, 60%, 45%, 0.32);
   --warning: hsl(var(--pg-warning));
-  --warning-bg: hsla(var(--pg-warning), 0.12);
-  --warning-border: hsla(var(--pg-warning), 0.35);
+  --warning-bg: hsla(var(--pg-warning), 0.08);
+  --warning-border: hsla(38, 92%, 55%, 0.32);
   --error: hsl(var(--pg-destructive));
-  --error-bg: hsla(var(--pg-destructive), 0.12);
-  --error-border: hsla(var(--pg-destructive), 0.35);
-  --info-bg: hsla(var(--pg-primary), 0.08);
-  --info-border: hsla(var(--pg-primary), 0.32);
+  --error-bg: hsla(var(--pg-destructive), 0.08);
+  --error-border: hsla(0, 72%, 55%, 0.32);
+  --info-bg: hsla(var(--pg-primary), 0.05);
+  --info-border: hsla(var(--pg-primary), 0.28);
   --shadow: 0 8px 28px rgba(0, 0, 0, 0.32);
   --surface-pad: 16px 18px;
   --control-h: 44px;
@@ -986,24 +987,29 @@ button.db-card {
 .info-box {
   border-color: var(--info-border);
   background: var(--info-bg);
+  color: var(--text);
 }
 .warnings-box, .warning-card {
   border-color: var(--warning-border);
   background: var(--warning-bg);
+  color: var(--warning);
 }
 .warning-card h4 { color: var(--warning); margin-bottom: 8px; font-size: 0.95rem; }
 .success-card {
   border-color: var(--success-border);
   background: var(--success-bg);
+  color: var(--text);
 }
 .success-card h3 { margin-bottom: 8px; color: var(--success); font-family: var(--font); }
 .block-msg {
   background: var(--error-bg);
-  border-color: var(--error-border);
+  border: 1px solid var(--error-border);
+  border-radius: var(--radius);
   color: var(--error);
   font-size: 0.85rem;
   line-height: 1.5;
   margin: 12px 0;
+  padding: var(--surface-pad);
 }
 
 .checks-list { margin-bottom: 20px; }
