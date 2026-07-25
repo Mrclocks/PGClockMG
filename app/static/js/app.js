@@ -418,8 +418,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   const rwTok = document.getElementById('remnawaveToken');
   if (rwUrl) rwUrl.placeholder = t('step2.remnawaveUrlPh');
   if (rwTok) rwTok.placeholder = t('step2.remnawaveTokenPh');
-  const footerGithub = document.getElementById('footerGithub');
-  if (footerGithub) footerGithub.textContent = t('footer.github');
+  const footerGithub = document.getElementById('footerGithubLabel');
+  if (footerGithub) footerGithub.textContent = t('footer.star');
+  if (typeof applySocialI18n === 'function') applySocialI18n();
   const statusMsg = document.getElementById('statusMsg');
   if (statusMsg) statusMsg.textContent = t('step5.preparing');
   setupUpload();

@@ -272,7 +272,11 @@ const I18N = {
     },
     support: { full: 'Full', partial: 'Partial', experimental: 'Experimental', db_only: 'DB only' },
     sub: { native: 'Links preserved', redirect: 'Links preserved via redirect', changed: 'Links will change' },
-    footer: { github: 'github.com/Mrclocks/PGClockMG' },
+    footer: {
+      telegram: 'Telegram channel',
+      star: 'Star on GitHub',
+    },
+    starCta: 'Star this project on GitHub',
     uploading: 'Uploading',
     uploaded: 'uploaded',
     uploadErr: 'Upload error',
@@ -624,8 +628,12 @@ const I18N = {
     },
     support: { full: 'کامل', partial: 'جزئی', experimental: 'آزمایشی', db_only: 'فقط DB' },
     sub: { native: 'لینک‌ها حفظ می‌شوند', redirect: 'لینک‌ها با redirect حفظ می‌شوند', changed: 'لینک‌ها تغییر می‌کنند' },
-    footer: { github: 'github.com/Mrclocks/PGClockMG' },
-    uploading: 'در حال آپلود',
+    footer: {
+      telegram: '\u06A9\u0627\u0646\u0627\u0644 \u062A\u0644\u06AF\u0631\u0627\u0645',
+      star: '\u0633\u062A\u0627\u0631\u0647 \u062F\u0631 \u06AF\u06CC\u062A\u200C\u0647\u0627\u0628',
+    },
+    starCta: '\u0628\u0647 \u0627\u06CC\u0646 \u067E\u0631\u0648\u0698\u0647 \u062F\u0631 \u06AF\u06CC\u062A\u200C\u0647\u0627\u0628 \u0633\u062A\u0627\u0631\u0647 \u0628\u062F\u0647',
+    uploading: '\u062F\u0631 \u062D\u0627\u0644 \u0622\u067E\u0644\u0648\u062F',
     uploaded: 'آپلود شد',
     uploadErr: 'خطا',
     uploadProgress: 'در حال آپلود بکاپ…',
@@ -976,8 +984,12 @@ const I18N = {
     },
     support: { full: 'Полная', partial: 'Частичная', experimental: 'Эксперимент', db_only: 'Только БД' },
     sub: { native: 'Ссылки сохранены', redirect: 'Ссылки через redirect', changed: 'Ссылки изменятся' },
-    footer: { github: 'github.com/Mrclocks/PGClockMG' },
-    uploading: 'Загрузка',
+    footer: {
+      telegram: '\u041A\u0430\u043D\u0430\u043B Telegram',
+      star: '\u0417\u0432\u0435\u0437\u0434\u0430 \u043D\u0430 GitHub',
+    },
+    starCta: '\u041F\u043E\u0441\u0442\u0430\u0432\u044C\u0442\u0435 \u0437\u0432\u0435\u0437\u0434\u0443 \u043D\u0430 GitHub',
+    uploading: '\u0417\u0430\u0433\u0440\u0443\u0437\u043A\u0430',
     uploaded: 'загружено',
     uploadErr: 'Ошибка',
     uploadProgress: 'Загрузка бэкапа…',
@@ -1086,19 +1098,20 @@ function tr(obj, lang) {
 
 /* Native names via Unicode escapes so HTML encoding cannot break labels */
 const LANG_META = {
-  fa: { code: 'FA', name: '\u0641\u0627\u0631\u0633\u06CC' },
-  en: { code: 'EN', name: 'English' },
-  ru: { code: 'RU', name: '\u0420\u0443\u0441\u0441\u043A\u0438\u0439' },
+  fa: { name: '\u0641\u0627\u0631\u0633\u06CC' },
+  en: { name: 'English' },
+  ru: { name: '\u0420\u0443\u0441\u0441\u043A\u0438\u0439' },
 };
+
+const GITHUB_REPO_URL = 'https://github.com/Mrclocks/PGClockMG';
+const TELEGRAM_URL = 'https://t.me/MrClockHub';
 
 function syncLangSwitch(lang) {
   document.querySelectorAll('.lang-btn').forEach((btn) => {
     const code = btn.dataset.lang;
     const meta = LANG_META[code];
     const nameEl = btn.querySelector('.lang-name');
-    const codeEl = btn.querySelector('.lang-code');
     if (meta) {
-      if (codeEl) codeEl.textContent = meta.code;
       if (nameEl) nameEl.textContent = meta.name;
       btn.setAttribute('aria-label', meta.name);
       btn.title = meta.name;
@@ -1109,6 +1122,27 @@ function syncLangSwitch(lang) {
   });
 }
 
+function applySocialI18n() {
+  const tg = document.getElementById('footerTelegramLabel');
+  const gh = document.getElementById('footerGithubLabel');
+  const starLabels = [
+    document.getElementById('migrateStarLabel'),
+    document.getElementById('restoreStarLabel'),
+  ];
+  if (tg) tg.textContent = t('footer.telegram');
+  if (gh) gh.textContent = t('footer.star');
+  starLabels.forEach((el) => {
+    if (el) el.textContent = t('starCta');
+  });
+  const tgLink = document.getElementById('footerTelegram');
+  const ghLink = document.getElementById('footerGithub');
+  if (tgLink) tgLink.href = TELEGRAM_URL;
+  if (ghLink) ghLink.href = GITHUB_REPO_URL;
+  document.querySelectorAll('#migrateStarLink, #restoreStarLink').forEach((a) => {
+    a.href = GITHUB_REPO_URL;
+  });
+}
+
 function setLang(lang) {
   state.lang = lang;
   localStorage.setItem('pg-migrator-lang', lang);
@@ -1116,6 +1150,7 @@ function setLang(lang) {
   document.documentElement.dir = lang === 'fa' ? 'rtl' : 'ltr';
   syncLangSwitch(lang);
   applyI18n();
+  applySocialI18n();
   renderGlobalChecks();
   if (state.selectedPanel) renderPanelPrereqs(state.selectedPanel.id);
   if (state.selectedPanel?.id === 'marzban' && typeof renderMarzbanModes === 'function') renderMarzbanModes();
