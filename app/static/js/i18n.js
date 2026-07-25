@@ -275,6 +275,8 @@ const I18N = {
     footer: {
       telegram: 'Telegram channel',
       star: 'Star on GitHub',
+      repo: 'github.com/Mrclocks/PGClockMG',
+      copyright: 'Copyright (c) 2026 Mrclocks \u2014 All rights reserved.',
     },
     starCta: 'Star this project on GitHub',
     uploading: 'Uploading',
@@ -631,6 +633,8 @@ const I18N = {
     footer: {
       telegram: '\u06A9\u0627\u0646\u0627\u0644 \u062A\u0644\u06AF\u0631\u0627\u0645',
       star: '\u0633\u062A\u0627\u0631\u0647 \u062F\u0631 \u06AF\u06CC\u062A\u200C\u0647\u0627\u0628',
+      repo: 'github.com/Mrclocks/PGClockMG',
+      copyright: 'Copyright (c) 2026 Mrclocks \u2014 \u0647\u0645\u0647 \u062D\u0642\u0648\u0642 \u0645\u062D\u0641\u0648\u0638 \u0627\u0633\u062A.',
     },
     starCta: '\u0628\u0647 \u0627\u06CC\u0646 \u067E\u0631\u0648\u0698\u0647 \u062F\u0631 \u06AF\u06CC\u062A\u200C\u0647\u0627\u0628 \u0633\u062A\u0627\u0631\u0647 \u0628\u062F\u0647',
     uploading: '\u062F\u0631 \u062D\u0627\u0644 \u0622\u067E\u0644\u0648\u062F',
@@ -987,6 +991,8 @@ const I18N = {
     footer: {
       telegram: '\u041A\u0430\u043D\u0430\u043B Telegram',
       star: '\u0417\u0432\u0435\u0437\u0434\u0430 \u043D\u0430 GitHub',
+      repo: 'github.com/Mrclocks/PGClockMG',
+      copyright: 'Copyright (c) 2026 Mrclocks \u2014 \u0412\u0441\u0435 \u043F\u0440\u0430\u0432\u0430 \u0437\u0430\u0449\u0438\u0449\u0435\u043D\u044B.',
     },
     starCta: '\u041F\u043E\u0441\u0442\u0430\u0432\u044C\u0442\u0435 \u0437\u0432\u0435\u0437\u0434\u0443 \u043D\u0430 GitHub',
     uploading: '\u0417\u0430\u0433\u0440\u0443\u0437\u043A\u0430',
@@ -1125,12 +1131,19 @@ function syncLangSwitch(lang) {
 function applySocialI18n() {
   const tg = document.getElementById('footerTelegramLabel');
   const gh = document.getElementById('footerGithubLabel');
+  const repo = document.getElementById('footerRepoUrl');
+  const copy = document.getElementById('footerCopyright');
   const starLabels = [
     document.getElementById('migrateStarLabel'),
     document.getElementById('restoreStarLabel'),
   ];
   if (tg) tg.textContent = t('footer.telegram');
   if (gh) gh.textContent = t('footer.star');
+  if (repo) {
+    repo.textContent = t('footer.repo') || 'github.com/Mrclocks/PGClockMG';
+    repo.href = GITHUB_REPO_URL;
+  }
+  if (copy) copy.textContent = t('footer.copyright');
   starLabels.forEach((el) => {
     if (el) el.textContent = t('starCta');
   });
