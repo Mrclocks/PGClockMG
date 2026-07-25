@@ -1,4 +1,10 @@
+<div dir="rtl" align="right">
+
 > ⚠️ **نسخه بتا (`v1.0beta`)** — الان عمومی شده، ولی هنوز در مرحله آزمایش است. ممکن است باگ داشته باشد؛ لطفاً با احتیاط استفاده کنید.
+
+<p align="center">
+  <b>فارسی</b> · <a href="README.en.md">English</a> · <a href="README.ru.md">Русский</a>
+</p>
 
 <div align="center">
 
@@ -89,3 +95,5 @@ systemctl stop pg-migrator && systemctl disable pg-migrator
 کپی، بازنشر، فروش یا استفاده بدون اجازه و بدون ذکر نام **مجاز نیست** و قابل پیگیری است (از جمله از طریق DMCA در GitHub).
 
 جزئیات بیشتر: [`LICENSE`](LICENSE) · مخزن: [github.com/Mrclocks/PGClockMG](https://github.com/Mrclocks/PGClockMG)
+
+</div>
