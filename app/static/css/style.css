@@ -385,7 +385,38 @@ html[lang="fa"] .step-label {
 .desc-sm {
   color: var(--text-dim);
   font-size: 0.85rem;
+  margin-top: 0;
   margin-bottom: 12px;
+  line-height: 1.55;
+}
+
+/* Captions under labels / above boxes must not glue to the box */
+.form-group > label + .install-cmd-row,
+.form-group > label + .db-grid,
+.form-group > label + input,
+.form-group > .desc-sm + .install-cmd-row,
+.form-group > .desc-sm + input,
+.section-title + .desc-sm,
+.section-title + .install-cmd-list,
+.section-title + .guide-steps {
+  margin-top: 0;
+}
+
+.install-cmd-row + .desc-sm,
+.install-cmd-box + .desc-sm,
+.install-cmd-card-head + .desc-sm,
+.specs-grid + .desc-sm,
+.info-box + .section-title,
+.success-card > h3 + .desc-sm {
+  margin-top: 10px;
+}
+
+.install-cmd-card .desc-sm {
+  margin: 4px 0 12px;
+}
+
+.install-cmd-card-head + .desc-sm + .install-cmd-row {
+  margin-top: 0;
 }
 
 /* Panel Grid */
@@ -441,7 +472,7 @@ html[lang="fa"] .step-label {
   font-size: 0.78rem;
   color: var(--text-muted);
   line-height: 1.5;
-  margin: 0 0 10px;
+  margin: 2px 0 14px;
   flex: 1;
 }
 
@@ -707,7 +738,11 @@ button.db-card {
 
 .upload-section h3 {
   font-size: 1rem;
-  margin-bottom: 4px;
+  margin-bottom: 8px;
+}
+
+.upload-section .desc-sm {
+  margin-bottom: 14px;
 }
 
 .upload-zone {
@@ -1905,7 +1940,13 @@ button.db-card {
   margin: 6px 0;
   line-height: 1.55;
 }
-.guide-item { margin-bottom: 10px; }
+.guide-item { margin-bottom: 14px; }
+.guide-item .guide-line {
+  margin: 0 0 10px;
+}
+.guide-item .install-cmd-row {
+  margin-top: 0;
+}
 .guide-item .install-cmd-box {
   background: hsl(240 2% 9%);
   border-color: hsla(142, 76%, 36%, 0.2);
@@ -1997,27 +2038,46 @@ button.db-card {
 .warn-line { color: var(--warning); font-size: 0.88rem; margin: 6px 0; }
 /* Manual install guide */
 .section-title {
-  margin: 22px 0 8px;
+  margin: 28px 0 10px;
   font-size: 1.05rem;
   font-weight: 600;
+  line-height: 1.4;
+}
+.section-title:first-child {
+  margin-top: 12px;
+}
+#pgInstallGuide .info-box {
+  margin-bottom: 8px;
+}
+#pgInstallGuide .section-title {
+  margin-top: 28px;
+}
+#pgInstallGuide #pgGuideIntro + .section-title {
+  margin-top: 20px;
 }
 .install-cmd-list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin: 12px 0 8px;
+  gap: 14px;
+  margin: 4px 0 12px;
 }
 .install-cmd-card {
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: 12px 14px;
+  padding: 14px 16px;
 }
 .install-cmd-card-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
+}
+.install-cmd-card-head strong {
+  line-height: 1.35;
+}
+.install-cmd-card .install-cmd-row {
+  margin-top: 0;
 }
 .install-cmd-card .install-cmd-box {
   flex: 1;
@@ -2030,18 +2090,53 @@ button.db-card {
   line-height: 1.45;
 }
 .guide-steps {
-  margin: 8px 0 4px 1.2rem;
+  margin: 4px 0 16px 1.2rem;
   color: var(--text-muted);
   font-size: 0.92rem;
-  line-height: 1.7;
+  line-height: 1.75;
 }
-.guide-steps li { margin-bottom: 4px; }
+.guide-steps li { margin-bottom: 8px; }
+.guide-steps li:last-child { margin-bottom: 0; }
+
+/* Label → box → caption under command rows in guide */
+#pgInstallGuide .form-group > label {
+  margin-bottom: 12px;
+}
+#pgInstallGuide .form-group > .install-cmd-row {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+#pgInstallGuide .form-group > .install-cmd-row + .desc-sm {
+  margin-top: 12px;
+  margin-bottom: 0;
+}
+
+/* Tip text above copyable path / command boxes */
+.info-box > p + .install-cmd-row,
+.cred-hint-box > p + .install-cmd-row {
+  margin-top: 12px;
+}
+.info-box > p:last-of-type {
+  margin-bottom: 0;
+}
+#pgInstalledCard > h3 {
+  margin-bottom: 8px;
+}
+#pgInstalledCard > .desc-sm {
+  margin-top: 0;
+  margin-bottom: 14px;
+}
+#pgInstalledCard > .specs-grid {
+  margin-top: 4px;
+  margin-bottom: 8px;
+}
+
 #pgDocsBox {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  margin-top: 16px;
+  margin-top: 20px;
   min-width: 0;
 }
 #pgDocsBox a {
