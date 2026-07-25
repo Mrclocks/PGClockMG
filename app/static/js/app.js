@@ -1369,68 +1369,32 @@ function applyBundleAnalysis(bs) {
 
 function renderBundleStatus(bs) {
   const el = document.getElementById('uploadBundleStatus');
-  if (!el || !bs) return;
-  if (bs.upload_mode === 'none' || bs.upload_mode === 'optional' && !state.uploadBundleId) {
-    el.classList.add('hidden');
-    return;
+  if (!el) return;
+  // Slot checklist boxes removed — uploadStatus already shows success/waiting.
+  el.innerHTML = '';
+  el.classList.add('hidden');
+  if (!bs) return;
+  const status = document.getElementById('uploadStatus');
+  if (!status || status.classList.contains('hidden')) return;
+  if (bs.complete) {
+    status.innerHTML = `<span class="status-inline">${statusIcon('ok')} <span>${t('upload.allReady')}</span></span>`;
+    status.style.background = 'var(--success-bg)';
+    status.style.color = 'var(--success)';
+  } else if (state.uploadBundleId) {
+    status.innerHTML = `<span class="status-inline">${statusIcon('wait')} <span>${t('upload.waitingFiles')}</span></span>`;
+    status.style.background = 'var(--warning-bg)';
+    status.style.color = 'var(--warning)';
   }
-  const lang = state.lang;
-  const rows = (bs.slots || []).map(s => {
-    const label = s.label ? tr(s.label, lang) : t(`upload.slot.${s.id}`) || s.id;
-    const slotIcon = statusIcon(s.ok ? 'ok' : (s.required ? false : 'empty'));
-    const via = s.via === 'bundle_zip' ? ` (${t('upload.viaZip')})` : '';
-    return `<div class="check-item"><span class="check-icon">${icon}</span><div><div>${label}${via}</div><div class="check-detail">${s.filename || (s.required ? t('upload.missing') : t('upload.optional'))}</div></div></div>`;
-  }).join('');
-  const head = bs.complete
-    ? `<p class="status-inline" style="color:var(--success);margin-bottom:8px">${statusIcon('ok')} <span>${t('upload.allReady')}</span></p>`
-    : `<p class="status-inline" style="color:var(--warning);margin-bottom:8px">${statusIcon('wait')} <span>${t('upload.waitingFiles')}</span></p>`;
-  el.innerHTML = head + rows;
-  el.classList.remove('hidden');
 }
 
 async function uploadFile(file) {
   return uploadSlotFile('bundle_zip', file);
 }
 
-function renderUploadInventory(data) {
+function renderUploadInventory(_data) {
+  // Backup contents / inventory table intentionally hidden.
   const el = document.getElementById('uploadInventory');
-  const a = data.analysis;
-  if (!el || !a) return;
-
-  const lang = state.lang;
-  const catLabel = (c) => t(`upload.cat.${c}`) || c;
-  const fmtSize = (n) => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
-
-  const badges = Object.entries(a.categories || {}).map(([k, v]) =>
-    `<span class="inv-badge">${catLabel(k)}: ${v}</span>`
-  ).join('');
-  const okBadge = `<span class="inv-badge ${a.backup_ok ? 'ok' : 'warn'}">${a.backup_ok ? t('upload.backupOk') : t('upload.backupIncomplete')}</span>`;
-
-  const rows = (a.inventory || []).map(item => `
-    <tr>
-      <td>${catLabel(item.category)}</td>
-      <td><code>${item.path}</code></td>
-      <td>${fmtSize(item.size)}</td>
-      <td>${item.pasarguard_note ? `<span class="check-detail">${item.pasarguard_note}</span>` : '—'}</td>
-    </tr>`).join('');
-
-  const mapping = (a.env_mapping || []).map(m =>
-    `<li><code>${m.from}</code> → <code>${m.to}</code></li>`
-  ).join('');
-
-  const warnings = (a.warnings || []).map(w => `<p class="check-detail warn-line">${statusIcon('warn')}<span>${tr(w, lang)}</span></p>`).join('');
-  const missing = (a.missing || []).map(m => `<p class="check-detail warn-line">${statusIcon(false)}<span>${tr(m, lang)}</span></p>`).join('');
-
-  el.innerHTML = `
-    <h4>${t('upload.inventoryTitle')}</h4>
-    <div class="inv-summary">${okBadge}<span class="inv-badge">${t('upload.fileCount')}: ${a.total_files}</span>${badges}</div>
-    ${a.extract_root && a.extract_root !== '.' ? `<p class="check-detail">${t('upload.extractRoot')}: <code>${a.extract_root}</code></p>` : ''}
-    ${missing}${warnings}
-    ${mapping ? `<div class="inv-map"><strong>${t('upload.envMapping')}</strong><ul>${mapping}</ul></div>` : ''}
-    <table>
-      <thead><tr><th>${t('upload.colType')}</th><th>${t('upload.colPath')}</th><th>${t('upload.colSize')}</th><th>${t('upload.colPgPath')}</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-    ${a.inventory_truncated ? `<p class="check-detail">${t('upload.truncated')}</p>` : ''}`;
-  el.classList.remove('hidden');
+  if (!el) return;
+  el.innerHTML = '';
+  el.classList.add('hidden');
 }

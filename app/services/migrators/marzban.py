@@ -200,26 +200,112 @@ class MarzbanMigrator(BaseMigrator):
     async def _convert_pg_sqlite_to_target(
         self, sqlite_path: Path, target_db: str, install_env_snapshot: str,
     ) -> None:
-        """Restore-grade convert: PasarGuard-shaped SQLite → installed server DB."""
-        from app.services.db_auth import (
-            migration_params_from_connection,
-            resolve_live_admin_connection,
-        )
+        """PasarGuard-shaped SQLite → installed server DB via the proven restore convert path.
 
-        await self._update_env_paths("sqlite", target_db)
+        Keep .env on SQLite until convert finishes (same as change-DB / restore→convert),
+        then finalize for the target engine.
+        """
+        from app.services.pg_restore import _maybe_cross_db_after_restore
+
+        dest = PASARGUARD_DATA / "db.sqlite3"
+        PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
+        if Path(sqlite_path).resolve() != dest.resolve():
+            shutil.copy2(sqlite_path, dest)
+
+        # Keep a side copy of the upgraded PasarGuard SQLite before convert.
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        side = BACKUP_DIR / f"marzban-pg-ready-{self.job.job_id}.sqlite3"
+        shutil.copy2(dest, side)
+        self.job.log(f"Saved PasarGuard SQLite snapshot → {side.name}")
+
+        # Critical: do NOT point .env at target before convert — that was emptying panels.
+        await self._force_env_sqlite(install_env_snapshot)
         await self._ensure_target_database_stack(target_db)
 
-        admin = await resolve_live_admin_connection(
-            self, target_db, env_text=install_env_snapshot or None,
+        env = install_env_snapshot or ""
+        user = (
+            read_env_var(env, "DB_USER")
+            or read_env_var(env, "POSTGRES_USER")
+            or read_env_var(env, "MYSQL_USER")
+            or "pasarguard"
         )
-        self.params = migration_params_from_connection("sqlite", target_db, admin)
-        self.params["_resolved_target_conn"] = admin
-        self.params["_auto_db_credentials"] = True
+        password = (
+            read_env_var(env, "DB_PASSWORD")
+            or read_env_var(env, "POSTGRES_PASSWORD")
+            or read_env_var(env, "MYSQL_ROOT_PASSWORD")
+            or read_env_var(env, "MYSQL_PASSWORD")
+            or ""
+        )
+        db_name = (
+            read_env_var(env, "DB_NAME")
+            or read_env_var(env, "POSTGRES_DB")
+            or read_env_var(env, "MYSQL_DATABASE")
+            or "pasarguard"
+        )
 
-        await run_cross_db_migration(self, str(sqlite_path), "sqlite", target_db)
+        self.job.log(
+            f"Converting PasarGuard SQLite → {target_db} (restore-grade path)..."
+        )
+        _final_db, stats, report = await _maybe_cross_db_after_restore(
+            self.job,
+            dict(self.params or {}),
+            "sqlite",
+            target_db,
+            password,
+            user,
+            db_name,
+            source_path=str(dest),
+            install_env_snapshot=install_env_snapshot,
+        )
+        self.copy_stats = stats or {}
+        self.copy_report = report or {}
+
+        live_admin = (report or {}).get("live_admin") or {}
+        if live_admin:
+            self.params = {
+                **(self.params or {}),
+                "source_db": "sqlite",
+                "target_db": target_db,
+                "target_db_user": live_admin.get("user") or user,
+                "target_db_password": live_admin.get("password") or password,
+                "target_db_name": live_admin.get("database") or db_name,
+                "_resolved_target_conn": {**live_admin, "db_type": target_db},
+                "_auto_db_credentials": True,
+            }
+
         self._abort_if_copy_gaps()
+        self._abort_if_empty_convert(side if side.exists() else dest, stats)
         await self._finalize_env_after_convert(target_db, install_env_snapshot)
         self._relocate_sqlite_after_convert()
+
+    def _abort_if_empty_convert(self, sqlite_path: Path, stats: dict | None) -> None:
+        """Refuse success when source SQLite had rows but convert copied nothing."""
+        stats = stats or {}
+        copied = sum(int(stats.get(k, 0) or 0) for k in ("users", "admins", "hosts", "inbounds", "nodes", "groups"))
+        if copied > 0:
+            return
+        src_users = 0
+        try:
+            if sqlite_path.exists():
+                conn = sqlite3.connect(str(sqlite_path))
+                try:
+                    tables = {
+                        r[0]
+                        for r in conn.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table'"
+                        ).fetchall()
+                    }
+                    if "users" in tables:
+                        src_users = int(conn.execute('SELECT COUNT(*) FROM "users"').fetchone()[0] or 0)
+                finally:
+                    conn.close()
+        except Exception:
+            src_users = -1
+        if src_users > 0:
+            raise RuntimeError(
+                f"Convert produced empty target but SQLite source still has users={src_users}. "
+                "Aborting so the panel is not left empty."
+            )
 
     async def _finalize_env_after_convert(self, target_db: str, install_env_snapshot: str) -> None:
         if not PASARGUARD_ENV.exists():
