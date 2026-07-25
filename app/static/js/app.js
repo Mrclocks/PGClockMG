@@ -405,10 +405,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Paint UI text immediately — never wait on /api/* before i18n (mobile often
   // looks "empty" until a refresh when the first system-check is slow).
   setLang(state.lang);
-  document.addEventListener('click', (ev) => {
-    const acc = document.getElementById('langAccordion');
-    if (acc && acc.open && !acc.contains(ev.target)) acc.open = false;
-  });
   if (typeof bindFinishModal === 'function') bindFinishModal();
   const drag = document.getElementById('uploadDragText');
   const sel = document.getElementById('uploadSelectText');

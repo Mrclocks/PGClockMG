@@ -1084,19 +1084,37 @@ function tr(obj, lang) {
   return obj[L] || obj.fa || obj.en || '';
 }
 
+/* Native names via Unicode escapes so HTML encoding cannot break labels */
+const LANG_META = {
+  fa: { code: 'FA', name: '\u0641\u0627\u0631\u0633\u06CC' },
+  en: { code: 'EN', name: 'English' },
+  ru: { code: 'RU', name: '\u0420\u0443\u0441\u0441\u043A\u0438\u0439' },
+};
+
+function syncLangSwitch(lang) {
+  document.querySelectorAll('.lang-btn').forEach((btn) => {
+    const code = btn.dataset.lang;
+    const meta = LANG_META[code];
+    const nameEl = btn.querySelector('.lang-name');
+    const codeEl = btn.querySelector('.lang-code');
+    if (meta) {
+      if (codeEl) codeEl.textContent = meta.code;
+      if (nameEl) nameEl.textContent = meta.name;
+      btn.setAttribute('aria-label', meta.name);
+      btn.title = meta.name;
+    }
+    const active = code === lang;
+    btn.classList.toggle('is-active', active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+}
+
 function setLang(lang) {
   state.lang = lang;
   localStorage.setItem('pg-migrator-lang', lang);
   document.documentElement.lang = lang;
   document.documentElement.dir = lang === 'fa' ? 'rtl' : 'ltr';
-  const labels = { fa: 'FA', en: 'EN', ru: 'RU' };
-  const current = document.getElementById('langCurrentLabel');
-  if (current) current.textContent = labels[lang] || lang.toUpperCase();
-  document.querySelectorAll('.lang-option').forEach((b) => {
-    b.classList.toggle('is-active', b.dataset.lang === lang);
-  });
-  const accordion = document.getElementById('langAccordion');
-  if (accordion) accordion.open = false;
+  syncLangSwitch(lang);
   applyI18n();
   renderGlobalChecks();
   if (state.selectedPanel) renderPanelPrereqs(state.selectedPanel.id);
