@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT))
 from app.services.pg_restore import (
     soft_db_family,
     filter_timescaledb_extension_sql,
+    filter_globals_sql,
     parse_timescale_wanted,
     detect_ts_mismatch_from_text,
     is_auth_failure_text,
@@ -204,6 +205,30 @@ def test_analyze_experimental_hard_mismatch():
         mod.get_pasarguard_db_type = orig_db  # type: ignore
         shutil.rmtree(base, ignore_errors=True)
 
+def test_filter_globals_sql_makes_create_role_idempotent():
+    """filter_globals_sql must wrap CREATE ROLE in a DO-block so duplicate roles are tolerated."""
+    sample = (
+        "-- pg_dumpall globals\n"
+        "CREATE ROLE pasarguard;\n"
+        "ALTER ROLE pasarguard WITH NOSUPERUSER NOCREATEDB LOGIN;\n"
+        "CREATE ROLE postgres SUPERUSER;\n"
+    )
+    result = filter_globals_sql(sample)
+    # CREATE ROLE must be wrapped inside DO-blocks, not as bare top-level statements
+    assert "DO $pg_restore_idempotent$" in result
+    assert "duplicate_object" in result
+    # The DO-block delimiter must appear at least as many times as there are CREATE ROLE stmts
+    assert result.count("$pg_restore_idempotent$") >= 4  # 2 roles × open+close
+    # No line starting with CREATE ROLE at column 0 (bare, outside a DO block)
+    for line in result.splitlines():
+        assert not line.startswith("CREATE ROLE"), (
+            f"Bare CREATE ROLE found at column 0: {line!r}"
+        )
+    # Non-role lines must be preserved
+    assert "-- pg_dumpall globals" in result
+    assert "ALTER ROLE pasarguard WITH NOSUPERUSER NOCREATEDB LOGIN;" in result
+
+
 if __name__ == "__main__":
     test_soft_db_family_matrix()
     test_filter_timescaledb_extension_sql()
@@ -216,4 +241,5 @@ if __name__ == "__main__":
     test_parse_manifest_ts_versions()
     test_analyze_all_db_types()
     test_analyze_experimental_hard_mismatch()
+    test_filter_globals_sql_makes_create_role_idempotent()
     print("\nAll pg_restore tests passed")
