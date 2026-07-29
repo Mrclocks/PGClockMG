@@ -424,7 +424,6 @@ function applyPhaseI18n() {
   set('welcomeH2', 'welcome.h2');
   set('welcomeDesc', 'welcome.desc');
   set('welcomeNote', 'welcome.note');
-  set('welcomeBetaWarn', 'welcome.betaWarning');
   set('welcomeBackupWarn', 'welcome.backupWarning');
   set('welcomeGoalHint', 'welcome.goalHint');
   set('welcomeGoalInstall', 'welcome.goalInstall');
