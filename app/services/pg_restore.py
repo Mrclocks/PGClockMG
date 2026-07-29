@@ -583,6 +583,42 @@ async def _read_timescaledb_version(job: MigrationJob, container: str, password:
     return ver[-1].strip() if ver else None
 
 
+async def _wait_for_postgres_ready(
+    job: MigrationJob,
+    svc: str,
+    password: str,
+    user: str = "postgres",
+    timeout: int = 120,
+) -> bool:
+    """Poll until PostgreSQL inside `svc` accepts connections, up to `timeout` seconds."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    attempt = 0
+    while asyncio.get_event_loop().time() < deadline:
+        attempt += 1
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "compose", "exec", "-T",
+            "-e", f"PGPASSWORD={password}",
+            svc, "psql", "-U", user, "-d", "postgres", "-c", "SELECT 1;",
+            cwd=str(PASARGUARD_DIR),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        out_b, _ = await proc.communicate()
+        if proc.returncode == 0:
+            job.log(f"PostgreSQL ready after {attempt} probe(s)")
+            return True
+        out_txt = (out_b or b"").decode("utf-8", errors="replace").strip()
+        # Stop retrying on auth failures (wrong password) — no point waiting
+        if "password authentication failed" in out_txt.lower() or "role" in out_txt.lower() and "does not exist" in out_txt.lower():
+            job.log(f"PostgreSQL auth error during readiness probe: {out_txt[:200]}")
+            return False
+        wait = min(4, deadline - asyncio.get_event_loop().time())
+        if wait > 0:
+            await asyncio.sleep(wait)
+    job.log(f"PostgreSQL did not become ready within {timeout}s")
+    return False
+
+
 async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data: bool = True) -> None:
     """Pin compose timescaledb image to backup version and optionally recreate volume.
 
@@ -604,9 +640,6 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
     if m2:
         pg_suf = m2.group(1)
     new_tag = f"{wanted}-{pg_suf}"
-    if current_tag == new_tag:
-        job.log(f"TimescaleDB image already at {new_tag}")
-        return
 
     job.log(f"Aligning TimescaleDB image: {current_tag} → {new_tag}")
     new_text = re.sub(
@@ -617,7 +650,11 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
     )
     compose.write_text(new_text, encoding="utf-8")
 
-    job.set_progress(25, "Recreating TimescaleDB with matching version...")
+    job.set_progress(25, "Pulling TimescaleDB image...")
+    # Pull the exact image first so `compose up` never silently uses a stale cached layer
+    await _compose(job, "pull", "timescaledb", timeout=600)
+
+    job.set_progress(28, "Recreating TimescaleDB with matching version...")
     await _compose(job, "stop", "pasarguard", timeout=120)
     stop_svcs = ["timescaledb"]
     if _compose_has_service("pgbouncer"):
@@ -633,12 +670,22 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
     ok, out = await _compose_up_services(job, "timescaledb", "pgbouncer", timeout=300)
     if not ok:
         raise RuntimeError(f"Failed to recreate TimescaleDB:\n{out[-2000:]}")
-    await asyncio.sleep(10)
-    # Verify extension version when possible
+
+    # Wait for PostgreSQL to be ready instead of a fixed sleep
     cur_env = _read_current_env()
     pw = read_env_var(cur_env, "DB_PASSWORD") or read_env_var(cur_env, "POSTGRES_PASSWORD") or ""
-    user = read_env_var(cur_env, "DB_USER") or "postgres"
-    live = await _read_timescaledb_version(job, "timescaledb", pw, user=user)
+    pg_user = read_env_var(cur_env, "DB_USER") or "postgres"
+    ready = await _wait_for_postgres_ready(job, "timescaledb", pw, user=pg_user, timeout=120)
+    if not ready:
+        # Try postgres superuser as fallback (fresh container may ignore app user initially)
+        ready = await _wait_for_postgres_ready(job, "timescaledb", pw, user="postgres", timeout=30)
+    if not ready:
+        raise RuntimeError("TimescaleDB container did not become ready after image alignment")
+
+    # Verify extension version
+    live = await _read_timescaledb_version(job, "timescaledb", pw, user=pg_user)
+    if not live:
+        live = await _read_timescaledb_version(job, "timescaledb", pw, user="postgres")
     if live and live != wanted:
         job.log(f"Warning: live TimescaleDB={live} after align (wanted {wanted}) — continuing")
     else:
@@ -2083,7 +2130,6 @@ async def _restore_postgres(
         svc = "timescaledb" if db_type == "timescaledb" else "postgresql"
     job.log(f"PostgreSQL restore into service `{svc}` (engine={db_type})")
     await _compose_up_services(job, svc, "pgbouncer", timeout=180)
-    await asyncio.sleep(6)
 
     password = (
         read_env_var(current_env, "DB_PASSWORD")
@@ -2097,6 +2143,41 @@ async def _restore_postgres(
 
     if not password:
         raise RuntimeError("No database password available for PostgreSQL restore")
+
+    # Collect all candidate passwords and pick whichever the live container accepts.
+    # After a fresh wipe the container initialises with POSTGRES_PASSWORD from compose env;
+    # that value may differ from DB_PASSWORD.  Try current first, then backup, then postgres.
+    password_candidates = list(dict.fromkeys(filter(None, [
+        password,
+        read_env_var(backup_env, "POSTGRES_PASSWORD"),
+        read_env_var(backup_env, "DB_PASSWORD"),
+    ])))
+    user_candidates = list(dict.fromkeys(filter(None, [user, "postgres"])))
+
+    effective_password = password
+    effective_user = user
+    pg_ready = False
+    for pw_try in password_candidates:
+        for u_try in user_candidates:
+            if await _wait_for_postgres_ready(job, svc, pw_try, user=u_try, timeout=60):
+                effective_password = pw_try
+                effective_user = u_try
+                pg_ready = True
+                if pw_try != password or u_try != user:
+                    job.log(
+                        f"PostgreSQL accepted auth with user={u_try} "
+                        f"(password differs from current .env) — adjusting for restore"
+                    )
+                break
+        if pg_ready:
+            break
+
+    if not pg_ready:
+        raise RuntimeError(f"PostgreSQL service `{svc}` did not become ready before restore")
+
+    # Use the verified credentials for the rest of this restore session
+    password = effective_password
+    user = effective_user
 
     async def psql(
         sql: str,
@@ -2297,10 +2378,15 @@ async def _restore_postgres(
                     )
                     if wanted:
                         job.log(f"Timescale restore error — aligning to {wanted} and retrying {dbn}")
+                        # _align_timescaledb_image already starts the container and
+                        # waits for readiness — no extra sleep or compose up needed
                         await _align_timescaledb_image(job, wanted, wipe_data=True)
-                        await _compose(job, "up", "-d", svc, timeout=180)
-                        await asyncio.sleep(8)
-                        await psql(f'CREATE DATABASE "{dbn}" OWNER "{owner_q}";')
+                        await psql(f'DROP DATABASE IF EXISTS "{dbn}";')
+                        ok2, out2 = await psql(f'CREATE DATABASE "{dbn}" OWNER "{owner_q}";')
+                        if not ok2:
+                            raise RuntimeError(
+                                f"CREATE DATABASE {dbn} failed after image align:\n{out2[-1000:]}"
+                            )
                         await psql("CREATE EXTENSION IF NOT EXISTS timescaledb;", db=dbn)
                         await psql("SELECT timescaledb_pre_restore();", db=dbn)
                         filtered2 = dump_path.with_suffix(dump_path.suffix + ".filtered")
