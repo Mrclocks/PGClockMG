@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> ⚠️ **بتا `v1.1beta`** — هنوز آزمایشی است. قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
+> ⚠️ **بتا `v1.6beta`** — هنوز آزمایشی است. قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
   <b>فارسی</b> · <a href="README.en.md">English</a> · <a href="README.ru.md">Русский</a>
@@ -20,7 +20,10 @@
 
 ## امکانات
 
-- ریستور بکاپ PasarGuard (حتی با تغییر نوع دیتابیس)
+- ریستور بکاپ PasarGuard — حتی با تغییر نوع دیتابیس (SQLite / PostgreSQL / TimescaleDB / MySQL / MariaDB)
+- رفع خودکار مشکلات نسخه TimescaleDB هنگام ریستور (pull تصویر، readiness probe، auth fallback)
+- نمایش اطلاعات دیتابیس بعد از آپلود بکاپ — مقایسه DB بکاپ با DB نصب‌شده
+- گزینه غیرفعال‌سازی نودها بعد از ریستور (برای جلوگیری از تداخل با پنل قبلی)
 - مهاجرت از Marzban، 3x-ui، Remnawave و Hiddify
 - راهنمای وضعیت پنل و دستور نصب رسمی
 
@@ -47,6 +50,19 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 | PasarGuard | کامل |
 | 3x-ui | جزئی |
 | Remnawave / Hiddify | آزمایشی |
+
+---
+
+## تاریخچه نسخه‌ها
+
+| نسخه | تغییرات اصلی |
+|------|--------------|
+| v1.6beta | بهبود UI کارت DB، سوییچ iOS برای نودها، لوگو جدید |
+| v1.5beta | گزینه غیرفعال‌سازی نودها، نمایش مشخصات DB بعد آپلود |
+| v1.4beta | رفع restart loop ساکت پنل بعد ریستور TimescaleDB |
+| v1.3beta | pull تصویر Docker، readiness probe، auth fallback بعد wipe |
+| v1.2beta | رفع خطای «role already exists» هنگام ریستور globals.sql |
+| v1.1beta | انتشار اولیه |
 
 ---
 

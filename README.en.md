@@ -1,4 +1,4 @@
-> ⚠️ **Beta `v1.1beta`** — experimental. Always take a full backup before restore or migration.
+> ⚠️ **Beta `v1.6beta`** — experimental. Always take a full backup before restore or migration.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <b>English</b> · <a href="README.ru.md">Русский</a>
@@ -18,9 +18,12 @@ Web wizard for restore and migration to PasarGuard
 
 ## Features
 
-- Restore PasarGuard backups (including database engine changes)
+- Restore PasarGuard backups — including database engine changes (SQLite / PostgreSQL / TimescaleDB / MySQL / MariaDB)
+- Automatic TimescaleDB version mismatch resolution (image pull, readiness probe, auth fallback)
+- DB info card after backup upload — compares backup DB vs installed DB, shows compatibility
+- Option to keep nodes disabled after restore (avoids conflicts with a still-active previous panel)
 - Migrate from Marzban, 3x-ui, Remnawave, and Hiddify
-- Panel status and official install guide
+- Panel status guide and official install command
 
 > This wizard does not install PasarGuard. Install the panel yourself first.
 
@@ -45,6 +48,19 @@ Requirements: Ubuntu/Debian · root · Docker
 | PasarGuard | Full |
 | 3x-ui | Partial |
 | Remnawave / Hiddify | Experimental |
+
+---
+
+## Changelog
+
+| Version | Key changes |
+|---------|-------------|
+| v1.6beta | Redesigned DB info card, iOS toggle for nodes, new logo |
+| v1.5beta | Disable nodes after restore option, DB info card on upload |
+| v1.4beta | Fix silent panel restart loop after TimescaleDB restore |
+| v1.3beta | Docker image pull, readiness probe, auth fallback after wipe |
+| v1.2beta | Fix "role already exists" error during globals.sql restore |
+| v1.1beta | Initial public release |
 
 ---
 
