@@ -489,6 +489,11 @@ function applyPhaseI18n() {
   set('btnStep5Back', 'step4.back');
   set('restoreConvertNoteText', 'restore.autoConvertNote');
   set('btnCopyRestorePath', 'copy');
+  // Re-render options labels in case language changed while analysis is showing
+  if (state.restoreAnalysis) {
+    renderRestoreOptions(state.restoreAnalysis);
+    renderRestoreDbInfoCard(state.restoreAnalysis);
+  }
   set('restoreUninstallTitle', 'uninstall.title');
   set('restoreUninstallTip', 'uninstall.tip');
   set('btnUninstallRestore', 'uninstall.button');
@@ -855,8 +860,112 @@ function resetRestoreForm() {
   applyPhaseI18n();
 }
 
+const DB_DISPLAY_NAMES = {
+  timescaledb: 'TimescaleDB',
+  postgresql: 'PostgreSQL',
+  mysql: 'MySQL',
+  mariadb: 'MariaDB',
+  sqlite: 'SQLite',
+};
+
+function dbLabel(key) {
+  return DB_DISPLAY_NAMES[key] || (key ? key.charAt(0).toUpperCase() + key.slice(1) : '—');
+}
+
+function renderRestoreDbInfoCard(a) {
+  const card = document.getElementById('restoreDbInfoCard');
+  if (!card || !a) return;
+  if (!a.backup_db && !a.installed_db) {
+    card.classList.add('hidden');
+    return;
+  }
+  const lang = state.lang || 'fa';
+  const s = (STRINGS[lang] || STRINGS.fa).restore.dbInfo;
+
+  const bkDb = dbLabel(a.backup_db);
+  const instDb = dbLabel(a.installed_db);
+
+  let matchClass = 'db-match-ok';
+  let matchText = '';
+  if (a.convert_blocked) {
+    matchClass = 'db-match-blocked';
+    matchText = s.matchBlocked;
+  } else if (a.db_match) {
+    matchClass = 'db-match-ok';
+    matchText = s.matchYes;
+  } else if (a.soft_match) {
+    matchClass = 'db-match-soft';
+    matchText = s.matchSoft;
+  } else if (a.experimental_db_change) {
+    matchClass = 'db-match-convert';
+    matchText = s.matchConvert;
+  } else if (a.ok) {
+    matchClass = 'db-match-convert';
+    matchText = s.matchConvert;
+  } else {
+    matchClass = 'db-match-blocked';
+    matchText = s.matchBlocked;
+  }
+
+  let tsHtml = '';
+  if (a.timescaledb_versions && a.timescaledb_versions.length > 0) {
+    tsHtml = `<div class="db-info-row">
+      <span class="db-info-label">${s.tsVersions}</span>
+      <span class="db-info-value">${a.timescaledb_versions.join(', ')}</span>
+    </div>`;
+  }
+
+  let layoutHtml = '';
+  if (a.layout && a.layout !== 'none') {
+    layoutHtml = `<div class="db-info-row">
+      <span class="db-info-label">${s.layout}</span>
+      <span class="db-info-value">${a.layout}</span>
+    </div>`;
+  }
+
+  card.innerHTML = `
+    <div class="db-info-header">${s.title}</div>
+    <div class="db-info-body">
+      <div class="db-info-engines">
+        <div class="db-info-engine">
+          <span class="db-info-engine-label">${s.backupDb}</span>
+          <span class="db-info-engine-name db-badge db-badge-backup">${bkDb}</span>
+        </div>
+        <div class="db-info-arrow" aria-hidden="true">→</div>
+        <div class="db-info-engine">
+          <span class="db-info-engine-label">${s.installedDb}</span>
+          <span class="db-info-engine-name db-badge db-badge-installed">${instDb}</span>
+        </div>
+      </div>
+      <div class="db-info-match ${matchClass}">${matchText}</div>
+      ${tsHtml}${layoutHtml}
+    </div>
+  `;
+  card.classList.remove('hidden');
+}
+
+function renderRestoreOptions(a) {
+  const opts = document.getElementById('restoreOptions');
+  const lbl = document.getElementById('chkDisableNodesLabel');
+  const hint = document.getElementById('chkDisableNodesHint');
+  const chk = document.getElementById('chkDisableNodes');
+  if (!opts) return;
+  if (!a || !a.ok || a.convert_blocked) {
+    opts.classList.add('hidden');
+    return;
+  }
+  const lang = state.lang || 'fa';
+  const s = (STRINGS[lang] || STRINGS.fa).restore;
+  if (lbl) lbl.textContent = s.disableNodes;
+  if (hint) {
+    hint.textContent = s.disableNodesHint;
+    hint.classList.remove('hidden');
+  }
+  if (chk) chk.checked = false;
+  opts.classList.remove('hidden');
+}
+
 function renderRestoreAnalysis(a) {
-  // Specs / preview boxes are intentionally hidden — keep analysis in state only.
   const card = document.getElementById('restoreAnalysis');
   const warn = document.getElementById('restoreWarnings');
   const note = document.getElementById('restoreConvertNote');
@@ -869,6 +978,9 @@ function renderRestoreAnalysis(a) {
     warn.innerHTML = '';
   }
   if (note) note.classList.add('hidden');
+
+  renderRestoreDbInfoCard(a);
+  renderRestoreOptions(a);
 
   const block = document.getElementById('restoreBlock');
   const lang = state.lang || 'fa';
@@ -920,6 +1032,8 @@ async function startRestore() {
   if (status) status.textContent = t('restore.restoring');
   if (term) term.textContent = '';
 
+  const disableNodes = document.getElementById('chkDisableNodes')?.checked || false;
+
   try {
     const res = await fetch('/api/pasarguard/restore', {
       method: 'POST',
@@ -931,6 +1045,7 @@ async function startRestore() {
         // Destination is always the installed PasarGuard DB
         target_db: state.restoreAnalysis.installed_db || undefined,
         accept_experimental: true,
+        disable_nodes_after_restore: disableNodes,
       }),
     });
     const data = await res.json();
@@ -1040,6 +1155,15 @@ function showRestoreDone(result) {
       ? ` (${access.backup_db || '?'} → ${access.final_db || '?'})`
       : '';
     msg.textContent = `${t('restore.doneTitle') || ''}${convert}`.trim();
+  }
+  const nodesNote = document.getElementById('restoreNodesDisabledNote');
+  if (nodesNote) {
+    if (access.nodes_disabled) {
+      nodesNote.textContent = t('restore.nodesDisabledNote');
+      nodesNote.classList.remove('hidden');
+    } else {
+      nodesNote.classList.add('hidden');
+    }
   }
   const tip = document.getElementById('restoreUninstallTip');
   const btn = document.getElementById('btnUninstallRestore');

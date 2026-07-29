@@ -2059,11 +2059,17 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             require_any_data=bool(expected_counts) or bool(analysis.get("table_counts")),
         )
 
+        if params.get("disable_nodes_after_restore"):
+            await _disable_nodes_after_restore(
+                job, final_engine, verify_pass, verify_user, verify_db,
+            )
+
         from app.services.pasarguard_ops import verify_pasarguard_healthy
 
         await verify_pasarguard_healthy(mini)
 
         access = get_panel_access_info()
+        access["nodes_disabled"] = bool(params.get("disable_nodes_after_restore"))
         access["restored"] = True
         access["backup_db"] = backup_db
         access["final_db"] = final_db
@@ -2077,6 +2083,88 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         return access
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+async def _disable_nodes_after_restore(
+    job: MigrationJob,
+    db_type: str,
+    password: str,
+    user: str,
+    db_name: str,
+) -> None:
+    """Set all nodes to disabled state after restore so the operator can enable them manually.
+
+    PasarGuard uses a ``status`` TEXT column on the ``nodes`` table.
+    Known status values: 'healthy', 'unhealthy', 'disabled'.
+    We set every non-disabled node to 'disabled'.
+    """
+    job.log("Disabling all nodes as requested (nodes_disabled_after_restore)...")
+
+    if db_type in ("postgresql", "timescaledb"):
+        svc = await _detect_db_container(job, db_type)
+        if not svc:
+            job.log("Could not detect DB container — skipping node disable")
+            return
+        sql = "UPDATE nodes SET status = 'disabled' WHERE status != 'disabled';"
+        ok, out = await _run(
+            job,
+            [
+                "docker", "compose", "exec", "-T",
+                "-e", f"PGPASSWORD={password}",
+                svc, "psql", "-U", user, "-d", db_name,
+                "-v", "ON_ERROR_STOP=0", "-c", sql,
+            ],
+            cwd=str(PASARGUARD_DIR),
+            timeout=30,
+        )
+        if ok:
+            job.log("All nodes set to disabled (PostgreSQL/TimescaleDB)")
+        else:
+            job.log(f"Node disable warning: {(out or '')[-300:]}")
+
+    elif db_type in ("mysql", "mariadb"):
+        svc = await _detect_db_container(job, db_type)
+        if not svc:
+            job.log("Could not detect DB container — skipping node disable")
+            return
+        sql = f"UPDATE {db_name}.nodes SET status = 'disabled' WHERE status != 'disabled';"
+        last_out = ""
+        for bin_name in _mysql_client_bins(db_type, svc):
+            ok, out = await _run(
+                job,
+                [
+                    "docker", "compose", "exec", "-T",
+                    svc, bin_name, "-u", user, f"-p{password}",
+                    "-e", sql,
+                ],
+                cwd=str(PASARGUARD_DIR),
+                timeout=30,
+            )
+            if ok:
+                job.log(f"All nodes set to disabled (MySQL/MariaDB via {bin_name})")
+                return
+            last_out = out or last_out
+        job.log(f"Node disable warning: {last_out[-300:]}")
+
+    elif db_type == "sqlite":
+        sqlite_path = PASARGUARD_DATA / "db.sqlite3"
+        if not sqlite_path.exists():
+            job.log("SQLite file not found — skipping node disable")
+            return
+        try:
+            import sqlite3 as _sqlite3
+            conn = _sqlite3.connect(str(sqlite_path))
+            cur = conn.cursor()
+            cur.execute("UPDATE nodes SET status = 'disabled' WHERE status != 'disabled'")
+            updated = cur.rowcount
+            conn.commit()
+            conn.close()
+            job.log(f"All nodes set to disabled (SQLite, {updated} rows updated)")
+        except Exception as e:
+            job.log(f"Node disable warning (SQLite): {e}")
+
+    else:
+        job.log(f"Node disable skipped — unsupported db_type: {db_type}")
 
 
 async def _restore_sqlite(job: MigrationJob, root: Path) -> None:

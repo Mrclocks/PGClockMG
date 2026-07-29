@@ -2555,3 +2555,132 @@ a.btn-panel-enter:focus {
   display: inline-block;
   vertical-align: bottom;
 }
+
+/* ── Restore: DB info card ─────────────────────────────────────── */
+.db-info-card {
+  margin-top: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+.db-info-header {
+  padding: 10px 16px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.db-info-body {
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.db-info-engines {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.db-info-engine {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.db-info-engine-label {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.db-info-arrow {
+  font-size: 1.2rem;
+  color: var(--text-dim);
+  margin-top: 16px;
+}
+.db-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.db-badge-backup {
+  background: hsla(220, 70%, 55%, 0.15);
+  color: hsla(220, 70%, 65%, 1);
+  border: 1px solid hsla(220, 70%, 55%, 0.3);
+}
+.db-badge-installed {
+  background: hsla(160, 60%, 40%, 0.15);
+  color: hsla(160, 70%, 55%, 1);
+  border: 1px solid hsla(160, 60%, 40%, 0.3);
+}
+.db-info-match {
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+.db-match-ok    { background: hsla(142, 71%, 45%, 0.12); color: hsla(142, 71%, 55%, 1); }
+.db-match-soft  { background: hsla(200, 70%, 50%, 0.12); color: hsla(200, 70%, 60%, 1); }
+.db-match-convert { background: hsla(38, 92%, 50%, 0.12); color: hsla(38, 92%, 55%, 1); }
+.db-match-blocked { background: hsla(0, 72%, 51%, 0.12); color: hsla(0, 72%, 60%, 1); }
+.db-info-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 0.82rem;
+}
+.db-info-label  { color: var(--text-dim); min-width: 140px; flex-shrink: 0; }
+.db-info-value  { color: var(--text); font-weight: 500; }
+
+/* ── Restore: options (disable nodes checkbox) ─────────────────── */
+.restore-options {
+  margin-top: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--text);
+  user-select: none;
+}
+.checkbox-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--primary);
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.checkbox-hint {
+  margin: 6px 0 0 28px;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+/* ── Restore done: info note ───────────────────────────────────── */
+.info-note {
+  margin: 10px 0;
+  padding: 8px 14px;
+  border-radius: 6px;
+  background: hsla(38, 92%, 50%, 0.1);
+  border: 1px solid hsla(38, 92%, 50%, 0.25);
+  color: hsla(38, 92%, 55%, 1);
+  font-size: 0.85rem;
+  font-weight: 500;
+}

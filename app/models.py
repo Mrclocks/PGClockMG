@@ -59,3 +59,4 @@ class PasarguardRestoreRequest(BaseModel):
     confirmed: bool = False
     target_db: Optional[str] = None
     accept_experimental: bool = False
+    disable_nodes_after_restore: bool = False

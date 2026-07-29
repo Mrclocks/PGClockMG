@@ -205,12 +205,23 @@
           </div>
           <div id="restoreUploadStatus" class="upload-status hidden"></div>
           <div id="restoreAnalysis" class="summary-card hidden"></div>
+          <!-- DB info card — shown after backup upload -->
+          <div id="restoreDbInfoCard" class="db-info-card hidden"></div>
           <div id="restoreWarnings" class="warnings-box hidden"></div>
           <div id="restoreConvertNote" class="info-box info-box-spaced hidden">
             <p id="restoreConvertNoteText"></p>
           </div>
 
           <div id="restoreBlock" class="block-msg hidden"></div>
+
+          <!-- Options shown after successful backup analysis -->
+          <div id="restoreOptions" class="restore-options hidden">
+            <label class="checkbox-row" id="restoreDisableNodesRow">
+              <input type="checkbox" id="chkDisableNodes">
+              <span class="checkbox-label" id="chkDisableNodesLabel"></span>
+            </label>
+            <p class="checkbox-hint hidden" id="chkDisableNodesHint"></p>
+          </div>
 
           <div class="actions">
             <button class="btn btn-back" onclick="backFromRestore()" id="btnRestoreBack"></button>
@@ -262,6 +273,7 @@
             </div>
             <h2 id="restoreDoneTitle"></h2>
             <p id="restoreDoneMsg"></p>
+            <p id="restoreNodesDisabledNote" class="info-note hidden"></p>
             <p id="restorePanelUrl" class="panel-url-line hidden" dir="ltr"></p>
             <a class="btn btn-panel-enter btn-lg" id="restorePanelLink" href="#" target="_blank" rel="noopener">
               <svg class="social-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true"><path d="M10 17l5-5-5-5"/><path d="M15 12H4"/><path d="M20 19V5a2 2 0 0 0-2-2h-3"/></svg>
