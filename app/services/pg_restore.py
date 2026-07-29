@@ -122,6 +122,59 @@ def filter_timescaledb_extension_sql(sql: str, *, strip_all: bool = False) -> st
     return "\n".join(out_lines)
 
 
+def filter_globals_sql(sql: str) -> str:
+    """Rewrite globals.sql so it is idempotent when roles/databases already exist.
+
+    pg_dumpall emits plain ``CREATE ROLE`` and ``CREATE DATABASE`` statements
+    that fail with *"already exists"* when the cluster was initialised by
+    docker-compose before the restore.  We wrap every such statement in a
+    DO-block that silently swallows ``duplicate_object`` / ``duplicate_database``
+    so the restore proceeds without errors even on a live cluster.
+    """
+    out: list[str] = []
+    buf: list[str] = []
+    in_stmt = False
+
+    def _flush_role_create(stmt_lines: list[str]) -> None:
+        raw = "\n".join(stmt_lines).rstrip(";").strip()
+        # Wrap in an anonymous block that ignores duplicate_object
+        out.append(
+            "DO $pg_restore_idempotent$\n"
+            "BEGIN\n"
+            f"  {raw};\n"
+            "EXCEPTION WHEN duplicate_object OR duplicate_database THEN\n"
+            "  NULL;\n"
+            "END\n"
+            "$pg_restore_idempotent$;"
+        )
+
+    for ln in sql.splitlines():
+        stripped = ln.strip()
+        # Detect start of a CREATE ROLE / CREATE DATABASE statement
+        if not in_stmt and re.match(r"CREATE\s+ROLE\b", stripped, re.I):
+            in_stmt = True
+            buf = [ln]
+            if stripped.endswith(";"):
+                _flush_role_create(buf)
+                buf = []
+                in_stmt = False
+            continue
+        if in_stmt:
+            buf.append(ln)
+            if stripped.endswith(";"):
+                _flush_role_create(buf)
+                buf = []
+                in_stmt = False
+            continue
+        out.append(ln)
+
+    # Flush any unterminated statement
+    if buf:
+        _flush_role_create(buf)
+
+    return "\n".join(out)
+
+
 def _sql_literal(value: str) -> str:
     return "'" + (value or "").replace("'", "''") + "'"
 
@@ -2144,6 +2197,8 @@ async def _restore_postgres(
             job.log("Restoring globals...")
             # Globals often include extension bits — never hard-fail the whole restore on them
             gtext = globals_sql.read_text(encoding="utf-8", errors="ignore")
+            # Make CREATE ROLE idempotent so "role already exists" never aborts the restore
+            gtext = filter_globals_sql(gtext)
             if strip_for_plain_pg:
                 gtext = filter_timescaledb_extension_sql(gtext, strip_all=True)
             cmd = [
