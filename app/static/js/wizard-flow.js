@@ -880,7 +880,7 @@ function renderRestoreDbInfoCard(a) {
     return;
   }
   const lang = state.lang || 'fa';
-  const s = (STRINGS[lang] || STRINGS.fa).restore.dbInfo;
+  const s = (I18N[lang] || I18N.fa).restore.dbInfo;
 
   const bkDb = dbLabel(a.backup_db);
   const instDb = dbLabel(a.installed_db);
@@ -955,7 +955,7 @@ function renderRestoreOptions(a) {
     return;
   }
   const lang = state.lang || 'fa';
-  const s = (STRINGS[lang] || STRINGS.fa).restore;
+  const s = (I18N[lang] || I18N.fa).restore;
   if (lbl) lbl.textContent = s.disableNodes;
   if (hint) {
     hint.textContent = s.disableNodesHint;
