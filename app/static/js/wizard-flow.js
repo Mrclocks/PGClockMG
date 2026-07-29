@@ -924,17 +924,18 @@ function renderRestoreDbInfoCard(a) {
   }
 
   card.innerHTML = `
-    <div class="db-info-header">${s.title}</div>
     <div class="db-info-body">
       <div class="db-info-engines">
         <div class="db-info-engine">
           <span class="db-info-engine-label">${s.backupDb}</span>
-          <span class="db-info-engine-name db-badge db-badge-backup">${bkDb}</span>
+          <span class="db-badge db-badge-backup">${bkDb}</span>
         </div>
-        <div class="db-info-arrow" aria-hidden="true">→</div>
+        <div class="db-info-arrow" aria-hidden="true">
+          <svg viewBox="0 0 20 20" fill="none" width="18" height="18"><path d="M4 10h12M12 6l4 4-4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
         <div class="db-info-engine">
           <span class="db-info-engine-label">${s.installedDb}</span>
-          <span class="db-info-engine-name db-badge db-badge-installed">${instDb}</span>
+          <span class="db-badge db-badge-installed">${instDb}</span>
         </div>
       </div>
       <div class="db-info-match ${matchClass}">${matchText}</div>
@@ -957,10 +958,7 @@ function renderRestoreOptions(a) {
   const lang = state.lang || 'fa';
   const s = (I18N[lang] || I18N.fa).restore;
   if (lbl) lbl.textContent = s.disableNodes;
-  if (hint) {
-    hint.textContent = s.disableNodesHint;
-    hint.classList.remove('hidden');
-  }
+  if (hint) hint.textContent = s.disableNodesHint;
   if (chk) chk.checked = false;
   opts.classList.remove('hidden');
 }

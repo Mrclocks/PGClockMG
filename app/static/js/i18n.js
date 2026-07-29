@@ -143,7 +143,7 @@ const I18N = {
         layout: 'Backup layout',
       },
       disableNodes: 'Keep nodes disabled after restore',
-      disableNodesHint: 'Nodes are restored to the database but remain disabled. Enable them manually from the panel when ready.',
+      disableNodesHint: 'If your previous panel is still active, it is better to turn this option on to avoid disruption in node connections. Nodes are restored to the database but remain disabled — enable them from the panel when ready.',
       nodesDisabledNote: 'Nodes were left disabled as requested. Enable them from the panel.',
     },
     step0: {
@@ -520,7 +520,7 @@ const I18N = {
         layout: 'ساختار بکاپ',
       },
       disableNodes: 'نودها بعد از ریستور غیرفعال بمانند',
-      disableNodesHint: 'نودها در دیتابیس ریستور می‌شوند ولی فعال نمی‌شوند. هر وقت آماده شدید از پنل فعالشان کنید.',
+      disableNodesHint: 'اگر پنل قبلی شما همچنان فعال است، بهتر است این گزینه را روشن کنید تا در اتصال نودها اختلال ایجاد نشود. نودها در دیتابیس ریستور می‌شوند ولی غیرفعال می‌مانند — هر وقت آماده شدید از پنل فعالشان کنید.',
       nodesDisabledNote: 'نودها طبق درخواست غیرفعال ماندند. از پنل فعالشان کنید.',
     },
     step0: {
@@ -894,7 +894,7 @@ const I18N = {
         layout: 'Формат бэкапа',
       },
       disableNodes: 'Оставить узлы отключёнными после восстановления',
-      disableNodesHint: 'Узлы будут в БД, но останутся отключёнными. Включите их вручную из панели.',
+      disableNodesHint: 'Если предыдущая панель ещё активна, рекомендуется включить эту опцию, чтобы избежать конфликтов подключения узлов. Узлы будут восстановлены в БД, но останутся отключёнными — включите их из панели когда будете готовы.',
       nodesDisabledNote: 'Узлы оставлены отключёнными по запросу. Включите их из панели.',
     },
     step0: {

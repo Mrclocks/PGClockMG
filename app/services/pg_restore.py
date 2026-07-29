@@ -2127,7 +2127,7 @@ async def _disable_nodes_after_restore(
         if not svc:
             job.log("Could not detect DB container — skipping node disable")
             return
-        sql = f"UPDATE {db_name}.nodes SET status = 'disabled' WHERE status != 'disabled';"
+        sql = "UPDATE nodes SET status = 'disabled' WHERE status != 'disabled';"
         last_out = ""
         for bin_name in _mysql_client_bins(db_type, svc):
             ok, out = await _run(
@@ -2135,7 +2135,7 @@ async def _disable_nodes_after_restore(
                 [
                     "docker", "compose", "exec", "-T",
                     svc, bin_name, "-u", user, f"-p{password}",
-                    "-e", sql,
+                    "-D", db_name, "-e", sql,
                 ],
                 cwd=str(PASARGUARD_DIR),
                 timeout=30,

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#0f1218">
   <title>PGClockMG</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=1.1beta.13">
+  <link rel="stylesheet" href="/static/css/style.css?v=1.6beta.1">
   <!-- Fonts: non-blocking so mobile/Iran networks don't stall first paint -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -18,7 +18,22 @@
     <header class="header">
       <div class="header-brand">
         <div class="logo" aria-hidden="true">
-          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+          <svg class="icon" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <!-- Clock face -->
+            <circle cx="24" cy="24" r="20" fill="white" opacity="0.95"/>
+            <!-- Hour/minute hands (navy blue) -->
+            <line x1="24" y1="24" x2="24" y2="10" stroke="#1a2e5a" stroke-width="2.8" stroke-linecap="round"/>
+            <line x1="24" y1="24" x2="34" y2="18" stroke="#1a2e5a" stroke-width="2.8" stroke-linecap="round"/>
+            <!-- Second hand (orange) -->
+            <line x1="24" y1="24" x2="20" y2="35" stroke="#f97316" stroke-width="1.8" stroke-linecap="round"/>
+            <!-- Center dot -->
+            <circle cx="24" cy="24" r="2.5" fill="#c2410c"/>
+            <!-- Hour dots -->
+            <circle cx="24" cy="6"  r="1.2" fill="#1a2e5a" opacity="0.5"/>
+            <circle cx="24" cy="42" r="1.2" fill="#1a2e5a" opacity="0.5"/>
+            <circle cx="6"  cy="24" r="1.2" fill="#1a2e5a" opacity="0.5"/>
+            <circle cx="42" cy="24" r="1.2" fill="#1a2e5a" opacity="0.5"/>
+          </svg>
         </div>
         <div>
           <h1>PGClockMG</h1>
@@ -216,11 +231,16 @@
 
           <!-- Options shown after successful backup analysis -->
           <div id="restoreOptions" class="restore-options hidden">
-            <label class="checkbox-row" id="restoreDisableNodesRow">
-              <input type="checkbox" id="chkDisableNodes">
-              <span class="checkbox-label" id="chkDisableNodesLabel"></span>
-            </label>
-            <p class="checkbox-hint hidden" id="chkDisableNodesHint"></p>
+            <div class="toggle-row">
+              <label class="ios-toggle" for="chkDisableNodes">
+                <input type="checkbox" id="chkDisableNodes" role="switch">
+                <span class="ios-toggle-track"><span class="ios-toggle-thumb"></span></span>
+              </label>
+              <div class="toggle-text">
+                <span class="toggle-label" id="chkDisableNodesLabel"></span>
+                <span class="toggle-hint" id="chkDisableNodesHint"></span>
+              </div>
+            </div>
           </div>
 
           <div class="actions">

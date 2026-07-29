@@ -133,11 +133,12 @@ html[lang="fa"] body {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: hsl(24, 95%, 62%);
-  background: hsla(24, 95%, 53%, 0.16);
+  background: linear-gradient(135deg, hsl(28, 100%, 52%) 0%, hsl(18, 100%, 48%) 100%);
   border-radius: 16px;
-  border: 1px solid hsla(24, 95%, 53%, 0.45);
-  box-shadow: none;
+  border: 1px solid hsla(24, 95%, 53%, 0.6);
+  box-shadow: 0 2px 12px hsla(24, 95%, 50%, 0.35);
+  overflow: hidden;
+  padding: 6px;
 }
 
 .header h1 {
@@ -2315,7 +2316,7 @@ a.btn-panel-enter:focus {
   stroke-linejoin: round;
 }
 .icon-lg { width: 2.25rem; height: 2.25rem; }
-.logo .icon { width: 1.7rem; height: 1.7rem; color: hsl(24, 95%, 62%); }
+.logo .icon { width: 100%; height: 100%; }
 .result-icon {
   display: flex;
   align-items: center;
@@ -2564,84 +2565,85 @@ a.btn-panel-enter:focus {
   background: var(--surface);
   overflow: hidden;
 }
-.db-info-header {
-  padding: 10px 16px;
-  font-size: 0.78rem;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--text-dim);
-  border-bottom: 1px solid var(--border);
-  background: var(--bg);
-}
 .db-info-body {
-  padding: 14px 16px;
+  padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 .db-info-engines {
   display: flex;
   align-items: center;
-  gap: 12px;
+  justify-content: center;
+  gap: 16px;
   flex-wrap: wrap;
 }
 .db-info-engine {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  align-items: center;
+  gap: 6px;
 }
 .db-info-engine-label {
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   color: var(--text-dim);
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
 }
 .db-info-arrow {
-  font-size: 1.2rem;
   color: var(--text-dim);
-  margin-top: 16px;
+  display: flex;
+  align-items: center;
+  margin-top: 18px;
+  flex-shrink: 0;
 }
 .db-badge {
   display: inline-flex;
   align-items: center;
-  padding: 4px 12px;
-  border-radius: 20px;
-  font-size: 0.85rem;
-  font-weight: 600;
+  padding: 6px 16px;
+  border-radius: 24px;
+  font-size: 0.88rem;
+  font-weight: 700;
   letter-spacing: 0.01em;
+  white-space: nowrap;
 }
 .db-badge-backup {
-  background: hsla(220, 70%, 55%, 0.15);
-  color: hsla(220, 70%, 65%, 1);
-  border: 1px solid hsla(220, 70%, 55%, 0.3);
+  background: hsla(220, 70%, 55%, 0.14);
+  color: hsla(220, 70%, 68%, 1);
+  border: 1.5px solid hsla(220, 70%, 55%, 0.32);
 }
 .db-badge-installed {
-  background: hsla(160, 60%, 40%, 0.15);
-  color: hsla(160, 70%, 55%, 1);
-  border: 1px solid hsla(160, 60%, 40%, 0.3);
+  background: hsla(155, 60%, 40%, 0.14);
+  color: hsla(155, 65%, 58%, 1);
+  border: 1.5px solid hsla(155, 60%, 40%, 0.32);
 }
 .db-info-match {
-  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.84rem;
   font-weight: 600;
-  padding: 6px 10px;
-  border-radius: 6px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  gap: 6px;
+  text-align: center;
 }
-.db-match-ok    { background: hsla(142, 71%, 45%, 0.12); color: hsla(142, 71%, 55%, 1); }
-.db-match-soft  { background: hsla(200, 70%, 50%, 0.12); color: hsla(200, 70%, 60%, 1); }
-.db-match-convert { background: hsla(38, 92%, 50%, 0.12); color: hsla(38, 92%, 55%, 1); }
-.db-match-blocked { background: hsla(0, 72%, 51%, 0.12); color: hsla(0, 72%, 60%, 1); }
+.db-match-ok      { background: hsla(142, 71%, 45%, 0.11); color: hsla(142, 71%, 58%, 1); border: 1px solid hsla(142,71%,45%,0.22); }
+.db-match-soft    { background: hsla(200, 70%, 50%, 0.11); color: hsla(200, 70%, 62%, 1); border: 1px solid hsla(200,70%,50%,0.22); }
+.db-match-convert { background: hsla(38,  92%, 50%, 0.11); color: hsla(38,  92%, 58%, 1); border: 1px solid hsla(38, 92%,50%,0.22); }
+.db-match-blocked { background: hsla(0,   72%, 51%, 0.11); color: hsla(0,   72%, 62%, 1); border: 1px solid hsla(0,  72%,51%,0.22); }
 .db-info-row {
   display: flex;
   gap: 8px;
   align-items: baseline;
-  font-size: 0.82rem;
+  font-size: 0.8rem;
+  justify-content: center;
+  color: var(--text-dim);
 }
-.db-info-label  { color: var(--text-dim); min-width: 140px; flex-shrink: 0; }
-.db-info-value  { color: var(--text); font-weight: 500; }
+.db-info-row strong { color: var(--text); font-weight: 600; }
 
-/* ── Restore: options (disable nodes checkbox) ─────────────────── */
+/* ── Restore: options — iOS toggle switch ──────────────────────── */
 .restore-options {
   margin-top: 14px;
   padding: 14px 16px;
@@ -2649,28 +2651,74 @@ a.btn-panel-enter:focus {
   border-radius: var(--radius);
   background: var(--surface);
 }
-.checkbox-row {
+.toggle-row {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  cursor: pointer;
-  font-size: 0.9rem;
-  font-weight: 500;
-  color: var(--text);
-  user-select: none;
+  align-items: flex-start;
+  gap: 14px;
 }
-.checkbox-row input[type="checkbox"] {
-  width: 18px;
-  height: 18px;
-  accent-color: var(--primary);
+/* iOS-style toggle */
+.ios-toggle {
   flex-shrink: 0;
   cursor: pointer;
+  margin-top: 2px;
 }
-.checkbox-hint {
-  margin: 6px 0 0 28px;
+.ios-toggle input {
+  position: absolute;
+  width: 1px; height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.ios-toggle-track {
+  display: block;
+  width: 46px;
+  height: 26px;
+  background: var(--border);
+  border-radius: 13px;
+  position: relative;
+  transition: background 0.22s ease;
+}
+.ios-toggle-thumb {
+  display: block;
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+  transition: transform 0.22s ease;
+}
+.ios-toggle input:checked ~ .ios-toggle-track {
+  background: var(--primary);
+}
+.ios-toggle input:checked ~ .ios-toggle-track .ios-toggle-thumb {
+  transform: translateX(20px);
+}
+html[dir="rtl"] .ios-toggle-thumb {
+  left: auto;
+  right: 3px;
+}
+html[dir="rtl"] .ios-toggle input:checked ~ .ios-toggle-track .ios-toggle-thumb {
+  transform: translateX(-20px);
+}
+.toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex: 1;
+  min-width: 0;
+}
+.toggle-label {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.4;
+}
+.toggle-hint {
   font-size: 0.78rem;
   color: var(--text-dim);
-  line-height: 1.5;
+  line-height: 1.55;
 }
 
 /* ── Restore done: info note ───────────────────────────────────── */
