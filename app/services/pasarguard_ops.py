@@ -215,7 +215,43 @@ async def _ensure_pasarguard_up(migrator) -> None:
     )
 
 
-async def verify_pasarguard_healthy(migrator, max_wait: int = 150) -> None:
+def _count_restarts_in_logs(output: str) -> int:
+    """Count how many times 'Starting backend...' appears — each one is a restart."""
+    return (output or "").count("Starting backend...")
+
+
+async def _heal_silent_restart_loop(migrator) -> bool:
+    """Attempt to fix a silent restart-loop (panel exits without any error log).
+
+    The panel starts, runs alembic context check, then silently exits and
+    restarts.  The most common cause after a DB restore is a stale
+    alembic_version that makes PasarGuard's startup code exit non-zero before
+    uvicorn binds its socket.  Stamp alembic head and force-recreate the
+    container.
+    """
+    target_db = (migrator.params or {}).get("target_db")
+    if target_db not in ("postgresql", "timescaledb", "mysql", "mariadb", "sqlite"):
+        return False
+    migrator.job.log(
+        "Silent restart loop detected — stamping alembic head and force-recreating panel..."
+    )
+    try:
+        await stamp_alembic_head(migrator)
+    except Exception as e:
+        migrator.job.log(f"alembic stamp note: {e}")
+
+    cwd = str(PASARGUARD_DIR)
+    await migrator._run_cmd(["docker", "compose", "stop", "pasarguard"], cwd=cwd, timeout=60)
+    await asyncio.sleep(3)
+    await migrator._run_cmd(
+        ["docker", "compose", "up", "-d", "--force-recreate", "pasarguard"],
+        cwd=cwd,
+        timeout=180,
+    )
+    return True
+
+
+async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
     """Fail unless PasarGuard logs show a clean startup (no migration errors)."""
     migrator.job.log("Verifying PasarGuard started without errors...")
     await asyncio.sleep(8)
@@ -223,9 +259,11 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 150) -> None:
     stable_ready = 0
     not_running_streak = 0
     healed_once = False
-    attempts = max(10, max_wait // 4)
+    silent_loop_healed = False
+    prev_restart_count = 0
+    attempts = max(12, max_wait // 4)
     for i in range(attempts):
-        out = await fetch_pasarguard_logs(migrator, tail=300)
+        out = await fetch_pasarguard_logs(migrator, tail=400)
         _log_failures_from_output(migrator, out)
 
         hit = _check_logs_for_failure(out)
@@ -250,6 +288,20 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 150) -> None:
                 + _extract_failure_snippet(out)
                 + db_hint
             )
+
+        # Detect silent restart loop: panel exits without any error log
+        # (alembic context prints but uvicorn never starts)
+        restart_count = _count_restarts_in_logs(out)
+        if restart_count >= 2 and not silent_loop_healed:
+            # Only heal if we see multiple restarts without a startup marker
+            has_startup = any(marker in (out or "") for marker in STARTUP_MARKERS)
+            if not has_startup:
+                silent_loop_healed = True
+                await _heal_silent_restart_loop(migrator)
+                await asyncio.sleep(15)
+                prev_restart_count = 0
+                continue
+        prev_restart_count = restart_count
 
         state = await _pasarguard_container_state(migrator)
         if state != "running":
@@ -277,7 +329,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 150) -> None:
 
         await asyncio.sleep(4)
 
-    out = await fetch_pasarguard_logs(migrator, tail=350)
+    out = await fetch_pasarguard_logs(migrator, tail=400)
     hit = _check_logs_for_failure(out)
     if hit:
         raise RuntimeError(

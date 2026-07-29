@@ -796,6 +796,63 @@ async def _sync_pg_role_passwords(
     await asyncio.sleep(3)
 
 
+async def _ensure_timescaledb_not_in_restore_mode(
+    job: MigrationJob,
+    password: str,
+    user: str,
+    db_name: str,
+) -> None:
+    """Guard against TimescaleDB being stuck in restore mode before panel start.
+
+    If timescaledb_pre_restore() was called but post_restore() was never
+    confirmed, the extension keeps the DB in maintenance mode and PasarGuard
+    silently crashes on every connect attempt — producing a restart loop with
+    no visible error in panel logs.
+
+    This function checks the timescaledb.restoring GUC and, if it is 'on',
+    calls timescaledb_post_restore() to release maintenance mode.
+    """
+    svc = await _detect_db_container(job, "timescaledb") or await _detect_db_container(job, "postgresql")
+    if not svc:
+        return
+    # Query the restoring flag — available since TimescaleDB 2.x
+    check_sql = (
+        "SELECT current_setting('timescaledb.restoring', true);"
+    )
+    ok, out = await _run(
+        job,
+        [
+            "docker", "compose", "exec", "-T",
+            "-e", f"PGPASSWORD={password}",
+            svc, "psql", "-U", user, "-d", db_name,
+            "-v", "ON_ERROR_STOP=0", "-At", "-c", check_sql,
+        ],
+        cwd=str(PASARGUARD_DIR),
+        timeout=20,
+    )
+    val = (out or "").strip().splitlines()
+    restoring = val[-1].strip().lower() if val else ""
+    if restoring == "on":
+        job.log("TimescaleDB is still in restore mode — calling timescaledb_post_restore() now")
+        ok2, out2 = await _run(
+            job,
+            [
+                "docker", "compose", "exec", "-T",
+                "-e", f"PGPASSWORD={password}",
+                svc, "psql", "-U", user, "-d", db_name,
+                "-v", "ON_ERROR_STOP=0", "-c", "SELECT timescaledb_post_restore();",
+            ],
+            cwd=str(PASARGUARD_DIR),
+            timeout=30,
+        )
+        if ok2:
+            job.log("TimescaleDB restore mode cleared successfully")
+        else:
+            job.log(f"timescaledb_post_restore warning: {extract_psql_errors(out2 or '')[:300]}")
+    else:
+        job.log(f"TimescaleDB restore mode check: {restoring or 'off/n/a'} — OK")
+
+
 async def _heal_panel_auth_if_needed(job: MigrationJob, password: str, user: str, db_name: str, db_type: str) -> None:
     """If panel crash-loops on SASL/password, re-sync roles and restart."""
     if db_type not in ("postgresql", "timescaledb", "mysql", "mariadb"):
@@ -1909,6 +1966,12 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             _relocate_sqlite_after_convert(job)
 
         job.set_progress(90, "Starting PasarGuard...")
+        # Ensure TimescaleDB is not stuck in restore mode before panel starts
+        if (final_db or restore_engine or "") in ("timescaledb", "postgresql"):
+            await _ensure_timescaledb_not_in_restore_mode(
+                job, verify_pass, verify_user, verify_db,
+            )
+
         # Force recreate so panel picks up finalized .env (DB URL / SSL)
         ok, out = await _compose(job, "up", "-d", "--force-recreate", "pasarguard", timeout=300)
         if not ok:
@@ -2341,7 +2404,12 @@ async def _restore_postgres(
                 )
                 restore_file = filtered
                 ok, out = await restore_dump_file(dbn, restore_file, tolerant=False)
-                await psql("SELECT timescaledb_post_restore();", db=dbn)
+                ok_post, out_post = await psql("SELECT timescaledb_post_restore();", db=dbn)
+                if not ok_post:
+                    job.log(f"timescaledb_post_restore warning: {extract_psql_errors(out_post)[:300]}")
+                    # Retry once — extension may need a moment after dump load
+                    await asyncio.sleep(3)
+                    await psql("SELECT timescaledb_post_restore();", db=dbn)
             elif dump_wants_ts and not use_timescale:
                 # Timescale backup → plain PostgreSQL (fallback if convert path not used)
                 filtered = dump_path.with_suffix(dump_path.suffix + ".pg-plain")
@@ -2397,7 +2465,11 @@ async def _restore_postgres(
                             encoding="utf-8",
                         )
                         ok, out = await restore_dump_file(dbn, filtered2, tolerant=False)
-                        await psql("SELECT timescaledb_post_restore();", db=dbn)
+                        ok_post2, out_post2 = await psql("SELECT timescaledb_post_restore();", db=dbn)
+                        if not ok_post2:
+                            job.log(f"timescaledb_post_restore (retry) warning: {extract_psql_errors(out_post2)[:300]}")
+                            await asyncio.sleep(3)
+                            await psql("SELECT timescaledb_post_restore();", db=dbn)
                 if not ok and dump_wants_ts and not use_timescale:
                     job.log("Retrying Timescale→PG dump with tolerant import...")
                     filtered3 = dump_path.with_suffix(dump_path.suffix + ".pg-plain-retry")
@@ -2444,7 +2516,11 @@ async def _restore_postgres(
             encoding="utf-8",
         )
         ok, out = await restore_dump_file(db_name, filtered, tolerant=False)
-        await psql("SELECT timescaledb_post_restore();", db=db_name)
+        ok_post_s, out_post_s = await psql("SELECT timescaledb_post_restore();", db=db_name)
+        if not ok_post_s:
+            job.log(f"timescaledb_post_restore (single) warning: {extract_psql_errors(out_post_s)[:300]}")
+            await asyncio.sleep(3)
+            await psql("SELECT timescaledb_post_restore();", db=db_name)
     elif backup_has_ts and not use_timescale:
         filtered = root / "db_backup_pg_plain.sql"
         filtered.write_text(
