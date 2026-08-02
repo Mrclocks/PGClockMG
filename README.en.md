@@ -1,4 +1,4 @@
-> ⚠️ **`v2.0.1`** — Always take a full backup before restore or migration.
+> ⚠️ **`v2.0.2`** — Always take a full backup before restore or migration.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <b>English</b> · <a href="README.ru.md">Русский</a>
@@ -55,6 +55,7 @@ Requirements: Ubuntu/Debian · root · Docker
 
 | Version | Key changes |
 |---------|-------------|
+| v2.0.2 | Fix MariaDB→Timescale migrate (ephemeral CREATE DATABASE + stage on mariadb:11) |
 | v2.0.1 | Panel/sub redirect prefers PasarGuard domain, else IP; tracks later .env/domain changes |
 | v2.0 | Full 3X-UI migrate (auto old/new schema, Host/Admin/Group, redirect path/port) |
 | v1.16.3 | Fix /sub Internal Server Error (short 3x-ui shadowsocks passwords) |
