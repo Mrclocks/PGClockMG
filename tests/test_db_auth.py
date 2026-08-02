@@ -147,6 +147,44 @@ def test_explain_auth_mariadb_target_from_timescale():
     print("OK: timescale→mariadb auth tips are MySQL-aware")
 
 
+def test_sync_mysql_roles_runs_alter_user_shell():
+    import asyncio
+    from unittest.mock import patch
+
+    from app.services.db_auth import sync_mysql_roles_to_password
+    from app.services.migrators.base import BaseMigrator, MigrationJob
+
+    class Dummy(BaseMigrator):
+        async def run(self, params):
+            return {}
+
+    async def _run():
+        job = MigrationJob(job_id="sync1")
+        migrator = Dummy(job, {})
+        seen = []
+
+        async def fake_run(self, cmd, cwd=None, timeout=600):
+            seen.append(cmd if isinstance(cmd, str) else " ".join(cmd))
+            return True, "ok"
+
+        with patch("app.services.db_auth.resolve_db_service", return_value="mysql"), \
+             patch("app.services.db_auth.PASARGUARD_DIR", Path("/opt/pasarguard")), \
+             patch.object(Dummy, "_run_cmd", fake_run):
+            await sync_mysql_roles_to_password(
+                migrator,
+                "mysql",
+                {"user": "root", "password": "rootpw"},
+                app_user="pasarguard",
+                password="rootpw",
+                env_text="DB_USER=pasarguard\nMYSQL_ROOT_PASSWORD=rootpw\n",
+            )
+        assert seen
+        assert any("ALTER USER" in s and "pasarguard" in s for s in seen)
+
+    asyncio.run(_run())
+    print("OK: sync_mysql_roles ALTER USER")
+
+
 def test_mysql_probe_shell_string_via_base_migrator():
     """Regression: x-ui→MySQL died because BaseMigrator exec'd shell strings char-by-char."""
     import asyncio
@@ -219,5 +257,6 @@ if __name__ == "__main__":
     test_mysql_password_candidates()
     test_mysql_password_candidates_from_sqlalchemy_url()
     test_explain_auth_mariadb_target_from_timescale()
+    test_sync_mysql_roles_runs_alter_user_shell()
     test_mysql_probe_shell_string_via_base_migrator()
     print("\nAll db_auth tests passed")

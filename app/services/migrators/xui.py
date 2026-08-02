@@ -15,7 +15,11 @@ from app.services.migrators.base import BaseMigrator
 from app.services.prerequisites import find_xui_db
 from app.services.pasarguard_ops import safe_start_pasarguard
 from app.services.native_migration import run_cross_db_migration
-from app.services.env_migration import transform_pasarguard_env_for_target
+from app.services.env_migration import (
+    env_points_to_db,
+    finalize_pasarguard_env_after_restore,
+    read_env_var,
+)
 
 
 def find_xui_db_in_dir(root: Path) -> Path | None:
@@ -317,6 +321,13 @@ class XuiMigrator(BaseMigrator):
         if not PASARGUARD_DIR.exists():
             raise RuntimeError("PasarGuard نصب نیست — ابتدا نصب کنید")
 
+        # Snapshot install .env BEFORE any rewrite (needed for MySQL app-user finalize)
+        install_env_snapshot = ""
+        if PASARGUARD_ENV.exists():
+            install_env_snapshot = PASARGUARD_ENV.read_text(
+                encoding="utf-8", errors="ignore",
+            )
+
         self.job.set_progress(30, "آماده‌سازی ابزار مهاجرت x-ui...")
         xui_tool = TOOLS_DIR / "migrations" / "x-ui"
         if not xui_tool.exists():
@@ -386,26 +397,13 @@ class XuiMigrator(BaseMigrator):
         redirect_installed = False
         if install_redirect and mapping_file.exists():
             self.job.set_progress(85, "نصب سرور ریدایرکت لینک‌های قدیمی...")
-            ok, _ = await self._run_cmd([
-                "bash", "-c",
-                f"curl -fsSL https://raw.githubusercontent.com/PasarGuard/migrations/main/"
-                f"redirect-server/install_redirect_server.sh | bash -s -- --mapping {mapping_file}"
-            ], timeout=300)
-            redirect_installed = ok
+            redirect_installed = await self._install_redirect_server(mapping_file)
 
         if target_db != "sqlite":
             self.job.set_progress(88, f"Two-phase: SQLite → {target_db}...")
-            await run_cross_db_migration(self, str(land_db), "sqlite", target_db)
-            if PASARGUARD_ENV.exists():
-                from app.services.db_credentials import get_target_connection
-                text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
-                conn = get_target_connection(self.params)
-                PASARGUARD_ENV.write_text(
-                    transform_pasarguard_env_for_target(
-                        text, target_db, conn.get("password"),
-                    ),
-                    encoding="utf-8",
-                )
+            await self._convert_landed_sqlite_to_target(
+                land_db, target_db, install_env_snapshot,
+            )
 
         self.job.set_progress(95, "راه‌اندازی مجدد PasarGuard...")
         await safe_start_pasarguard(self)
@@ -421,19 +419,150 @@ class XuiMigrator(BaseMigrator):
             "migrated_counts": out_counts,
             "warnings": {
                 "en": [
-                    "Old /sub/{token} links work if redirect server is installed (enabled by default).",
+                    "Old /sub/{token} links keep working via the redirect server (installed by default).",
                     "Create admin: pasarguard cli generate-temp-key",
+                    "Add Hosts in the panel for each inbound so new subscription configs resolve.",
                 ],
                 "fa": [
-                    "لینک‌های قدیمی /sub/{token} با redirect server کار می‌کنند.",
+                    "لینک‌های قدیمی /sub/{token} با redirect server بدون تغییر می‌مانند.",
                     "ادمین بسازید: pasarguard cli generate-temp-key",
+                    "برای هر inbound در پنل Host بسازید تا کانفیگ سابسکریپشن جدید کامل شود.",
                 ],
                 "ru": [
-                    "Старые ссылки работают через redirect server.",
+                    "Старые ссылки /sub/{token} сохраняются через redirect server.",
                     "Создайте админа: pasarguard cli generate-temp-key",
+                    "Создайте Hosts для inbound'ов в панели для новых подписок.",
                 ],
             },
         }
+
+    async def _install_redirect_server(self, mapping_file: Path) -> bool:
+        """Install PasarGuard redirect-server so old x-ui /sub links keep working.
+
+        Upstream installer expects ``MAP_FILE=/path`` (not ``--mapping``). Prefer the
+        locally cloned script under tools/migrations/redirect-server.
+        """
+        mapping = Path(mapping_file)
+        if not mapping.is_file():
+            return False
+        local = TOOLS_DIR / "migrations" / "redirect-server" / "install_redirect_server.sh"
+        # Official API: MAP_FILE env + optional version arg (default latest)
+        if local.is_file():
+            cmd = f'MAP_FILE="{mapping}" bash "{local}" latest'
+        else:
+            url = (
+                "https://raw.githubusercontent.com/PasarGuard/migrations/main/"
+                "redirect-server/install_redirect_server.sh"
+            )
+            cmd = f'MAP_FILE="{mapping}" bash -c \'curl -fsSL "{url}" | bash -s -- latest\''
+        ok, out = await self._run_cmd(["bash", "-c", cmd], timeout=600)
+        if ok:
+            self.job.log("Redirect server installed — old subscription URLs stay valid")
+            return True
+        self.job.log(
+            "Redirect server install failed (old /sub links may break until fixed): "
+            f"{(out or '')[-500:]}"
+        )
+        return False
+
+    async def _convert_landed_sqlite_to_target(
+        self,
+        land_db: Path,
+        target_db: str,
+        install_env_snapshot: str,
+    ) -> None:
+        """sqlite → server DB with restore-grade MySQL password sync + .env finalize.
+
+        Fixes Access denied for ``pasarguard`` after copy-as-root: align app user
+        password and write SQLAlchemy URL from the install snapshot.
+        """
+        from app.services.db_auth import (
+            resolve_live_admin_connection,
+            sync_mysql_roles_to_password,
+            sync_postgres_roles_to_app_password,
+        )
+        from app.services.db_credentials import get_target_connection
+
+        await run_cross_db_migration(self, str(land_db), "sqlite", target_db)
+
+        env = install_env_snapshot or (
+            PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+            if PASARGUARD_ENV.exists()
+            else ""
+        )
+        app_user = (
+            read_env_var(env, "DB_USER")
+            or read_env_var(env, "MYSQL_USER")
+            or read_env_var(env, "POSTGRES_USER")
+            or "pasarguard"
+        )
+        db_name = (
+            read_env_var(env, "DB_NAME")
+            or read_env_var(env, "MYSQL_DATABASE")
+            or read_env_var(env, "POSTGRES_DB")
+            or "pasarguard"
+        )
+        # Prefer MYSQL_ROOT_PASSWORD for sync (matches restore convert); URL keeps app user.
+        sync_pwd = (
+            read_env_var(env, "MYSQL_ROOT_PASSWORD")
+            or read_env_var(env, "DB_PASSWORD")
+            or read_env_var(env, "MYSQL_PASSWORD")
+            or read_env_var(env, "POSTGRES_PASSWORD")
+            or ""
+        )
+        admin = get_target_connection(self.params) or {}
+        if not sync_pwd:
+            sync_pwd = admin.get("password") or ""
+
+        if target_db in ("mysql", "mariadb") and sync_pwd:
+            try:
+                live = await resolve_live_admin_connection(
+                    self, target_db, env_text=env,
+                )
+            except Exception:
+                live = {**admin, "db_type": target_db, "password": sync_pwd}
+            await sync_mysql_roles_to_password(
+                self,
+                target_db,
+                live,
+                app_user=app_user,
+                password=sync_pwd,
+                env_text=env,
+            )
+            self.job.log(
+                f"MySQL app user '{app_user}' aligned for panel SQLAlchemy URL"
+            )
+        elif target_db in ("postgresql", "timescaledb") and admin:
+            await sync_postgres_roles_to_app_password(
+                self, target_db, admin, env_text=env,
+            )
+
+        if not PASARGUARD_ENV.exists():
+            raise RuntimeError(".env PasarGuard یافت نشد بعد از convert")
+
+        text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+        finalized = finalize_pasarguard_env_after_restore(
+            text,
+            target_db,
+            sync_pwd,
+            env,
+            db_user=app_user,
+            db_name=db_name,
+        )
+        if not env_points_to_db(finalized, target_db):
+            raise RuntimeError(
+                f".env SQLALCHEMY_DATABASE_URL با موتور هدف {target_db} هم‌خوان نیست"
+            )
+        PASARGUARD_ENV.write_text(finalized, encoding="utf-8")
+        self.job.log(f".env finalized for {target_db} (user={app_user})")
+
+        # Panel must not keep reading the intermediate SQLite file
+        if land_db.exists() and target_db != "sqlite":
+            bak = PASARGUARD_DATA / f"db.sqlite3.pre-convert-{self.job.job_id}.bak"
+            if bak.exists():
+                bak.unlink()
+            shutil.move(str(land_db), str(bak))
+            self.job.log(f"Moved SQLite aside → {bak.name}")
 
     async def _locate_xui_db(
         self,

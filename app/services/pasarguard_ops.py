@@ -215,6 +215,75 @@ async def _ensure_pasarguard_up(migrator) -> None:
     )
 
 
+async def _try_heal_db_auth_mismatch(migrator, logs: str) -> bool:
+    """If panel logs show Access denied / SASL fail, re-sync DB users to .env password."""
+    low = (logs or "").lower()
+    auth_hit = any(
+        s in low
+        for s in (
+            "access denied for user",
+            "password authentication failed",
+            "sasl authentication failed",
+            "authentication failed",
+        )
+    )
+    if not auth_hit:
+        return False
+
+    target_db = (migrator.params or {}).get("target_db")
+    if target_db not in ("mysql", "mariadb", "postgresql", "timescaledb"):
+        return False
+
+    try:
+        from app.services.db_auth import (
+            read_env_text,
+            resolve_live_admin_connection,
+            sync_mysql_roles_to_password,
+            sync_postgres_roles_to_app_password,
+        )
+        from app.services.env_migration import parse_sqlalchemy_url, read_env_var
+
+        env = read_env_text()
+        url = read_env_var(env, "SQLALCHEMY_DATABASE_URL") or ""
+        parsed = parse_sqlalchemy_url(url) if url else {}
+        app_user = (
+            parsed.get("user")
+            or read_env_var(env, "DB_USER")
+            or read_env_var(env, "MYSQL_USER")
+            or "pasarguard"
+        )
+        url_pwd = (
+            parsed.get("password")
+            or read_env_var(env, "DB_PASSWORD")
+            or read_env_var(env, "MYSQL_ROOT_PASSWORD")
+            or ""
+        )
+        if not url_pwd:
+            return False
+
+        migrator.job.log(
+            f"Auth failure in panel logs — syncing {target_db} roles for user={app_user}…"
+        )
+        admin = await resolve_live_admin_connection(migrator, target_db, env_text=env)
+        if target_db in ("mysql", "mariadb"):
+            await sync_mysql_roles_to_password(
+                migrator,
+                target_db,
+                admin,
+                app_user=app_user,
+                password=url_pwd,
+                env_text=env,
+            )
+        else:
+            await sync_postgres_roles_to_app_password(
+                migrator, target_db, admin, env_text=env,
+            )
+        return True
+    except Exception as e:
+        migrator.job.log(f"DB auth heal note: {e}")
+        return False
+
+
 def _count_restarts_in_logs(output: str) -> int:
     """Count how many times 'Starting backend...' appears — each one is a restart."""
     return (output or "").count("Starting backend...")
@@ -271,7 +340,15 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
             # Give crash-loop a moment and one recreate before hard-fail
             if not healed_once:
                 healed_once = True
-                migrator.job.log(f"Panel error detected ({hit}) — recreating pasarguard once…")
+                # Auto-heal MySQL/PG password drift after cross-DB (Access denied / SASL)
+                if await _try_heal_db_auth_mismatch(migrator, out):
+                    migrator.job.log(
+                        f"Panel error detected ({hit}) — DB auth healed, recreating panel…"
+                    )
+                else:
+                    migrator.job.log(
+                        f"Panel error detected ({hit}) — recreating pasarguard once…"
+                    )
                 await _ensure_pasarguard_up(migrator)
                 await asyncio.sleep(10)
                 continue
