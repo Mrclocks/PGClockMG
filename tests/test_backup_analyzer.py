@@ -69,8 +69,24 @@ def test_incomplete_zip():
         print("OK: incomplete zip")
 
 
+def test_xui_db_in_extracted_zip():
+    with tempfile.TemporaryDirectory() as tmp:
+        upload_dir = Path(tmp)
+        ext = upload_dir / "extracted"
+        ext.mkdir()
+        (ext / "x-ui.db").write_bytes(b"xui-sqlite")
+
+        result = analyze_upload_directory(upload_dir)
+        assert result["panel_hint"] == "3x-ui"
+        assert result["detected_source_db"] == "sqlite"
+        assert result["backup_ok"] is True
+        assert result["categories"].get("database_sqlite", 0) >= 1
+        print("OK: x-ui zip")
+
+
 if __name__ == "__main__":
     test_nested_marzban_zip_sqlite()
     test_mysql_sql_dump()
     test_incomplete_zip()
+    test_xui_db_in_extracted_zip()
     print("\nAll backup analyzer tests passed.")

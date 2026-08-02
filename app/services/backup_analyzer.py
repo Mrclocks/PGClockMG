@@ -15,7 +15,7 @@ from app.services.env_migration import (
 )
 
 CATEGORY_RULES: list[tuple[str, tuple[str, ...]]] = [
-    ("database_sqlite", ("db.sqlite3", "marzban.db")),
+    ("database_sqlite", ("db.sqlite3", "marzban.db", "x-ui.db")),
     ("database_sql", (".sql",)),
     ("config_env", (".env",)),
     ("config_compose", ("docker-compose.yml", "docker-compose.yaml")),
@@ -23,6 +23,8 @@ CATEGORY_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("ssl_certs", ("fullchain.pem", "key.pem", "cert.pem")),
     ("templates", ()),
 ]
+
+SQLITE_DB_NAMES = ("db.sqlite3", "marzban.db", "x-ui.db")
 
 MARZBAN_PATH_MARKERS = (
     "/var/lib/marzban",
@@ -78,7 +80,7 @@ def _score_directory(path: Path) -> int:
         if not p.is_file():
             continue
         name = p.name.lower()
-        if name in ("db.sqlite3", "marzban.db"):
+        if name in SQLITE_DB_NAMES:
             score += 10
         if name.endswith(".sql"):
             score += 8
@@ -144,7 +146,7 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
         })
 
         name = p.name.lower()
-        if name in ("db.sqlite3", "marzban.db") and not paths["sqlite"]:
+        if name in SQLITE_DB_NAMES and not paths["sqlite"]:
             paths["sqlite"] = str(p)
             paths["data_dir"] = str(p.parent)
         if name.endswith(".sql") and not paths["sql"]:
@@ -164,7 +166,7 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
             continue
         if p.name.lower().endswith(".sql") and not paths["sql"]:
             paths["sql"] = str(p)
-        if p.name.lower() in ("db.sqlite3", "marzban.db", "x-ui.db") and not paths["sqlite"]:
+        if p.name.lower() in SQLITE_DB_NAMES and not paths["sqlite"]:
             paths["sqlite"] = str(p)
 
     panel_hint = _detect_panel(inventory, paths)
@@ -250,10 +252,13 @@ def _detect_panel(inventory: list[dict], paths: dict) -> str | None:
     if "x-ui" in sqlite_path.lower():
         return "3x-ui"
     for item in inventory:
+        name = item["name"].lower()
         p = item["path"].lower()
+        if "x-ui" in name or "x-ui" in p:
+            return "3x-ui"
         if "hiddify" in p:
             return "hiddify"
-        if "marzban" in p or item["name"] in ("db.sqlite3", "marzban.db"):
+        if "marzban" in p or name in ("db.sqlite3", "marzban.db"):
             return "marzban"
     if paths.get("sqlite") or paths.get("sql"):
         return "marzban"
