@@ -1,4 +1,4 @@
-> ⚠️ **`v2.0.1`** — Перед restore или миграцией сделайте полный бэкап.
+> ⚠️ **`v2.0.2`** — Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <a href="README.en.md">English</a> · <b>Русский</b>
@@ -55,6 +55,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | Версия | Основные изменения |
 |--------|-------------------|
+| v2.0.2 | Исправление миграции MariaDB→Timescale (CREATE DATABASE + staging на mariadb:11) |
 | v2.0.1 | Redirect/панель: домен PasarGuard приоритетнее IP; отслеживает смену .env/домена |
 | v2.0 | Полная миграция 3X-UI (авто old/new, Host/Admin/Group, redirect path/port) |
 | v1.16.3 | Исправление Internal Server Error на /sub (короткий пароль shadowsocks из 3x-ui) |
