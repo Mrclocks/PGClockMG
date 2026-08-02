@@ -11,8 +11,11 @@ from pathlib import Path
 import pytest
 
 from app.services.migrators.xui import (
+    detect_xui_db_schema,
+    ensure_sudo_admin_from_xui,
     is_modern_xui_multi_inbound_schema,
     normalize_modern_xui_sqlite,
+    seed_hosts_from_xui_inbounds,
     sync_user_groups_from_xui_settings,
 )
 
@@ -23,10 +26,15 @@ LEGACY2_DB = Path(r"c:\Users\hrtag\Downloads\x-ui (2).db")
 
 @pytest.mark.skipif(not MODERN_DB.is_file(), reason="modern sample db missing")
 def test_detect_modern_schema():
+    info = detect_xui_db_schema(MODERN_DB)
+    assert info["schema"] == "modern"
+    assert info["modern"] is True
     assert is_modern_xui_multi_inbound_schema(MODERN_DB) is True
     if LEGACY_DB.is_file():
+        assert detect_xui_db_schema(LEGACY_DB)["schema"] == "legacy"
         assert is_modern_xui_multi_inbound_schema(LEGACY_DB) is False
     if LEGACY2_DB.is_file():
+        assert detect_xui_db_schema(LEGACY2_DB)["schema"] == "legacy"
         assert is_modern_xui_multi_inbound_schema(LEGACY2_DB) is False
 
 
@@ -139,3 +147,77 @@ def test_normalize_skips_legacy():
         shutil.copy2(LEGACY_DB, work)
         stats = normalize_modern_xui_sqlite(work)
         assert stats["normalized"] is False
+
+
+@pytest.mark.skipif(not MODERN_DB.is_file(), reason="modern sample db missing")
+def test_seed_hosts_and_admin_for_modern():
+    with tempfile.TemporaryDirectory() as tmp:
+        xui = Path(tmp) / "x-ui.db"
+        pg = Path(tmp) / "pg.db"
+        shutil.copy2(MODERN_DB, xui)
+        normalize_modern_xui_sqlite(xui)
+
+        conn = sqlite3.connect(pg)
+        conn.executescript(
+            """
+            CREATE TABLE inbounds (id INTEGER PRIMARY KEY, tag TEXT);
+            CREATE TABLE hosts (
+                id INTEGER PRIMARY KEY,
+                remark VARCHAR(256) NOT NULL,
+                address VARCHAR(256) NOT NULL,
+                port INTEGER,
+                inbound_tag VARCHAR(256),
+                sni VARCHAR(1000),
+                host VARCHAR(1000),
+                security VARCHAR(15) DEFAULT 'inbound_default' NOT NULL,
+                alpn VARCHAR(14) DEFAULT '',
+                fingerprint VARCHAR(16) DEFAULT 'none' NOT NULL,
+                allowinsecure BOOLEAN,
+                is_disabled BOOLEAN,
+                path VARCHAR(256),
+                random_user_agent BOOLEAN DEFAULT '0' NOT NULL,
+                use_sni_as_host BOOLEAN DEFAULT '0' NOT NULL,
+                priority INTEGER NOT NULL,
+                status VARCHAR(60) DEFAULT ''
+            );
+            CREATE TABLE admins (
+                id INTEGER PRIMARY KEY,
+                username VARCHAR(34) NOT NULL,
+                hashed_password VARCHAR(128) NOT NULL,
+                created_at DATETIME NOT NULL,
+                is_sudo BOOLEAN DEFAULT 0 NOT NULL,
+                used_traffic BIGINT DEFAULT 0 NOT NULL,
+                is_disabled BOOLEAN DEFAULT 0 NOT NULL
+            );
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY, username TEXT, admin_id INTEGER
+            );
+            INSERT INTO inbounds VALUES
+                (1, 'in-45361-tcp'), (2, 'in-58551-tcp'), (3, 'in-56038-tcp');
+            INSERT INTO users VALUES (1, '7didmnu1sz', 1), (2, 'uubnxn4ska', 1);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        hosts = seed_hosts_from_xui_inbounds(
+            pg, xui, share_address="test1.mrclock.website",
+        )
+        assert hosts["seeded"] == 3
+        assert hosts["address"] == "test1.mrclock.website"
+
+        admin = ensure_sudo_admin_from_xui(pg, xui)
+        assert admin["created"] is True
+
+        conn = sqlite3.connect(f"file:{pg}?mode=ro", uri=True)
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM hosts").fetchone()[0] == 3
+            for addr, tag, alpn in conn.execute(
+                "SELECT address, inbound_tag, alpn FROM hosts"
+            ):
+                assert addr == "test1.mrclock.website"
+                assert tag.startswith("in-")
+                assert alpn != "none"  # EnumArray-breaking value
+            assert conn.execute("SELECT COUNT(*) FROM admins").fetchone()[0] == 1
+        finally:
+            conn.close()

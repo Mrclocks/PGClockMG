@@ -203,14 +203,38 @@ def safe_copy_sqlite(src: Path, dst: Path) -> None:
         src_conn.close()
 
 
-def is_modern_xui_multi_inbound_schema(path: Path) -> bool:
-    """Newer 3x-ui (multi-inbound clients): ``clients`` + ``client_inbounds`` tables."""
+def detect_xui_db_schema(path: Path) -> dict:
+    """Auto-detect legacy vs modern 3x-ui SQLite layout from uploaded DB tables."""
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         names = _xui_table_names(conn)
-        return "clients" in names and "client_inbounds" in names
+        modern = "clients" in names and "client_inbounds" in names
+        clients = 0
+        memberships = 0
+        traffics = 0
+        if "clients" in names:
+            clients = int(conn.execute("SELECT COUNT(*) FROM clients").fetchone()[0])
+        if "client_inbounds" in names:
+            memberships = int(conn.execute("SELECT COUNT(*) FROM client_inbounds").fetchone()[0])
+        if "client_traffics" in names:
+            traffics = int(conn.execute("SELECT COUNT(*) FROM client_traffics").fetchone()[0])
+        return {
+            "schema": "modern" if modern else "legacy",
+            "modern": modern,
+            "has_clients_table": "clients" in names,
+            "has_client_inbounds": "client_inbounds" in names,
+            "has_hosts_table": "hosts" in names,
+            "clients": clients,
+            "memberships": memberships,
+            "traffics": traffics,
+        }
     finally:
         conn.close()
+
+
+def is_modern_xui_multi_inbound_schema(path: Path) -> bool:
+    """Newer 3x-ui (multi-inbound clients): ``clients`` + ``client_inbounds`` tables."""
+    return bool(detect_xui_db_schema(path).get("modern"))
 
 
 def _client_entry_for_protocol(protocol: str, client: dict, flow_override: str = "") -> dict:
@@ -526,6 +550,480 @@ def sync_user_groups_from_xui_settings(pg_db: Path, xui_db: Path) -> dict:
         }
     finally:
         conn.close()
+
+
+def _guess_share_address(xui_db: Path, listen: dict | None = None) -> str:
+    """Best-effort public address for seeded PasarGuard hosts."""
+    listen = listen or {}
+    domain = str(listen.get("domain") or "").strip()
+    if domain.startswith("http://") or domain.startswith("https://"):
+        domain = urlparse(domain).hostname or ""
+    if domain:
+        return domain
+    for key in ("cert_path", "key_path", "cert", "key"):
+        raw = str(listen.get(key) or "").strip()
+        if not raw:
+            continue
+        for part in reversed(Path(raw).parts):
+            if "." in part and not part.lower().endswith(
+                (".pem", ".crt", ".key", ".cer")
+            ):
+                return part
+    # Fall back to cert paths directly from DB if listen was incomplete
+    try:
+        again = read_xui_subscription_listen(Path(xui_db))
+        for key in ("cert_path", "key_path"):
+            raw = str(again.get(key) or "").strip()
+            for part in reversed(Path(raw).parts):
+                if "." in part and not part.lower().endswith(
+                    (".pem", ".crt", ".key", ".cer")
+                ):
+                    return part
+    except Exception:
+        pass
+    return detect_public_ip()
+
+
+def _host_overlay_from_stream(stream: dict) -> dict:
+    """Map x-ui stream_settings → PasarGuard host column overlays."""
+    if not isinstance(stream, dict):
+        stream = {}
+    network = str(stream.get("network") or "tcp").lower()
+    security = str(stream.get("security") or "none").lower()
+    if security == "tls":
+        host_security = "tls"
+    elif security == "none":
+        host_security = "none"
+    else:
+        # reality / other → keep inbound defaults
+        host_security = "inbound_default"
+
+    path = ""
+    host_header = ""
+    if network == "ws":
+        ws = stream.get("wsSettings") or {}
+        path = str(ws.get("path") or "")
+        host_header = str((ws.get("headers") or {}).get("Host") or "")
+    elif network in ("httpupgrade", "http_upgrade"):
+        hu = stream.get("httpupgradeSettings") or stream.get("httpUpgradeSettings") or {}
+        path = str(hu.get("path") or "")
+        host_header = str(hu.get("host") or "")
+    elif network == "splithttp" or network == "xhttp":
+        xh = stream.get("xhttpSettings") or stream.get("splithttpSettings") or {}
+        path = str(xh.get("path") or "")
+        host_header = str(xh.get("host") or "")
+    elif network == "grpc":
+        path = str((stream.get("grpcSettings") or {}).get("serviceName") or "")
+    elif network == "tcp":
+        header = ((stream.get("tcpSettings") or {}).get("header") or {})
+        if str(header.get("type") or "") == "http":
+            req = header.get("request") or {}
+            paths = req.get("path") or []
+            if isinstance(paths, list) and paths:
+                path = str(paths[0] or "")
+            headers = req.get("headers") or {}
+            hosts = headers.get("Host") or headers.get("host") or []
+            if isinstance(hosts, list) and hosts:
+                host_header = str(hosts[0] or "")
+
+    sni = ""
+    fingerprint = "none"
+    alpn = ""
+    if security == "tls":
+        tls = stream.get("tlsSettings") or {}
+        sni = str(tls.get("serverName") or tls.get("server_name") or "")
+        fingerprint = str(tls.get("fingerprint") or "none") or "none"
+        alpn_list = tls.get("alpn") or []
+        if isinstance(alpn_list, list):
+            # EnumArray: comma-separated ProxyHostALPN values
+            mapped = []
+            for item in alpn_list:
+                v = str(item or "").strip()
+                if v in ("h2", "h3", "http/1.1"):
+                    mapped.append(v)
+            alpn = ",".join(mapped)
+    elif security == "reality":
+        reality = stream.get("realitySettings") or {}
+        # serverNames may be list
+        names = reality.get("serverNames") or reality.get("server_names") or []
+        if isinstance(names, list) and names:
+            sni = str(names[0] or "")
+        elif isinstance(names, str):
+            sni = names
+        fingerprint = str(reality.get("fingerprint") or "chrome") or "chrome"
+
+    return {
+        "security": host_security,
+        "path": path or None,
+        "host": host_header or None,
+        "sni": sni or None,
+        "fingerprint": fingerprint or "none",
+        "alpn": alpn or None,
+    }
+
+
+def ensure_sudo_admin_from_xui(pg_db: Path, xui_db: Path) -> dict:
+    """Create sudo admin #1 from x-ui panel user when PG admins table is empty."""
+    pg_path = Path(pg_db)
+    xui_path = Path(xui_db)
+    conn = sqlite3.connect(str(pg_path))
+    try:
+        tables = _xui_table_names(conn)
+        if "admins" not in tables:
+            return {"created": False, "reason": "no-admins-table"}
+        if int(conn.execute("SELECT COUNT(*) FROM admins").fetchone()[0]) > 0:
+            return {"created": False, "reason": "already-present"}
+
+        username = "admin"
+        hashed = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"  # "password"
+        xui = sqlite3.connect(f"file:{xui_path.as_posix()}?mode=ro", uri=True)
+        try:
+            xui_tables = _xui_table_names(xui)
+            if "users" in xui_tables:
+                row = xui.execute(
+                    "SELECT username, password FROM users ORDER BY id LIMIT 1"
+                ).fetchone()
+                if row and row[0] and row[1]:
+                    username = str(row[0])[:34]
+                    hashed = str(row[1])[:128]
+        finally:
+            xui.close()
+
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(admins)")]
+        now = "1970-01-01 00:00:00"
+        fields = ["id", "username", "hashed_password", "created_at", "is_sudo"]
+        values: list = [1, username, hashed, now, 1]
+        if "used_traffic" in cols:
+            fields.append("used_traffic")
+            values.append(0)
+        if "is_disabled" in cols:
+            fields.append("is_disabled")
+            values.append(0)
+        placeholders = ",".join("?" * len(fields))
+        conn.execute(
+            f"INSERT INTO admins ({','.join(fields)}) VALUES ({placeholders})",
+            values,
+        )
+        # Point users at this admin when admin_id is missing/orphan
+        if "users" in tables:
+            user_cols = [r[1] for r in conn.execute("PRAGMA table_info(users)")]
+            if "admin_id" in user_cols:
+                conn.execute(
+                    "UPDATE users SET admin_id=1 WHERE admin_id IS NULL OR admin_id NOT IN (SELECT id FROM admins)"
+                )
+        conn.commit()
+        return {"created": True, "username": username}
+    finally:
+        conn.close()
+
+
+def sanitize_core_configs_encryption(pg_db: Path) -> dict:
+    """Strip panel-only vless ``encryption`` keys that break Xray/PasarGuard."""
+    path = Path(pg_db)
+    conn = sqlite3.connect(str(path))
+    try:
+        if "core_configs" not in _xui_table_names(conn):
+            return {"fixed": 0, "reason": "no-core_configs"}
+        fixed = 0
+        rows = list(conn.execute("SELECT id, config FROM core_configs"))
+        for row_id, raw in rows:
+            try:
+                cfg = json.loads(raw or "{}")
+            except json.JSONDecodeError:
+                continue
+            changed = False
+            for ib in cfg.get("inbounds") or []:
+                if not isinstance(ib, dict):
+                    continue
+                if str(ib.get("protocol") or "").lower() != "vless":
+                    continue
+                settings = ib.get("settings")
+                if isinstance(settings, dict) and "encryption" in settings:
+                    settings.pop("encryption", None)
+                    changed = True
+            if changed:
+                conn.execute(
+                    "UPDATE core_configs SET config=? WHERE id=?",
+                    (json.dumps(cfg, ensure_ascii=False), row_id),
+                )
+                fixed += 1
+        conn.commit()
+        return {"fixed": fixed}
+    finally:
+        conn.close()
+
+
+def seed_hosts_from_xui_inbounds(
+    pg_db: Path,
+    xui_db: Path,
+    *,
+    share_address: str = "",
+) -> dict:
+    """Create one PasarGuard host per inbound so ``/sub`` can render configs.
+
+    Official x-ui migrator never populates ``hosts``. Without them PasarGuard
+    subscriptions stay empty / error for clients. Prefer copying modern x-ui
+    ``hosts`` rows when present; otherwise synthesize from inbound stream.
+    """
+    pg_path = Path(pg_db)
+    xui_path = Path(xui_db)
+    address = (share_address or "").strip() or _guess_share_address(xui_path)
+
+    xui = sqlite3.connect(f"file:{xui_path.as_posix()}?mode=ro", uri=True)
+    try:
+        xui.row_factory = sqlite3.Row
+        xui_tables = _xui_table_names(xui)
+        inbound_meta: dict[int, dict] = {}
+        for row in xui.execute(
+            "SELECT id, remark, port, protocol, tag, stream_settings FROM inbounds"
+        ):
+            try:
+                stream = json.loads(row["stream_settings"] or "{}")
+            except json.JSONDecodeError:
+                stream = {}
+            tag = (row["tag"] or "").strip() or f"inbound-{row['id']}"
+            inbound_meta[int(row["id"])] = {
+                "tag": tag,
+                "remark": (row["remark"] or tag or f"inbound-{row['id']}").strip(),
+                "port": int(row["port"] or 0) or None,
+                "protocol": str(row["protocol"] or ""),
+                "stream": stream if isinstance(stream, dict) else {},
+            }
+
+        xui_hosts: list[dict] = []
+        if "hosts" in xui_tables:
+            for row in xui.execute("SELECT * FROM hosts WHERE COALESCE(is_disabled,0)=0"):
+                xui_hosts.append(dict(row))
+    finally:
+        xui.close()
+
+    conn = sqlite3.connect(str(pg_path))
+    try:
+        tables = _xui_table_names(conn)
+        if "hosts" not in tables or "inbounds" not in tables:
+            return {"seeded": 0, "reason": "missing-tables"}
+
+        existing = int(conn.execute("SELECT COUNT(*) FROM hosts").fetchone()[0])
+        if existing > 0:
+            return {"seeded": 0, "reason": "already-present", "hosts": existing}
+
+        pg_tags = {
+            str(r[0])
+            for r in conn.execute("SELECT tag FROM inbounds")
+            if r[0]
+        }
+        # Ensure tags from x-ui exist (official migrator keeps same tags)
+        host_cols = {r[1] for r in conn.execute("PRAGMA table_info(hosts)")}
+        inserted = 0
+        priority = 1
+
+        def _insert_host(
+            *,
+            remark: str,
+            inbound_tag: str,
+            port: int | None,
+            addr: str,
+            overlay: dict,
+        ) -> None:
+            nonlocal inserted, priority
+            if inbound_tag not in pg_tags:
+                return
+            fields = {
+                "remark": (remark or inbound_tag)[:256],
+                "address": (addr or "127.0.0.1")[:256],
+                "port": port,
+                "inbound_tag": inbound_tag,
+                "security": overlay.get("security") or "inbound_default",
+                "fingerprint": overlay.get("fingerprint") or "none",
+                "priority": priority,
+                "is_disabled": 0,
+                "random_user_agent": 0,
+                "use_sni_as_host": 0,
+                "status": "",
+            }
+            if overlay.get("path") and "path" in host_cols:
+                fields["path"] = str(overlay["path"])[:256]
+            if overlay.get("sni") and "sni" in host_cols:
+                fields["sni"] = str(overlay["sni"])[:1000]
+            if overlay.get("host") and "host" in host_cols:
+                fields["host"] = str(overlay["host"])[:1000]
+            # Never write alpn='none' — EnumArray cannot parse it (→ /sub 500)
+            if overlay.get("alpn") and "alpn" in host_cols:
+                fields["alpn"] = str(overlay["alpn"])[:14]
+            elif "alpn" in host_cols:
+                fields["alpn"] = ""
+
+            use = {k: v for k, v in fields.items() if k in host_cols}
+            cols = list(use.keys())
+            conn.execute(
+                f"INSERT INTO hosts ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
+                [use[c] for c in cols],
+            )
+            inserted += 1
+            priority += 1
+
+        # 1) Prefer modern x-ui managed hosts
+        for h in xui_hosts:
+            meta = inbound_meta.get(int(h.get("inbound_id") or 0))
+            if not meta:
+                continue
+            addr = (h.get("address") or "").strip() or address
+            port = int(h.get("port") or 0) or meta["port"]
+            overlay = _host_overlay_from_stream(meta["stream"])
+            # Host-level overrides from x-ui hosts table
+            if h.get("security") and str(h.get("security")) != "same":
+                sec = str(h.get("security")).lower()
+                if sec in ("tls", "none", "inbound_default"):
+                    overlay["security"] = sec
+            if h.get("path"):
+                overlay["path"] = str(h.get("path"))
+            if h.get("sni"):
+                overlay["sni"] = str(h.get("sni"))
+            if h.get("host_header"):
+                overlay["host"] = str(h.get("host_header"))
+            if h.get("fingerprint"):
+                overlay["fingerprint"] = str(h.get("fingerprint")) or "none"
+            if h.get("alpn"):
+                raw_alpn = h.get("alpn")
+                if isinstance(raw_alpn, str) and raw_alpn not in ("", "none", "same"):
+                    try:
+                        parsed = json.loads(raw_alpn)
+                        if isinstance(parsed, list):
+                            overlay["alpn"] = ",".join(str(x) for x in parsed if x)
+                        else:
+                            overlay["alpn"] = raw_alpn
+                    except json.JSONDecodeError:
+                        overlay["alpn"] = raw_alpn
+            _insert_host(
+                remark=str(h.get("remark") or meta["remark"]),
+                inbound_tag=meta["tag"],
+                port=port,
+                addr=addr,
+                overlay=overlay,
+            )
+
+        # 2) Fallback: one host per inbound from stream_settings
+        if inserted == 0:
+            for meta in inbound_meta.values():
+                _insert_host(
+                    remark=meta["remark"],
+                    inbound_tag=meta["tag"],
+                    port=meta["port"],
+                    addr=address,
+                    overlay=_host_overlay_from_stream(meta["stream"]),
+                )
+
+        conn.commit()
+        return {
+            "seeded": inserted,
+            "address": address,
+            "from_xui_hosts": bool(xui_hosts) and inserted > 0,
+        }
+    finally:
+        conn.close()
+
+
+def enrich_subscription_mapping_from_clients(
+    mapping_file: Path,
+    xui_db: Path,
+    pg_db: Path,
+    *,
+    xui_path: str = "sub",
+) -> dict:
+    """Fill missing redirect mappings using modern ``clients.sub_id`` / settings."""
+    path = Path(mapping_file)
+    if not path.is_file():
+        return {"added": 0, "reason": "no-mapping-file"}
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    mappings = data.setdefault("mappings", {})
+    if not isinstance(mappings, dict):
+        mappings = {}
+        data["mappings"] = mappings
+
+    email_to_sub: dict[str, str] = {}
+    xui = sqlite3.connect(f"file:{Path(xui_db).as_posix()}?mode=ro", uri=True)
+    try:
+        xui.row_factory = sqlite3.Row
+        tables = _xui_table_names(xui)
+        if "clients" in tables:
+            for row in xui.execute("SELECT email, sub_id FROM clients"):
+                email = (row["email"] or "").strip()
+                sub = (row["sub_id"] or "").strip()
+                if email and sub:
+                    email_to_sub.setdefault(email, sub)
+        for row in xui.execute("SELECT settings FROM inbounds"):
+            try:
+                settings = json.loads(row["settings"] or "{}")
+            except json.JSONDecodeError:
+                continue
+            for client in (settings.get("clients") or []) if isinstance(settings, dict) else []:
+                if not isinstance(client, dict):
+                    continue
+                email = (client.get("email") or "").strip()
+                sub = (
+                    client.get("subId")
+                    or client.get("sub_id")
+                    or client.get("sub_token")
+                    or ""
+                )
+                sub = str(sub).strip()
+                if email and sub:
+                    email_to_sub.setdefault(email, sub)
+    finally:
+        xui.close()
+
+    pg = sqlite3.connect(f"file:{Path(pg_db).as_posix()}?mode=ro", uri=True)
+    try:
+        pg.row_factory = sqlite3.Row
+        jwt_row = pg.execute("SELECT secret_key FROM jwt LIMIT 1").fetchone()
+        jwt_secret = (jwt_row[0] if jwt_row else "") or ""
+        users = list(pg.execute("SELECT id, username FROM users"))
+    finally:
+        pg.close()
+
+    if not jwt_secret:
+        return {"added": 0, "reason": "no-jwt"}
+
+    # Same algorithm as PasarGuard/migrations generate_subscription_url_mapping.py
+    from base64 import b64encode
+    from hashlib import sha256
+    from math import ceil
+    import time
+
+    def _pg_token(username: str) -> str:
+        data = f"{username},{ceil(time.time())}"
+        data_b64 = (
+            b64encode(data.encode("utf-8"), altchars=b"-_")
+            .decode("utf-8")
+            .rstrip("=")
+        )
+        sign = b64encode(
+            sha256((data_b64 + jwt_secret).encode("utf-8")).digest(),
+            altchars=b"-_",
+        ).decode("utf-8")[:10]
+        return data_b64 + sign
+
+    sub_path = (xui_path or "sub").strip().strip("/") or "sub"
+    added = 0
+    for row in users:
+        email = (row["username"] or "").strip()
+        if not email or email in mappings:
+            continue
+        sub_id = email_to_sub.get(email)
+        if not sub_id:
+            continue
+        mappings[email] = {
+            "user_id": int(row["id"]),
+            "old_subscription_url": f"/{sub_path}/{sub_id}",
+            "new_subscription_url": f"/sub/{_pg_token(email)}",
+        }
+        added += 1
+
+    if added:
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        normalize_subscription_mapping(path)
+    return {"added": added, "mapped_total": len(mappings)}
 
 
 def assert_migrated_pg_has_data(path: Path) -> dict[str, int]:
@@ -878,7 +1376,25 @@ class XuiMigrator(BaseMigrator):
         input_db = work_dir / "x-ui.db"
         # WAL-safe copy so uploads next to .db-wal/.db-shm stay consistent
         safe_copy_sqlite(Path(xui_db), input_db)
-        # Newer 3x-ui multi-inbound clients schema → classic client_traffics shape
+
+        # Auto-detect legacy vs modern 3x-ui schema from uploaded tables (no user choice)
+        schema_info = detect_xui_db_schema(input_db)
+        if schema_info.get("modern"):
+            self.job.log(
+                "Detected 3x-ui schema: MODERN "
+                "(clients + client_inbounds) — "
+                f"clients={schema_info.get('clients')} "
+                f"memberships={schema_info.get('memberships')} "
+                f"traffics={schema_info.get('traffics')}"
+            )
+        else:
+            self.job.log(
+                "Detected 3x-ui schema: LEGACY "
+                "(classic client_traffics / settings.clients) — "
+                f"traffics={schema_info.get('traffics')}"
+            )
+
+        # Newer 3x-ui multi-inbound clients schema → classic shape for official migrator
         norm = normalize_modern_xui_sqlite(input_db)
         if norm.get("normalized"):
             self.job.log(
@@ -886,6 +1402,11 @@ class XuiMigrator(BaseMigrator):
                 f"clients={norm.get('clients')} memberships={norm.get('memberships')} "
                 f"traffics={norm.get('traffics_written')} "
                 f"settings_inbounds={norm.get('inbounds_settings_updated')}"
+            )
+        else:
+            self.job.log(
+                f"Normalize skipped ({norm.get('reason', 'legacy-schema')}) — "
+                "using DB as-is for official migrator"
             )
         output_dir = work_dir / "output-db"
 
@@ -920,6 +1441,42 @@ class XuiMigrator(BaseMigrator):
                 f"emails={group_sync.get('emails')} "
                 f"links_added={group_sync.get('links_added')} "
                 f"orphans_removed={group_sync.get('orphans_removed')}"
+            )
+
+        admin_info = ensure_sudo_admin_from_xui(output_db, input_db)
+        if admin_info.get("created"):
+            self.job.log(
+                f"Created sudo admin from x-ui panel user: {admin_info.get('username')}"
+            )
+
+        enc_fix = sanitize_core_configs_encryption(output_db)
+        if enc_fix.get("fixed"):
+            self.job.log(
+                f"Stripped vless encryption from core_configs ({enc_fix.get('fixed')} row(s))"
+            )
+
+        # PasarGuard /sub needs hosts; official migrator leaves hosts empty
+        xui_listen_early = read_xui_subscription_listen(Path(xui_db))
+        share_addr = (
+            (params.get("redirect_domain") or "").strip()
+            or _guess_share_address(input_db, xui_listen_early)
+        )
+        # redirect_domain may be a full URL
+        if share_addr.startswith("http://") or share_addr.startswith("https://"):
+            share_addr = urlparse(share_addr).hostname or share_addr
+        hosts_info = seed_hosts_from_xui_inbounds(
+            output_db, input_db, share_address=share_addr,
+        )
+        if hosts_info.get("seeded"):
+            self.job.log(
+                f"Seeded {hosts_info.get('seeded')} PasarGuard host(s) "
+                f"address={hosts_info.get('address')} "
+                f"(from_xui_hosts={hosts_info.get('from_xui_hosts')})"
+            )
+        else:
+            self.job.log(
+                f"Host seed skipped: {hosts_info.get('reason')} "
+                f"(hosts={hosts_info.get('hosts', 0)})"
             )
 
         out_counts = assert_migrated_pg_has_data(output_db)
@@ -957,11 +1514,22 @@ class XuiMigrator(BaseMigrator):
         ]
         await self._run_cmd(map_cmd, cwd=str(xui_tool))
         if mapping_file.exists():
-            norm = normalize_subscription_mapping(mapping_file)
+            map_norm = normalize_subscription_mapping(mapping_file)
             self.job.log(
                 f"Normalized subscription mapping paths "
-                f"(stripped ?name= query; {norm.get('_normalized_entries', 0)} entries touched)"
+                f"(stripped ?name= query; {map_norm.get('_normalized_entries', 0)} entries touched)"
             )
+            enrich = enrich_subscription_mapping_from_clients(
+                mapping_file,
+                input_db,
+                land_db,
+                xui_path=xui_listen["path"],
+            )
+            if enrich.get("added"):
+                self.job.log(
+                    f"Enriched subscription mapping from clients/subId: "
+                    f"added={enrich.get('added')} total={enrich.get('mapped_total')}"
+                )
 
         if target_db != "sqlite":
             self.job.set_progress(88, f"Two-phase: SQLite → {target_db}...")
@@ -998,24 +1566,62 @@ class XuiMigrator(BaseMigrator):
         self.job.set_progress(100, "3x-ui migration complete!")
         redir_scheme = "https" if xui_listen.get("ssl_wanted") else "http"
         redirect_path = (xui_listen.get("path") or "sub").strip().strip("/") or "sub"
+        schema_label = "modern" if schema_info.get("modern") else "legacy"
         warn_en = [
+            f"Detected 3x-ui schema: {schema_label} (auto).",
             f"Old /{redirect_path}/{{subId}} links are redirected to PasarGuard via redirect-server.",
             f"Redirect listens {redir_scheme} on port {redirect_port} → {redirect_domain}/sub/…",
-            "Create admin: pasarguard cli generate-temp-key",
-            "Add Hosts in the panel for each inbound so new subscription configs resolve.",
         ]
         warn_fa = [
+            f"اسکیما 3x-ui تشخیص داده شد: {schema_label} (خودکار).",
             f"لینک‌های قدیمی /{redirect_path}/{{subId}} با redirect-server به پاسارگارد هدایت می‌شوند.",
             f"ریدایرکت {redir_scheme} روی پورت {redirect_port} → {redirect_domain}/sub/…",
-            "ادمین بسازید: pasarguard cli generate-temp-key",
-            "برای هر inbound در پنل Host بسازید تا کانفیگ سابسکریپشن جدید کامل شود.",
         ]
         warn_ru = [
+            f"Схема 3x-ui определена: {schema_label} (авто).",
             f"Старые /{redirect_path}/{{subId}} перенаправляются на PasarGuard через redirect-server.",
             f"Redirect слушает {redir_scheme} на порту {redirect_port} → {redirect_domain}/sub/…",
-            "Создайте админа: pasarguard cli generate-temp-key",
-            "Создайте Hosts для inbound'ов в панели для новых подписок.",
         ]
+        if hosts_info.get("seeded"):
+            warn_en.append(
+                f"Auto-seeded {hosts_info.get('seeded')} host(s) "
+                f"→ {hosts_info.get('address')} (edit in panel if needed)."
+            )
+            warn_fa.append(
+                f"{hosts_info.get('seeded')} هاست به‌صورت خودکار ساخته شد "
+                f"→ {hosts_info.get('address')} (در پنل قابل ویرایش است)."
+            )
+            warn_ru.append(
+                f"Автосоздано хостов: {hosts_info.get('seeded')} "
+                f"→ {hosts_info.get('address')} (при необходимости измените в панели)."
+            )
+        else:
+            warn_en.append(
+                "Add Hosts in the panel for each inbound so subscription configs resolve."
+            )
+            warn_fa.append(
+                "برای هر inbound در پنل Host بسازید تا کانفیگ سابسکریپشن کامل شود."
+            )
+            warn_ru.append(
+                "Создайте Hosts для inbound'ов в панели для подписок."
+            )
+        if not admin_info.get("created"):
+            warn_en.append("Create admin: pasarguard cli generate-temp-key")
+            warn_fa.append("ادمین بسازید: pasarguard cli generate-temp-key")
+            warn_ru.append("Создайте админа: pasarguard cli generate-temp-key")
+        else:
+            warn_en.append(
+                f"Panel admin migrated from x-ui user «{admin_info.get('username')}» "
+                "(same password as old panel)."
+            )
+            warn_fa.append(
+                f"ادمین پنل از کاربر x-ui «{admin_info.get('username')}» منتقل شد "
+                "(همان رمز پنل قبلی)."
+            )
+            warn_ru.append(
+                f"Админ панели перенесён из x-ui «{admin_info.get('username')}» "
+                "(тот же пароль)."
+            )
         if not redirect_installed and install_redirect:
             detail = (redirect_error or "").strip()
             if len(detail) > 280:
@@ -1048,6 +1654,9 @@ class XuiMigrator(BaseMigrator):
             "mapping_file": str(mapping_file) if mapping_file.exists() else None,
             "source_counts": src_counts,
             "migrated_counts": out_counts,
+            "xui_schema": schema_info.get("schema"),
+            "xui_schema_modern": bool(schema_info.get("modern")),
+            "hosts_seeded": int(hosts_info.get("seeded") or 0),
             "warnings": {
                 "en": warn_en,
                 "fa": warn_fa,
