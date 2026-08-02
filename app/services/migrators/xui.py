@@ -178,6 +178,120 @@ def assert_migrated_pg_has_data(path: Path) -> dict[str, int]:
     )
 
 
+# Upstream PasarGuard/migrations bug: debug logs reference `tag` before assignment
+# whenever stream_settings has externalProxy / tlsSettings / security.
+_XUI_TAG_BUG_NEEDLE = 'logger.debug(f"Removed externalProxy from inbound {tag}")'
+_XUI_TAG_BUG_MARKER = (
+    'tag = inbound_row.get("tag", f"inbound-{inbound_row.get(\'id\', \'unknown\')}")'
+)
+
+
+def patch_xui_converter_tag_bug(xui_tool: Path) -> bool:
+    """Fix UnboundLocalError on `tag` in official x-ui converter (in-place).
+
+    Returns True if the file was patched, False if already fixed / not present.
+    """
+    path = Path(xui_tool) / "migration" / "transformers" / "converter.py"
+    if not path.is_file():
+        return False
+    text = path.read_text(encoding="utf-8")
+    if _XUI_TAG_BUG_NEEDLE not in text:
+        return False
+
+    # Already fixed: tag assignment appears before the first debug that uses it.
+    needle_pos = text.find(_XUI_TAG_BUG_NEEDLE)
+    assign_pos = text.find(_XUI_TAG_BUG_MARKER)
+    if assign_pos != -1 and assign_pos < needle_pos:
+        return False
+
+    buggy = (
+        "            # Remove external proxy and TLS settings from streamSettings if present\n"
+        "            if isinstance(stream_settings, dict):\n"
+        "                # Remove proxy-related settings\n"
+        '                stream_settings.pop("proxySettings", None)\n'
+        '                stream_settings.pop("sockopt", None)\n'
+        "                # Remove external proxy\n"
+        '                if "externalProxy" in stream_settings:\n'
+        '                    stream_settings.pop("externalProxy")\n'
+        '                    logger.debug(f"Removed externalProxy from inbound {tag}")\n'
+        "                # Remove TLS settings (certificate files won't exist on new system)\n"
+        '                if "tlsSettings" in stream_settings:\n'
+        '                    stream_settings.pop("tlsSettings")\n'
+        '                    logger.debug(f"Removed tlsSettings from inbound {tag}")\n'
+        "                # Remove security field (TLS indicator)\n"
+        '                if "security" in stream_settings:\n'
+        '                    stream_settings.pop("security")\n'
+        '                    logger.debug(f"Removed security field from inbound {tag}")\n'
+        "            \n"
+        '            tag = inbound_row.get("tag", f"inbound-{inbound_row.get(\'id\', \'unknown\')}")\n'
+    )
+    fixed = (
+        '            tag = inbound_row.get("tag", f"inbound-{inbound_row.get(\'id\', \'unknown\')}")\n'
+        "            # Remove external proxy and TLS settings from streamSettings if present\n"
+        "            if isinstance(stream_settings, dict):\n"
+        "                # Remove proxy-related settings\n"
+        '                stream_settings.pop("proxySettings", None)\n'
+        '                stream_settings.pop("sockopt", None)\n'
+        "                # Remove external proxy\n"
+        '                if "externalProxy" in stream_settings:\n'
+        '                    stream_settings.pop("externalProxy")\n'
+        '                    logger.debug(f"Removed externalProxy from inbound {tag}")\n'
+        "                # Remove TLS settings (certificate files won't exist on new system)\n"
+        '                if "tlsSettings" in stream_settings:\n'
+        '                    stream_settings.pop("tlsSettings")\n'
+        '                    logger.debug(f"Removed tlsSettings from inbound {tag}")\n'
+        "                # Remove security field (TLS indicator)\n"
+        '                if "security" in stream_settings:\n'
+        '                    stream_settings.pop("security")\n'
+        '                    logger.debug(f"Removed security field from inbound {tag}")\n'
+        "\n"
+    )
+    if buggy not in text:
+        # Fallback: move assignment before stream_settings cleanup, drop the late assign.
+        marker = "            # Remove external proxy and TLS settings from streamSettings if present\n"
+        late = (
+            '            tag = inbound_row.get("tag", f"inbound-{inbound_row.get(\'id\', \'unknown\')}")\n'
+            '            protocol = inbound_row.get("protocol", "vless")\n'
+        )
+        if marker not in text or late not in text:
+            return False
+        text2 = text.replace(
+            marker,
+            '            tag = inbound_row.get("tag", f"inbound-{inbound_row.get(\'id\', \'unknown\')}")\n'
+            + marker,
+            1,
+        )
+        text2 = text2.replace(
+            late,
+            '            protocol = inbound_row.get("protocol", "vless")\n',
+            1,
+        )
+        if text2 == text:
+            return False
+        path.write_text(text2, encoding="utf-8")
+        return True
+
+    path.write_text(text.replace(buggy, fixed, 1), encoding="utf-8")
+    return True
+
+
+def assert_migrated_core_config(path: Path) -> None:
+    """Refuse to continue if official migrator skipped core_configs (broken xray config)."""
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        n = _table_count(conn, "core_configs")
+        if n is None:
+            return  # schema without table — nothing to assert
+        if n <= 0:
+            raise RuntimeError(
+                "مهاجرت x-ui جدول core_configs را خالی گذاشت "
+                "(باگ tag در converter رسمی). دوباره تلاش کنید؛ "
+                "بدون core_config پنل inboundها را درست لود نمی‌کند."
+            )
+    finally:
+        conn.close()
+
+
 class XuiMigrator(BaseMigrator):
     async def run(self, params: dict) -> dict:
         upload_path = params.get("upload_path")
@@ -208,6 +322,11 @@ class XuiMigrator(BaseMigrator):
         if not xui_tool.exists():
             raise RuntimeError("ابزار x-ui migration یافت نشد")
 
+        if patch_xui_converter_tag_bug(xui_tool):
+            self.job.log(
+                "Patched official x-ui converter: assign inbound tag before stream_settings cleanup"
+            )
+
         schema_db = resolve_xui_schema_db()
         self.job.log(f"Using PasarGuard schema reference: {schema_db}")
 
@@ -229,12 +348,19 @@ class XuiMigrator(BaseMigrator):
         )
         if not ok:
             raise RuntimeError(f"مهاجرت x-ui ناموفق: {out}")
+        # Official tool can exit 0 even when core_configs failed (UnboundLocalError).
+        if out and "Failed to migrate core_configs" in out:
+            raise RuntimeError(
+                "مهاجرت x-ui برای core_configs شکست خورد "
+                f"(معمولاً باگ tag در converter): {out[-800:]}"
+            )
 
         output_db = output_dir / "db.sqlite3"
         if not output_db.exists():
             raise RuntimeError("دیتابیس خروجی ایجاد نشد")
 
         out_counts = assert_migrated_pg_has_data(output_db)
+        assert_migrated_core_config(output_db)
         self.job.log(
             "Migrated SQLite counts: "
             + ", ".join(f"{k}={v}" for k, v in out_counts.items())

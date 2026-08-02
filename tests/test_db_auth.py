@@ -147,6 +147,68 @@ def test_explain_auth_mariadb_target_from_timescale():
     print("OK: timescale→mariadb auth tips are MySQL-aware")
 
 
+def test_mysql_probe_shell_string_via_base_migrator():
+    """Regression: x-ui→MySQL died because BaseMigrator exec'd shell strings char-by-char."""
+    import asyncio
+    from unittest.mock import patch
+
+    from app.services.db_auth import resolve_live_admin_connection
+    from app.services.migrators.base import BaseMigrator, MigrationJob
+
+    class Dummy(BaseMigrator):
+        async def run(self, params):
+            return {}
+
+    async def _run():
+        job = MigrationJob(job_id="probe1")
+        migrator = Dummy(job, {})
+        env = "MYSQL_ROOT_PASSWORD=secret\nMYSQL_DATABASE=pasarguard\n"
+        seen = {"shell": 0}
+
+        class FakeProc:
+            returncode = 0
+
+            def __init__(self):
+                class Out:
+                    async def readline(self_inner):
+                        if not getattr(self_inner, "_sent", False):
+                            self_inner._sent = True
+                            return b"1\n"
+                        return b""
+
+                self.stdout = Out()
+
+            async def wait(self):
+                return 0
+
+            def kill(self):
+                pass
+
+        async def fake_shell(cmd, **kwargs):
+            seen["shell"] += 1
+            assert isinstance(cmd, str)
+            assert "docker compose exec" in cmd
+            assert "mysql" in cmd or "mariadb" in cmd
+            return FakeProc()
+
+        async def fake_exec(*_a, **_k):
+            raise AssertionError("probe must use create_subprocess_shell for shell strings")
+
+        with patch("app.services.db_auth.PASARGUARD_DIR", Path("/opt/pasarguard")), \
+             patch("app.services.db_auth.resolve_db_service", return_value="mysql"), \
+             patch("asyncio.create_subprocess_shell", fake_shell), \
+             patch("asyncio.create_subprocess_exec", fake_exec):
+            conn = await resolve_live_admin_connection(migrator, "mysql", env_text=env)
+
+        assert conn["password"] == "secret"
+        assert conn["user"] == "root"
+        assert seen["shell"] >= 1
+        assert not any("$ c d" in line for line in job.logs)
+
+    asyncio.run(_run())
+    print("OK: mysql probe uses shell via BaseMigrator")
+
+
 if __name__ == "__main__":
     test_postgres_password_candidates_order()
     test_postgres_admin_users()
@@ -157,4 +219,5 @@ if __name__ == "__main__":
     test_mysql_password_candidates()
     test_mysql_password_candidates_from_sqlalchemy_url()
     test_explain_auth_mariadb_target_from_timescale()
+    test_mysql_probe_shell_string_via_base_migrator()
     print("\nAll db_auth tests passed")

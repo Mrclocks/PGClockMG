@@ -53,14 +53,34 @@ class BaseMigrator(ABC):
     async def run(self, params: dict) -> dict:
         pass
 
-    async def _run_cmd(self, cmd: list[str], cwd: str | None = None, timeout: int = 600) -> tuple[bool, str]:
-        self.job.log(f"$ {' '.join(cmd)}")
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=cwd,
-        )
+    async def _run_cmd(
+        self,
+        cmd: list[str] | str,
+        cwd: str | None = None,
+        timeout: int = 600,
+    ) -> tuple[bool, str]:
+        """Run a command as argv list (exec) or shell string.
+
+        ``db_auth`` probes pass shell strings (``cd ... && docker compose exec...``).
+        Passing those to ``create_subprocess_exec`` iterates the string character-by-
+        character and fails with FileNotFoundError — same shell support as restore.
+        """
+        if isinstance(cmd, str):
+            self.job.log(f"$ {cmd}")
+            proc = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=cwd,
+            )
+        else:
+            self.job.log(f"$ {' '.join(cmd)}")
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=cwd,
+            )
         output_lines = []
 
         async def _drain_stdout() -> None:

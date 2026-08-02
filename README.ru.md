@@ -1,4 +1,4 @@
-> ⚠️ **`v1.7`** — Перед restore или миграцией сделайте полный бэкап.
+> ⚠️ **`v1.8`** — Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <a href="README.en.md">English</a> · <b>Русский</b>
@@ -55,6 +55,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | Версия | Основные изменения |
 |--------|-------------------|
+| v1.8 | Исправление миграции 3x-ui → MySQL (probe БД + core_configs) |
 | v1.7 | Исправление ошибки миграции 3x-ui при загрузке bundle (IsADirectoryError) |
 | v1.6beta | Новый дизайн карточки БД, iOS-переключатель для узлов, новый логотип |
 | v1.5beta | Опция отключения узлов после восстановления, карточка БД при загрузке |
