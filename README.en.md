@@ -1,4 +1,4 @@
-> ⚠️ **Beta `v1.6beta`** — experimental. Always take a full backup before restore or migration.
+> ⚠️ **`v1.7`** — Always take a full backup before restore or migration.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <b>English</b> · <a href="README.ru.md">Русский</a>
@@ -55,6 +55,7 @@ Requirements: Ubuntu/Debian · root · Docker
 
 | Version | Key changes |
 |---------|-------------|
+| v1.7 | Fix 3x-ui migration crash on bundle workspace uploads (IsADirectoryError) |
 | v1.6beta | Redesigned DB info card, iOS toggle for nodes, new logo |
 | v1.5beta | Disable nodes after restore option, DB info card on upload |
 | v1.4beta | Fix silent panel restart loop after TimescaleDB restore |
