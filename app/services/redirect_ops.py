@@ -83,15 +83,16 @@ def build_runtime_config(
         }
 
 
-def _systemd_unit() -> str:
+def _systemd_unit(user: str = SERVICE_USER, group: str | None = None) -> str:
+    grp = group or user
     return f"""[Unit]
 Description=PGClockMG subscription URL redirect (pg-redirect)
 After=network.target
 
 [Service]
 Type=simple
-User={SERVICE_USER}
-Group={SERVICE_USER}
+User={user}
+Group={grp}
 WorkingDirectory={INSTALL_ROOT}
 Environment=PYTHONPATH={INSTALL_ROOT}
 ExecStart=/usr/bin/python3 -m pg_redirect --config {CONFIG_DIR}/config.json --map {CONFIG_DIR}/mapping.json
@@ -103,6 +104,61 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 """
+
+
+def _install_user_snippet() -> str:
+    """Bash that resolves a runtime user without requiring useradd on PATH."""
+    return f'''
+# Prefer dedicated system user; fall back when useradd/adduser missing (minimal images).
+_nologin_shell() {{
+  for s in /usr/sbin/nologin /sbin/nologin /bin/false; do
+    [[ -x "$s" ]] && {{ echo "$s"; return; }}
+  done
+  echo /bin/false
+}}
+_try_create_user() {{
+  local u="$1" home="$2" sh
+  sh="$(_nologin_shell)"
+  id "$u" >/dev/null 2>&1 && return 0
+  if [[ -x /usr/sbin/useradd ]]; then
+    /usr/sbin/useradd --system --home "$home" --shell "$sh" "$u" && return 0
+  fi
+  if command -v useradd >/dev/null 2>&1; then
+    useradd --system --home "$home" --shell "$sh" "$u" && return 0
+  fi
+  if command -v adduser >/dev/null 2>&1; then
+    # Debian/Ubuntu
+    adduser --system --home "$home" --shell "$sh" --no-create-home --group "$u" 2>/dev/null && return 0
+    # Alpine / BusyBox
+    adduser -S -D -H -h "$home" -s "$sh" "$u" 2>/dev/null && return 0
+  fi
+  return 1
+}}
+_resolve_svc_group() {{
+  local u="$1"
+  if [[ "$u" == "nobody" ]]; then
+    if getent group nogroup >/dev/null 2>&1; then echo nogroup; return; fi
+    if getent group nobody >/dev/null 2>&1; then echo nobody; return; fi
+  fi
+  if getent group "$u" >/dev/null 2>&1; then echo "$u"; return; fi
+  id -gn "$u" 2>/dev/null || echo "$u"
+}}
+SVC_USER="{SERVICE_USER}"
+if ! id "$SVC_USER" >/dev/null 2>&1; then
+  _try_create_user "$SVC_USER" "{INSTALL_ROOT}" || true
+fi
+if ! id "$SVC_USER" >/dev/null 2>&1; then
+  if id nobody >/dev/null 2>&1; then
+    SVC_USER=nobody
+    echo "pg-redirect: using nobody (useradd/adduser unavailable)"
+  else
+    SVC_USER=root
+    echo "pg-redirect: using root (no unprivileged user available)"
+  fi
+fi
+SVC_GROUP="$(_resolve_svc_group "$SVC_USER")"
+echo "pg-redirect runtime user=$SVC_USER group=$SVC_GROUP"
+'''
 
 
 async def free_listen_port(migrator, port: int) -> None:
@@ -174,13 +230,12 @@ async def install_pg_redirect(
 
     await free_listen_port(migrator, listen_port)
 
-    unit_body = _systemd_unit()
-    # Escape for embedding in bash single-quoted heredoc via file write from python is cleaner —
-    # write unit via python inside the shell script from a temp file we create here.
     unit_path = mapping.parent / "pg-redirect.service"
-    unit_path.write_text(unit_body, encoding="utf-8")
+    # Unit is finalized on the server after resolving the runtime user.
+    unit_path.write_text(_systemd_unit("__USER__", "__GROUP__"), encoding="utf-8")
 
     ssl_py = "True" if ssl_on else "False"
+    user_snippet = _install_user_snippet()
     script = f'''set -euo pipefail
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "pg-redirect install requires root" >&2
@@ -195,16 +250,16 @@ rm -rf "{INSTALL_ROOT}/pg_redirect"
 cp -a "$SRC" "{INSTALL_ROOT}/pg_redirect"
 test -f "{INSTALL_ROOT}/pg_redirect/__main__.py"
 
-id {SERVICE_USER} >/dev/null 2>&1 || \\
-  useradd --system --home "{INSTALL_ROOT}" --shell /usr/sbin/nologin {SERVICE_USER}
+{user_snippet}
 
 install -d -m 0750 "{CONFIG_DIR}"
 cp -f "{mapping}" "{CONFIG_DIR}/mapping.json"
 cp -f "{work_cfg}" "{CONFIG_DIR}/config.json"
-chown -R {SERVICE_USER}:{SERVICE_USER} "{INSTALL_ROOT}" "{CONFIG_DIR}"
+chown -R "$SVC_USER:$SVC_GROUP" "{INSTALL_ROOT}" "{CONFIG_DIR}"
 chmod 0640 "{CONFIG_DIR}/mapping.json" "{CONFIG_DIR}/config.json"
 
-cp -f "{unit_path}" "{SERVICE_FILE}"
+sed -e "s/__USER__/${{SVC_USER}}/g" -e "s/__GROUP__/${{SVC_GROUP}}/g" \\
+  "{unit_path}" > "{SERVICE_FILE}"
 chmod 0644 "{SERVICE_FILE}"
 
 systemctl disable --now redirect-server 2>/dev/null || true
@@ -246,7 +301,7 @@ except Exception as e:
     sys.exit(1)
 PY
 
-echo "pg-redirect active on port {int(listen_port)}"
+echo "pg-redirect active on port {int(listen_port)} as $SVC_USER"
 '''
 
     ok, out = await migrator._run_cmd(["bash", "-c", script], timeout=180)

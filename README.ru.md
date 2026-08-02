@@ -1,4 +1,4 @@
-> ⚠️ **`v1.15.1`** — Перед restore или миграцией сделайте полный бэкап.
+> ⚠️ **`v1.15.2`** — Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <a href="README.en.md">English</a> · <b>Русский</b>
@@ -55,6 +55,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | Версия | Основные изменения |
 |--------|-------------------|
+| v1.15.2 | Установка pg-redirect без useradd (fallback на nobody) |
 | v1.15 | Нативный pg-redirect (без скачивания с GitHub) |
 | v1.14 | Redirect: зеркала GitHub + реальная причина ошибки в предупреждении |
 | v1.13 | Убрана смена БД PasarGuard из раздела миграции панелей |

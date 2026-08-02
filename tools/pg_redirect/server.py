@@ -42,7 +42,15 @@ async def _read_request(reader: asyncio.StreamReader, limit: int = 65536) -> tup
     if len(parts) < 2:
         return "", ""
     method, target = parts[0], parts[1]
+    # Strip query; also accept absolute-form targets (http://host/path)
     path = target.split("?", 1)[0] or "/"
+    if path.startswith("http://") or path.startswith("https://"):
+        # authority + path — keep only the path portion
+        rest = path.split("://", 1)[1]
+        slash = rest.find("/")
+        path = rest[slash:] if slash >= 0 else "/"
+    if not path.startswith("/"):
+        path = "/" + path
     return method.upper(), path
 
 
