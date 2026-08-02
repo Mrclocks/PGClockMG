@@ -507,6 +507,120 @@ def test_ephemeral_mysql_create_database_real_docker():
             subprocess.run(["docker", "rm", "-f", cid], capture_output=True)
 
 
+def test_ephemeral_mysql_use_redirect_lands_in_staging():
+    """Regression: dump with USE `pasarguard` must still fill pgmig_* (Phase1 0-row bug)."""
+    import asyncio
+    import pymysql
+    from app.services.native_migration import sql_staging as mod
+
+    dump = Path(tempfile.mkstemp(suffix="-use.sql")[1])
+    # Realistic mysqldump header that previously diverted data out of staging
+    dump.write_text(
+        "-- MySQL dump\n"
+        "CREATE DATABASE /*!32312 IF NOT EXISTS*/ `pasarguard` "
+        "/*!40100 DEFAULT CHARACTER SET utf8mb4 */;\n"
+        "USE `pasarguard`;\n"
+        "CREATE TABLE users (id INT PRIMARY KEY, username VARCHAR(64));\n"
+        "INSERT INTO users VALUES (1, 'kept_in_staging');\n"
+        "CREATE TABLE admins (id INT PRIMARY KEY, username VARCHAR(64), is_sudo TINYINT);\n"
+        "INSERT INTO admins VALUES (1, 'admin', 1);\n"
+        "CREATE TABLE hosts (id INT PRIMARY KEY, remark VARCHAR(64));\n"
+        "INSERT INTO hosts VALUES (1, 'h1');\n"
+        "CREATE TABLE inbounds (id INT PRIMARY KEY, tag VARCHAR(64));\n"
+        "INSERT INTO inbounds VALUES (1, 'vless');\n"
+        "CREATE TABLE nodes (id INT PRIMARY KEY, name VARCHAR(64));\n"
+        "INSERT INTO nodes VALUES (1, 'n1');\n"
+        "CREATE TABLE `groups` (id INT PRIMARY KEY, name VARCHAR(64));\n"
+        "INSERT INTO `groups` VALUES (1, 'g1');\n",
+        encoding="utf-8",
+    )
+    container = None
+    logs: list[str] = []
+
+    class Job:
+        def log(self, msg, *_a, **_k):
+            logs.append(str(msg))
+
+    class Mini:
+        def __init__(self):
+            self.job = Job()
+
+        async def _run_cmd(self, cmd, timeout=180, cwd=None):
+            try:
+                r = subprocess.run(
+                    cmd, capture_output=True, timeout=timeout, cwd=cwd,
+                )
+                out = (r.stdout or b"").decode() + (r.stderr or b"").decode()
+                return r.returncode == 0, out
+            except Exception as exc:
+                return False, str(exc)
+
+    orig_compose = mod._compose_text
+    orig_resolve = mod.resolve_db_service
+    mod._compose_text = lambda: (
+        "services:\n  timescaledb:\n    image: timescale/timescaledb:latest-pg16\n"
+    )
+    mod.resolve_db_service = lambda db: "timescaledb" if db == "timescaledb" else None
+    try:
+        # backup=mysql path (matches user log)
+        result = asyncio.run(
+            mod.import_sql_dump_to_live_db(
+                Mini(), str(dump), "mysql", {"password": "x"},
+            )
+        )
+        container = result["_ephemeral_container"]
+        staging = result["database"]
+        assert staging.startswith("pgmig_"), result
+        assert any("stripped" in m.lower() or "rewrote" in m.lower() for m in logs), logs
+
+        conn = pymysql.connect(
+            host=result["host"], port=int(result["port"]),
+            user=result["user"], password=result["password"],
+            database=staging,
+        )
+        cur = conn.cursor()
+        cur.execute("SELECT username FROM users WHERE id=1")
+        assert cur.fetchone()[0] == "kept_in_staging"
+        for tbl, n in (
+            ("users", 1), ("admins", 1), ("hosts", 1),
+            ("inbounds", 1), ("nodes", 1), ("groups", 1),
+        ):
+            cur.execute(f"SELECT COUNT(*) FROM `{tbl}`")
+            assert cur.fetchone()[0] == n, tbl
+        # Data must NOT only live in pasarguard
+        cur.execute(
+            "SELECT COUNT(*) FROM information_schema.tables "
+            "WHERE table_schema=%s AND table_name='users'",
+            (staging,),
+        )
+        assert cur.fetchone()[0] == 1
+        conn.close()
+
+        # Phase1-style pre-count must see rows
+        from app.services.native_migration.adapters import create_reader, _count_source_rows
+        reader = create_reader("mysql", None, result)
+        try:
+            pre = {t: _count_source_rows(reader, t) for t in (
+                "users", "admins", "hosts", "inbounds", "nodes", "groups",
+            )}
+            assert any(v > 0 for v in pre.values()), pre
+        finally:
+            reader.close()
+        print("OK: USE/CREATE DATABASE dump lands in pgmig_* staging (Phase1 rows > 0)")
+    finally:
+        mod._compose_text = orig_compose
+        mod.resolve_db_service = orig_resolve
+        dump.unlink(missing_ok=True)
+        if container:
+            subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+        out = subprocess.run(
+            ["docker", "ps", "-aq", "--filter", "name=pgmig-mysql-"],
+            capture_output=True, text=True,
+        )
+        for cid in (out.stdout or "").split():
+            subprocess.run(["docker", "rm", "-f", cid], capture_output=True)
+
+
 def test_mariadb_to_timescaledb_full_schema():
     """Live MariaDB → TimescaleDB universal copy with row verification."""
     import psycopg2
@@ -1132,6 +1246,7 @@ if __name__ == "__main__":
     test_mysql_to_postgres_full_schema()
     # MariaDB → TimescaleDB (reported failure path)
     test_ephemeral_mysql_create_database_real_docker()
+    test_ephemeral_mysql_use_redirect_lands_in_staging()
     test_mariadb_to_timescaledb_full_schema()
     test_mariadb_dump_ephemeral_then_timescaledb()
     print("\nAll integration tests passed.")

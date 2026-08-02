@@ -56,6 +56,61 @@ def mysql_create_db_sql(db: str, *, drop_first: bool = False) -> str:
     return f"CREATE DATABASE `{safe}`;"
 
 
+_MYSQL_USE_DB_RE = re.compile(
+    r"(?im)^\s*USE\s+[`'\"]?[A-Za-z0-9_]+[`'\"]?\s*;\s*$"
+)
+_MYSQL_CREATE_DB_RE = re.compile(
+    r"(?im)^\s*CREATE\s+DATABASE\b.*?;\s*$"
+)
+_MYSQL_DROP_DB_RE = re.compile(
+    r"(?im)^\s*DROP\s+DATABASE\b.*?;\s*$"
+)
+
+
+def prepare_mysql_dump_for_staging(sql_text: str, staging_db: str) -> tuple[str, int]:
+    """Keep dump objects inside staging_db.
+
+    PasarGuard / mysqldump / mariadb-dump backups often include::
+
+        CREATE DATABASE … `pasarguard`;
+        USE `pasarguard`;
+
+    Importing that into ``pgmig_*`` still switches context, so tables land in
+    ``pasarguard`` while Phase1 reads ``pgmig_*`` → 0 rows and aborted convert.
+    Strip CREATE/DROP/USE database redirects; the client already selects staging_db.
+
+    Returns (rewritten_sql, number_of_stripped_lines).
+    """
+    _safe_mysql_ident(staging_db)  # validate only
+    out: list[str] = []
+    stripped = 0
+    for line in sql_text.splitlines(keepends=True):
+        body = line.strip()
+        if not body or body.startswith("--") or body.startswith("#"):
+            out.append(line)
+            continue
+        if (
+            _MYSQL_USE_DB_RE.match(body)
+            or _MYSQL_CREATE_DB_RE.match(body)
+            or _MYSQL_DROP_DB_RE.match(body)
+        ):
+            stripped += 1
+            continue
+        out.append(line)
+    return "".join(out), stripped
+
+
+def write_mysql_dump_for_staging(dump_path: Path, staging_db: str) -> tuple[Path, int]:
+    """Write a staging-safe dump next to the original; return (path, stripped_count)."""
+    raw = dump_path.read_text(encoding="utf-8", errors="ignore")
+    prepared, stripped = prepare_mysql_dump_for_staging(raw, staging_db)
+    if stripped == 0 and prepared == raw:
+        return dump_path, 0
+    out = dump_path.with_suffix(dump_path.suffix + f".stage-{staging_db}")
+    out.write_text(prepared, encoding="utf-8")
+    return out, stripped
+
+
 async def _import_via_compose_service(
     migrator, dump_path: Path, source_db: str, service: str, conn: dict, staging_db: str,
 ) -> None:
@@ -73,22 +128,35 @@ async def _import_via_compose_service(
             f'mysql -u {user} -p"{pwd}" -e {e_sql}'
         )
         safe_db = _safe_mysql_ident(staging_db)
+        import_path, stripped = write_mysql_dump_for_staging(dump_path, safe_db)
+        if stripped:
+            migrator.job.log(
+                f"Rewrote MySQL dump for staging DB {safe_db} "
+                f"(stripped {stripped} USE/CREATE/DROP DATABASE redirect lines)"
+            )
         import_cmd = (
             f'cd "{cwd}" && docker compose exec -T {service} '
-            f'mysql -u {user} -p"{pwd}" {safe_db} < "{dump_path}"'
+            f'mysql -u {user} -p"{pwd}" {safe_db} < "{import_path}"'
         )
-        for cmd in (create_cmd, import_cmd):
-            proc = await asyncio.create_subprocess_shell(
-                cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            out_b, _ = await proc.communicate()
-            if proc.returncode != 0:
-                out = (out_b or b"").decode("utf-8", errors="replace")
-                raise RuntimeError(
-                    f"SQL staging failed (db={staging_db}): {out[-400:]}"
+        try:
+            for cmd in (create_cmd, import_cmd):
+                proc = await asyncio.create_subprocess_shell(
+                    cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
                 )
+                out_b, _ = await proc.communicate()
+                if proc.returncode != 0:
+                    out = (out_b or b"").decode("utf-8", errors="replace")
+                    raise RuntimeError(
+                        f"SQL staging failed (db={staging_db}): {out[-400:]}"
+                    )
+        finally:
+            if import_path != dump_path and import_path.exists():
+                try:
+                    import_path.unlink()
+                except OSError:
+                    pass
         return
 
     # PostgreSQL / TimescaleDB via compose
@@ -185,14 +253,6 @@ async def _import_via_compose_service(
             f'"SELECT timescaledb_post_restore();"'
         )
         await p.wait()
-
-
-def mysql_create_db_sql(db: str, *, drop_first: bool = False) -> str:
-    """Build CREATE DATABASE SQL with backticks (safe when not shell-double-quoted)."""
-    safe = _safe_mysql_ident(db)
-    if drop_first:
-        return f"DROP DATABASE IF EXISTS `{safe}`; CREATE DATABASE `{safe}`;"
-    return f"CREATE DATABASE `{safe}`;"
 
 
 def _ephemeral_mysql_runtime(source_db: str) -> tuple[str, str, str]:
@@ -294,6 +354,69 @@ async def _wait_ephemeral_mysql_ready(
     )
 
 
+async def _count_mysql_table_rows(
+    container: str, pwd: str, database: str, table: str, *, client: str = "mysql",
+) -> int:
+    """Return COUNT(*) for table, or -1 if missing/error."""
+    safe_t = "".join(c for c in table if c.isalnum() or c == "_")
+    if safe_t != table or not safe_t:
+        return -1
+    rc, out = await _mysql_ephemeral(
+        container, pwd, database=database,
+        sql=f"SELECT COUNT(*) FROM `{safe_t}`;",
+        client=client,
+    )
+    if rc != 0:
+        return -1
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if line.isdigit():
+            return int(line)
+        # mariadb may print warnings before the number
+        parts = line.split()
+        if parts and parts[-1].isdigit() and "Warning" not in line:
+            return int(parts[-1])
+    return -1
+
+
+async def _verify_mysql_staging_has_data(
+    migrator, container: str, pwd: str, database: str, *, client: str = "mysql",
+) -> None:
+    """Fail early if dump landed outside staging_db (classic USE redirect)."""
+    critical = ("users", "admins", "hosts", "inbounds", "nodes", "groups")
+    found: dict[str, int] = {}
+    for t in critical:
+        n = await _count_mysql_table_rows(container, pwd, database, t, client=client)
+        if n > 0:
+            found[t] = n
+    if found:
+        migrator.job.log(
+            "Ephemeral staging has data: "
+            + ", ".join(f"{k}={v}" for k, v in found.items())
+        )
+        return
+
+    # Diagnose: did USE divert into another schema?
+    rc, out = await _mysql_ephemeral(
+        container, pwd, client=client,
+        sql=(
+            "SELECT table_schema, table_name FROM information_schema.tables "
+            "WHERE table_schema NOT IN "
+            "('information_schema','mysql','performance_schema','sys') "
+            "AND table_name IN ('users','admins') "
+            "ORDER BY table_schema, table_name;"
+        ),
+    )
+    hint = (out or "").strip()[-400:]
+    raise RuntimeError(
+        f"Ephemeral staging DB `{database}` has 0 rows in "
+        f"users/admins/hosts/inbounds/nodes/groups after dump import. "
+        f"The SQL dump likely contains USE/CREATE DATABASE that redirected "
+        f"data away from the staging database"
+        + (f". Other schemas with panel tables:\n{hint}" if hint else ".")
+    )
+
+
 async def _import_via_ephemeral_mysql(
     migrator,
     dump_path: Path,
@@ -321,6 +444,7 @@ async def _import_via_ephemeral_mysql(
     if not ok:
         raise RuntimeError(f"Failed to start ephemeral MySQL/MariaDB ({image}): {out[-500:]}")
 
+    import_path: Path | None = None
     try:
         migrator.job.log(f"Waiting for ephemeral {image} to finish init...")
         await _wait_ephemeral_mysql_ready(
@@ -336,13 +460,24 @@ async def _import_via_ephemeral_mysql(
                 f"Failed to create ephemeral MySQL database {safe_db}: {create_out[-500:]}"
             )
 
+        import_path, stripped = write_mysql_dump_for_staging(dump_path, safe_db)
+        if stripped:
+            migrator.job.log(
+                f"Rewrote dump for staging DB {safe_db} "
+                f"(stripped {stripped} USE/CREATE/DROP DATABASE redirect lines)"
+            )
+
         rc, import_out = await _mysql_ephemeral(
-            container, pwd, database=safe_db, stdin_path=dump_path, client=client,
+            container, pwd, database=safe_db, stdin_path=import_path, client=client,
         )
         if rc != 0:
             raise RuntimeError(
                 f"Failed to import {source_db} dump into ephemeral {image}: {import_out[-500:]}"
             )
+
+        await _verify_mysql_staging_has_data(
+            migrator, container, pwd, safe_db, client=client,
+        )
     except Exception as e:
         migrator.job.log(f"Ephemeral MySQL staging failed — cleaning up ({e})")
         try:
@@ -353,6 +488,12 @@ async def _import_via_ephemeral_mysql(
             pass
         await migrator._run_cmd(["docker", "rm", "-f", container], timeout=30)
         raise
+    finally:
+        if import_path is not None and import_path != dump_path and import_path.exists():
+            try:
+                import_path.unlink()
+            except OSError:
+                pass
 
     return {
         "host": "127.0.0.1",
