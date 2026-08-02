@@ -488,27 +488,18 @@ def test_install_redirect_uses_native_pg_redirect():
     asyncio.run(_run())
 
 
-def test_install_redirect_retries_without_ssl():
-    """Optional TLS (no ssl_wanted, http PG URL): may fall back to plain HTTP."""
+def test_install_redirect_http_when_xui_had_no_sub_tls():
+    """Old http://sub links: plain HTTP even if PasarGuard URL is https://."""
     async def _run():
         job = MigrationJob(job_id="redir2")
         migrator = XuiMigrator(job, {})
-        installs = {"n": 0}
+        installs = []
 
         async def _fake_install(migrator, mapping, **kwargs):
-            installs["n"] += 1
-            if installs["n"] == 1 and kwargs.get("ssl_cert"):
-                return False, "ssl boom"
+            installs.append(kwargs)
             return True, ""
 
-        async def _fake_active(_migrator):
-            return False
-
         with tempfile.TemporaryDirectory() as tmp:
-            cert = Path(tmp) / "c.pem"
-            key = Path(tmp) / "k.pem"
-            cert.write_text("CERT", encoding="utf-8")
-            key.write_text("KEY", encoding="utf-8")
             mapping = Path(tmp) / "subscription_url_mapping.json"
             mapping.write_text(
                 json.dumps({
@@ -523,21 +514,19 @@ def test_install_redirect_retries_without_ssl():
             )
             with patch(
                 "app.services.redirect_ops.install_pg_redirect", _fake_install,
-            ), patch(
-                "app.services.redirect_ops.pg_redirect_is_active", _fake_active,
             ):
                 ok, err = await migrator._install_redirect_server(
                     mapping,
                     listen_port=2096,
-                    redirect_domain="http://10.0.0.1:8000",
-                    ssl_cert=str(cert),
-                    ssl_key=str(key),
+                    redirect_domain="https://10.0.0.1:8000",
+                    ssl_cert="/root/cert/ip/fullchain.pem",
+                    ssl_key="/root/cert/ip/privkey.pem",
                     ssl_wanted=False,
                 )
             assert ok and not err
-            assert installs["n"] == 2
-            # Second attempt must be plain HTTP
-            assert installs["n"] == 2
+            assert len(installs) == 1
+            assert not installs[0].get("ssl_cert")
+            assert not installs[0].get("ssl_key")
 
     asyncio.run(_run())
 
@@ -595,6 +584,35 @@ def test_install_redirect_retries_self_signed_when_https_required():
             assert installs[1]["ssl_cert"] == "SELF_CERT"
 
     asyncio.run(_run())
+
+
+def test_resolve_redirect_tls_prefers_pasarguard_over_xui():
+    from app.services.redirect_ops import resolve_redirect_tls
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        pg_cert = root / "pg.crt"
+        pg_key = root / "pg.key"
+        xui_cert = root / "xui.crt"
+        xui_key = root / "xui.key"
+        pg_cert.write_text("-----BEGIN CERTIFICATE-----\nPG\n-----END CERTIFICATE-----\n")
+        pg_key.write_text("-----BEGIN PRIVATE KEY-----\nPGK\n-----END PRIVATE KEY-----\n")
+        xui_cert.write_text("-----BEGIN CERTIFICATE-----\nXUI\n-----END CERTIFICATE-----\n")
+        xui_key.write_text("-----BEGIN PRIVATE KEY-----\nXUIK\n-----END PRIVATE KEY-----\n")
+        env = (
+            f"UVICORN_SSL_CERTFILE={pg_cert}\n"
+            f"UVICORN_SSL_KEYFILE={pg_key}\n"
+        )
+        cert, key, src = resolve_redirect_tls(
+            cert_path=str(xui_cert),
+            key_path=str(xui_key),
+            env_text=env,
+            want_ssl=True,
+            work_dir=root,
+        )
+        assert src == "pasarguard-uvicorn-ssl"
+        assert "PG" in cert
+        assert "PGK" in key
 
 
 def test_normalize_target_db_aliases():
@@ -859,8 +877,9 @@ if __name__ == "__main__":
     test_normalize_subscription_mapping_strips_query()
     test_build_redirect_config_sets_domain_and_port()
     test_install_redirect_uses_native_pg_redirect()
-    test_install_redirect_retries_without_ssl()
+    test_install_redirect_http_when_xui_had_no_sub_tls()
     test_install_redirect_retries_self_signed_when_https_required()
+    test_resolve_redirect_tls_prefers_pasarguard_over_xui()
     test_normalize_target_db_aliases()
     test_convert_landed_sqlite_syncs_mysql_and_finalizes_env()
     test_convert_landed_sqlite_for_all_server_engines()

@@ -622,9 +622,7 @@ class XuiMigrator(BaseMigrator):
             )
 
         self.job.set_progress(100, "3x-ui migration complete!")
-        redir_scheme = "https" if (
-            xui_listen.get("ssl_wanted") or str(redirect_domain).startswith("https://")
-        ) else "http"
+        redir_scheme = "https" if xui_listen.get("ssl_wanted") else "http"
         warn_en = [
             "Old /sub/{subId} links are redirected to PasarGuard via redirect-server.",
             f"Redirect listens {redir_scheme} on port {redirect_port} → {redirect_domain}/sub/…",
@@ -720,24 +718,33 @@ class XuiMigrator(BaseMigrator):
         if PASARGUARD_ENV.exists():
             env_text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
 
-        # Old https://IP:subPort/sub links need a TLS listener. Prefer when x-ui
-        # had sub certs, or when PasarGuard public URL is already HTTPS.
-        want_tls = bool(ssl_wanted) or str(redirect_domain or "").startswith("https://")
+        # Listener scheme must match OLD client links, not PasarGuard's URL:
+        # - x-ui had sub certs → https://IP:subPort/sub/... → HTTPS redirect
+        # - x-ui had no sub certs → http://IP:subPort/sub/... → plain HTTP
+        # (PG being https://…:8000 must NOT force TLS on the old sub port.)
+        want_tls = bool(ssl_wanted)
 
-        cert_pem, key_pem, tls_src = resolve_redirect_tls(
-            cert_path=ssl_cert,
-            key_path=ssl_key,
-            env_text=env_text,
-            common_name=detect_public_ip(),
-            work_dir=work_dir or mapping.parent,
-            want_ssl=want_tls,
-        )
-        if cert_pem and key_pem:
-            self.job.log(f"pg-redirect TLS material: {tls_src}")
-        elif want_tls:
+        cert_pem, key_pem, tls_src = ("", "", "")
+        if want_tls:
+            cert_pem, key_pem, tls_src = resolve_redirect_tls(
+                cert_path=ssl_cert,
+                key_path=ssl_key,
+                env_text=env_text,
+                common_name=detect_public_ip(),
+                work_dir=work_dir or mapping.parent,
+                want_ssl=True,
+            )
+            if cert_pem and key_pem:
+                self.job.log(f"pg-redirect TLS material: {tls_src}")
+            else:
+                self.job.log(
+                    "pg-redirect: old links need HTTPS but no cert found yet — "
+                    "will try self-signed after first failure"
+                )
+        else:
             self.job.log(
-                "pg-redirect: old links need HTTPS but no cert found yet — "
-                "will try self-signed after first failure"
+                "pg-redirect: x-ui had no subscription TLS — "
+                "listening plain HTTP for old http://sub links"
             )
 
         ok, err = await install_pg_redirect(
@@ -783,20 +790,6 @@ class XuiMigrator(BaseMigrator):
                 "(old https://IP:subPort/sub/… links would not work)"
             )
             return False, err or "HTTPS redirect required but TLS install failed"
-
-        # Plain HTTP was intended (x-ui had no sub certs) — optional SSL retry-off
-        if cert_pem and key_pem:
-            self.job.log("Retrying pg-redirect without SSL (plain HTTP on old sub port)...")
-            ok2, err2 = await install_pg_redirect(
-                self,
-                mapping,
-                listen_port=listen_port,
-                redirect_base=redirect_domain,
-                panel="x-ui",
-            )
-            if ok2 or await pg_redirect_is_active(self):
-                return True, ""
-            err = err2 or err
 
         self.job.log(
             "pg-redirect install failed — check logs above "

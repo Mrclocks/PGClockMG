@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> ⚠️ **`v1.15.3`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
+> ⚠️ **`v1.15.4`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
   <b>فارسی</b> · <a href="README.en.md">English</a> · <a href="README.ru.md">Русский</a>
@@ -57,6 +57,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | نسخه | تغییرات اصلی |
 |------|--------------|
+| v1.15.4 | سرت ریدایرکت از پاسارگارد؛ HTTP اگر ساب قدیمی TLS نداشت |
 | v1.15.3 | ریدایرکت HTTPS برای لینک‌های قدیمی 3x-ui (سرت PG / self-signed) |
 | v1.15.2 | نصب pg-redirect بدون useradd (fallback به nobody) |
 | v1.15 | ریدایرکت بومی pg-redirect (بدون دانلود GitHub) |

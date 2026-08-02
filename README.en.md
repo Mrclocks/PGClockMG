@@ -1,4 +1,4 @@
-> ⚠️ **`v1.15.3`** — Always take a full backup before restore or migration.
+> ⚠️ **`v1.15.4`** — Always take a full backup before restore or migration.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <b>English</b> · <a href="README.ru.md">Русский</a>
@@ -55,6 +55,7 @@ Requirements: Ubuntu/Debian · root · Docker
 
 | Version | Key changes |
 |---------|-------------|
+| v1.15.4 | Redirect TLS from PasarGuard certs; HTTP when old sub had no TLS |
 | v1.15.3 | HTTPS pg-redirect for old 3x-ui links (PG certs / self-signed) |
 | v1.15.2 | pg-redirect install without useradd (fallback to nobody) |
 | v1.15 | Native pg-redirect service (no GitHub binary download) |

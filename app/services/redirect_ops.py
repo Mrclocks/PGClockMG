@@ -129,15 +129,17 @@ def resolve_redirect_tls(
 ) -> tuple[str, str, str]:
     """Resolve TLS material for pg-redirect.
 
-    Order: x-ui cert paths → PasarGuard UVICORN_SSL_* → certs under data →
-    self-signed (only when ``want_ssl``).
+    Prefer **PasarGuard** certs first so ``https://IP:subPort`` presents the same
+    certificate clients already see on the panel (avoids random self-signed /
+    stale x-ui paths after migrate). Fallback order:
+
+    1. PasarGuard ``UVICORN_SSL_*``
+    2. Files under PasarGuard ``certs/``
+    3. Legacy 3x-ui cert paths (if still on disk)
+    4. Self-signed (only when ``want_ssl``)
 
     Returns ``(cert_pem, key_pem, source_label)``.
     """
-    pair = _load_pem_pair(cert_path, key_path)
-    if pair:
-        return pair[0], pair[1], "x-ui-cert-files"
-
     text = env_text or ""
     if not text and PASARGUARD_ENV.exists():
         try:
@@ -166,6 +168,10 @@ def resolve_redirect_tls(
             )
     except Exception:
         pass
+
+    pair = _load_pem_pair(cert_path, key_path)
+    if pair:
+        return pair[0], pair[1], "x-ui-cert-files"
 
     if want_ssl and work_dir is not None:
         generated = generate_self_signed_pem(common_name or "127.0.0.1", Path(work_dir))
