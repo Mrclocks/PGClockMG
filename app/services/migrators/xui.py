@@ -4,7 +4,10 @@ Always converts to SQLite first. If target_db is not sqlite, runs two-phase
 engine to copy head→head into the requested engine.
 """
 
+from __future__ import annotations
+
 import shutil
+import sqlite3
 from pathlib import Path
 
 from app.config import PASARGUARD_DIR, PASARGUARD_DATA, PASARGUARD_ENV, TOOLS_DIR, BACKUP_DIR
@@ -33,7 +36,6 @@ def find_xui_db_in_dir(root: Path) -> Path | None:
                 fallback.append(p)
 
     if preferred:
-        # Prefer exact x-ui.db, then any *x-ui* name
         for p in preferred:
             if p.name.lower() == "x-ui.db":
                 return p
@@ -57,7 +59,6 @@ def resolve_xui_db_source(
         candidates.append(Path(upload_work_dir))
     if upload_path:
         p = Path(upload_path)
-        # Avoid scanning the same directory twice when both params point at workspace
         if not candidates or p.resolve() != candidates[0].resolve():
             candidates.append(p)
 
@@ -70,17 +71,111 @@ def resolve_xui_db_source(
                 return found
             continue
         if src.is_file():
-            suffix = src.suffix.lower()
-            if suffix == ".zip":
-                # Caller extracts zip; signal zip by returning the zip path.
-                # Actual extraction stays in the migrator (needs async unzip).
-                return src
-            if suffix in (".db", ".sqlite3") or "x-ui" in src.name.lower():
-                return src
-            # Unknown single file — still try (legacy upload of bare db)
             return src
 
     return find_xui_db()
+
+
+def bundled_xui_schema_db(tools_dir: Path | None = None) -> Path | None:
+    """Official empty PasarGuard SQLite schema shipped with PasarGuard/migrations."""
+    base = Path(tools_dir) if tools_dir else TOOLS_DIR
+    path = base / "migrations" / "x-ui" / "input-db-pg" / "db.sqlite3"
+    return path if path.is_file() else None
+
+
+def resolve_xui_schema_db(
+    tools_dir: Path | None = None,
+    pasarguard_data: Path | None = None,
+) -> Path:
+    """Pick a PasarGuard *SQLite* schema reference for the official x-ui migrator.
+
+    Starting a MySQL/Postgres PasarGuard install never creates db.sqlite3, so we
+    must not rely on safe_start for schema creation. Prefer the bundled empty
+    schema from PasarGuard/migrations; fall back to a live sqlite file if present.
+    """
+    bundled = bundled_xui_schema_db(tools_dir)
+    if bundled:
+        return bundled
+
+    data = Path(pasarguard_data) if pasarguard_data else PASARGUARD_DATA
+    live = data / "db.sqlite3"
+    if live.is_file() and live.stat().st_size > 0:
+        return live
+
+    raise RuntimeError(
+        "PasarGuard SQLite schema reference not found. "
+        "Expected tools/migrations/x-ui/input-db-pg/db.sqlite3 "
+        "(re-run installer to fetch PasarGuard/migrations) "
+        "or a local /var/lib/pasarguard/db.sqlite3."
+    )
+
+
+def _table_count(conn: sqlite3.Connection, table: str) -> int | None:
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        if not row or row[0] == 0:
+            return None
+        return int(conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+    except sqlite3.Error:
+        return None
+
+
+def inspect_xui_sqlite(path: Path) -> dict[str, int]:
+    """Count key x-ui source tables (client_traffics / clients / inbounds)."""
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        out: dict[str, int] = {}
+        for table in ("client_traffics", "clients", "inbounds", "users"):
+            n = _table_count(conn, table)
+            if n is not None:
+                out[table] = n
+        return out
+    finally:
+        conn.close()
+
+
+def inspect_pasarguard_sqlite(path: Path) -> dict[str, int]:
+    """Count key PasarGuard tables in a migrated sqlite file."""
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        out: dict[str, int] = {}
+        for table in ("users", "admins", "hosts", "inbounds", "nodes", "groups"):
+            n = _table_count(conn, table)
+            if n is not None:
+                out[table] = n
+        return out
+    finally:
+        conn.close()
+
+
+def assert_xui_source_has_data(path: Path) -> dict[str, int]:
+    counts = inspect_xui_sqlite(path)
+    if not counts:
+        raise RuntimeError(
+            "فایل x-ui.db جدول‌های مورد انتظار (inbounds / client_traffics) را ندارد — "
+            "آیا فایل دیتابیس 3x-ui درست آپلود شده؟"
+        )
+    clients = counts.get("client_traffics", counts.get("clients", 0))
+    inbounds = counts.get("inbounds", 0)
+    if clients <= 0 and inbounds <= 0:
+        raise RuntimeError(
+            "دیتابیس x-ui.db خالی است (هیچ inbound/کاربری نیست) — مهاجرت لغو شد"
+        )
+    return counts
+
+
+def assert_migrated_pg_has_data(path: Path) -> dict[str, int]:
+    counts = inspect_pasarguard_sqlite(path)
+    data_tables = ("users", "inbounds", "groups")
+    if any(counts.get(t, 0) > 0 for t in data_tables):
+        return counts
+    raise RuntimeError(
+        "خروجی مهاجرت x-ui خالی است (users/inbounds/groups = 0). "
+        "معمولاً به‌خاطر نبود schema مرجع SQLite یا دیتابیس مبدأ خالی است."
+    )
 
 
 class XuiMigrator(BaseMigrator):
@@ -98,22 +193,23 @@ class XuiMigrator(BaseMigrator):
             raise RuntimeError("دیتابیس x-ui.db یافت نشد — لطفاً آپلود کنید")
 
         self.job.log(f"Using 3x-ui database: {xui_db}")
+        src_counts = assert_xui_source_has_data(Path(xui_db))
+        self.job.log(
+            "Source x-ui counts: "
+            + ", ".join(f"{k}={v}" for k, v in src_counts.items())
+        )
 
         self.job.set_progress(15, "بررسی PasarGuard...")
         if not PASARGUARD_DIR.exists():
             raise RuntimeError("PasarGuard نصب نیست — ابتدا نصب کنید")
 
-        schema_db = PASARGUARD_DATA / "db.sqlite3"
-        if not schema_db.exists():
-            self.job.log("راه‌اندازی PasarGuard برای ایجاد schema...")
-            await safe_start_pasarguard(self)
-            import asyncio
-            await asyncio.sleep(10)
-
         self.job.set_progress(30, "آماده‌سازی ابزار مهاجرت x-ui...")
         xui_tool = TOOLS_DIR / "migrations" / "x-ui"
         if not xui_tool.exists():
             raise RuntimeError("ابزار x-ui migration یافت نشد")
+
+        schema_db = resolve_xui_schema_db()
+        self.job.log(f"Using PasarGuard schema reference: {schema_db}")
 
         work_dir = BACKUP_DIR / f"xui-{self.job.job_id}"
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -138,16 +234,25 @@ class XuiMigrator(BaseMigrator):
         if not output_db.exists():
             raise RuntimeError("دیتابیس خروجی ایجاد نشد")
 
+        out_counts = assert_migrated_pg_has_data(output_db)
+        self.job.log(
+            "Migrated SQLite counts: "
+            + ", ".join(f"{k}={v}" for k, v in out_counts.items())
+        )
+
+        # Land migrated SQLite under PasarGuard data (also intermediate for cross-db)
+        land_db = PASARGUARD_DATA / "db.sqlite3"
+        PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
         self.job.set_progress(70, "جایگزینی دیتابیس PasarGuard (SQLite)...")
-        self._backup_file(schema_db, BACKUP_DIR)
-        shutil.copy2(output_db, schema_db)
+        self._backup_file(land_db, BACKUP_DIR)
+        shutil.copy2(output_db, land_db)
 
         self.job.set_progress(80, "تولید mapping لینک‌های اشتراک...")
         mapping_file = work_dir / "subscription_url_mapping.json"
         await self._run_cmd(
             ["uv", "run", "migration/generate_subscription_url_mapping.py",
              "--xui-db", str(input_db),
-             "--pasarguard-db", str(schema_db),
+             "--pasarguard-db", str(land_db),
              "--output", str(mapping_file)],
             cwd=str(xui_tool),
         )
@@ -164,7 +269,7 @@ class XuiMigrator(BaseMigrator):
 
         if target_db != "sqlite":
             self.job.set_progress(88, f"Two-phase: SQLite → {target_db}...")
-            await run_cross_db_migration(self, str(schema_db), "sqlite", target_db)
+            await run_cross_db_migration(self, str(land_db), "sqlite", target_db)
             if PASARGUARD_ENV.exists():
                 from app.services.db_credentials import get_target_connection
                 text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
@@ -186,6 +291,8 @@ class XuiMigrator(BaseMigrator):
             "redirect_installed": redirect_installed,
             "target_db": target_db,
             "mapping_file": str(mapping_file) if mapping_file.exists() else None,
+            "source_counts": src_counts,
+            "migrated_counts": out_counts,
             "warnings": {
                 "en": [
                     "Old /sub/{token} links work if redirect server is installed (enabled by default).",
