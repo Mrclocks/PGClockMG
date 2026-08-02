@@ -938,10 +938,18 @@ function renderSummary() {
   const names = { sqlite: 'SQLite', mysql: 'MySQL', mariadb: 'MariaDB', postgresql: 'PostgreSQL', timescaledb: 'TimescaleDB' };
 
   const linkLabel = t(`sub.${panel.subscription_mode}`);
+  const analysis = state.bundleStatus?.analysis || state.uploadInfo?.analysis;
+  let xuiSchemaRow = '';
+  if (panel.id === '3x-ui' && analysis?.xui_schema) {
+    const modern = !!(analysis.xui_schema_modern || analysis.xui_schema.modern);
+    const schemaLabel = modern ? t('step6.xuiSchemaModern') : t('step6.xuiSchemaLegacy');
+    xuiSchemaRow = `<div class="summary-row"><span class="summary-label">${s.xuiVersion || '3X-UI'}</span><span>${schemaLabel}</span></div>`;
+  }
 
   document.getElementById('migrationSummary').innerHTML = `
     <div class="summary-row"><span class="summary-label">${s.source}</span><span>${panelLatinName(panel)}</span></div>
     <div class="summary-row"><span class="summary-label">${s.sourceDb}</span><span>${names[state.sourceDb] || '—'}</span></div>
+    ${xuiSchemaRow}
     <div class="summary-row"><span class="summary-label">${panel.id === 'marzban' ? s.pgInstallDb : s.targetDb}</span><span>${names[state.targetDb] || '—'}</span></div>
     <div class="summary-row"><span class="summary-label">${s.links}</span><span>${linkLabel}</span></div>
     <div class="summary-row"><span class="summary-label">${s.backup}</span><span>${state.uploadInfo?.filename || state.bundleStatus?.mode === 'zip' ? t('upload.fullZip') : state.bundleStatus?.mode === 'separate' ? t('upload.separateFiles') : s.server}</span></div>`;
@@ -1161,10 +1169,18 @@ function showSuccess(result) {
   document.getElementById('resultMessage').textContent = t(`step6.${msgKey}`);
 
   let details = '';
+  // 3X-UI: show detected DB generation (modern vs legacy) on final confirm
+  if (state.selectedPanel?.id === '3x-ui' || result?.xui_schema) {
+    const modern = !!(result?.xui_schema_modern || result?.xui_schema === 'modern');
+    const schemaLabel = modern ? t('step6.xuiSchemaModern') : t('step6.xuiSchemaLegacy');
+    details += `<p class="status-inline">${statusIcon('ok')} <span>${schemaLabel}</span></p>`;
+  }
   const warnings = result?.warnings;
   if (warnings) {
     const w = tr(warnings, state.lang);
-    if (Array.isArray(w)) details = '<ul>' + w.map(x => `<li class="warn-line">${statusIcon('warn')}<span>${x}</span></li>`).join('') + '</ul>';
+    if (Array.isArray(w) && w.length) {
+      details += '<ul>' + w.map(x => `<li class="warn-line">${statusIcon('warn')}<span>${x}</span></li>`).join('') + '</ul>';
+    }
   }
   if (result?.redirect_installed) {
     details += `<p class="status-inline">${statusIcon('ok')} <span>${t('step6.redirectInstalled')}</span></p>`;

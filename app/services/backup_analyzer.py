@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from pathlib import Path
 
 from app.services.env_migration import (
@@ -166,10 +167,17 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
             continue
         if p.name.lower().endswith(".sql") and not paths["sql"]:
             paths["sql"] = str(p)
-        if p.name.lower() in SQLITE_DB_NAMES and not paths["sqlite"]:
+        name_l = p.name.lower()
+        if not paths["sqlite"] and (
+            name_l in SQLITE_DB_NAMES or name_l.endswith((".db", ".sqlite3"))
+        ):
             paths["sqlite"] = str(p)
 
     panel_hint = _detect_panel(inventory, paths)
+    # Renamed 3x-ui dumps (*.db) may not match x-ui.db — detect via tables
+    if panel_hint != "3x-ui" and paths.get("sqlite"):
+        if _sqlite_looks_like_xui(Path(paths["sqlite"])):
+            panel_hint = "3x-ui"
     env_text = ""
     if paths["env"]:
         env_text = Path(paths["env"]).read_text(encoding="utf-8", errors="ignore")
@@ -213,7 +221,7 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
         else:
             backup_ok = bool(paths["sqlite"] or paths["sql"])
     elif panel_hint == "3x-ui":
-        backup_ok = paths["sqlite"] is not None and "x-ui" in (paths["sqlite"] or "").lower()
+        backup_ok = paths["sqlite"] is not None
     else:
         backup_ok = bool(paths["sqlite"] or paths["sql"])
 
@@ -224,6 +232,10 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
             "فایل .env در بکاپ نیست — تنظیمات اشتراک/SSL ممکن است دستی لازم باشد",
             "Нет .env в копии — настройки вручную",
         ))
+
+    xui_schema = None
+    if panel_hint == "3x-ui" and paths.get("sqlite"):
+        xui_schema = _detect_xui_schema(Path(paths["sqlite"]))
 
     return {
         "extract_root": str(root.relative_to(upload_dir)).replace("\\", "/") if root != upload_dir else ".",
@@ -244,6 +256,39 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
         "has_certs": categories.get("ssl_certs", 0) > 0,
         "has_templates": categories.get("templates", 0) > 0,
         "has_xray_config": paths["xray_config"] is not None,
+        "xui_schema": xui_schema,
+        "xui_schema_modern": bool(xui_schema and xui_schema.get("modern")),
+    }
+
+
+def _sqlite_table_names(path: Path) -> set[str]:
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+            return {str(r[0]) for r in rows}
+        finally:
+            conn.close()
+    except Exception:
+        return set()
+
+
+def _sqlite_looks_like_xui(path: Path) -> bool:
+    names = _sqlite_table_names(path)
+    return "inbounds" in names and ("client_traffics" in names or "clients" in names)
+
+
+def _detect_xui_schema(path: Path) -> dict | None:
+    """Return modern/legacy 3x-ui schema info for confirmation UI."""
+    names = _sqlite_table_names(path)
+    if not names or not _sqlite_looks_like_xui(path):
+        return None
+    modern = "clients" in names and "client_inbounds" in names
+    return {
+        "schema": "modern" if modern else "legacy",
+        "modern": modern,
     }
 
 

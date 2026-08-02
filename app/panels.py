@@ -147,28 +147,25 @@ PANELS: dict[str, PanelInfo] = {
         support_level="full",
         subscription_mode="redirect",
         description={
-            "en": "Migrates inbounds and users. Admin accounts are not migrated. Old subscription URLs work via redirect server.",
-            "fa": "انتقال inbound و کاربران. ادمین منتقل نمی‌شود. لینک‌های قدیمی با سرور ریدایرکت کار می‌کنند.",
-            "ru": "Миграция inbound и пользователей. Админы не переносятся. Старые ссылки работают через redirect.",
+            "en": "Migrates inbounds, users, admin, hosts and groups. Old and new 3X-UI DBs auto-detected. Old subscription URLs work via redirect.",
+            "fa": "انتقال inbound، کاربر، ادمین، هاست و گروه. دیتابیس قدیم/جدید 3X-UI خودکار تشخیص داده می‌شود. لینک‌های قدیمی با ریدایرکت کار می‌کنند.",
+            "ru": "Миграция inbound, пользователей, админа, hosts и groups. Старая/новая БД 3X-UI определяется автоматически. Старые ссылки — через redirect.",
         },
         warnings={
             "en": [
                 "PasarGuard MUST be installed on this server BEFORE migration.",
                 "SQLite only (x-ui.db).",
                 "TLS/SSL certificates are NOT migrated — configure certificates again in PasarGuard.",
-                "Create admin manually after migration: pasarguard cli generate-temp-key",
             ],
             "fa": [
                 "PasarGuard باید قبل از مهاجرت روی این سرور نصب باشد.",
                 "فقط SQLite (x-ui.db).",
                 "سرتیفیکیت‌های TLS/SSL منتقل نمی‌شوند — بعداً در PasarGuard دوباره تنظیم کنید.",
-                "ادمین را دستی بسازید: pasarguard cli generate-temp-key",
             ],
             "ru": [
                 "PasarGuard ДОЛЖЕН быть установлен ДО миграции.",
                 "Только SQLite (x-ui.db).",
                 "TLS/SSL сертификаты НЕ переносятся — настройте их снова в PasarGuard.",
-                "Создайте админа: pasarguard cli generate-temp-key",
             ],
         },
         prerequisites=PanelPrerequisites(

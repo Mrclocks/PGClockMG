@@ -1674,79 +1674,23 @@ class XuiMigrator(BaseMigrator):
         self.job.set_progress(100, "3x-ui migration complete!")
         redir_scheme = "https" if xui_listen.get("ssl_wanted") else "http"
         redirect_path = (xui_listen.get("path") or "sub").strip().strip("/") or "sub"
-        schema_label = "modern" if schema_info.get("modern") else "legacy"
-        warn_en = [
-            f"Detected 3x-ui schema: {schema_label} (auto).",
-            f"Old /{redirect_path}/{{subId}} links are redirected to PasarGuard via redirect-server.",
-            f"Redirect listens {redir_scheme} on port {redirect_port} → {redirect_domain}/sub/…",
-        ]
-        warn_fa = [
-            f"اسکیما 3x-ui تشخیص داده شد: {schema_label} (خودکار).",
-            f"لینک‌های قدیمی /{redirect_path}/{{subId}} با redirect-server به پاسارگارد هدایت می‌شوند.",
-            f"ریدایرکت {redir_scheme} روی پورت {redirect_port} → {redirect_domain}/sub/…",
-        ]
-        warn_ru = [
-            f"Схема 3x-ui определена: {schema_label} (авто).",
-            f"Старые /{redirect_path}/{{subId}} перенаправляются на PasarGuard через redirect-server.",
-            f"Redirect слушает {redir_scheme} на порту {redirect_port} → {redirect_domain}/sub/…",
-        ]
-        if hosts_info.get("seeded"):
-            warn_en.append(
-                f"Auto-seeded {hosts_info.get('seeded')} host(s) "
-                f"→ {hosts_info.get('address')} (edit in panel if needed)."
-            )
-            warn_fa.append(
-                f"{hosts_info.get('seeded')} هاست به‌صورت خودکار ساخته شد "
-                f"→ {hosts_info.get('address')} (در پنل قابل ویرایش است)."
-            )
-            warn_ru.append(
-                f"Автосоздано хостов: {hosts_info.get('seeded')} "
-                f"→ {hosts_info.get('address')} (при необходимости измените в панели)."
-            )
-        else:
-            warn_en.append(
-                "Add Hosts in the panel for each inbound so subscription configs resolve."
-            )
-            warn_fa.append(
-                "برای هر inbound در پنل Host بسازید تا کانفیگ سابسکریپشن کامل شود."
-            )
-            warn_ru.append(
-                "Создайте Hosts для inbound'ов в панели для подписок."
-            )
-        if not admin_info.get("created"):
-            warn_en.append("Create admin: pasarguard cli generate-temp-key")
-            warn_fa.append("ادمین بسازید: pasarguard cli generate-temp-key")
-            warn_ru.append("Создайте админа: pasarguard cli generate-temp-key")
-        else:
-            warn_en.append(
-                f"Panel admin migrated from x-ui user «{admin_info.get('username')}» "
-                "(same password as old panel)."
-            )
-            warn_fa.append(
-                f"ادمین پنل از کاربر x-ui «{admin_info.get('username')}» منتقل شد "
-                "(همان رمز پنل قبلی)."
-            )
-            warn_ru.append(
-                f"Админ панели перенесён из x-ui «{admin_info.get('username')}» "
-                "(тот же пароль)."
-            )
+        warn_en: list[str] = []
+        warn_fa: list[str] = []
+        warn_ru: list[str] = []
         if not redirect_installed and install_redirect:
             detail = (redirect_error or "").strip()
             if len(detail) > 280:
                 detail = "…" + detail[-280:]
-            warn_en.insert(
-                0,
+            warn_en.append(
                 "pg-redirect did NOT install — old /sub links will not work until fixed. "
                 "Users/inbounds already migrated. "
                 + (f"Cause: {detail}" if detail else "Often: subscription port still busy, or python3/systemd missing."),
             )
-            warn_fa.insert(
-                0,
+            warn_fa.append(
                 "سرویس pg-redirect نصب نشد — لینک‌های قدیمی کار نمی‌کنند (یوزرها منتقل شده‌اند). "
                 + (f"علت: {detail}" if detail else "معمولاً پورت ساب هنوز اشغال است یا python3/systemd نیست."),
             )
-            warn_ru.insert(
-                0,
+            warn_ru.append(
                 "pg-redirect не установился — старые /sub не работают (пользователи уже перенесены). "
                 + (f"Причина: {detail}" if detail else "Часто порт занят или нет python3/systemd."),
             )
@@ -1758,12 +1702,14 @@ class XuiMigrator(BaseMigrator):
             "redirect_port": redirect_port,
             "redirect_path": redirect_path,
             "redirect_domain": redirect_domain,
+            "redirect_scheme": redir_scheme,
             "target_db": target_db,
             "mapping_file": str(mapping_file) if mapping_file.exists() else None,
             "source_counts": src_counts,
             "migrated_counts": out_counts,
             "xui_schema": schema_info.get("schema"),
             "xui_schema_modern": bool(schema_info.get("modern")),
+            "admin_username": admin_info.get("username") if admin_info.get("created") else None,
             "hosts_seeded": int(hosts_info.get("seeded") or 0),
             "warnings": {
                 "en": warn_en,
