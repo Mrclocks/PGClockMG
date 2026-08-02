@@ -30,7 +30,7 @@ const state = {
 };
 
 function panelLatinName(panel) {
-  if (panel?.id === '3x-ui') return 'X-UI';
+  if (panel?.id === '3x-ui') return '3X-UI';
   return panel?.name?.en || panel?.id || '';
 }
 
@@ -1167,13 +1167,48 @@ function showSuccess(result) {
     if (Array.isArray(w)) details = '<ul>' + w.map(x => `<li class="warn-line">${statusIcon('warn')}<span>${x}</span></li>`).join('') + '</ul>';
   }
   if (result?.redirect_installed) {
-    details += `<p class="status-inline">${statusIcon('ok')} <span>Redirect server installed</span></p>`;
+    details += `<p class="status-inline">${statusIcon('ok')} <span>${t('step6.redirectInstalled')}</span></p>`;
   }
   if (result?.users_migrated) {
     details += `<p>${result.users_migrated} / ${result.users_total} users</p>`;
   }
   document.getElementById('resultDetails').innerHTML = details;
+  renderRedirectVerifyBox(result);
   renderPostMigrateSection(result);
+}
+
+function renderRedirectVerifyBox(result) {
+  const box = document.getElementById('redirectVerifyBox');
+  if (!box) return;
+  const show = !!(
+    result?.redirect_installed
+    || result?.subscription_mode === 'redirect'
+    || state.selectedPanel?.id === '3x-ui'
+  );
+  if (!show) {
+    box.classList.add('hidden');
+    box.innerHTML = '';
+    return;
+  }
+  const redirPort = result?.redirect_port || 2096;
+  const cmds = [
+    'systemctl status pg-redirect --no-pager',
+    `curl -kI https://127.0.0.1:${redirPort}/healthz`,
+    `curl -I http://127.0.0.1:${redirPort}/healthz`,
+    `curl -kI https://127.0.0.1:${redirPort}/sub/YOUR_OLD_SUB_ID`,
+  ].join('\n');
+  box.classList.remove('hidden');
+  box.innerHTML = `
+    <h3 class="post-migrate-title">${t('step6.redirectVerifyTitle')}</h3>
+    <p class="desc-sm">${t('step6.redirectVerifyHint')}</p>
+    <div class="install-cmd-row">
+      <div class="install-cmd-box"><code id="redirectVerifyCmds">${escapeHtmlApp(cmds)}</code></div>
+      <button type="button" class="btn btn-copy" id="btnCopyRedirectVerify">${t('copy')}</button>
+    </div>`;
+  document.getElementById('btnCopyRedirectVerify')?.addEventListener('click', () => {
+    if (typeof copyText === 'function') copyText('redirectVerifyCmds');
+    else copyTextToClipboard(cmds);
+  });
 }
 
 function showError(msg, logs) {
@@ -1317,12 +1352,17 @@ function setUploadProgressUi(ids, { phase, pct = 0, message = '', fileName = '' 
   }
 }
 
+function primaryUploadSlot() {
+  return state.uploadPrimarySlot || 'bundle_zip';
+}
+
 function bindZipUploadZone() {
   const zone = document.getElementById('uploadZone');
   const input = document.getElementById('fileInputZip');
   const link = document.getElementById('uploadSelectText');
   if (!zone || !input) return;
 
+  const slot = () => primaryUploadSlot();
   zone.onclick = () => input.click();
   if (link) {
     link.onclick = (e) => {
@@ -1332,7 +1372,7 @@ function bindZipUploadZone() {
     };
   }
   input.onchange = () => {
-    if (input.files.length) uploadSlotFile('bundle_zip', input.files[0]);
+    if (input.files.length) uploadSlotFile(slot(), input.files[0]);
     input.value = '';
   };
 
@@ -1341,7 +1381,7 @@ function bindZipUploadZone() {
   zone.ondrop = (e) => {
     e.preventDefault();
     zone.classList.remove('dragover');
-    if (e.dataTransfer.files.length) uploadSlotFile('bundle_zip', e.dataTransfer.files[0]);
+    if (e.dataTransfer.files.length) uploadSlotFile(slot(), e.dataTransfer.files[0]);
   };
 }
 
@@ -1408,12 +1448,30 @@ async function renderUploadSection() {
   document.getElementById('uploadSelectText').textContent = t('step2.uploadSelect');
   document.getElementById('uploadModeZip').textContent = t('upload.modeZip');
   document.getElementById('uploadModeSeparate').textContent = t('upload.modeSeparate');
-  setUploadMode(state.uploadMode);
+
+  const isXuiDbOnly = panel.id === '3x-ui';
+  const modeTabs = document.getElementById('uploadModeTabs');
+  const zipInput = document.getElementById('fileInputZip');
+  if (isXuiDbOnly) {
+    state.uploadPrimarySlot = 'database';
+    state.uploadMode = 'zip'; // reuse single dropzone panel
+    modeTabs?.classList.add('hidden');
+    document.getElementById('uploadZipPanel')?.classList.remove('hidden');
+    document.getElementById('uploadSeparatePanel')?.classList.add('hidden');
+    if (zipInput) zipInput.accept = '.db,.sqlite3';
+  } else {
+    state.uploadPrimarySlot = 'bundle_zip';
+    modeTabs?.classList.remove('hidden');
+    if (zipInput) zipInput.accept = '.zip';
+    setUploadMode(state.uploadMode);
+  }
   bindZipUploadZone();
 
   const slotsEl = document.getElementById('uploadSlots');
   if (slotsEl) {
-    const separateSlots = (reqs.slots || []).filter(s => s.id !== 'bundle_zip');
+    const separateSlots = isXuiDbOnly
+      ? []
+      : (reqs.slots || []).filter(s => s.id !== 'bundle_zip');
     slotsEl.innerHTML = separateSlots.map(s => {
       const accept = (s.accept || ['.zip']).join(',');
       const reqLabel = s.required ? t('upload.required') : t('upload.optional');
@@ -1460,7 +1518,8 @@ async function renderUploadSection() {
 async function uploadSlotFile(slot, file) {
   const status = document.getElementById('uploadStatus');
   const inventory = document.getElementById('uploadInventory');
-  const isZip = slot === 'bundle_zip';
+  // Primary dropzone (zip OR single 3X-UI db) uses the same progress UI
+  const isPrimaryZone = slot === 'bundle_zip' || slot === primaryUploadSlot();
   const progressIds = {
     zone: 'uploadZone',
     panel: 'uploadZipProgress',
@@ -1475,7 +1534,7 @@ async function uploadSlotFile(slot, file) {
     },
   };
 
-  if (isZip) {
+  if (isPrimaryZone) {
     setUploadProgressUi(progressIds, {
       phase: 'uploading',
       pct: 0,
@@ -1496,7 +1555,7 @@ async function uploadSlotFile(slot, file) {
 
   try {
     const data = await uploadFormWithProgress('/api/upload', form, (pct) => {
-      if (!isZip) return;
+      if (!isPrimaryZone) return;
       setUploadProgressUi(progressIds, {
         phase: 'uploading',
         pct: pct == null ? 0 : pct,
@@ -1520,7 +1579,7 @@ async function uploadSlotFile(slot, file) {
     renderUploadSection();
     renderBundleStatus(bs);
 
-    if (isZip) {
+    if (isPrimaryZone) {
       document.getElementById('uploadZone')?.classList.add('hidden');
       document.getElementById('uploadZipProgress')?.classList.add('hidden');
       applyUploadSuccessStatus(status, {
@@ -1540,7 +1599,7 @@ async function uploadSlotFile(slot, file) {
     if (state.selectedPanel) await renderPanelPrereqs(state.selectedPanel.id);
     updateStepButtons();
   } catch (e) {
-    if (isZip) {
+    if (isPrimaryZone) {
       setUploadProgressUi(progressIds, { phase: 'error', message: e.message });
     } else {
       status.innerHTML = `<span class="status-inline">${statusIcon(false)} <span>${t('uploadErr')}: ${escapeHtmlApp(e.message)}</span></span>`;

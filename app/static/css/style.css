@@ -2193,21 +2193,52 @@ a.btn-panel-enter:focus {
   color: currentColor;
 }
 
-/* Welcome goals: header-style logo boxes — red / purple / yellow */
+/* Welcome goals: card border matches icon accent — red / purple / yellow */
+.welcome-goals .choice-card:nth-child(1) {
+  border-color: hsla(0, 78%, 55%, 0.55);
+}
+.welcome-goals .choice-card:nth-child(1):hover {
+  border-color: hsl(0, 78%, 62%);
+}
 .welcome-goals .choice-card:nth-child(1) .choice-icon {
   color: hsl(0, 78%, 62%);
   background: hsla(0, 78%, 55%, 0.16);
   border-color: hsla(0, 78%, 55%, 0.45);
+}
+.welcome-goals .choice-card:nth-child(2) {
+  border-color: hsla(270, 70%, 58%, 0.55);
+}
+.welcome-goals .choice-card:nth-child(2):hover {
+  border-color: hsl(270, 70%, 72%);
 }
 .welcome-goals .choice-card:nth-child(2) .choice-icon {
   color: hsl(270, 70%, 72%);
   background: hsla(270, 70%, 58%, 0.16);
   border-color: hsla(270, 70%, 58%, 0.45);
 }
+.welcome-goals .choice-card:nth-child(3) {
+  border-color: hsla(48, 96%, 50%, 0.55);
+}
+.welcome-goals .choice-card:nth-child(3):hover {
+  border-color: hsl(48, 96%, 58%);
+}
 .welcome-goals .choice-card:nth-child(3) .choice-icon {
   color: hsl(48, 96%, 58%);
   background: hsla(48, 96%, 50%, 0.16);
   border-color: hsla(48, 96%, 50%, 0.45);
+}
+
+.redirect-verify-box {
+  margin: 20px 0 8px;
+  text-align: start;
+  width: 100%;
+  max-width: 560px;
+}
+.redirect-verify-box .install-cmd-row {
+  margin-top: 10px;
+}
+.redirect-verify-box .install-cmd-box code {
+  white-space: pre-wrap;
 }
 
 /* shadcn-like helpers */

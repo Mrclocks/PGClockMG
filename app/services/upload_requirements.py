@@ -130,9 +130,24 @@ def get_upload_requirements(
         slots = _marzban_slots(source_db)
 
     elif panel_id == "3x-ui":
+        # Database file only — no ZIP bundle UI for 3X-UI
         slots = [
-            _slot("bundle_zip", False, exclusive=True),
-            _slot("database", True, accept=[".db", ".sqlite3"], db_types=["sqlite"]),
+            _slot(
+                "database",
+                True,
+                accept=[".db", ".sqlite3"],
+                db_types=["sqlite"],
+                label={
+                    "en": "3X-UI database (x-ui.db)",
+                    "fa": "دیتابیس 3X-UI (x-ui.db)",
+                    "ru": "База 3X-UI (x-ui.db)",
+                },
+                hint={
+                    "en": "Upload the SQLite file only (.db / .sqlite3)",
+                    "fa": "فقط فایل SQLite را آپلود کنید (.db / .sqlite3)",
+                    "ru": "Загрузите только файл SQLite (.db / .sqlite3)",
+                },
+            ),
         ]
         if xui_live:
             upload_mode = "optional"
@@ -144,9 +159,9 @@ def get_upload_requirements(
         else:
             upload_mode = "required"
             reason = {
-                "en": "Upload x-ui.db from your 3x-ui server",
-                "fa": "فایل x-ui.db را آپلود کنید",
-                "ru": "Загрузите x-ui.db",
+                "en": "Upload x-ui.db from your 3X-UI server",
+                "fa": "فایل x-ui.db را از سرور 3X-UI آپلود کنید",
+                "ru": "Загрузите x-ui.db с сервера 3X-UI",
             }
 
     elif panel_id == "hiddify":

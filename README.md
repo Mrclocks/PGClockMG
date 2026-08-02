@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> ⚠️ **`v1.15.5`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
+> ⚠️ **`v1.16`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
   <b>فارسی</b> · <a href="README.en.md">English</a> · <a href="README.ru.md">Русский</a>
@@ -48,7 +48,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 |-----|--------|
 | Marzban | کامل |
 | PasarGuard | ریستور / تغییر DB (نه در مهاجرت پنل) |
-| 3x-ui | جزئی |
+| 3X-UI | کامل |
 | Remnawave / Hiddify | به‌زودی |
 
 ---
@@ -57,6 +57,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | نسخه | تغییرات اصلی |
 |------|--------------|
+| v1.16 | UI مهاجرت 3X-UI: آپلود فقط DB، تگ کامل، دستورات چک ریدایرکت |
 | v1.15.5 | فیکس Errno 36 وقتی PEM پاسارگارد به‌اشتباه به‌عنوان مسیر فایل خوانده می‌شد |
 | v1.15.4 | سرت ریدایرکت از پاسارگارد؛ HTTP اگر ساب قدیمی TLS نداشت |
 | v1.15.3 | ریدایرکت HTTPS برای لینک‌های قدیمی 3x-ui (سرت PG / self-signed) |

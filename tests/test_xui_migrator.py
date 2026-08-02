@@ -204,14 +204,14 @@ def test_xui_upload_requirements_always_have_slots():
         reqs = get_upload_requirements("3x-ui", "sqlite")
         assert reqs["upload_mode"] == "required"
         ids = [s["id"] for s in reqs["slots"]]
-        assert "bundle_zip" in ids
-        assert "database" in ids
+        assert ids == ["database"]
+        assert "bundle_zip" not in ids
 
     with patch("app.services.upload_requirements.find_xui_db", return_value=Path("/etc/x-ui/x-ui.db")):
         reqs = get_upload_requirements("3x-ui", "sqlite")
         assert reqs["upload_mode"] == "optional"
         ids = [s["id"] for s in reqs["slots"]]
-        assert "database" in ids
+        assert ids == ["database"]
 
 
 def test_schema_prefers_bundled_over_missing_live_sqlite():
