@@ -134,13 +134,18 @@ async def _reset_target_schema(migrator, target_db: str) -> None:
         ]
     else:
         from app.services.pasarguard_ops import mysql_client_bins
+        from app.services.native_migration.sql_staging import (
+            mysql_create_db_sql,
+            mysql_shell_e_arg,
+        )
 
         pwd_q = (pwd or "").replace('"', '\\"')
+        # Single-quote -e SQL: double quotes expand backticks via command substitution
+        e_sql = mysql_shell_e_arg(mysql_create_db_sql(db, drop_first=True))
         cmds = [
             (
                 f'cd "{cwd}" && docker compose exec -T {service} '
-                f'{bin_name} -u {user} -p"{pwd_q}" -e '
-                f'"DROP DATABASE IF EXISTS `{db}`; CREATE DATABASE `{db}`;"'
+                f'{bin_name} -u {user} -p"{pwd_q}" -e {e_sql}'
             )
             for bin_name in mysql_client_bins(target_db, service)
         ]
