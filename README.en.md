@@ -1,4 +1,4 @@
-> ⚠️ **`v1.14`** — Always take a full backup before restore or migration.
+> ⚠️ **`v1.15`** — Always take a full backup before restore or migration.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <b>English</b> · <a href="README.ru.md">Русский</a>
@@ -55,6 +55,7 @@ Requirements: Ubuntu/Debian · root · Docker
 
 | Version | Key changes |
 |---------|-------------|
+| v1.15 | Native pg-redirect service (no GitHub binary download) |
 | v1.14 | Redirect: GitHub download mirrors + show real failure cause |
 | v1.13 | Remove PasarGuard DB-change option from panel migrate |
 | v1.12 | 3x-ui cert upload warning + disable Hiddify/Remnawave (coming soon) |

@@ -7,7 +7,7 @@
 #
 set -eo pipefail
 
-readonly SCRIPT_VERSION="1.14"
+readonly SCRIPT_VERSION="1.15"
 readonly INSTALL_DIR="/opt/pg-migrator"
 readonly SERVICE_NAME="pg-migrator"
 readonly WEB_PORT=7000
@@ -113,9 +113,16 @@ copy_app_files() {
   cp -r /tmp/pg-migrator-src/app "${INSTALL_DIR}/"
   cp -f /tmp/pg-migrator-src/requirements.txt "${INSTALL_DIR}/"
   [[ -d /tmp/pg-migrator-src/tests ]] && cp -r /tmp/pg-migrator-src/tests "${INSTALL_DIR}/"
+  # Native subscription redirect (stdlib) — must not depend on GitHub downloads at migrate time
+  if [[ -d /tmp/pg-migrator-src/tools/pg_redirect ]]; then
+    mkdir -p "${TOOLS_DIR}"
+    rm -rf "${TOOLS_DIR}/pg_redirect"
+    cp -a /tmp/pg-migrator-src/tools/pg_redirect "${TOOLS_DIR}/pg_redirect"
+  fi
   rm -rf /tmp/pg-migrator-src
 
   [[ -f "${INSTALL_DIR}/app/main.py" ]] || fail "Application files not found after sync."
+  [[ -f "${TOOLS_DIR}/pg_redirect/__main__.py" ]] || warn "tools/pg_redirect missing — old sub link redirect may fail"
   ok "Application synced to ${INSTALL_DIR}"
 }
 

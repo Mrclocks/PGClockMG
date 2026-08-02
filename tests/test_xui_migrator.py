@@ -430,8 +430,8 @@ def test_build_redirect_config_sets_domain_and_port():
     assert cfg["ssl"]["enabled"] is False
 
 
-def test_install_redirect_uses_direct_deploy():
-    """Wizard installs redirect-server directly (not fragile upstream interactive script)."""
+def test_install_redirect_uses_native_pg_redirect():
+    """Wizard installs bundled pg-redirect (no GitHub binary download)."""
     async def _run():
         job = MigrationJob(job_id="redir1")
         migrator = XuiMigrator(job, {})
@@ -454,7 +454,17 @@ def test_install_redirect_uses_direct_deploy():
                 }),
                 encoding="utf-8",
             )
-            with patch.object(XuiMigrator, "_run_cmd", _fake_cmd):
+            tools = Path(tmp) / "tools"
+            pkg = tools / "pg_redirect"
+            # Minimal stub package so bundled_pg_redirect_src finds something;
+            # install script is mocked via _run_cmd.
+            real = Path(__file__).resolve().parents[1] / "tools" / "pg_redirect"
+            import shutil
+            shutil.copytree(real, pkg)
+
+            with patch("app.services.redirect_ops.TOOLS_DIR", tools), \
+                 patch("app.services.redirect_ops.BASE_DIR", Path(tmp)), \
+                 patch.object(XuiMigrator, "_run_cmd", _fake_cmd):
                 ok, err = await migrator._install_redirect_server(
                     mapping,
                     listen_port=2096,
@@ -464,39 +474,34 @@ def test_install_redirect_uses_direct_deploy():
             blob = " ".join(
                 c if isinstance(c, str) else " ".join(c) for c in seen
             )
-            assert "github.com/PasarGuard/migrations/releases" in blob
-            assert "ghproxy" in blob or "mirror.ghproxy" in blob
-            assert "/usr/local/bin/redirect-server" in blob
-            assert "systemctl restart redirect-server" in blob or "systemctl enable redirect-server" in blob
-            assert "install_redirect_server.sh" not in blob  # direct path succeeded first
+            assert "pg-redirect" in blob
+            assert "/opt/pg-redirect" in blob
+            assert "github.com/PasarGuard/migrations/releases" not in blob
             data = json.loads(mapping.read_text(encoding="utf-8"))
             assert data["mappings"]["a"]["old_subscription_url"] == "/sub/tok"
             cfg = json.loads(
-                (mapping.parent / "redirect-server-config.json").read_text(encoding="utf-8")
+                (mapping.parent / "pg-redirect-config.json").read_text(encoding="utf-8")
             )
             assert cfg["port"] == 2096
-            assert cfg["redirect_domain"] == "http://10.0.0.1:8000"
+            assert cfg["redirect_base"] == "http://10.0.0.1:8000"
 
     asyncio.run(_run())
 
 
-def test_install_redirect_retries_without_ssl_then_upstream():
+def test_install_redirect_retries_without_ssl():
     async def _run():
         job = MigrationJob(job_id="redir2")
         migrator = XuiMigrator(job, {})
-        deploys = {"n": 0}
+        installs = {"n": 0}
 
-        async def _fake_cmd(self, cmd, cwd=None, timeout=600):
-            text = cmd if isinstance(cmd, str) else " ".join(cmd)
-            # First direct deploy fails; second (no-ssl) succeeds
-            if "github.com/PasarGuard/migrations/releases" in text:
-                deploys["n"] += 1
-                if deploys["n"] == 1:
-                    return False, "ssl handshake boom"
-                return True, "redirect-server active"
-            if "systemctl is-active" in text:
-                return True, "active"
-            return True, "ok"
+        async def _fake_install(migrator, mapping, **kwargs):
+            installs["n"] += 1
+            if installs["n"] == 1 and kwargs.get("ssl_cert"):
+                return False, "ssl boom"
+            return True, ""
+
+        async def _fake_active(_migrator):
+            return False
 
         with tempfile.TemporaryDirectory() as tmp:
             cert = Path(tmp) / "c.pem"
@@ -515,7 +520,11 @@ def test_install_redirect_retries_without_ssl_then_upstream():
                 }),
                 encoding="utf-8",
             )
-            with patch.object(XuiMigrator, "_run_cmd", _fake_cmd):
+            with patch(
+                "app.services.redirect_ops.install_pg_redirect", _fake_install,
+            ), patch(
+                "app.services.redirect_ops.pg_redirect_is_active", _fake_active,
+            ):
                 ok, err = await migrator._install_redirect_server(
                     mapping,
                     listen_port=2096,
@@ -524,11 +533,7 @@ def test_install_redirect_retries_without_ssl_then_upstream():
                     ssl_key=str(key),
                 )
             assert ok and not err
-            assert deploys["n"] == 2
-            cfg = json.loads(
-                (mapping.parent / "redirect-server-config.json").read_text(encoding="utf-8")
-            )
-            assert cfg["ssl"]["enabled"] is False
+            assert installs["n"] == 2
 
     asyncio.run(_run())
 
@@ -794,8 +799,8 @@ if __name__ == "__main__":
     test_run_uses_bundled_schema_not_mysql_start()
     test_normalize_subscription_mapping_strips_query()
     test_build_redirect_config_sets_domain_and_port()
-    test_install_redirect_uses_direct_deploy()
-    test_install_redirect_retries_without_ssl_then_upstream()
+    test_install_redirect_uses_native_pg_redirect()
+    test_install_redirect_retries_without_ssl()
     test_normalize_target_db_aliases()
     test_convert_landed_sqlite_syncs_mysql_and_finalizes_env()
     test_convert_landed_sqlite_for_all_server_engines()

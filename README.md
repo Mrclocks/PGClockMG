@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> ⚠️ **`v1.14`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
+> ⚠️ **`v1.15`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
   <b>فارسی</b> · <a href="README.en.md">English</a> · <a href="README.ru.md">Русский</a>
@@ -57,6 +57,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | نسخه | تغییرات اصلی |
 |------|--------------|
+| v1.15 | ریدایرکت بومی pg-redirect (بدون دانلود GitHub) |
 | v1.14 | ریدایرکت: آینه دانلود GitHub + نمایش علت واقعی در هشدار |
 | v1.13 | حذف گزینه تغییر DB PasarGuard از بخش مهاجرت پنل |
 | v1.12 | هشدار سرتیفیکیت 3x-ui + غیرفعال‌سازی موقت Hiddify/Remnawave |

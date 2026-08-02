@@ -633,19 +633,19 @@ class XuiMigrator(BaseMigrator):
                 detail = "…" + detail[-280:]
             warn_en.insert(
                 0,
-                "Redirect server did NOT install — old /sub links will not work until fixed. "
+                "pg-redirect did NOT install — old /sub links will not work until fixed. "
                 "Users/inbounds already migrated. "
-                + (f"Cause: {detail}" if detail else "Often: GitHub download blocked, or old sub port still busy."),
+                + (f"Cause: {detail}" if detail else "Often: subscription port still busy, or python3/systemd missing."),
             )
             warn_fa.insert(
                 0,
-                "سرور ریدایرکت نصب نشد — لینک‌های قدیمی کار نمی‌کنند (یوزرها منتقل شده‌اند). "
-                + (f"علت: {detail}" if detail else "معمولاً دانلود از GitHub روی سرور بسته است یا پورت ساب هنوز اشغال است."),
+                "سرویس pg-redirect نصب نشد — لینک‌های قدیمی کار نمی‌کنند (یوزرها منتقل شده‌اند). "
+                + (f"علت: {detail}" if detail else "معمولاً پورت ساب هنوز اشغال است یا python3/systemd نیست."),
             )
             warn_ru.insert(
                 0,
-                "Redirect-server не установился — старые /sub не работают (пользователи уже перенесены). "
-                + (f"Причина: {detail}" if detail else "Часто блок GitHub или порт занят."),
+                "pg-redirect не установился — старые /sub не работают (пользователи уже перенесены). "
+                + (f"Причина: {detail}" if detail else "Часто порт занят или нет python3/systemd."),
             )
 
         return {
@@ -665,29 +665,6 @@ class XuiMigrator(BaseMigrator):
             },
         }
 
-    async def _stop_xui_for_redirect_port(self, port: int) -> None:
-        """Free the old 3x-ui subscription port so redirect-server can bind it."""
-        # Best-effort: stop common x-ui unit / process without failing migration
-        await self._run_cmd(
-            ["bash", "-c", "systemctl stop x-ui 2>/dev/null || true"],
-            timeout=60,
-        )
-        await self._run_cmd(
-            ["bash", "-c", "systemctl stop x-ui.service 2>/dev/null || true"],
-            timeout=60,
-        )
-        # Kill anything still listening on the subscription port (usually x-ui sub)
-        await self._run_cmd(
-            [
-                "bash", "-c",
-                f"fuser -k {int(port)}/tcp 2>/dev/null || "
-                f"(command -v lsof >/dev/null && "
-                f"lsof -ti tcp:{int(port)} | xargs -r kill -9) || true",
-            ],
-            timeout=30,
-        )
-        self.job.log(f"Freed port {port} for redirect-server (stopped x-ui if present)")
-
     async def _install_redirect_server(
         self,
         mapping_file: Path,
@@ -697,11 +674,12 @@ class XuiMigrator(BaseMigrator):
         ssl_cert: str = "",
         ssl_key: str = "",
     ) -> tuple[bool, str]:
-        """Install redirect-server so old x-ui /sub links keep working.
+        """Install native pg-redirect so old x-ui /sub links keep working.
 
-        Returns ``(ok, error_detail)``. Uses a direct install (plus GitHub mirrors)
-        instead of the fragile upstream interactive script.
+        Returns ``(ok, error_detail)``. Uses bundled stdlib service — no GitHub download.
         """
+        from app.services.redirect_ops import install_pg_redirect, pg_redirect_is_active
+
         mapping = Path(mapping_file)
         if not mapping.is_file():
             self.job.log("Redirect install skipped: mapping file missing")
@@ -710,216 +688,38 @@ class XuiMigrator(BaseMigrator):
         normalize_subscription_mapping(mapping)
         if not redirect_domain:
             redirect_domain = pasarguard_subscription_base_url()
-        await self._stop_xui_for_redirect_port(listen_port)
 
-        cfg = build_redirect_server_config(
+        ok, err = await install_pg_redirect(
+            self,
+            mapping,
             listen_port=listen_port,
-            redirect_domain=redirect_domain,
+            redirect_base=redirect_domain,
+            panel="x-ui",
             ssl_cert=ssl_cert,
             ssl_key=ssl_key,
         )
-        cfg_path = mapping.parent / "redirect-server-config.json"
-        cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-        self.job.log(
-            f"Redirect config: port={listen_port} redirect_domain={redirect_domain} "
-            f"ssl={cfg['ssl']['enabled']}"
-        )
-
-        last_err = ""
-        ok, err = await self._deploy_redirect_server_direct(mapping, cfg_path, listen_port)
         if ok:
             return True, ""
-        last_err = err or last_err
 
         # Retry without SSL if cert/key made the service fail to start
-        if cfg.get("ssl", {}).get("enabled"):
-            self.job.log("Retrying redirect-server without SSL (plain HTTP on old sub port)...")
-            cfg_no_ssl = build_redirect_server_config(
+        if ssl_cert and ssl_key:
+            self.job.log("Retrying pg-redirect without SSL (plain HTTP on old sub port)...")
+            ok2, err2 = await install_pg_redirect(
+                self,
+                mapping,
                 listen_port=listen_port,
-                redirect_domain=redirect_domain,
+                redirect_base=redirect_domain,
+                panel="x-ui",
             )
-            cfg_path.write_text(json.dumps(cfg_no_ssl, indent=2), encoding="utf-8")
-            ok, err = await self._deploy_redirect_server_direct(mapping, cfg_path, listen_port)
-            if ok:
+            if ok2 or await pg_redirect_is_active(self):
                 return True, ""
-            last_err = err or last_err
-
-        # Last resort: official installer (MAP_FILE/CONFIG_FILE), then force our files
-        ok, err = await self._deploy_redirect_server_upstream(mapping, cfg_path)
-        if ok or await self._redirect_server_is_active():
-            await self._force_redirect_runtime_files(mapping, cfg_path)
-            if await self._redirect_server_is_active():
-                self.job.log(
-                    "Redirect server installed — old /sub/{subId} → PasarGuard /sub/{token}"
-                )
-                return True, ""
-        last_err = err or last_err
+            err = err2 or err
 
         self.job.log(
-            "Redirect server install failed — check job logs above "
-            "(common: GitHub download blocked, port still busy, missing curl/jq/tar)"
+            "pg-redirect install failed — check logs above "
+            "(common: port still busy, python3/systemd missing, or package not bundled)"
         )
-        return False, last_err or "redirect-server install failed"
-
-    async def _redirect_server_is_active(self) -> bool:
-        ok, out = await self._run_cmd(
-            ["bash", "-c", "systemctl is-active redirect-server 2>/dev/null || true"],
-            timeout=15,
-        )
-        return "active" in (out or "").split()
-
-    async def _force_redirect_runtime_files(
-        self, mapping: Path, cfg_path: Path,
-    ) -> None:
-        await self._run_cmd(
-            [
-                "bash", "-c",
-                "mkdir -p /etc/redirect-server && "
-                f'cp -f "{mapping}" /etc/redirect-server/subscription_url_mapping.json && '
-                f'cp -f "{cfg_path}" /etc/redirect-server/config.json && '
-                "id redirectsrv >/dev/null 2>&1 && "
-                "chown -R redirectsrv:redirectsrv /etc/redirect-server || true && "
-                "systemctl daemon-reload 2>/dev/null || true && "
-                "systemctl enable redirect-server 2>/dev/null || true && "
-                "systemctl restart redirect-server 2>/dev/null || true",
-            ],
-            timeout=60,
-        )
-
-    async def _deploy_redirect_server_direct(
-        self,
-        mapping: Path,
-        cfg_path: Path,
-        listen_port: int,
-    ) -> tuple[bool, str]:
-        """Download binary + write systemd unit (no interactive upstream script)."""
-        script = f'''set -euo pipefail
-if [[ "$(id -u)" -ne 0 ]]; then
-  echo "Redirect install requires root" >&2
-  exit 1
-fi
-command -v curl >/dev/null || {{ echo "curl missing" >&2; exit 1; }}
-command -v tar >/dev/null || {{ echo "tar missing" >&2; exit 1; }}
-command -v systemctl >/dev/null || {{ echo "systemctl missing" >&2; exit 1; }}
-
-case "$(uname -m)" in
-  x86_64|amd64) ARCH_ASSET="Linux_x86_64" ;;
-  aarch64|arm64) ARCH_ASSET="Linux_arm64" ;;
-  armv7l|armv7hf) ARCH_ASSET="Linux_armv7" ;;
-  i386|i686) ARCH_ASSET="Linux_i386" ;;
-  *) echo "Unsupported arch: $(uname -m)" >&2; exit 1 ;;
-esac
-
-ASSET="redirect-server_0.0.1_${{ARCH_ASSET}}.tar.gz"
-GH_URL="https://github.com/PasarGuard/migrations/releases/download/v0.0.1/${{ASSET}}"
-# Fallbacks for servers where github.com is blocked/slow (common)
-URLS=(
-  "$GH_URL"
-  "https://ghproxy.net/$GH_URL"
-  "https://mirror.ghproxy.com/$GH_URL"
-  "https://gitdl.cn/$GH_URL"
-)
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
-DOWNLOADED=0
-for URL in "${{URLS[@]}}"; do
-  echo "Downloading redirect-server: $URL"
-  if curl -fsSL --connect-timeout 15 --max-time 120 -o "$TMP/$ASSET" "$URL"; then
-    DOWNLOADED=1
-    break
-  fi
-  echo "Download failed from $URL"
-done
-if [[ "$DOWNLOADED" -ne 1 ]]; then
-  echo "All download mirrors failed (GitHub likely blocked from this server)" >&2
-  exit 1
-fi
-
-tar -xzf "$TMP/$ASSET" -C "$TMP"
-BIN="$(find "$TMP" -type f -name redirect-server | head -n 1)"
-[[ -n "$BIN" ]] || {{ echo "redirect-server binary missing in archive" >&2; exit 1; }}
-chmod +x "$BIN"
-
-id redirectsrv >/dev/null 2>&1 || useradd --system --home /opt/redirect-server --shell /usr/sbin/nologin redirectsrv
-install -d -m 0755 /opt/redirect-server
-install -d -m 0750 /etc/redirect-server
-install -D -m 0755 "$BIN" /usr/local/bin/redirect-server
-cp -f "{mapping}" /etc/redirect-server/subscription_url_mapping.json
-cp -f "{cfg_path}" /etc/redirect-server/config.json
-chown -R redirectsrv:redirectsrv /opt/redirect-server /etc/redirect-server
-chmod 0640 /etc/redirect-server/*
-
-cat > /etc/systemd/system/redirect-server.service <<'UNIT'
-[Unit]
-Description=Subscription URL Redirect Server
-After=network.target
-
-[Service]
-Type=simple
-User=redirectsrv
-Group=redirectsrv
-WorkingDirectory=/opt/redirect-server
-ExecStart=/usr/local/bin/redirect-server --config /etc/redirect-server/config.json --map /etc/redirect-server/subscription_url_mapping.json
-Restart=on-failure
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-# Free listen port again right before start
-fuser -k {int(listen_port)}/tcp 2>/dev/null || true
-systemctl daemon-reload
-systemctl enable redirect-server
-systemctl restart redirect-server
-sleep 1
-if ! systemctl is-active --quiet redirect-server; then
-  echo "redirect-server failed to start on port {int(listen_port)}:" >&2
-  systemctl status redirect-server --no-pager -l || true
-  journalctl -u redirect-server -n 40 --no-pager || true
-  ss -lntp "sport = :{int(listen_port)}" 2>/dev/null || true
-  exit 1
-fi
-echo "redirect-server active on port {int(listen_port)}"
-'''
-        ok, out = await self._run_cmd(["bash", "-c", script], timeout=300)
-        if ok:
-            self.job.log(
-                "Redirect server installed — old /sub/{subId} → PasarGuard /sub/{token}"
-            )
-            return True, ""
-        detail = (out or "")[-800:]
-        self.job.log(f"Direct redirect install failed: {detail}")
-        return False, detail
-
-    async def _deploy_redirect_server_upstream(
-        self, mapping: Path, cfg_path: Path,
-    ) -> tuple[bool, str]:
-        await self._run_cmd(
-            ["bash", "-c", "rm -f /etc/redirect-server/config.json 2>/dev/null || true"],
-            timeout=15,
-        )
-        local = TOOLS_DIR / "migrations" / "redirect-server" / "install_redirect_server.sh"
-        if local.is_file():
-            cmd = (
-                f'MAP_FILE="{mapping}" CONFIG_FILE="{cfg_path}" '
-                f'bash "{local}" latest'
-            )
-        else:
-            url = (
-                "https://raw.githubusercontent.com/PasarGuard/migrations/main/"
-                "redirect-server/install_redirect_server.sh"
-            )
-            cmd = (
-                f'MAP_FILE="{mapping}" CONFIG_FILE="{cfg_path}" '
-                f"bash -c 'curl -fsSL \"{url}\" | bash -s -- latest'"
-            )
-        ok, out = await self._run_cmd(["bash", "-c", cmd], timeout=600)
-        if not ok:
-            detail = (out or "")[-500:]
-            self.job.log(f"Upstream redirect installer failed: {detail}")
-            return False, detail
-        return True, ""
+        return False, err or "pg-redirect install failed"
 
     async def _convert_landed_sqlite_to_target(
         self,
