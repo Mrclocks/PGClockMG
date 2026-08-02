@@ -615,6 +615,24 @@ def test_resolve_redirect_tls_prefers_pasarguard_over_xui():
         assert "PGK" in key
 
 
+def test_build_runtime_config_accepts_embedded_pem():
+    """PasarGuard may store fullchain PEM in UVICORN_SSL_* — must not Path().is_file() it."""
+    from app.services.redirect_ops import build_runtime_config
+
+    # Long-ish PEM blob (Errno 36 repro when treated as filename)
+    cert = "-----BEGIN CERTIFICATE-----\n" + ("A" * 4000) + "\n-----END CERTIFICATE-----\n"
+    key = "-----BEGIN PRIVATE KEY-----\n" + ("B" * 2000) + "\n-----END PRIVATE KEY-----\n"
+    cfg = build_runtime_config(
+        listen_port=2096,
+        redirect_base="https://10.0.0.1:8000",
+        ssl_cert=cert,
+        ssl_key=key,
+    )
+    assert cfg["ssl"]["enabled"] is True
+    assert cfg["ssl"]["cert"].startswith("-----BEGIN CERTIFICATE-----")
+    assert "AAAA" in cfg["ssl"]["cert"]
+
+
 def test_normalize_target_db_aliases():
     from app.services.pasarguard_ops import normalize_target_db, mysql_client_bins
 
@@ -880,6 +898,7 @@ if __name__ == "__main__":
     test_install_redirect_http_when_xui_had_no_sub_tls()
     test_install_redirect_retries_self_signed_when_https_required()
     test_resolve_redirect_tls_prefers_pasarguard_over_xui()
+    test_build_runtime_config_accepts_embedded_pem()
     test_normalize_target_db_aliases()
     test_convert_landed_sqlite_syncs_mysql_and_finalizes_env()
     test_convert_landed_sqlite_for_all_server_engines()

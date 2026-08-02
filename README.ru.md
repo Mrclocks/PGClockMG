@@ -1,4 +1,4 @@
-> ⚠️ **`v1.15.4`** — Перед restore или миграцией сделайте полный бэкап.
+> ⚠️ **`v1.15.5`** — Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <a href="README.en.md">English</a> · <b>Русский</b>
@@ -55,6 +55,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | Версия | Основные изменения |
 |--------|-------------------|
+| v1.15.5 | Исправление Errno 36: PEM из .env PasarGuard больше не воспринимается как путь |
 | v1.15.4 | TLS редиректа из сертификатов PasarGuard; HTTP если у старого sub не было TLS |
 | v1.15.3 | HTTPS pg-redirect для старых ссылок 3x-ui (сертификаты PG / self-signed) |
 | v1.15.2 | Установка pg-redirect без useradd (fallback на nobody) |

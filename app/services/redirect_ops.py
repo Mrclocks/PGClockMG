@@ -46,8 +46,11 @@ def _load_pem_pair(cert: str, key: str) -> tuple[str, str] | None:
     key = (key or "").strip()
     if not cert or not key:
         return None
+    # Embedded PEM in .env — never pass to Path()/stat()
     if "BEGIN" in cert and "BEGIN" in key:
         return cert, key
+    if len(cert) > 512 or len(key) > 512 or "\n" in cert or "\n" in key:
+        return None
     try:
         from app.services.env_migration import _resolve_ssl_cert_path
 
@@ -55,11 +58,14 @@ def _load_pem_pair(cert: str, key: str) -> tuple[str, str] | None:
         kp = _resolve_ssl_cert_path(key)
     except Exception:
         cp, kp = Path(cert), Path(key)
-    if cp and kp and Path(cp).is_file() and Path(kp).is_file():
-        return (
-            Path(cp).read_text(encoding="utf-8", errors="ignore"),
-            Path(kp).read_text(encoding="utf-8", errors="ignore"),
-        )
+    try:
+        if cp and kp and Path(cp).is_file() and Path(kp).is_file():
+            return (
+                Path(cp).read_text(encoding="utf-8", errors="ignore"),
+                Path(kp).read_text(encoding="utf-8", errors="ignore"),
+            )
+    except OSError:
+        return None
     return None
 
 
@@ -181,6 +187,30 @@ def resolve_redirect_tls(
     return "", "", ""
 
 
+def _as_pem_pair(ssl_cert: str, ssl_key: str) -> tuple[str, str]:
+    """Accept either PEM text or filesystem paths (never Path() on PEM blobs)."""
+    cert = (ssl_cert or "").strip()
+    key = (ssl_key or "").strip()
+    if not cert or not key:
+        return "", ""
+    # PEM may be embedded in .env (PasarGuard) — must not treat as a path.
+    if "BEGIN" in cert and "BEGIN" in key:
+        return cert, key
+    # Only probe short path-like strings; long blobs are never filenames.
+    if len(cert) > 512 or len(key) > 512 or "\n" in cert or "\n" in key:
+        return "", ""
+    try:
+        cp, kp = Path(cert), Path(key)
+        if cp.is_file() and kp.is_file():
+            return (
+                cp.read_text(encoding="utf-8", errors="ignore"),
+                kp.read_text(encoding="utf-8", errors="ignore"),
+            )
+    except OSError:
+        return "", ""
+    return "", ""
+
+
 def build_runtime_config(
     *,
     listen_port: int,
@@ -189,14 +219,7 @@ def build_runtime_config(
     ssl_cert: str = "",
     ssl_key: str = "",
 ) -> dict:
-    cert_pem = ""
-    key_pem = ""
-    if ssl_cert and ssl_key and Path(ssl_cert).is_file() and Path(ssl_key).is_file():
-        cert_pem = Path(ssl_cert).read_text(encoding="utf-8", errors="ignore")
-        key_pem = Path(ssl_key).read_text(encoding="utf-8", errors="ignore")
-    elif ssl_cert and ssl_key and "BEGIN" in ssl_cert:
-        cert_pem = ssl_cert
-        key_pem = ssl_key
+    cert_pem, key_pem = _as_pem_pair(ssl_cert, ssl_key)
 
     _ensure_pg_redirect_importable()
     try:
