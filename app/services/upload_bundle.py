@@ -277,7 +277,14 @@ def prepare_bundle_workspace(bundle_id: str) -> Path:
             with zipfile.ZipFile(src, "r") as zf:
                 zf.extractall(work / "db_extracted")
         else:
-            name = "db.sqlite3" if src.suffix.lower() in (".sqlite3", ".db") else src.name
+            # Preserve panel-specific names (x-ui.db); normalize other sqlite dumps
+            lower = src.name.lower()
+            if lower == "x-ui.db":
+                name = "x-ui.db"
+            elif src.suffix.lower() in (".sqlite3", ".db"):
+                name = "db.sqlite3"
+            else:
+                name = src.name
             shutil.copy2(src, work / name)
 
     for key, subpath in (("env", ".env"), ("xray_config", "xray_config.json")):

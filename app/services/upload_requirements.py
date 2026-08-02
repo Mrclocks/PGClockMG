@@ -130,8 +130,17 @@ def get_upload_requirements(
         slots = _marzban_slots(source_db)
 
     elif panel_id == "3x-ui":
+        slots = [
+            _slot("bundle_zip", False, exclusive=True),
+            _slot("database", True, accept=[".db", ".sqlite3"], db_types=["sqlite"]),
+        ]
         if xui_live:
             upload_mode = "optional"
+            reason = {
+                "en": "Live x-ui.db found — upload optional if migrating another backup",
+                "fa": "x-ui.db روی سرور یافت شد — آپلود بکاپ دیگر اختیاری است",
+                "ru": "x-ui.db на сервере найден — загрузка копии опциональна",
+            }
         else:
             upload_mode = "required"
             reason = {
@@ -139,10 +148,6 @@ def get_upload_requirements(
                 "fa": "فایل x-ui.db را آپلود کنید",
                 "ru": "Загрузите x-ui.db",
             }
-            slots = [
-                _slot("bundle_zip", False, exclusive=True),
-                _slot("database", True, accept=[".db", ".sqlite3"], db_types=["sqlite"]),
-            ]
 
     elif panel_id == "hiddify":
         if hiddify_live:

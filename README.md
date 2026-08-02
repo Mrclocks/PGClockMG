@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> ⚠️ **بتا `v1.6beta`** — هنوز آزمایشی است. قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
+> ⚠️ **`v1.7`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
   <b>فارسی</b> · <a href="README.en.md">English</a> · <a href="README.ru.md">Русский</a>
@@ -57,6 +57,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | نسخه | تغییرات اصلی |
 |------|--------------|
+| v1.7 | رفع خطای مهاجرت 3x-ui هنگام آپلود bundle (IsADirectoryError) |
 | v1.6beta | بهبود UI کارت DB، سوییچ iOS برای نودها، لوگو جدید |
 | v1.5beta | گزینه غیرفعال‌سازی نودها، نمایش مشخصات DB بعد آپلود |
 | v1.4beta | رفع restart loop ساکت پنل بعد ریستور TimescaleDB |

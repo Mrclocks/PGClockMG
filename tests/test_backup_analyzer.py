@@ -69,8 +69,57 @@ def test_incomplete_zip():
         print("OK: incomplete zip")
 
 
+def test_xui_db_in_extracted_zip():
+    with tempfile.TemporaryDirectory() as tmp:
+        upload_dir = Path(tmp)
+        ext = upload_dir / "extracted"
+        ext.mkdir()
+        (ext / "x-ui.db").write_bytes(b"xui-sqlite")
+
+        result = analyze_upload_directory(upload_dir)
+        assert result["panel_hint"] == "3x-ui"
+        assert result["detected_source_db"] == "sqlite"
+        assert result["backup_ok"] is True
+        assert result["categories"].get("database_sqlite", 0) >= 1
+        print("OK: x-ui zip")
+
+
+def test_marzban_not_misdetected_as_xui():
+    """Mentions of x-ui in unrelated filenames must not flip Marzban backups."""
+    with tempfile.TemporaryDirectory() as tmp:
+        upload_dir = Path(tmp)
+        data = upload_dir / "extracted" / "var" / "lib" / "marzban"
+        data.mkdir(parents=True)
+        (data / "db.sqlite3").write_bytes(b"sqlite-data")
+        (data / "notes-about-x-ui.txt").write_text("migration notes", encoding="utf-8")
+        (data / ".env").write_text(
+            'SQLALCHEMY_DATABASE_URL = "sqlite:////var/lib/marzban/db.sqlite3"\n',
+            encoding="utf-8",
+        )
+
+        result = analyze_upload_directory(upload_dir)
+        assert result["panel_hint"] == "marzban"
+        assert result["backup_ok"] is True
+        print("OK: marzban not misdetected")
+
+
+def test_plain_sqlite_still_marzban_hint():
+    with tempfile.TemporaryDirectory() as tmp:
+        upload_dir = Path(tmp)
+        ext = upload_dir / "extracted"
+        ext.mkdir()
+        (ext / "db.sqlite3").write_bytes(b"m")
+        result = analyze_upload_directory(upload_dir)
+        assert result["panel_hint"] == "marzban"
+        assert result["backup_ok"] is True
+        print("OK: plain sqlite marzban")
+
+
 if __name__ == "__main__":
     test_nested_marzban_zip_sqlite()
     test_mysql_sql_dump()
     test_incomplete_zip()
+    test_xui_db_in_extracted_zip()
+    test_marzban_not_misdetected_as_xui()
+    test_plain_sqlite_still_marzban_hint()
     print("\nAll backup analyzer tests passed.")

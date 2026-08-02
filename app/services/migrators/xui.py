@@ -15,37 +15,89 @@ from app.services.native_migration import run_cross_db_migration
 from app.services.env_migration import transform_pasarguard_env_for_target
 
 
+def find_xui_db_in_dir(root: Path) -> Path | None:
+    """Locate an x-ui SQLite database inside an extracted backup / workspace."""
+    if not root or not root.is_dir():
+        return None
+
+    preferred: list[Path] = []
+    fallback: list[Path] = []
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+        name = p.name.lower()
+        if name.endswith(".db") or name.endswith(".sqlite3"):
+            if "x-ui" in name:
+                preferred.append(p)
+            else:
+                fallback.append(p)
+
+    if preferred:
+        # Prefer exact x-ui.db, then any *x-ui* name
+        for p in preferred:
+            if p.name.lower() == "x-ui.db":
+                return p
+        return preferred[0]
+    if fallback:
+        return fallback[0]
+    return None
+
+
+def resolve_xui_db_source(
+    upload_path: str | None = None,
+    upload_work_dir: str | None = None,
+) -> Path | None:
+    """Resolve x-ui.db from bundle workspace, upload file/zip, or live install.
+
+    Bundle uploads set upload_path to a *directory* (workspace). Older code
+    treated every non-.zip path as a file and crashed with IsADirectoryError.
+    """
+    candidates: list[Path] = []
+    if upload_work_dir:
+        candidates.append(Path(upload_work_dir))
+    if upload_path:
+        p = Path(upload_path)
+        # Avoid scanning the same directory twice when both params point at workspace
+        if not candidates or p.resolve() != candidates[0].resolve():
+            candidates.append(p)
+
+    for src in candidates:
+        if not src.exists():
+            continue
+        if src.is_dir():
+            found = find_xui_db_in_dir(src)
+            if found:
+                return found
+            continue
+        if src.is_file():
+            suffix = src.suffix.lower()
+            if suffix == ".zip":
+                # Caller extracts zip; signal zip by returning the zip path.
+                # Actual extraction stays in the migrator (needs async unzip).
+                return src
+            if suffix in (".db", ".sqlite3") or "x-ui" in src.name.lower():
+                return src
+            # Unknown single file — still try (legacy upload of bare db)
+            return src
+
+    return find_xui_db()
+
+
 class XuiMigrator(BaseMigrator):
     async def run(self, params: dict) -> dict:
         upload_path = params.get("upload_path")
+        upload_work_dir = params.get("upload_work_dir")
         install_redirect = params.get("install_redirect", True)
         target_db = params.get("target_db") or "sqlite"
 
         self.job.set_progress(5, "یافتن دیتابیس 3x-ui...")
 
-        xui_db = None
-        if upload_path:
-            src = Path(upload_path)
-            work = BACKUP_DIR / self.job.job_id
-            work.mkdir(parents=True, exist_ok=True)
-            if src.suffix == ".zip":
-                await self._run_cmd(["unzip", "-o", str(src), "-d", str(work)])
-                for p in work.rglob("*.db"):
-                    if "x-ui" in p.name.lower() or p.name == "x-ui.db":
-                        xui_db = p
-                        break
-                if not xui_db:
-                    for p in work.rglob("*.db"):
-                        xui_db = p
-                        break
-            else:
-                xui_db = work / "x-ui.db"
-                shutil.copy2(src, xui_db)
-        else:
-            xui_db = find_xui_db()
+        xui_db = await self._locate_xui_db(upload_path, upload_work_dir)
 
         if not xui_db or not Path(xui_db).exists():
             raise RuntimeError("دیتابیس x-ui.db یافت نشد — لطفاً آپلود کنید")
+
+        self.job.log(f"Using 3x-ui database: {xui_db}")
 
         self.job.set_progress(15, "بررسی PasarGuard...")
         if not PASARGUARD_DIR.exists():
@@ -149,6 +201,32 @@ class XuiMigrator(BaseMigrator):
                 ],
             },
         }
+
+    async def _locate_xui_db(
+        self,
+        upload_path: str | None,
+        upload_work_dir: str | None,
+    ) -> Path | None:
+        """Find x-ui.db, extracting zip uploads into a job work dir when needed."""
+        resolved = resolve_xui_db_source(upload_path, upload_work_dir)
+        if resolved is None:
+            return None
+
+        if resolved.is_dir():
+            return find_xui_db_in_dir(resolved)
+
+        if resolved.is_file() and resolved.suffix.lower() == ".zip":
+            work = BACKUP_DIR / self.job.job_id
+            work.mkdir(parents=True, exist_ok=True)
+            ok, out = await self._run_cmd(["unzip", "-o", str(resolved), "-d", str(work)])
+            if not ok:
+                raise RuntimeError(f"استخراج zip ناموفق: {out}")
+            found = find_xui_db_in_dir(work)
+            if not found:
+                raise RuntimeError("دیتابیس x-ui.db داخل zip یافت نشد")
+            return found
+
+        return resolved
 
     def _get_panel_url(self) -> str:
         import socket
