@@ -327,6 +327,399 @@ def test_mysql_to_postgres_full_schema():
         subprocess.run(["docker", "rm", "-f", my_name], capture_output=True)
 
 
+def _timescale_run_args(name: str, port: int) -> list[str]:
+    """Start Timescale; skip timescaledb-tune (panics without cgroup memory)."""
+    return [
+        "docker", "run", "-d", "--name", name,
+        "-e", "POSTGRES_PASSWORD=test",
+        "-e", "POSTGRES_USER=postgres",
+        "-e", "POSTGRES_DB=pasarguard",
+        "-p", f"127.0.0.1:{port}:5432",
+        "-v", "/dev/null:/docker-entrypoint-initdb.d/001_timescaledb_tune.sh:ro",
+        "timescale/timescaledb:latest-pg16",
+    ]
+
+
+def _wait_mysql_ready(port: int, password: str = "test", database: str = "pasarguard", timeout: float = 120):
+    import pymysql
+
+    _wait_port("127.0.0.1", port, timeout=timeout)
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        try:
+            conn = pymysql.connect(
+                host="127.0.0.1", port=port, user="root",
+                password=password, database=database,
+            )
+            conn.close()
+            return
+        except Exception as exc:
+            last = exc
+            time.sleep(2)
+    raise RuntimeError(f"MySQL/MariaDB not ready on {port}: {last}")
+
+
+def _wait_pg_ready(port: int, user: str = "postgres", password: str = "test",
+                   database: str = "pasarguard", timeout: float = 120):
+    import psycopg2
+
+    _wait_port("127.0.0.1", port, timeout=timeout)
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        try:
+            conn = psycopg2.connect(
+                host="127.0.0.1", port=port, dbname=database,
+                user=user, password=password,
+            )
+            conn.close()
+            return
+        except Exception as exc:
+            last = exc
+            time.sleep(2)
+    raise RuntimeError(f"Postgres/Timescale not ready on {port}: {last}")
+
+
+def _mariadb_seed_full(port: int) -> None:
+    import pymysql
+
+    conn = pymysql.connect(
+        host="127.0.0.1", port=port, user="root",
+        password="test", database="pasarguard",
+    )
+    cur = conn.cursor()
+    _create_mysql_full_schema(cur)
+    cur.execute("INSERT INTO admins VALUES (1, 'admin', 1)")
+    cur.execute("INSERT INTO core_configs VALUES (1, 'xray')")
+    cur.execute(
+        "INSERT INTO nodes VALUES (1, 'n1', '1.2.3.4', 1, '', '', 'healthy')"
+    )
+    cur.execute("INSERT INTO inbounds VALUES (1, 'vless-tcp', 'vless', 0)")
+    cur.execute("INSERT INTO groups VALUES (1, 'default', 0)")
+    cur.execute(
+        "INSERT INTO hosts VALUES (1, 'h1', 'vless-tcp', NULL, NULL, "
+        "'{\"enabled\": true}', 0, 'none', 'none')"
+    )
+    cur.execute("INSERT INTO users VALUES (1, 'u1', 'active', 1, 1)")
+    cur.execute("INSERT INTO users VALUES (2, 'u2', 'active', 1, 1)")
+    cur.execute("INSERT INTO alembic_version VALUES ('deadbeefcafe')")
+    conn.commit()
+    conn.close()
+
+
+def _timescale_prepare_schema(port: int) -> None:
+    import psycopg2
+
+    conn = psycopg2.connect(
+        host="127.0.0.1", port=port, dbname="pasarguard",
+        user="postgres", password="test",
+    )
+    cur = conn.cursor()
+    cur.execute("CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;")
+    _create_pg_full_schema(cur)
+    conn.commit()
+    conn.close()
+
+
+def test_ephemeral_mysql_create_database_real_docker():
+    """Regression for reported failure: CREATE DATABASE on ephemeral mysql:8.
+
+    Exact user path: MariaDB dump + Timescale-only compose → ephemeral MySQL staging.
+    """
+    import asyncio
+    import pymysql
+    from app.services.native_migration import sql_staging as mod
+
+    dump = Path(tempfile.mkstemp(suffix=".sql")[1])
+    dump.write_text(
+        "CREATE TABLE users (id INT PRIMARY KEY, username VARCHAR(64));\n"
+        "INSERT INTO users VALUES (1, 'from_mariadb_dump');\n"
+        "CREATE TABLE admins (id INT PRIMARY KEY, username VARCHAR(64), is_sudo TINYINT);\n"
+        "INSERT INTO admins VALUES (1, 'admin', 1);\n",
+        encoding="utf-8",
+    )
+    container = None  # filled after import
+    logs: list[str] = []
+    result = None
+
+    class Job:
+        def log(self, msg, *_a, **_k):
+            logs.append(str(msg))
+
+    class Mini:
+        def __init__(self):
+            self.job = Job()
+
+        async def _run_cmd(self, cmd, timeout=60, cwd=None):
+            try:
+                r = subprocess.run(
+                    cmd, capture_output=True, timeout=timeout, cwd=cwd,
+                )
+                out = (r.stdout or b"").decode() + (r.stderr or b"").decode()
+                return r.returncode == 0, out
+            except Exception as exc:
+                return False, str(exc)
+
+    # Simulate Timescale-only compose (no mysql/mariadb service)
+    orig_compose = mod._compose_text
+    orig_resolve = mod.resolve_db_service
+    mod._compose_text = lambda: (
+        "services:\n  timescaledb:\n    image: timescale/timescaledb:latest-pg16\n"
+    )
+    mod.resolve_db_service = lambda db: "timescaledb" if db == "timescaledb" else None
+
+    try:
+        result = asyncio.run(
+            mod.import_sql_dump_to_live_db(
+                Mini(), str(dump), "mariadb", {"password": "x"},
+            )
+        )
+        assert result.get("_ephemeral_container"), result
+        assert result["database"].startswith("pgmig_"), result
+        container = result["_ephemeral_container"]
+        # Prove CREATE DATABASE + dump import actually landed
+        conn = pymysql.connect(
+            host=result["host"],
+            port=int(result["port"]),
+            user=result["user"],
+            password=result["password"],
+            database=result["database"],
+        )
+        cur = conn.cursor()
+        cur.execute("SELECT username FROM users WHERE id=1")
+        assert cur.fetchone()[0] == "from_mariadb_dump"
+        cur.execute("SELECT COUNT(*) FROM admins")
+        assert cur.fetchone()[0] == 1
+        conn.close()
+        print("OK: ephemeral MySQL CREATE DATABASE + dump import (MariaDB→Timescale path)")
+    finally:
+        mod._compose_text = orig_compose
+        mod.resolve_db_service = orig_resolve
+        dump.unlink(missing_ok=True)
+        if container:
+            subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+        out = subprocess.run(
+            ["docker", "ps", "-aq", "--filter", "name=pgmig-mysql-"],
+            capture_output=True, text=True,
+        )
+        for cid in (out.stdout or "").split():
+            subprocess.run(["docker", "rm", "-f", cid], capture_output=True)
+
+
+def test_mariadb_to_timescaledb_full_schema():
+    """Live MariaDB → TimescaleDB universal copy with row verification."""
+    import psycopg2
+    import pymysql
+
+    maria_name = f"pgmig-maria-{uuid.uuid4().hex[:8]}"
+    ts_name = f"pgmig-ts-{uuid.uuid4().hex[:8]}"
+    maria_port, ts_port = 33190, 55490
+
+    subprocess.run(
+        [
+            "docker", "run", "-d", "--name", maria_name,
+            "-e", "MYSQL_ROOT_PASSWORD=test",
+            "-e", "MYSQL_DATABASE=pasarguard",
+            "-p", f"127.0.0.1:{maria_port}:3306",
+            "mariadb:11",
+        ],
+        check=True, capture_output=True,
+    )
+    subprocess.run(_timescale_run_args(ts_name, ts_port), check=True, capture_output=True)
+
+    try:
+        _wait_mysql_ready(maria_port)
+        _wait_pg_ready(ts_port)
+        _mariadb_seed_full(maria_port)
+        _timescale_prepare_schema(ts_port)
+
+        from app.services.native_migration.adapters import (
+            create_reader, create_writer, copy_tables_universal,
+        )
+        src = {
+            "host": "127.0.0.1", "port": str(maria_port),
+            "database": "pasarguard", "user": "root", "password": "test",
+        }
+        dst = {
+            "host": "127.0.0.1", "port": str(ts_port),
+            "database": "pasarguard", "user": "postgres", "password": "test",
+        }
+        reader = create_reader("mariadb", None, src)
+        writer = create_writer("timescaledb", dst)
+        try:
+            stats, _ = copy_tables_universal(
+                reader, writer, lambda _m: None, fail_hard=True,
+            )
+        finally:
+            reader.close()
+            writer.close()
+
+        for tbl in ("users", "hosts", "nodes", "inbounds", "groups", "admins"):
+            assert stats.get(tbl, 0) >= 1, f"{tbl}: {stats}"
+        assert stats.get("users") == 2, stats
+
+        # Verify actual Timescale rows + extension
+        conn = psycopg2.connect(
+            host="127.0.0.1", port=ts_port, dbname="pasarguard",
+            user="postgres", password="test",
+        )
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM users")
+        assert cur.fetchone()[0] == 2
+        cur.execute("SELECT username FROM users ORDER BY id")
+        assert [r[0] for r in cur.fetchall()] == ["u1", "u2"]
+        cur.execute("SELECT is_sudo FROM admins WHERE id=1")
+        assert cur.fetchone()[0] is True
+        cur.execute("SELECT extname FROM pg_extension WHERE extname='timescaledb'")
+        assert cur.fetchone()[0] == "timescaledb"
+        conn.close()
+        print("OK: mariadb → timescaledb (full schema + row verify)")
+    finally:
+        subprocess.run(["docker", "rm", "-f", maria_name], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", ts_name], capture_output=True)
+
+
+def test_mariadb_dump_ephemeral_then_timescaledb():
+    """End-to-end like the panel convert: MariaDB .sql → ephemeral MySQL → Timescale."""
+    import asyncio
+    import pymysql
+    import psycopg2
+    from app.services.native_migration import sql_staging as mod
+    from app.services.native_migration.adapters import (
+        create_reader, create_writer, copy_tables_universal,
+    )
+
+    maria_name = f"pgmig-mdump-{uuid.uuid4().hex[:8]}"
+    ts_name = f"pgmig-tsdump-{uuid.uuid4().hex[:8]}"
+    maria_port, ts_port = 33191, 55491
+
+    subprocess.run(
+        [
+            "docker", "run", "-d", "--name", maria_name,
+            "-e", "MYSQL_ROOT_PASSWORD=test",
+            "-e", "MYSQL_DATABASE=pasarguard",
+            "-p", f"127.0.0.1:{maria_port}:3306",
+            "mariadb:11",
+        ],
+        check=True, capture_output=True,
+    )
+    subprocess.run(_timescale_run_args(ts_name, ts_port), check=True, capture_output=True)
+
+    dump = Path(tempfile.mkstemp(suffix="-mariadb.sql")[1])
+    staging_container = None
+    try:
+        _wait_mysql_ready(maria_port)
+        _wait_pg_ready(ts_port)
+        _mariadb_seed_full(maria_port)
+        _timescale_prepare_schema(ts_port)
+
+        # mysqldump-style dump from live MariaDB (what backup restore uses)
+        with open(dump, "wb") as fh:
+            r = subprocess.run(
+                [
+                    "docker", "exec", maria_name,
+                    "mariadb-dump", "-uroot", "-ptest", "pasarguard",
+                ],
+                stdout=fh, stderr=subprocess.PIPE, check=True,
+            )
+        assert dump.stat().st_size > 100, "empty dump"
+
+        class Job:
+            def log(self, msg, *_a, **_k):
+                print(f"  [staging] {msg}")
+
+        class Mini:
+            def __init__(self):
+                self.job = Job()
+
+            async def _run_cmd(self, cmd, timeout=180, cwd=None):
+                try:
+                    rr = subprocess.run(
+                        cmd, capture_output=True, timeout=timeout, cwd=cwd,
+                    )
+                    out = (rr.stdout or b"").decode() + (rr.stderr or b"").decode()
+                    return rr.returncode == 0, out
+                except Exception as exc:
+                    return False, str(exc)
+
+        orig_compose = mod._compose_text
+        orig_resolve = mod.resolve_db_service
+        mod._compose_text = lambda: (
+            "services:\n  timescaledb:\n    image: timescale/timescaledb:latest-pg16\n"
+        )
+        mod.resolve_db_service = lambda db: (
+            "timescaledb" if db == "timescaledb" else None
+        )
+        try:
+            staging = asyncio.run(
+                mod.import_sql_dump_to_live_db(
+                    Mini(), str(dump), "mariadb", {"password": "x"},
+                )
+            )
+        finally:
+            mod._compose_text = orig_compose
+            mod.resolve_db_service = orig_resolve
+
+        staging_container = staging.get("_ephemeral_container")
+        assert staging_container, staging
+
+        # Prove staging has MariaDB rows
+        sconn = pymysql.connect(
+            host=staging["host"], port=int(staging["port"]),
+            user=staging["user"], password=staging["password"],
+            database=staging["database"],
+        )
+        scur = sconn.cursor()
+        scur.execute("SELECT COUNT(*) FROM users")
+        assert scur.fetchone()[0] == 2
+        sconn.close()
+
+        dst = {
+            "host": "127.0.0.1", "port": str(ts_port),
+            "database": "pasarguard", "user": "postgres", "password": "test",
+        }
+        reader = create_reader("mariadb", None, staging)
+        writer = create_writer("timescaledb", dst)
+        try:
+            stats, _ = copy_tables_universal(
+                reader, writer, lambda _m: None, fail_hard=True,
+            )
+        finally:
+            reader.close()
+            writer.close()
+
+        assert stats.get("users") == 2, stats
+        assert stats.get("admins") == 1, stats
+
+        conn = psycopg2.connect(
+            host="127.0.0.1", port=ts_port, dbname="pasarguard",
+            user="postgres", password="test",
+        )
+        cur = conn.cursor()
+        cur.execute("SELECT username FROM users ORDER BY id")
+        assert [r[0] for r in cur.fetchall()] == ["u1", "u2"]
+        cur.execute("SELECT remark FROM hosts WHERE id=1")
+        assert cur.fetchone()[0] == "h1"
+        cur.execute("SELECT extname FROM pg_extension WHERE extname='timescaledb'")
+        assert cur.fetchone() is not None
+        conn.close()
+        print("OK: mariadb dump → ephemeral MySQL → timescaledb (E2E)")
+    finally:
+        dump.unlink(missing_ok=True)
+        if staging_container:
+            subprocess.run(["docker", "rm", "-f", staging_container], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", maria_name], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", ts_name], capture_output=True)
+        # Sweep any leftover ephemeral mysql from failed runs
+        out = subprocess.run(
+            ["docker", "ps", "-aq", "--filter", "name=pgmig-mysql-"],
+            capture_output=True, text=True,
+        )
+        for cid in (out.stdout or "").split():
+            subprocess.run(["docker", "rm", "-f", cid], capture_output=True)
+
+
 def _make_source_sqlite(path: Path) -> None:
     conn = sqlite3.connect(path)
     conn.executescript(
@@ -737,4 +1130,8 @@ if __name__ == "__main__":
     test_sqlite_to_mysql("mariadb:11", "mariadb")
     test_sqlite_to_mysql_full_schema("mariadb", "mariadb:11", 33074)
     test_mysql_to_postgres_full_schema()
+    # MariaDB → TimescaleDB (reported failure path)
+    test_ephemeral_mysql_create_database_real_docker()
+    test_mariadb_to_timescaledb_full_schema()
+    test_mariadb_dump_ephemeral_then_timescaledb()
     print("\nAll integration tests passed.")

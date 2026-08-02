@@ -187,6 +187,25 @@ async def _import_via_compose_service(
         await p.wait()
 
 
+def mysql_create_db_sql(db: str, *, drop_first: bool = False) -> str:
+    """Build CREATE DATABASE SQL with backticks (safe when not shell-double-quoted)."""
+    safe = _safe_mysql_ident(db)
+    if drop_first:
+        return f"DROP DATABASE IF EXISTS `{safe}`; CREATE DATABASE `{safe}`;"
+    return f"CREATE DATABASE `{safe}`;"
+
+
+def _ephemeral_mysql_runtime(source_db: str) -> tuple[str, str, str]:
+    """Pick image + client binaries that can load the source dump.
+
+    MariaDB 11 dumps use collations (e.g. utf8mb4_uca1400_ai_ci) that MySQL 8
+    rejects — staging must use mariadb:11 for mariadb sources.
+    """
+    if (source_db or "").lower() == "mariadb":
+        return "mariadb:11", "mariadb", "mariadb-admin"
+    return "mysql:8", "mysql", "mysqladmin"
+
+
 async def _mysql_ephemeral(
     container: str,
     pwd: str,
@@ -194,8 +213,9 @@ async def _mysql_ephemeral(
     sql: str | None = None,
     database: str | None = None,
     stdin_path: Path | None = None,
+    client: str = "mysql",
 ) -> tuple[int, str]:
-    """Run mysql via docker exec argv (never through a shell).
+    """Run mysql/mariadb via docker exec argv (never through a shell).
 
     Shell -e with double-quoted ``CREATE DATABASE `name`;`` expands backticks
     via command substitution and yields ``CREATE DATABASE ;``.
@@ -204,7 +224,7 @@ async def _mysql_ephemeral(
         "docker", "exec",
         *(["-i"] if stdin_path is not None else []),
         container,
-        "mysql", "-h", "127.0.0.1", "-u", "root", f"-p{pwd}",
+        client, "-h", "127.0.0.1", "-u", "root", f"-p{pwd}",
     ]
     if database:
         base.append(database)
@@ -227,8 +247,15 @@ async def _mysql_ephemeral(
     return proc.returncode or 0, (out_b or b"").decode("utf-8", errors="replace")
 
 
-async def _wait_ephemeral_mysql_ready(container: str, pwd: str, attempts: int = 90) -> None:
-    """Wait until MySQL accepts queries (not just mysqladmin ping during init)."""
+async def _wait_ephemeral_mysql_ready(
+    container: str,
+    pwd: str,
+    attempts: int = 90,
+    *,
+    client: str = "mysql",
+    admin_client: str = "mysqladmin",
+) -> None:
+    """Wait until MySQL/MariaDB accepts queries (not just admin ping during init)."""
     last = ""
     streak = 0
     need_streak = 3  # ~6s of continuous readiness at 2s interval
@@ -240,13 +267,15 @@ async def _wait_ephemeral_mysql_ready(container: str, pwd: str, attempts: int = 
             )
         proc = await asyncio.create_subprocess_exec(
             "docker", "exec", container,
-            "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", f"-p{pwd}", "--silent",
+            admin_client, "ping", "-h", "127.0.0.1", "-uroot", f"-p{pwd}", "--silent",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
         out_b, _ = await proc.communicate()
         if proc.returncode == 0:
-            rc, out = await _mysql_ephemeral(container, pwd, sql="SELECT 1;")
+            rc, out = await _mysql_ephemeral(
+                container, pwd, sql="SELECT 1;", client=client,
+            )
             if rc == 0:
                 streak += 1
                 if streak >= need_streak:
@@ -266,40 +295,53 @@ async def _wait_ephemeral_mysql_ready(container: str, pwd: str, attempts: int = 
 
 
 async def _import_via_ephemeral_mysql(
-    migrator, dump_path: Path, conn: dict, staging_db: str, container: str,
+    migrator,
+    dump_path: Path,
+    conn: dict,
+    staging_db: str,
+    container: str,
+    source_db: str = "mysql",
 ) -> dict:
     pwd = "pgmigrator"
     user = "root"
     port = _pick_free_host_port(33060)
     safe_db = _safe_mysql_ident(staging_db)
+    image, client, admin_client = _ephemeral_mysql_runtime(source_db)
 
     await migrator._run_cmd(["docker", "rm", "-f", container], timeout=30)
+    migrator.job.log(
+        f"Staging {source_db} dump into ephemeral container ({image}, host port {port})..."
+    )
     ok, out = await migrator._run_cmd([
         "docker", "run", "-d", "--name", container,
         "-e", f"MYSQL_ROOT_PASSWORD={pwd}",
         "-p", f"127.0.0.1:{port}:3306",
-        "mysql:8",
+        image,
     ], timeout=180)
     if not ok:
-        raise RuntimeError(f"Failed to start ephemeral MySQL: {out[-500:]}")
+        raise RuntimeError(f"Failed to start ephemeral MySQL/MariaDB ({image}): {out[-500:]}")
 
     try:
-        migrator.job.log("Waiting for ephemeral MySQL to finish init...")
-        await _wait_ephemeral_mysql_ready(container, pwd)
+        migrator.job.log(f"Waiting for ephemeral {image} to finish init...")
+        await _wait_ephemeral_mysql_ready(
+            container, pwd, client=client, admin_client=admin_client,
+        )
 
         create_sql = mysql_create_db_sql(safe_db)
-        rc, create_out = await _mysql_ephemeral(container, pwd, sql=create_sql)
+        rc, create_out = await _mysql_ephemeral(
+            container, pwd, sql=create_sql, client=client,
+        )
         if rc != 0:
             raise RuntimeError(
                 f"Failed to create ephemeral MySQL database {safe_db}: {create_out[-500:]}"
             )
 
         rc, import_out = await _mysql_ephemeral(
-            container, pwd, database=safe_db, stdin_path=dump_path,
+            container, pwd, database=safe_db, stdin_path=dump_path, client=client,
         )
         if rc != 0:
             raise RuntimeError(
-                f"Failed to import MySQL dump into ephemeral container: {import_out[-500:]}"
+                f"Failed to import {source_db} dump into ephemeral {image}: {import_out[-500:]}"
             )
     except Exception as e:
         migrator.job.log(f"Ephemeral MySQL staging failed — cleaning up ({e})")
@@ -319,6 +361,7 @@ async def _import_via_ephemeral_mysql(
         "user": user,
         "password": pwd,
         "_ephemeral_container": container,
+        "_ephemeral_image": image,
     }
 
 
@@ -729,8 +772,13 @@ async def import_sql_dump_to_live_db(
                 "password": conn.get("password") or "",
             }
         container = f"pgmig-mysql-{uuid.uuid4().hex[:6]}"
-        migrator.job.log("Staging SQL dump into ephemeral MySQL container...")
-        return await _import_via_ephemeral_mysql(migrator, path, conn, staging_db, container)
+        migrator.job.log(
+            f"Staging {source_db} SQL dump into ephemeral container "
+            f"(no {source_db} compose service — Timescale/PG target path)..."
+        )
+        return await _import_via_ephemeral_mysql(
+            migrator, path, conn, staging_db, container, source_db,
+        )
 
     # ── Plain PostgreSQL source dumps ───────────────────────────────────
     if source_db == "postgresql":

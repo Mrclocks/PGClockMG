@@ -258,11 +258,11 @@ def test_mysql_ephemeral_create_uses_exec_not_shell():
 
     calls: list[tuple] = []
 
-    async def fake_mysql(container, pwd, *, sql=None, database=None, stdin_path=None):
-        calls.append({"sql": sql, "database": database, "stdin": stdin_path})
+    async def fake_mysql(container, pwd, *, sql=None, database=None, stdin_path=None, client="mysql"):
+        calls.append({"sql": sql, "database": database, "stdin": stdin_path, "client": client})
         return 0, "ok"
 
-    async def fake_ready(container, pwd, attempts=90):
+    async def fake_ready(container, pwd, attempts=90, *, client="mysql", admin_client="mysqladmin"):
         return None
 
     class Job:
@@ -286,11 +286,12 @@ def test_mysql_ephemeral_create_uses_exec_not_shell():
     try:
         result = asyncio.run(
             mod._import_via_ephemeral_mysql(
-                Mini(), tmp, {}, "pgmig_89b78bab", "pgmig-mysql-test",
+                Mini(), tmp, {}, "pgmig_89b78bab", "pgmig-mysql-test", "mysql",
             )
         )
         assert result["database"] == "pgmig_89b78bab"
         assert result.get("_ephemeral_container") == "pgmig-mysql-test"
+        assert result.get("_ephemeral_image") == "mysql:8"
         assert any(
             c["sql"] and "CREATE DATABASE `pgmig_89b78bab`" in c["sql"]
             for c in calls
@@ -305,15 +306,72 @@ def test_mysql_ephemeral_create_uses_exec_not_shell():
         tmp.unlink(missing_ok=True)
 
 
+def test_ephemeral_mariadb_uses_mariadb_image():
+    """MariaDB dumps must stage into mariadb:11 (not mysql:8) for collations."""
+    import asyncio
+    from app.services.native_migration import sql_staging as mod
+
+    assert mod._ephemeral_mysql_runtime("mariadb") == (
+        "mariadb:11", "mariadb", "mariadb-admin",
+    )
+    assert mod._ephemeral_mysql_runtime("mysql") == (
+        "mysql:8", "mysql", "mysqladmin",
+    )
+
+    run_cmds: list[list] = []
+
+    async def fake_mysql(container, pwd, *, sql=None, database=None, stdin_path=None, client="mysql"):
+        assert client == "mariadb"
+        return 0, "ok"
+
+    async def fake_ready(container, pwd, attempts=90, *, client="mysql", admin_client="mysqladmin"):
+        assert client == "mariadb"
+        assert admin_client == "mariadb-admin"
+
+    class Job:
+        def log(self, *_a, **_k):
+            pass
+
+    class Mini:
+        def __init__(self):
+            self.job = Job()
+
+        async def _run_cmd(self, cmd, timeout=60, cwd=None):
+            run_cmds.append(list(cmd))
+            return True, "ok"
+
+    tmp = Path("/tmp/pgmig_maria_ephemeral_test.sql")
+    tmp.write_text("CREATE TABLE t (id int);\n", encoding="utf-8")
+    orig_mysql = mod._mysql_ephemeral
+    orig_ready = mod._wait_ephemeral_mysql_ready
+    mod._mysql_ephemeral = fake_mysql
+    mod._wait_ephemeral_mysql_ready = fake_ready
+    try:
+        result = asyncio.run(
+            mod._import_via_ephemeral_mysql(
+                Mini(), tmp, {}, "pgmig_deadbeef", "pgmig-mysql-maria", "mariadb",
+            )
+        )
+        assert result["_ephemeral_image"] == "mariadb:11"
+        docker_run = next(c for c in run_cmds if c[:2] == ["docker", "run"])
+        assert "mariadb:11" in docker_run
+        print("OK: ephemeral MariaDB staging uses mariadb:11 + mariadb client")
+    finally:
+        mod._mysql_ephemeral = orig_mysql
+        mod._wait_ephemeral_mysql_ready = orig_ready
+        tmp.unlink(missing_ok=True)
+
+
 def test_import_mysql_dump_routes_to_ephemeral_when_target_is_timescale():
     """MariaDB/MySQL → Timescale: no mysql compose service → ephemeral MySQL."""
     import asyncio
     from app.services.native_migration import sql_staging as mod
 
-    calls = {"ephemeral": 0}
+    calls = {"ephemeral": 0, "sources": []}
 
-    async def fake_ephemeral(migrator, dump_path, conn, staging_db, container):
+    async def fake_ephemeral(migrator, dump_path, conn, staging_db, container, source_db="mysql"):
         calls["ephemeral"] += 1
+        calls["sources"].append(source_db)
         assert staging_db.startswith("pgmig_")
         assert container.startswith("pgmig-mysql-")
         return {
@@ -357,6 +415,7 @@ def test_import_mysql_dump_routes_to_ephemeral_when_target_is_timescale():
                 )
             )
             assert calls["ephemeral"] == 1, source
+            assert calls["sources"][-1] == source
             assert result.get("_ephemeral_container")
         print("OK: mysql/mariadb dump routes to ephemeral MySQL when compose has timescale only")
     finally:
@@ -416,6 +475,7 @@ if __name__ == "__main__":
     test_mysql_shell_e_arg_preserves_backticks()
     test_mysql_create_db_sql_drop_first()
     test_mysql_ephemeral_create_uses_exec_not_shell()
+    test_ephemeral_mariadb_uses_mariadb_image()
     test_import_mysql_dump_routes_to_ephemeral_when_target_is_timescale()
     test_mysql_ephemeral_passes_create_sql_as_exec_argv()
     print("\nAll sql staging tests passed.")
