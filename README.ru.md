@@ -1,4 +1,4 @@
-> ⚠️ **`v1.16.2`** — Перед restore или миграцией сделайте полный бэкап.
+> ⚠️ **`v1.16.3`** — Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <a href="README.en.md">English</a> · <b>Русский</b>
@@ -55,6 +55,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | Версия | Основные изменения |
 |--------|-------------------|
+| v1.16.3 | Исправление Internal Server Error на /sub (короткий пароль shadowsocks из 3x-ui) |
 | v1.16.2 | Автоопределение схемы 3x-ui + Hosts/Admin чтобы /sub работал на новых панелях |
 | v1.16.1 | Полная миграция современного 3x-ui (multi-inbound) + redirect с реальным path/port |
 | v1.16 | UI миграции 3X-UI: только DB, бейдж Full, команды проверки redirect |

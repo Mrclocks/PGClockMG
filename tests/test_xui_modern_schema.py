@@ -15,6 +15,7 @@ from app.services.migrators.xui import (
     ensure_sudo_admin_from_xui,
     is_modern_xui_multi_inbound_schema,
     normalize_modern_xui_sqlite,
+    sanitize_user_proxy_settings,
     seed_hosts_from_xui_inbounds,
     sync_user_groups_from_xui_settings,
 )
@@ -138,6 +139,50 @@ def test_sync_user_groups_fills_multi_inbound_membership():
             assert orphans == 0
         finally:
             conn.close()
+
+
+def test_sanitize_short_shadowsocks_password_for_sub():
+    """PasarGuard /sub 500: ShadowsocksSettings.password min_length=22."""
+    with tempfile.TemporaryDirectory() as tmp:
+        pg = Path(tmp) / "pg.db"
+        conn = sqlite3.connect(pg)
+        short = "nf58lsn78odoizm2"  # 16 chars from modern 3x-ui sample
+        assert len(short) < 22
+        ps = {
+            "vmess": {"id": "f9d010f5-5812-487b-a2b4-3705b9f69dbb"},
+            "vless": {"id": "f9d010f5-5812-487b-a2b4-3705b9f69dbb", "flow": ""},
+            "trojan": {"password": short},
+            "shadowsocks": {"password": short, "method": "chacha20-ietf-poly1305"},
+        }
+        conn.execute(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, proxy_settings TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO users VALUES (1, '7didmnu1sz', ?)",
+            (json.dumps(ps),),
+        )
+        conn.commit()
+        conn.close()
+
+        result = sanitize_user_proxy_settings(pg)
+        assert result["fixed"] == 1
+
+        conn = sqlite3.connect(f"file:{pg}?mode=ro", uri=True)
+        raw = conn.execute("SELECT proxy_settings FROM users WHERE id=1").fetchone()[0]
+        conn.close()
+        out = json.loads(raw)
+        assert len(out["shadowsocks"]["password"]) >= 22
+        assert out["trojan"]["password"] == short  # trojan kept
+        assert "flow" not in out["vless"]
+
+        # Mimic PasarGuard ProxyTable shadowsocks constraint
+        from pydantic import BaseModel, Field, ValidationError
+
+        class SS(BaseModel):
+            password: str = Field(min_length=22)
+            method: str = "chacha20-ietf-poly1305"
+
+        SS.model_validate(out["shadowsocks"])
 
 
 @pytest.mark.skipif(not LEGACY_DB.is_file(), reason="legacy sample db missing")

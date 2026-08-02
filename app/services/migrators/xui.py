@@ -6,6 +6,7 @@ engine to copy head→head into the requested engine.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import socket
@@ -691,14 +692,34 @@ def ensure_sudo_admin_from_xui(pg_db: Path, xui_db: Path) -> dict:
 
         cols = [r[1] for r in conn.execute("PRAGMA table_info(admins)")]
         now = "1970-01-01 00:00:00"
-        fields = ["id", "username", "hashed_password", "created_at", "is_sudo"]
-        values: list = [1, username, hashed, now, 1]
+        fields: list[str] = ["id", "username", "hashed_password"]
+        values: list = [1, username, hashed]
+        if "created_at" in cols:
+            fields.append("created_at")
+            values.append(now)
+        if "is_sudo" in cols:
+            fields.append("is_sudo")
+            values.append(1)
+        if "status" in cols:
+            fields.append("status")
+            values.append("active")
         if "used_traffic" in cols:
             fields.append("used_traffic")
             values.append(0)
         if "is_disabled" in cols:
             fields.append("is_disabled")
             values.append(0)
+        # Newer PasarGuard: admin_roles (1=owner). Avoid NULL role_id → /sub 500.
+        if "role_id" in cols:
+            role_id = 1
+            if "admin_roles" in tables:
+                row = conn.execute(
+                    "SELECT id FROM admin_roles ORDER BY id LIMIT 1"
+                ).fetchone()
+                if row:
+                    role_id = int(row[0])
+            fields.append("role_id")
+            values.append(role_id)
         placeholders = ",".join("?" * len(fields))
         conn.execute(
             f"INSERT INTO admins ({','.join(fields)}) VALUES ({placeholders})",
@@ -713,6 +734,85 @@ def ensure_sudo_admin_from_xui(pg_db: Path, xui_db: Path) -> dict:
                 )
         conn.commit()
         return {"created": True, "username": username}
+    finally:
+        conn.close()
+
+
+def _ensure_shadowsocks_password(password: str, *, seed: str = "") -> str:
+    """PasarGuard requires shadowsocks password min_length=22 (Pydantic)."""
+    pw = (password or "").strip()
+    if len(pw) >= 22:
+        return pw
+    digest = hashlib.sha256(f"{pw}|{seed}".encode("utf-8")).hexdigest()
+    if pw:
+        return (pw + digest)[:32]
+    return digest[:22]
+
+
+def sanitize_user_proxy_settings(pg_db: Path) -> dict:
+    """Fix proxy_settings that make PasarGuard ``/sub`` return HTTP 500.
+
+    Official x-ui migrator copies short trojan passwords into shadowsocks.
+    PasarGuard's ``ShadowsocksSettings.password`` requires ``min_length=22``, so
+    ``UsersResponseWithInbounds.model_validate`` raises → Internal Server Error
+    even when redirect mapping is correct.
+    """
+    path = Path(pg_db)
+    conn = sqlite3.connect(str(path))
+    try:
+        if "users" not in _xui_table_names(conn):
+            return {"fixed": 0, "reason": "no-users"}
+        fixed = 0
+        rows = list(conn.execute("SELECT id, username, proxy_settings FROM users"))
+        for user_id, username, raw in rows:
+            try:
+                ps = json.loads(raw or "{}")
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(ps, dict):
+                continue
+            changed = False
+
+            ss = ps.get("shadowsocks")
+            if isinstance(ss, dict):
+                old_pw = str(ss.get("password") or "")
+                new_pw = _ensure_shadowsocks_password(old_pw, seed=str(username or user_id))
+                if new_pw != old_pw:
+                    ss["password"] = new_pw
+                    changed = True
+                method = str(ss.get("method") or "").strip()
+                if not method:
+                    ss["method"] = "chacha20-ietf-poly1305"
+                    changed = True
+
+            # Keep trojan password as-is (no min length); just ensure dict shape
+            trojan = ps.get("trojan")
+            if isinstance(trojan, dict) and not trojan.get("password"):
+                # Prefer original ss/trojan material if somehow empty
+                fallback = ""
+                if isinstance(ss, dict):
+                    fallback = str(ss.get("password") or "")
+                if fallback:
+                    trojan["password"] = fallback[:128]
+                    changed = True
+
+            vless = ps.get("vless")
+            if isinstance(vless, dict):
+                # Empty flow is fine for clients but drop unknown-empty noise
+                if vless.get("flow") in ("", None):
+                    if "flow" in vless:
+                        vless.pop("flow", None)
+                        changed = True
+
+            if changed:
+                conn.execute(
+                    "UPDATE users SET proxy_settings=? WHERE id=?",
+                    (json.dumps(ps, ensure_ascii=False), user_id),
+                )
+                fixed += 1
+
+        conn.commit()
+        return {"fixed": fixed, "users": len(rows)}
     finally:
         conn.close()
 
@@ -1453,6 +1553,14 @@ class XuiMigrator(BaseMigrator):
         if enc_fix.get("fixed"):
             self.job.log(
                 f"Stripped vless encryption from core_configs ({enc_fix.get('fixed')} row(s))"
+            )
+
+        proxy_fix = sanitize_user_proxy_settings(output_db)
+        if proxy_fix.get("fixed"):
+            self.job.log(
+                "Fixed user proxy_settings for PasarGuard /sub validation: "
+                f"{proxy_fix.get('fixed')}/{proxy_fix.get('users')} users "
+                "(shadowsocks password min 22 chars)"
             )
 
         # PasarGuard /sub needs hosts; official migrator leaves hosts empty
