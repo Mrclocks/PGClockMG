@@ -34,7 +34,7 @@ const I18N = {
       desc: 'What do you want to do on this server?',
       note: 'Everything runs on your own server. Backups, passwords and logs never leave this machine.',
       betaWarning: '',
-      backupWarning: 'This is a beta version. To prevent potential issues, always back up your database and important files before proceeding.',
+      backupWarning: 'Always back up your database and important files before restore or migration.',
       goalHint: 'For restore or migrate, PasarGuard must already be on this server. The Guide tab only shows how to install it yourself.',
       goalInstall: 'Guide / panel status',
       goalInstallDesc: 'If PasarGuard is installed: show details. If not: install commands for you to run.',
