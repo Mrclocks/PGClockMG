@@ -233,6 +233,89 @@ def migration_params_from_connection(
     return params
 
 
+def _mysql_client_bins(db_type: str, service: str | None = None) -> list[str]:
+    name = f"{service or ''} {db_type or ''}".lower()
+    if "maria" in name:
+        return ["mariadb", "mysql"]
+    return ["mysql", "mariadb"]
+
+
+async def sync_mysql_roles_to_password(
+    migrator,
+    db_type: str,
+    admin_conn: dict,
+    *,
+    app_user: str | None = None,
+    password: str | None = None,
+    env_text: str | None = None,
+) -> None:
+    """Align MySQL/MariaDB root + app-user passwords so the panel URL can connect.
+
+    Cross-DB copy authenticates as root; the panel uses DB_USER (often ``pasarguard``).
+    Without this sync, ``Access denied for user 'pasarguard'@...`` is common after
+    sqlite→mysql convert (same heal used by PasarGuard restore).
+    """
+    text = env_text if env_text is not None else read_env_text()
+    service = resolve_db_service(db_type) or ("mariadb" if db_type == "mariadb" else "mysql")
+    admin_pwd = (admin_conn or {}).get("password") or ""
+    new_pwd = (
+        password
+        or read_env_var(text, "MYSQL_ROOT_PASSWORD")
+        or read_env_var(text, "DB_PASSWORD")
+        or read_env_var(text, "MYSQL_PASSWORD")
+        or admin_pwd
+    )
+    if not new_pwd or not service:
+        return
+
+    user = (
+        app_user
+        or read_env_var(text, "DB_USER")
+        or read_env_var(text, "MYSQL_USER")
+        or "pasarguard"
+    )
+    lit = new_pwd.replace("\\", "\\\\").replace("'", "\\'")
+    statements = [
+        f"ALTER USER 'root'@'%' IDENTIFIED BY '{lit}';",
+        f"ALTER USER 'root'@'localhost' IDENTIFIED BY '{lit}';",
+    ]
+    if user and user != "root":
+        statements.append(f"ALTER USER '{user}'@'%' IDENTIFIED BY '{lit}';")
+        statements.append(f"ALTER USER '{user}'@'localhost' IDENTIFIED BY '{lit}';")
+    statements.append("FLUSH PRIVILEGES;")
+    sql = " ".join(statements)
+    cwd = str(PASARGUARD_DIR)
+    auth_pwds = _unique_strings(admin_pwd, new_pwd)
+    migrator.job.log(
+        f"Syncing MySQL passwords on {service} (app user={user})..."
+    )
+    last_out = ""
+    # Use single-quoted -e payload so SQL single-quotes stay intact; escape ' as '\'' 
+    sql_q = sql.replace("'", "'\\''")
+    for bin_name in _mysql_client_bins(db_type, service):
+        for auth_pwd in auth_pwds:
+            pwd_q = auth_pwd.replace('"', '\\"')
+            cmd = (
+                f'cd "{cwd}" && docker compose exec -T {service} '
+                f"{bin_name} -u root -p\"{pwd_q}\" -e '{sql_q}'"
+            )
+            ok, out = await migrator._run_cmd(cmd, timeout=60)
+            if ok:
+                migrator.job.log(f"Synced MySQL passwords on {service} ({bin_name})")
+                return
+            last_out = out or last_out
+        cmd2 = (
+            f'cd "{cwd}" && docker compose exec -T {service} '
+            f"{bin_name} -u root -e '{sql_q}'"
+        )
+        ok2, out2 = await migrator._run_cmd(cmd2, timeout=60)
+        if ok2:
+            migrator.job.log(f"Synced MySQL passwords on {service} ({bin_name}, no-password)")
+            return
+        last_out = out2 or last_out
+    migrator.job.log(f"MySQL password sync note: {(last_out or '')[-300:]}")
+
+
 async def sync_postgres_roles_to_app_password(
     migrator,
     db_type: str,

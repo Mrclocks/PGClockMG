@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> ⚠️ **`v1.8`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
+> ⚠️ **`v1.9`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
   <b>فارسی</b> · <a href="README.en.md">English</a> · <a href="README.ru.md">Русский</a>
@@ -57,6 +57,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | نسخه | تغییرات اصلی |
 |------|--------------|
+| v1.9 | رفع Access denied بعد مهاجرت 3x-ui→MySQL + نصب صحیح redirect سابسکریپشن |
 | v1.8 | رفع مهاجرت 3x-ui به MySQL (پروب DB + core_configs) |
 | v1.7 | رفع خطای مهاجرت 3x-ui هنگام آپلود bundle (IsADirectoryError) |
 | v1.6beta | بهبود UI کارت DB، سوییچ iOS برای نودها، لوگو جدید |
