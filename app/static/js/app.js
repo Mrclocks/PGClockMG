@@ -719,15 +719,23 @@ function renderPanels() {
   const grid = document.getElementById('panelGrid');
   const lang = state.lang;
   grid.innerHTML = state.panels.map(p => {
-    const sup = t(`support.${p.support_level}`) || p.support_level;
-    const supClass = `support-${p.support_level}`;
-    const subText = t(`sub.${p.subscription_mode}`) || p.subscription_mode;
-    const subClass = p.subscription_mode === 'changed' ? 'sub-no' : 'sub-yes';
+    const disabled = p.enabled === false || p.coming_soon;
+    const badge = disabled
+      ? `<span class="support-badge support-soon">${t('support.comingSoon')}</span>`
+      : `<span class="support-badge support-${p.support_level}">${t(`support.${p.support_level}`) || p.support_level}</span>`;
+    const subText = disabled
+      ? t('support.comingSoon')
+      : (t(`sub.${p.subscription_mode}`) || p.subscription_mode);
+    const subClass = disabled
+      ? 'sub-soon'
+      : (p.subscription_mode === 'changed' ? 'sub-no' : 'sub-yes');
+    const click = disabled ? '' : `onclick="selectPanel('${p.id}')"`;
     return `
-      <div class="panel-card" data-id="${p.id}" onclick="selectPanel('${p.id}')">
+      <div class="panel-card${disabled ? ' panel-card-disabled' : ''}" data-id="${p.id}" ${click}
+           aria-disabled="${disabled ? 'true' : 'false'}">
         <div class="panel-card-top">
           <h3>${panelLatinName(p)}</h3>
-          <span class="support-badge ${supClass}">${sup}</span>
+          ${badge}
         </div>
         <p class="panel-caption">${tr(p.description, lang)}</p>
         <div class="panel-card-footer sub-preserve ${subClass}">${subText}</div>
@@ -736,7 +744,10 @@ function renderPanels() {
 }
 
 async function selectPanel(id) {
-  state.selectedPanel = state.panels.find(p => p.id === id);
+  const panelMeta = state.panels.find(p => p.id === id);
+  if (!panelMeta || panelMeta.enabled === false || panelMeta.coming_soon) return;
+
+  state.selectedPanel = panelMeta;
   document.querySelectorAll('.panel-card').forEach(c => {
     c.classList.toggle('selected', c.dataset.id === id);
   });
@@ -1362,10 +1373,15 @@ async function renderUploadSection() {
   }
 
   const reqs = state.uploadRequirements;
+  const uploadWarnClear = document.getElementById('uploadPanelWarn');
   if (reqs.upload_mode === 'none') {
     section.classList.add('hidden');
     notNeeded?.classList.remove('hidden');
     if (notNeeded) notNeeded.textContent = tr(reqs.reason, state.lang);
+    if (uploadWarnClear) {
+      uploadWarnClear.classList.add('hidden');
+      uploadWarnClear.innerHTML = '';
+    }
     state.bundleStatus = { complete: true, ok: true };
     updateStepButtons();
     return;
@@ -1376,6 +1392,18 @@ async function renderUploadSection() {
   document.getElementById('uploadSectionTitle').textContent = t('step2.uploadH3');
   const uploadDesc = tr(reqs.reason, state.lang) || t('step2.uploadDesc');
   document.getElementById('uploadSectionDesc').textContent = uploadDesc;
+
+  const uploadWarn = document.getElementById('uploadPanelWarn');
+  if (uploadWarn) {
+    if (panel.id === '3x-ui') {
+      uploadWarn.classList.remove('hidden');
+      uploadWarn.innerHTML = `<p class="warn-line">${statusIcon('warn')}<span>${t('step2.xuiCertWarn')}</span></p>`;
+    } else {
+      uploadWarn.classList.add('hidden');
+      uploadWarn.innerHTML = '';
+    }
+  }
+
   document.getElementById('uploadDragText').textContent = t('step2.uploadDrag');
   document.getElementById('uploadSelectText').textContent = t('step2.uploadSelect');
   document.getElementById('uploadModeZip').textContent = t('upload.modeZip');

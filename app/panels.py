@@ -155,18 +155,21 @@ PANELS: dict[str, PanelInfo] = {
             "en": [
                 "PasarGuard MUST be installed on this server BEFORE migration.",
                 "SQLite only (x-ui.db).",
+                "TLS/SSL certificates are NOT migrated — configure certificates again in PasarGuard.",
                 "Install redirect server (checked by default) to keep old /sub/{token} links working.",
                 "Create admin manually after migration: pasarguard cli generate-temp-key",
             ],
             "fa": [
                 "PasarGuard باید قبل از مهاجرت روی این سرور نصب باشد.",
                 "فقط SQLite (x-ui.db).",
+                "سرتیفیکیت‌های TLS/SSL منتقل نمی‌شوند — بعداً در PasarGuard دوباره تنظیم کنید.",
                 "سرور ریدایرکت را نصب کنید (پیش‌فرض فعال) تا لینک‌های قدیمی کار کنند.",
                 "ادمین را دستی بسازید: pasarguard cli generate-temp-key",
             ],
             "ru": [
                 "PasarGuard ДОЛЖЕН быть установлен ДО миграции.",
                 "Только SQLite (x-ui.db).",
+                "TLS/SSL сертификаты НЕ переносятся — настройте их снова в PasarGuard.",
                 "Установите redirect server (по умолчанию) для старых ссылок.",
                 "Создайте админа: pasarguard cli generate-temp-key",
             ],
@@ -190,6 +193,8 @@ PANELS: dict[str, PanelInfo] = {
         icon="🌊",
         support_level="experimental",
         subscription_mode="changed",
+        enabled=False,
+        coming_soon=True,
         description={
             "en": "Experimental API-based user migration. Nodes, squads and inbounds must be reconfigured manually.",
             "fa": "مهاجرت آزمایشی از طریق API. نودها و inbound باید دستی تنظیم شوند.",
@@ -234,6 +239,8 @@ PANELS: dict[str, PanelInfo] = {
         icon="🔮",
         support_level="experimental",
         subscription_mode="changed",
+        enabled=False,
+        coming_soon=True,
         description={
             "en": "Experimental user migration from MySQL/MariaDB. Complex Hiddify settings may not transfer.",
             "fa": "انتقال آزمایشی کاربران از MySQL. تنظیمات پیچیده منتقل نمی‌شوند.",

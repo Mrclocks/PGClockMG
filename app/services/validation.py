@@ -28,6 +28,15 @@ def validate_migration(params: dict) -> dict:
     panel = PANELS.get(panel_id)
     if not panel:
         return {"ok": False, "errors": [_msg("Invalid panel", "پنل نامعتبر", "Неверная панель")]}
+    if not getattr(panel, "enabled", True):
+        return {
+            "ok": False,
+            "errors": [_msg(
+                "This panel migration is not available yet (coming soon).",
+                "مهاجرت این پنل فعلاً در دسترس نیست (به‌زودی).",
+                "Миграция этой панели пока недоступна (скоро).",
+            )],
+        }
 
     if not is_root():
         errors.append(_msg("Root access required", "دسترسی root لازم است", "Требуется root"))

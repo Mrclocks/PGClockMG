@@ -20,6 +20,8 @@ class PanelInfo(BaseModel):
     warnings: dict[str, List[str]]
     prerequisites: PanelPrerequisites
     supported_source_dbs: List[str]
+    enabled: bool = True
+    coming_soon: bool = False
 
 
 class MigrationRequest(BaseModel):

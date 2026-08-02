@@ -1,4 +1,4 @@
-> ⚠️ **`v1.11`** — Перед restore или миграцией сделайте полный бэкап.
+> ⚠️ **`v1.12`** — Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <a href="README.en.md">English</a> · <b>Русский</b>
@@ -47,7 +47,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 | Marzban | Полная |
 | PasarGuard | Полная |
 | 3x-ui | Частичная |
-| Remnawave / Hiddify | Экспериментальная |
+| Remnawave / Hiddify | Скоро |
 
 ---
 
@@ -55,6 +55,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | Версия | Основные изменения |
 |--------|-------------------|
+| v1.12 | Предупреждение о сертификатах 3x-ui + временно отключены Hiddify/Remnawave |
 | v1.11 | Прямая установка redirect-server (без хрупкого официального installer) |
 | v1.10 | Старые ссылки 3x-ui: нормализация mapping + реальный порт/домен redirect |
 | v1.9 | Исправление Access denied после 3x-ui→MySQL + корректный install redirect |

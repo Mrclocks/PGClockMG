@@ -450,6 +450,29 @@ html[lang="fa"] .step-label {
   box-shadow: 0 0 0 3px var(--primary-glow);
 }
 
+.panel-card.panel-card-disabled {
+  filter: grayscale(1);
+  opacity: 0.55;
+  cursor: not-allowed;
+  pointer-events: none;
+  box-shadow: none;
+}
+
+.panel-card.panel-card-disabled:hover {
+  transform: none;
+  border-color: var(--border-soft);
+  box-shadow: none;
+}
+
+.support-soon {
+  background: rgba(148, 163, 184, 0.22);
+  color: #94a3b8;
+}
+
+.sub-soon {
+  color: #94a3b8;
+}
+
 .panel-card-top {
   display: flex;
   align-items: center;
