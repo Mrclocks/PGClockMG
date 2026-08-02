@@ -608,24 +608,25 @@ def extract_env_summary(text: str) -> dict:
 
 
 def get_panel_url_from_env(env_text: str | None = None, ip: str | None = None) -> str:
-    """Build PasarGuard dashboard URL from UVICORN_PORT + UVICORN_ROOT_PATH."""
-    import socket
-    from app.services.pg_access import build_dashboard_url
+    """Build PasarGuard dashboard URL — domain from .env preferred, else IP."""
+    from app.services.pg_access import build_dashboard_url, get_panel_access_info
 
-    port = "8000"
-    root_path = ""
-    if env_text:
-        port = read_env_var(env_text, "UVICORN_PORT") or "8000"
-        root_path = (read_env_var(env_text, "UVICORN_ROOT_PATH") or "").rstrip("/")
-    if not ip:
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-        except Exception:
-            ip = "127.0.0.1"
-    return build_dashboard_url(ip, port, https=True, root_path=root_path)
+    if ip:
+        port = "8000"
+        root_path = ""
+        if env_text:
+            port = read_env_var(env_text, "UVICORN_PORT") or "8000"
+            root_path = (read_env_var(env_text, "UVICORN_ROOT_PATH") or "").rstrip("/")
+        return build_dashboard_url(ip, port, https=True, root_path=root_path)
+
+    access = get_panel_access_info()
+    if access.get("login_url"):
+        return access["login_url"]
+
+    port = (read_env_var(env_text, "UVICORN_PORT") if env_text else None) or "8000"
+    root_path = (read_env_var(env_text, "UVICORN_ROOT_PATH") or "").rstrip("/") if env_text else ""
+    host = access.get("domain") or access.get("ip") or "127.0.0.1"
+    return build_dashboard_url(host, port, https=True, root_path=root_path)
 
 
 def transform_marzban_env(

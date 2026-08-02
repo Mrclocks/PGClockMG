@@ -1160,7 +1160,11 @@ function showSuccess(result) {
     || '';
   const root = (rootRaw && rootRaw !== '/' ? String(rootRaw).replace(/\/$/, '') : '');
   const port = result?.panel_port || state.pasarguardEnvSummary?.panel_port || state.systemCheck?.pasarguard_env?.panel_port || '8000';
+  const accessUrl = (typeof resolveLoginUrl === 'function')
+    ? resolveLoginUrl(state.panelAccess || state.systemCheck?.panel_access)
+    : (state.panelAccess?.login_url || state.systemCheck?.panel_access?.login_url || '');
   const panelUrl = result?.panel_url
+    || accessUrl
     || `https://${state.serverIp.split(':')[0]}:${port}${root}/dashboard/`.replace(/([^:]\/)\/+/g, '$1');
   document.getElementById('panelLink').href = panelUrl;
 

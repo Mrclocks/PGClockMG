@@ -31,6 +31,10 @@ def build_redirect_url(new_url: str, redirect_base: str) -> str:
     if not new:
         return ""
     if new.startswith("http://") or new.startswith("https://"):
+        # Prefer path + live base so host changes in PasarGuard still apply.
+        # Absolute URLs are treated as path carriers unless base is empty.
+        if redirect_base:
+            return (redirect_base.rstrip("/") + path_only(new))
         return new
     path = path_only(new)
     base = (redirect_base or "").rstrip("/")
@@ -40,14 +44,16 @@ def build_redirect_url(new_url: str, redirect_base: str) -> str:
 
 
 def load_path_index(mapping_path: str | Path, redirect_base: str = "") -> dict[str, str]:
-    """Build path → absolute redirect URL index from PasarGuard-compatible JSON."""
+    """Build path → *relative* new path index (host applied at request time).
+
+    ``redirect_base`` is accepted for API compatibility but not baked into
+    values — the server resolves the live PasarGuard base on each request.
+    """
     data = json.loads(Path(mapping_path).read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("mapping root must be an object")
 
-    base = (redirect_base or data.get("redirect_base") or data.get("redirect_domain") or "")
-    base = str(base).rstrip("/")
-
+    _ = redirect_base  # fallback base lives in ServerConfig / live .env
     mappings = data.get("mappings") or {}
     if not isinstance(mappings, dict):
         raise ValueError("mappings must be an object")
@@ -59,17 +65,16 @@ def load_path_index(mapping_path: str | Path, redirect_base: str = "") -> dict[s
         old = entry.get("old_subscription_url") or ""
         new = entry.get("new_subscription_url") or ""
         old_path = path_only(old)
-        target = build_redirect_url(new, base)
-        if old_path and target:
-            index[old_path] = target
-            # Also index with trailing slash variant
+        new_path = path_only(new)
+        if old_path and new_path:
+            index[old_path] = new_path
             if old_path != "/" and not old_path.endswith("/"):
-                index[old_path + "/"] = target
+                index[old_path + "/"] = new_path
     return index
 
 
 def normalize_mapping_file(mapping_path: str | Path, redirect_base: str = "") -> dict:
-    """Normalize paths in-place and optionally stamp redirect_base."""
+    """Normalize paths in-place and optionally stamp redirect_base (fallback only)."""
     path = Path(mapping_path)
     data = json.loads(path.read_text(encoding="utf-8"))
     mappings = data.get("mappings") or {}
@@ -83,7 +88,7 @@ def normalize_mapping_file(mapping_path: str | Path, redirect_base: str = "") ->
         if old_n != old:
             entry["old_subscription_url"] = old_n
             fixed += 1
-        if new and not new.startswith("http"):
+        if new:
             new_n = path_only(new)
             if new_n != new:
                 entry["new_subscription_url"] = new_n

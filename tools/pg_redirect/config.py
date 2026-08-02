@@ -20,6 +20,7 @@ class ServerConfig:
     port: int = 2096
     redirect_base: str = ""
     panel: str = ""
+    pasarguard_env: str = "/opt/pasarguard/.env"
     ssl: SslConfig | None = None
 
     @property
@@ -42,6 +43,10 @@ def load_config(path: str | Path) -> ServerConfig:
         .strip()
         .rstrip("/")
     )
+    pasarguard_env = (
+        (data.get("pasarguard_env") or "/opt/pasarguard/.env").strip()
+        or "/opt/pasarguard/.env"
+    )
 
     ssl_raw = data.get("ssl") or {}
     if not isinstance(ssl_raw, dict):
@@ -55,6 +60,7 @@ def load_config(path: str | Path) -> ServerConfig:
         port=port,
         redirect_base=redirect_base,
         panel=str(data.get("panel") or ""),
+        pasarguard_env=pasarguard_env,
         ssl=SslConfig(enabled=enabled, cert=cert, key=key),
     )
 
@@ -67,13 +73,16 @@ def build_config_dict(
     ssl_cert_pem: str = "",
     ssl_key_pem: str = "",
     host: str = "0.0.0.0",
+    pasarguard_env: str = "/opt/pasarguard/.env",
 ) -> dict:
     ssl_enabled = bool(ssl_cert_pem and ssl_key_pem)
+    base = (redirect_base or "").rstrip("/")
     return {
         "host": host,
         "port": int(listen_port),
-        "redirect_base": (redirect_base or "").rstrip("/"),
-        "redirect_domain": (redirect_base or "").rstrip("/"),
+        "redirect_base": base,
+        "redirect_domain": base,
+        "pasarguard_env": pasarguard_env or "/opt/pasarguard/.env",
         "panel": panel,
         "ssl": {
             "enabled": ssl_enabled,

@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> ⚠️ **`v2.0`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
+> ⚠️ **`v2.0.1`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
   <b>فارسی</b> · <a href="README.en.md">English</a> · <a href="README.ru.md">Русский</a>
@@ -57,6 +57,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | نسخه | تغییرات اصلی |
 |------|--------------|
+| v2.0.1 | ریدایرکت/لینک پنل: اولویت دامنه پاسارگارد، در غیر این‌صورت IP؛ دنبال‌کردن تغییر دامنه/.env |
 | v2.0 | مهاجرت کامل 3X-UI قدیم/جدید (تشخیص خودکار، Host/Admin/Group، ریدایرکت path/port) |
 | v1.16.3 | فیکس Internal Server Error روی /sub (پسورد shadowsocks کوتاه از 3x-ui) |
 | v1.16.2 | تشخیص خودکار اسکیما 3x-ui + ساخت Host/Admin و فیکس /sub برای نسخه جدید |

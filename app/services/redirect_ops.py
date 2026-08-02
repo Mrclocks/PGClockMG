@@ -218,8 +218,12 @@ def build_runtime_config(
     panel: str = "x-ui",
     ssl_cert: str = "",
     ssl_key: str = "",
+    pasarguard_env: str = "",
 ) -> dict:
     cert_pem, key_pem = _as_pem_pair(ssl_cert, ssl_key)
+    from app.config import PASARGUARD_ENV
+
+    env_path = (pasarguard_env or str(PASARGUARD_ENV)).strip() or "/opt/pasarguard/.env"
 
     _ensure_pg_redirect_importable()
     try:
@@ -231,6 +235,7 @@ def build_runtime_config(
             panel=panel,
             ssl_cert_pem=cert_pem,
             ssl_key_pem=key_pem,
+            pasarguard_env=env_path,
         )
     except Exception:
         ssl_enabled = bool(cert_pem and key_pem)
@@ -240,6 +245,7 @@ def build_runtime_config(
             "port": int(listen_port),
             "redirect_base": base,
             "redirect_domain": base,
+            "pasarguard_env": env_path,
             "panel": panel,
             "ssl": {
                 "enabled": ssl_enabled,

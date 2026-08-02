@@ -102,7 +102,13 @@ def test_sample_db_redirect_301_zero_touch():
         assert cfg["ssl"]["enabled"] is False
 
         cfg_path = Path(tmp) / "config.json"
-        cfg_local = {**cfg, "host": "127.0.0.1", "port": 0}
+        # Point pasarguard_env at a missing file so Location uses redirect_base fallback
+        cfg_local = {
+            **cfg,
+            "host": "127.0.0.1",
+            "port": 0,
+            "pasarguard_env": str(Path(tmp) / "missing.env"),
+        }
         cfg_path.write_text(json.dumps(cfg_local), encoding="utf-8")
 
         index = load_path_index(mapping_path, redirect_base=redirect_base)

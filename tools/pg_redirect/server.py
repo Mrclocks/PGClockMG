@@ -9,8 +9,9 @@ import ssl
 import tempfile
 from pathlib import Path
 
+from .base_url import resolve_live_base
 from .config import ServerConfig, load_config
-from .mapping import load_path_index
+from .mapping import build_redirect_url, load_path_index, path_only
 
 log = logging.getLogger("pg_redirect")
 
@@ -66,6 +67,21 @@ class RedirectApp:
             return self.path_index.get(path.rstrip("/"))
         return self.path_index.get(path + "/")
 
+    def live_redirect_base(self) -> str:
+        """Current PasarGuard public base (domain if set, else IP); tracks .env changes."""
+        return resolve_live_base(
+            env_path=getattr(self.config, "pasarguard_env", None) or "/opt/pasarguard/.env",
+            fallback=self.config.redirect_base or "",
+            cache_key=f"{getattr(self.config, 'pasarguard_env', '')}|{self.config.redirect_base}",
+        )
+
+    def resolve_location(self, mapped: str) -> str:
+        """Map relative (or legacy absolute) target → absolute Location with live base."""
+        rel = path_only(mapped) if mapped else ""
+        if not rel:
+            return ""
+        return build_redirect_url(rel, self.live_redirect_base())
+
     async def handle(
         self,
         reader: asyncio.StreamReader,
@@ -100,8 +116,8 @@ class RedirectApp:
                 await writer.drain()
                 return
 
-            target = self.lookup(path)
-            if not target:
+            mapped = self.lookup(path)
+            if not mapped:
                 log.info("404 %s %s peer=%s", method, path, peer)
                 resp = _http_response(
                     404, "Not Found",
@@ -112,6 +128,7 @@ class RedirectApp:
                 await writer.drain()
                 return
 
+            target = self.resolve_location(mapped)
             log.info("301 %s %s -> %s peer=%s", method, path, target, peer)
             resp = _http_response(
                 301, "Moved Permanently",

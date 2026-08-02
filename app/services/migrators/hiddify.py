@@ -163,12 +163,6 @@ class HiddifyMigrator(BaseMigrator):
         return migrated
 
     def _get_panel_url(self) -> str:
-        import socket
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-        except Exception:
-            ip = "SERVER_IP"
-        return f"https://{ip}:8000/dashboard/"
+        from app.services.pg_access import get_panel_access_info
+
+        return get_panel_access_info().get("login_url") or "https://127.0.0.1:8000/dashboard/"

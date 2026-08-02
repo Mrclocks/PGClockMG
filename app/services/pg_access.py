@@ -34,24 +34,76 @@ def _has_ssl(env_text: str) -> bool:
     return bool(cert and key and not str(cert).startswith("#") and not str(key).startswith("#"))
 
 
-def _guess_domain(env_text: str) -> str | None:
-    cert = read_env_var(env_text, "UVICORN_SSL_CERTFILE") or ""
-    m = re.search(r"/certs/([^/]+)/", cert.replace("\\", "/"))
-    if m and "." in m.group(1) and m.group(1) != "ip":
-        return m.group(1)
-    origins = read_env_var(env_text, "ALLOWED_ORIGINS") or ""
-    for part in re.split(r"[\s,]+", origins):
-        part = part.strip().rstrip("/")
-        m2 = re.match(r"https?://([^/:]+)", part)
-        if m2 and "." in m2.group(1) and m2.group(1) not in ("localhost", "127.0.0.1"):
-            return m2.group(1)
-    return None
-
-
 def _looks_like_ip(host: str | None) -> bool:
     if not host:
         return False
     return bool(re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", host.strip()))
+
+
+def _hostname_from_url(val: str) -> str | None:
+    from urllib.parse import urlparse
+
+    raw = (val or "").strip()
+    if not (raw.startswith("http://") or raw.startswith("https://")):
+        return None
+    host = urlparse(raw).hostname or ""
+    if host and "." in host and host not in ("localhost", "127.0.0.1") and not _looks_like_ip(host):
+        return host
+    return None
+
+
+def _guess_domain(env_text: str) -> str | None:
+    for key in (
+        "SUBSCRIPTION_URL_PREFIX",
+        "XRAY_SUBSCRIPTION_URL_PREFIX",
+        "XRAY_SUBSCRIPTION_URL",
+        "SUBSCRIPTION_URL",
+        "PUBLIC_URL",
+        "UVICORN_PUBLIC_URL",
+        "ALLOWED_ORIGINS",
+    ):
+        raw = read_env_var(env_text, key) or ""
+        if key == "ALLOWED_ORIGINS":
+            for part in re.split(r"[\s,]+", raw):
+                host = _hostname_from_url(part.strip().rstrip("/"))
+                if host:
+                    return host
+            continue
+        host = _hostname_from_url(raw.strip().rstrip("/"))
+        if host:
+            return host
+    cert = read_env_var(env_text, "UVICORN_SSL_CERTFILE") or ""
+    m = re.search(r"/certs/([^/]+)/", cert.replace("\\", "/"))
+    if m and "." in m.group(1) and m.group(1) != "ip" and not _looks_like_ip(m.group(1)):
+        return m.group(1)
+    return None
+
+
+def resolve_pasarguard_public_base(env_text: str | None = None) -> str:
+    """Public PasarGuard base URL (no trailing slash): domain preferred, else IP.
+
+    Used for subscription redirect targets and related links. Prefer explicit
+    subscription/public URL keys, then cert/ALLOWED_ORIGINS domain, then IP.
+    """
+    text = env_text if env_text is not None else _read_env()
+    for key in (
+        "SUBSCRIPTION_URL_PREFIX",
+        "XRAY_SUBSCRIPTION_URL_PREFIX",
+        "XRAY_SUBSCRIPTION_URL",
+        "SUBSCRIPTION_URL",
+        "PUBLIC_URL",
+        "UVICORN_PUBLIC_URL",
+    ):
+        val = (read_env_var(text, key) or "").strip().rstrip("/")
+        if val.startswith("http://") or val.startswith("https://"):
+            if val.endswith("/sub"):
+                val = val[:-4]
+            return val.rstrip("/")
+
+    port = (read_env_var(text, "UVICORN_PORT") or "8000").strip() or "8000"
+    scheme = "https" if _has_ssl(text) else "http"
+    host = _guess_domain(text) or _server_ip()
+    return f"{scheme}://{host}:{port}"
 
 
 def build_dashboard_url(host: str, port: str | int = "8000", *, https: bool = True, root_path: str = "") -> str:

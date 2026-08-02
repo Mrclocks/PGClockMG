@@ -1370,32 +1370,17 @@ def detect_public_ip() -> str:
 
 
 def pasarguard_subscription_base_url(env_text: str | None = None) -> str:
-    """Base URL where PasarGuard serves ``/sub/{token}`` (redirect target)."""
-    text = env_text or ""
-    if not text and PASARGUARD_ENV.exists():
+    """Base URL where PasarGuard serves ``/sub/{token}`` (redirect target).
+
+    Prefers domain from PasarGuard .env (SUBSCRIPTION_URL_PREFIX / certs);
+    falls back to server IP. pg-redirect also re-reads .env at request time.
+    """
+    from app.services.pg_access import resolve_pasarguard_public_base
+
+    text = env_text
+    if text is None and PASARGUARD_ENV.exists():
         text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
-
-    # Explicit subscription / public URL wins when set
-    for key in (
-        "XRAY_SUBSCRIPTION_URL",
-        "SUBSCRIPTION_URL",
-        "PUBLIC_URL",
-        "UVICORN_PUBLIC_URL",
-    ):
-        val = (read_env_var(text, key) or "").strip().rstrip("/")
-        if val.startswith("http://") or val.startswith("https://"):
-            # Strip trailing /sub if present
-            if val.endswith("/sub"):
-                val = val[:-4]
-            return val
-
-    port = read_env_var(text, "UVICORN_PORT") or "8000"
-    has_ssl = bool(
-        read_env_var(text, "UVICORN_SSL_CERTFILE")
-        or read_env_var(text, "UVICORN_SSL_KEYFILE")
-    )
-    scheme = "https" if has_ssl else "http"
-    return f"{scheme}://{detect_public_ip()}:{port}"
+    return resolve_pasarguard_public_base(text)
 
 
 def build_redirect_server_config(
@@ -1971,12 +1956,9 @@ class XuiMigrator(BaseMigrator):
         return resolved
 
     def _get_panel_url(self) -> str:
-        import socket
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-        except Exception:
-            ip = "SERVER_IP"
-        return f"https://{ip}:8000/dashboard/"
+        from app.services.pg_access import get_panel_access_info
+
+        return (
+            get_panel_access_info().get("login_url")
+            or f"https://{detect_public_ip()}:8000/dashboard/"
+        )
