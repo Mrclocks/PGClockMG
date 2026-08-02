@@ -234,10 +234,9 @@ def migration_params_from_connection(
 
 
 def _mysql_client_bins(db_type: str, service: str | None = None) -> list[str]:
-    name = f"{service or ''} {db_type or ''}".lower()
-    if "maria" in name:
-        return ["mariadb", "mysql"]
-    return ["mysql", "mariadb"]
+    from app.services.pasarguard_ops import mysql_client_bins
+
+    return mysql_client_bins(db_type, service)
 
 
 async def sync_mysql_roles_to_password(

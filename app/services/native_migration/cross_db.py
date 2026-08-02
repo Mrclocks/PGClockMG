@@ -13,6 +13,7 @@ from app.services.db_credentials import get_source_connection, get_target_connec
 from app.services.pasarguard_ops import (
     docker_compose_up,
     resolve_db_service,
+    normalize_target_db,
     _wait_db_service,
     build_sqlite_alembic_url,
     build_alembic_url_from_conn,
@@ -29,6 +30,8 @@ SUPPORTED_ENGINES = frozenset({
 
 
 def migration_strategy(source_db: str, target_db: str) -> str:
+    source_db = normalize_target_db(source_db)
+    target_db = normalize_target_db(target_db)
     if source_db == target_db:
         return "same_db"
     if source_db not in SUPPORTED_ENGINES or target_db not in SUPPORTED_ENGINES:
@@ -123,24 +126,37 @@ async def _reset_target_schema(migrator, target_db: str) -> None:
             f"GRANT ALL ON SCHEMA public TO \"{user}\"; "
             "GRANT ALL ON SCHEMA public TO public;"
         )
-        cmd = (
-            f'cd "{cwd}" && docker compose exec -T {service} '
-            f'env PGPASSWORD="{pwd}" psql -U {user} -d {db} -c "{sql}"'
-        )
+        cmds = [
+            (
+                f'cd "{cwd}" && docker compose exec -T {service} '
+                f'env PGPASSWORD="{pwd}" psql -U {user} -d {db} -c "{sql}"'
+            )
+        ]
     else:
-        cmd = (
-            f'cd "{cwd}" && docker compose exec -T {service} '
-            f'mysql -u {user} -p"{pwd}" -e '
-            f'"DROP DATABASE IF EXISTS `{db}`; CREATE DATABASE `{db}`;"'
-        )
+        from app.services.pasarguard_ops import mysql_client_bins
 
-    proc = await asyncio.create_subprocess_shell(
-        cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-    await proc.wait()
-    if proc.returncode != 0:
+        pwd_q = (pwd or "").replace('"', '\\"')
+        cmds = [
+            (
+                f'cd "{cwd}" && docker compose exec -T {service} '
+                f'{bin_name} -u {user} -p"{pwd_q}" -e '
+                f'"DROP DATABASE IF EXISTS `{db}`; CREATE DATABASE `{db}`;"'
+            )
+            for bin_name in mysql_client_bins(target_db, service)
+        ]
+
+    ok = False
+    for cmd in cmds:
+        proc = await asyncio.create_subprocess_shell(
+            cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        await proc.wait()
+        if proc.returncode == 0:
+            ok = True
+            break
+    if not ok:
         migrator.job.log("Warning: target schema reset returned non-zero — continuing")
 
 
@@ -290,6 +306,8 @@ async def run_two_phase_migration(
     upgrade_via_panel: bool = False,
 ) -> dict[str, int]:
     """Migrate any supported source → any supported target via head→head copy."""
+    source_db = normalize_target_db(source_db)
+    target_db = normalize_target_db(target_db)
     strategy = migration_strategy(source_db, target_db)
     if strategy == "unsupported":
         raise RuntimeError(f"Unsupported cross-DB migration: {source_db} → {target_db}")

@@ -65,7 +65,39 @@ DB_SERVICES = {
     "sqlite": tuple(),
 }
 
+# Aliases that may appear in labels / raw API params → canonical engine ids
+TARGET_DB_ALIASES = {
+    "postgres": "postgresql",
+    "pgsql": "postgresql",
+    "pg": "postgresql",
+    "timescale": "timescaledb",
+    "tsdb": "timescaledb",
+    "maria": "mariadb",
+}
+
 PASARGUARD_SERVICE_CANDIDATES = ("pasarguard", "panel", "app", "pg")
+
+
+def normalize_target_db(target_db: str | None) -> str:
+    """Map aliases to canonical PasarGuard engine ids."""
+    raw = (target_db or "sqlite").strip().lower()
+    return TARGET_DB_ALIASES.get(raw, raw)
+
+
+def mysql_client_bins(db_type: str = "", service: str | None = None) -> list[str]:
+    """SQL client binaries to try inside MySQL/MariaDB containers."""
+    name = f"{service or ''} {db_type or ''}".lower()
+    if "maria" in name:
+        return ["mariadb", "mysql"]
+    return ["mysql", "mariadb"]
+
+
+def mysql_admin_bins(db_type: str = "", service: str | None = None) -> list[str]:
+    """Admin ping binaries (MariaDB often ships ``mariadb-admin`` only)."""
+    name = f"{service or ''} {db_type or ''}".lower()
+    if "maria" in name:
+        return ["mariadb-admin", "mysqladmin"]
+    return ["mysqladmin", "mariadb-admin"]
 
 
 def _compose_text() -> str:
@@ -74,6 +106,7 @@ def _compose_text() -> str:
 
 
 def resolve_db_service(target_db: str) -> str | None:
+    target_db = normalize_target_db(target_db)
     if target_db == "sqlite":
         return None
     text = _compose_text()
@@ -444,19 +477,23 @@ async def read_mysql_alembic_version(migrator, target_db: str) -> str | None:
     host = conn.get("host") or "127.0.0.1"
     db = conn.get("database") or "pasarguard"
     cwd = str(PASARGUARD_DIR)
-    cmd = (
-        f'cd "{cwd}" && docker compose exec -T {service} '
-        f'mysql -u {user} -p"{pwd}" -h {host} -N -e '
-        f'"SELECT version_num FROM `{db}`.alembic_version LIMIT 1"'
-    )
-    proc = await asyncio.create_subprocess_shell(
-        cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-    )
-    stdout, _ = await proc.communicate()
-    if proc.returncode != 0:
-        return None
-    version = (stdout or b"").decode("utf-8", errors="ignore").strip()
-    return version or None
+    pwd_q = (pwd or "").replace('"', '\\"')
+    for bin_name in mysql_client_bins(target_db, service):
+        cmd = (
+            f'cd "{cwd}" && docker compose exec -T {service} '
+            f'{bin_name} -u {user} -p"{pwd_q}" -h {host} -N -e '
+            f'"SELECT version_num FROM `{db}`.alembic_version LIMIT 1"'
+        )
+        proc = await asyncio.create_subprocess_shell(
+            cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode != 0:
+            continue
+        version = (stdout or b"").decode("utf-8", errors="ignore").strip()
+        if version:
+            return version
+    return None
 
 
 def read_source_alembic_version(
@@ -553,26 +590,36 @@ async def _wait_db_service(migrator, target_db: str, service: str, attempts: int
     pwd = conn.get("password") or "password"
     db = conn.get("database") or "pasarguard"
     host = conn.get("host") or "127.0.0.1"
+    pwd_q = (pwd or "").replace('"', '\\"')
 
     for _ in range(attempts):
+        cmds: list[str] = []
         if service in ("postgresql", "timescaledb"):
-            cmd = (
-                f'cd "{cwd}" && docker compose exec -T {service} '
-                f'env PGPASSWORD="{pwd}" psql -U {user} -d {db} -c "SELECT 1"'
-            )
+            cmds = [
+                (
+                    f'cd "{cwd}" && docker compose exec -T {service} '
+                    f'env PGPASSWORD="{pwd_q}" psql -U {user} -d {db} -c "SELECT 1"'
+                )
+            ]
         elif service in ("mysql", "mariadb"):
-            cmd = (
-                f'cd "{cwd}" && docker compose exec -T {service} '
-                f'mysqladmin ping -h {host} -u {user} -p"{pwd}"'
-            )
+            for admin_bin in mysql_admin_bins(target_db, service):
+                cmds.append(
+                    f'cd "{cwd}" && docker compose exec -T {service} '
+                    f'{admin_bin} ping -h {host} -u {user} -p"{pwd_q}"'
+                )
         else:
             return
 
-        proc = await asyncio.create_subprocess_shell(
-            cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        )
-        await proc.wait()
-        if proc.returncode == 0:
+        ready = False
+        for cmd in cmds:
+            proc = await asyncio.create_subprocess_shell(
+                cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            )
+            await proc.wait()
+            if proc.returncode == 0:
+                ready = True
+                break
+        if ready:
             migrator.job.log(f"Database service {service} ready (db={db}, user={user})")
             return
         await asyncio.sleep(3)
@@ -604,11 +651,25 @@ async def read_target_alembic_version(migrator, target_db: str) -> str | None:
         )
     elif service in ("mysql", "mariadb"):
         host = conn.get("host") or "127.0.0.1"
-        cmd = (
-            f'cd "{cwd}" && docker compose exec -T {service} '
-            f'mysql -u {user} -p"{pwd}" -h {host} -N -e '
-            f'"SELECT version_num FROM `{db}`.alembic_version LIMIT 1"'
-        )
+        pwd_q = (pwd or "").replace('"', '\\"')
+        from app.services.native_migration.source_version import normalize_alembic_revision
+
+        for bin_name in mysql_client_bins(target_db, service):
+            cmd = (
+                f'cd "{cwd}" && docker compose exec -T {service} '
+                f'{bin_name} -u {user} -p"{pwd_q}" -h {host} -N -e '
+                f'"SELECT version_num FROM `{db}`.alembic_version LIMIT 1"'
+            )
+            proc = await asyncio.create_subprocess_shell(
+                cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await proc.communicate()
+            if proc.returncode != 0:
+                continue
+            version = (stdout or b"").decode("utf-8", errors="ignore").strip()
+            if version:
+                return normalize_alembic_revision(version)
+        return None
     else:
         return None
 
@@ -1062,10 +1123,23 @@ async def set_target_alembic_version(
             f"DELETE FROM alembic_version; "
             f"INSERT INTO alembic_version (version_num) VALUES ('{version}');"
         )
-        cmd = (
-            f'cd "{cwd}" && docker compose exec -T {service} '
-            f'mysql -u {user} -p"{pwd}" -h {host} {db} -e "{sql}"'
-        )
+        pwd_q = (pwd or "").replace('"', '\\"')
+        for bin_name in mysql_client_bins(target_db, service):
+            cmd = (
+                f'cd "{cwd}" && docker compose exec -T {service} '
+                f'{bin_name} -u {user} -p"{pwd_q}" -h {host} {db} -e "{sql}"'
+            )
+            proc = await asyncio.create_subprocess_shell(
+                cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            )
+            await proc.wait()
+            if proc.returncode == 0:
+                migrator.job.log(
+                    f"Target alembic_version set to {version} "
+                    f"(db={db}, user={user}, client={bin_name})"
+                )
+                return True
+        return False
     else:
         return False
 

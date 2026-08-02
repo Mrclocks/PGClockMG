@@ -1,6 +1,7 @@
 """Tests for 3x-ui DB resolution (bundle workspace vs file vs zip)."""
 
 import asyncio
+import json
 import sqlite3
 import sys
 import tempfile
@@ -20,6 +21,9 @@ from app.services.migrators.xui import (
     assert_migrated_pg_has_data,
     assert_migrated_core_config,
     patch_xui_converter_tag_bug,
+    normalize_subscription_mapping,
+    _subscription_path_only,
+    build_redirect_server_config,
     XuiMigrator,
 )
 from app.services.migrators.base import MigrationJob
@@ -389,8 +393,45 @@ def test_run_uses_bundled_schema_not_mysql_start():
     asyncio.run(_run())
 
 
-def test_install_redirect_uses_map_file_env():
-    """Upstream installer wants MAP_FILE=, not --mapping (which was treated as a tag)."""
+def test_normalize_subscription_mapping_strips_query():
+    """Clients hit /sub/{subId}; upstream mapping used /sub/{id}?name={id} → 404."""
+    with tempfile.TemporaryDirectory() as tmp:
+        mapping = Path(tmp) / "m.json"
+        mapping.write_text(
+            json.dumps({
+                "mappings": {
+                    "u1": {
+                        "old_subscription_url": "/sub/abc123?name=abc123",
+                        "new_subscription_url": "/sub/newtoken",
+                    },
+                    "u2": {
+                        "old_subscription_url": "https://x.example:2096/sub/zz?name=zz",
+                        "new_subscription_url": "sub/other",
+                    },
+                }
+            }),
+            encoding="utf-8",
+        )
+        normalize_subscription_mapping(mapping)
+        data = json.loads(mapping.read_text(encoding="utf-8"))
+        assert data["mappings"]["u1"]["old_subscription_url"] == "/sub/abc123"
+        assert data["mappings"]["u2"]["old_subscription_url"] == "/sub/zz"
+        assert data["mappings"]["u2"]["new_subscription_url"] == "/sub/other"
+        assert _subscription_path_only("/sub/a?name=a") == "/sub/a"
+
+
+def test_build_redirect_config_sets_domain_and_port():
+    cfg = build_redirect_server_config(
+        listen_port=2096,
+        redirect_domain="https://1.2.3.4:8000",
+    )
+    assert cfg["port"] == 2096
+    assert cfg["redirect_domain"] == "https://1.2.3.4:8000"
+    assert cfg["ssl"]["enabled"] is False
+
+
+def test_install_redirect_uses_map_file_and_config_file():
+    """Upstream wants MAP_FILE= + CONFIG_FILE= with redirect_domain set."""
     async def _run():
         job = MigrationJob(job_id="redir1")
         migrator = XuiMigrator(job, {})
@@ -402,104 +443,179 @@ def test_install_redirect_uses_map_file_env():
 
         with tempfile.TemporaryDirectory() as tmp:
             mapping = Path(tmp) / "subscription_url_mapping.json"
-            mapping.write_text('{"mappings":[]}', encoding="utf-8")
+            mapping.write_text(
+                json.dumps({
+                    "mappings": {
+                        "a": {
+                            "old_subscription_url": "/sub/tok?name=tok",
+                            "new_subscription_url": "/sub/new",
+                        }
+                    }
+                }),
+                encoding="utf-8",
+            )
             tools = Path(tmp) / "tools"
             script = tools / "migrations" / "redirect-server" / "install_redirect_server.sh"
             script.parent.mkdir(parents=True)
             script.write_text("#!/bin/bash\n", encoding="utf-8")
             with patch("app.services.migrators.xui.TOOLS_DIR", tools), \
                  patch.object(XuiMigrator, "_run_cmd", _fake_cmd):
-                ok = await migrator._install_redirect_server(mapping)
-        assert ok
-        assert seen
-        blob = " ".join(
-            c if isinstance(c, str) else " ".join(c) for c in seen
-        )
-        assert "MAP_FILE=" in blob
-        assert "--mapping" not in blob
-        assert "install_redirect_server.sh" in blob
+                ok = await migrator._install_redirect_server(
+                    mapping,
+                    listen_port=2096,
+                    redirect_domain="http://10.0.0.1:8000",
+                )
+            assert ok
+            blob = " ".join(
+                c if isinstance(c, str) else " ".join(c) for c in seen
+            )
+            assert "MAP_FILE=" in blob
+            assert "CONFIG_FILE=" in blob
+            assert "--mapping" not in blob
+            assert "install_redirect_server.sh" in blob
+            data = json.loads(mapping.read_text(encoding="utf-8"))
+            assert data["mappings"]["a"]["old_subscription_url"] == "/sub/tok"
+            cfg = json.loads(
+                (mapping.parent / "redirect-server-config.json").read_text(encoding="utf-8")
+            )
+            assert cfg["port"] == 2096
+            assert cfg["redirect_domain"] == "http://10.0.0.1:8000"
 
     asyncio.run(_run())
 
 
+def test_normalize_target_db_aliases():
+    from app.services.pasarguard_ops import normalize_target_db, mysql_client_bins
+
+    assert normalize_target_db("postgres") == "postgresql"
+    assert normalize_target_db("timescale") == "timescaledb"
+    assert normalize_target_db("maria") == "mariadb"
+    assert normalize_target_db("MySQL") == "mysql"
+    assert mysql_client_bins("mariadb", "mariadb")[0] == "mariadb"
+    assert mysql_client_bins("mysql", "mysql")[0] == "mysql"
+
+
 def test_convert_landed_sqlite_syncs_mysql_and_finalizes_env():
     """Regression: panel Access denied pasarguard after copy-as-root."""
-    async def _run():
-        with tempfile.TemporaryDirectory() as tmp:
-            pg_dir = Path(tmp) / "opt" / "pasarguard"
-            data = Path(tmp) / "var" / "lib" / "pasarguard"
-            pg_dir.mkdir(parents=True)
-            data.mkdir(parents=True)
-            land = data / "db.sqlite3"
-            land.write_bytes(b"x")
+    asyncio.run(_assert_convert_for_target("mysql"))
+
+
+def test_convert_landed_sqlite_for_all_server_engines():
+    """sqlite→mysql/mariadb/postgresql/timescaledb all finalize .env + sync roles."""
+    for engine in ("mysql", "mariadb", "postgresql", "timescaledb"):
+        asyncio.run(_assert_convert_for_target(engine))
+
+
+async def _assert_convert_for_target(target_db: str):
+    with tempfile.TemporaryDirectory() as tmp:
+        pg_dir = Path(tmp) / "opt" / "pasarguard"
+        data = Path(tmp) / "var" / "lib" / "pasarguard"
+        pg_dir.mkdir(parents=True)
+        data.mkdir(parents=True)
+        land = data / "db.sqlite3"
+        land.write_bytes(b"x")
+
+        if target_db in ("mysql", "mariadb"):
             install_env = (
-                "SQLALCHEMY_DATABASE_URL="
-                '"mysql+asyncmy://pasarguard:appsecret@127.0.0.1:3306/pasarguard"\n'
+                f"SQLALCHEMY_DATABASE_URL="
+                f'"mysql+asyncmy://pasarguard:appsecret@127.0.0.1:3306/pasarguard"\n'
                 "DB_USER=pasarguard\n"
                 "DB_PASSWORD=appsecret\n"
                 "DB_NAME=pasarguard\n"
                 "MYSQL_ROOT_PASSWORD=rootsecret\n"
             )
-            (pg_dir / ".env").write_text(install_env, encoding="utf-8")
+            url_needle = "mysql+asyncmy://"
+            secret = "rootsecret"
+            port = "3306"
+            admin_user = "root"
+        else:
+            install_env = (
+                f"SQLALCHEMY_DATABASE_URL="
+                f'"postgresql+asyncpg://pasarguard:pgsecret@127.0.0.1:5432/pasarguard"\n'
+                "DB_USER=pasarguard\n"
+                "DB_PASSWORD=pgsecret\n"
+                "DB_NAME=pasarguard\n"
+                "POSTGRES_USER=postgres\n"
+                "POSTGRES_PASSWORD=pgsecret\n"
+            )
+            url_needle = "postgresql+asyncpg://"
+            secret = "pgsecret"
+            port = "5432"
+            admin_user = "postgres"
 
-            job = MigrationJob(job_id="conv1")
-            migrator = XuiMigrator(job, {"target_db": "mysql"})
-            calls = {"sync": 0, "cross": 0}
+        (pg_dir / ".env").write_text(install_env, encoding="utf-8")
 
-            async def _fake_cross(migrator, path, src, tgt):
-                calls["cross"] += 1
-                migrator.params = {
-                    "target_db": "mysql",
-                    "_resolved_target_conn": {
-                        "user": "root",
-                        "password": "rootsecret",
-                        "database": "pasarguard",
-                        "host": "127.0.0.1",
-                        "port": "3306",
-                        "db_type": "mysql",
-                    },
-                }
+        job = MigrationJob(job_id=f"conv-{target_db}")
+        migrator = XuiMigrator(job, {"target_db": target_db})
+        calls = {"mysql_sync": 0, "pg_sync": 0, "cross": 0, "cross_tgt": None}
 
-            async def _fake_sync(migrator, db_type, admin, **kw):
-                calls["sync"] += 1
-                assert db_type == "mysql"
-                assert kw.get("app_user") == "pasarguard"
-                assert kw.get("password") == "rootsecret"
-
-            async def _fake_resolve(migrator, db_type, env_text=None):
-                return {
-                    "user": "root",
-                    "password": "rootsecret",
+        async def _fake_cross(migrator, path, src, tgt):
+            calls["cross"] += 1
+            calls["cross_tgt"] = tgt
+            migrator.params = {
+                "target_db": tgt,
+                "_resolved_target_conn": {
+                    "user": admin_user,
+                    "password": secret,
                     "database": "pasarguard",
-                    "db_type": db_type,
-                }
+                    "host": "127.0.0.1",
+                    "port": port,
+                    "db_type": tgt,
+                },
+            }
 
-            with patch("app.services.migrators.xui.PASARGUARD_DIR", pg_dir), \
-                 patch("app.services.migrators.xui.PASARGUARD_DATA", data), \
-                 patch("app.services.migrators.xui.PASARGUARD_ENV", pg_dir / ".env"), \
-                 patch("app.services.migrators.xui.run_cross_db_migration", _fake_cross), \
-                 patch(
-                     "app.services.db_auth.resolve_live_admin_connection",
-                     _fake_resolve,
-                 ), \
-                 patch(
-                     "app.services.db_auth.sync_mysql_roles_to_password",
-                     _fake_sync,
-                 ):
-                await migrator._convert_landed_sqlite_to_target(
-                    land, "mysql", install_env,
-                )
+        async def _fake_mysql_sync(migrator, db_type, admin, **kw):
+            calls["mysql_sync"] += 1
+            assert db_type == target_db
+            assert kw.get("app_user") == "pasarguard"
+            assert kw.get("password") == secret
 
-            assert calls["cross"] == 1
-            assert calls["sync"] == 1
-            env_now = (pg_dir / ".env").read_text(encoding="utf-8")
-            assert "mysql+asyncmy://" in env_now
-            assert "pasarguard" in env_now
-            assert "rootsecret" in env_now
-            assert not land.exists()  # relocated after convert
-            assert list(data.glob("db.sqlite3.pre-convert-*.bak"))
+        async def _fake_pg_sync(migrator, db_type, admin, env_text=None):
+            calls["pg_sync"] += 1
+            assert db_type == target_db
 
-    asyncio.run(_run())
+        async def _fake_resolve(migrator, db_type, env_text=None):
+            return {
+                "user": admin_user,
+                "password": secret,
+                "database": "pasarguard",
+                "db_type": db_type,
+            }
+
+        with patch("app.services.migrators.xui.PASARGUARD_DIR", pg_dir), \
+             patch("app.services.migrators.xui.PASARGUARD_DATA", data), \
+             patch("app.services.migrators.xui.PASARGUARD_ENV", pg_dir / ".env"), \
+             patch("app.services.migrators.xui.run_cross_db_migration", _fake_cross), \
+             patch(
+                 "app.services.db_auth.resolve_live_admin_connection",
+                 _fake_resolve,
+             ), \
+             patch(
+                 "app.services.db_auth.sync_mysql_roles_to_password",
+                 _fake_mysql_sync,
+             ), \
+             patch(
+                 "app.services.db_auth.sync_postgres_roles_to_app_password",
+                 _fake_pg_sync,
+             ):
+            await migrator._convert_landed_sqlite_to_target(
+                land, target_db, install_env,
+            )
+
+        assert calls["cross"] == 1
+        assert calls["cross_tgt"] == target_db
+        if target_db in ("mysql", "mariadb"):
+            assert calls["mysql_sync"] == 1
+            assert calls["pg_sync"] == 0
+        else:
+            assert calls["pg_sync"] == 1
+            assert calls["mysql_sync"] == 0
+        env_now = (pg_dir / ".env").read_text(encoding="utf-8")
+        assert url_needle in env_now
+        assert "pasarguard" in env_now
+        assert secret in env_now
+        assert not land.exists()
+        assert list(data.glob("db.sqlite3.pre-convert-*.bak"))
 
 
 def test_patch_xui_converter_tag_bug_moves_assignment():
@@ -627,8 +743,12 @@ if __name__ == "__main__":
     test_assert_migrated_pg_has_data()
     test_run_does_not_copy2_directory()
     test_run_uses_bundled_schema_not_mysql_start()
-    test_install_redirect_uses_map_file_env()
+    test_normalize_subscription_mapping_strips_query()
+    test_build_redirect_config_sets_domain_and_port()
+    test_install_redirect_uses_map_file_and_config_file()
+    test_normalize_target_db_aliases()
     test_convert_landed_sqlite_syncs_mysql_and_finalizes_env()
+    test_convert_landed_sqlite_for_all_server_engines()
     test_patch_xui_converter_tag_bug_moves_assignment()
     test_assert_migrated_core_config_rejects_empty()
     test_run_cmd_shell_string_uses_subprocess_shell()

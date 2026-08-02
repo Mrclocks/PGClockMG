@@ -6,14 +6,17 @@ engine to copy head→head into the requested engine.
 
 from __future__ import annotations
 
+import json
 import shutil
+import socket
 import sqlite3
 from pathlib import Path
+from urllib.parse import urlparse
 
 from app.config import PASARGUARD_DIR, PASARGUARD_DATA, PASARGUARD_ENV, TOOLS_DIR, BACKUP_DIR
 from app.services.migrators.base import BaseMigrator
 from app.services.prerequisites import find_xui_db
-from app.services.pasarguard_ops import safe_start_pasarguard
+from app.services.pasarguard_ops import safe_start_pasarguard, normalize_target_db
 from app.services.native_migration import run_cross_db_migration
 from app.services.env_migration import (
     env_points_to_db,
@@ -296,12 +299,176 @@ def assert_migrated_core_config(path: Path) -> None:
         conn.close()
 
 
+def _subscription_path_only(url: str) -> str:
+    """Path used by redirect-server lookup (must match ``r.URL.Path``, no query)."""
+    raw = (url or "").strip()
+    if not raw:
+        return "/"
+    if raw.startswith("http://") or raw.startswith("https://"):
+        parsed = urlparse(raw)
+        path = parsed.path or "/"
+    else:
+        path = raw.split("?", 1)[0]
+    if not path.startswith("/"):
+        path = "/" + path
+    return path or "/"
+
+
+def normalize_subscription_mapping(mapping_path: Path) -> dict:
+    """Fix official mapping so redirect-server can match client requests.
+
+    Upstream writes ``/sub/{subId}?name={subId}`` but browsers/clients request
+    ``/sub/{subId}`` (query is not part of ``URL.Path``) → permanent 404.
+    """
+    path = Path(mapping_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    mappings = data.get("mappings") or {}
+    fixed = 0
+    for _key, entry in mappings.items():
+        if not isinstance(entry, dict):
+            continue
+        old = entry.get("old_subscription_url") or ""
+        new = entry.get("new_subscription_url") or ""
+        old_n = _subscription_path_only(old)
+        if old_n != old:
+            entry["old_subscription_url"] = old_n
+            fixed += 1
+        if new and not new.startswith("http"):
+            new_n = _subscription_path_only(new)
+            if new_n != new:
+                entry["new_subscription_url"] = new_n
+                fixed += 1
+    data["url_formats"] = {
+        "old_format": "/sub/{subId}",
+        "new_format": "/sub/{token}",
+    }
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    data["_normalized_entries"] = fixed
+    return data
+
+
+def read_xui_subscription_listen(xui_db: Path) -> dict:
+    """Read 3x-ui subscription listener settings (port/path/certs)."""
+    out = {
+        "port": 2096,
+        "path": "sub",
+        "domain": "",
+        "cert": "",
+        "key": "",
+        "ssl": False,
+    }
+    try:
+        conn = sqlite3.connect(f"file:{xui_db}?mode=ro", uri=True)
+        try:
+            rows = conn.execute("SELECT key, value FROM settings").fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return out
+
+    settings = {str(k): ("" if v is None else str(v)) for k, v in rows}
+    port_raw = settings.get("subPort") or settings.get("sub_port") or ""
+    try:
+        port = int(str(port_raw).strip()) if str(port_raw).strip() else 2096
+    except ValueError:
+        port = 2096
+    if port <= 0 or port > 65535:
+        port = 2096
+    path = (settings.get("subPath") or settings.get("sub_path") or "sub").strip().strip("/") or "sub"
+    domain = (
+        settings.get("subURI")
+        or settings.get("subDomain")
+        or settings.get("sub_domain")
+        or ""
+    ).strip()
+    cert = (settings.get("subCertFile") or settings.get("webCertFile") or "").strip()
+    key = (settings.get("subKeyFile") or settings.get("webKeyFile") or "").strip()
+    ssl = bool(cert and key and Path(cert).is_file() and Path(key).is_file())
+    out.update({
+        "port": port,
+        "path": path,
+        "domain": domain,
+        "cert": cert if ssl else "",
+        "key": key if ssl else "",
+        "ssl": ssl,
+    })
+    return out
+
+
+def detect_public_ip() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip or "127.0.0.1"
+    except Exception:
+        return "127.0.0.1"
+
+
+def pasarguard_subscription_base_url(env_text: str | None = None) -> str:
+    """Base URL where PasarGuard serves ``/sub/{token}`` (redirect target)."""
+    text = env_text or ""
+    if not text and PASARGUARD_ENV.exists():
+        text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+
+    # Explicit subscription / public URL wins when set
+    for key in (
+        "XRAY_SUBSCRIPTION_URL",
+        "SUBSCRIPTION_URL",
+        "PUBLIC_URL",
+        "UVICORN_PUBLIC_URL",
+    ):
+        val = (read_env_var(text, key) or "").strip().rstrip("/")
+        if val.startswith("http://") or val.startswith("https://"):
+            # Strip trailing /sub if present
+            if val.endswith("/sub"):
+                val = val[:-4]
+            return val
+
+    port = read_env_var(text, "UVICORN_PORT") or "8000"
+    has_ssl = bool(
+        read_env_var(text, "UVICORN_SSL_CERTFILE")
+        or read_env_var(text, "UVICORN_SSL_KEYFILE")
+    )
+    scheme = "https" if has_ssl else "http"
+    return f"{scheme}://{detect_public_ip()}:{port}"
+
+
+def build_redirect_server_config(
+    *,
+    listen_port: int,
+    redirect_domain: str,
+    ssl_cert: str = "",
+    ssl_key: str = "",
+) -> dict:
+    ssl_enabled = bool(ssl_cert and ssl_key)
+    cert_pem = ""
+    key_pem = ""
+    if ssl_enabled:
+        cert_pem = Path(ssl_cert).read_text(encoding="utf-8", errors="ignore")
+        key_pem = Path(ssl_key).read_text(encoding="utf-8", errors="ignore")
+    return {
+        "host": "0.0.0.0",
+        "port": int(listen_port),
+        "redirect_domain": (redirect_domain or "").rstrip("/"),
+        "panel": "x-ui",
+        "ssl": {
+            "enabled": ssl_enabled,
+            "cert": cert_pem,
+            "key": key_pem,
+        },
+    }
+
+
 class XuiMigrator(BaseMigrator):
     async def run(self, params: dict) -> dict:
         upload_path = params.get("upload_path")
         upload_work_dir = params.get("upload_work_dir")
         install_redirect = params.get("install_redirect", True)
-        target_db = params.get("target_db") or "sqlite"
+        target_db = normalize_target_db(params.get("target_db") or "sqlite")
+        params["target_db"] = target_db
+        self.params["target_db"] = target_db
 
         self.job.set_progress(5, "یافتن دیتابیس 3x-ui...")
 
@@ -386,18 +553,30 @@ class XuiMigrator(BaseMigrator):
 
         self.job.set_progress(80, "تولید mapping لینک‌های اشتراک...")
         mapping_file = work_dir / "subscription_url_mapping.json"
-        await self._run_cmd(
-            ["uv", "run", "migration/generate_subscription_url_mapping.py",
-             "--xui-db", str(input_db),
-             "--pasarguard-db", str(land_db),
-             "--output", str(mapping_file)],
-            cwd=str(xui_tool),
-        )
+        xui_listen = read_xui_subscription_listen(Path(xui_db))
+        # Allow wizard overrides
+        if params.get("xui_sub_port"):
+            try:
+                xui_listen["port"] = int(params["xui_sub_port"])
+            except (TypeError, ValueError):
+                pass
+        if params.get("xui_sub_path"):
+            xui_listen["path"] = str(params["xui_sub_path"]).strip().strip("/") or "sub"
 
-        redirect_installed = False
-        if install_redirect and mapping_file.exists():
-            self.job.set_progress(85, "نصب سرور ریدایرکت لینک‌های قدیمی...")
-            redirect_installed = await self._install_redirect_server(mapping_file)
+        map_cmd = [
+            "uv", "run", "migration/generate_subscription_url_mapping.py",
+            "--xui-db", str(input_db),
+            "--pasarguard-db", str(land_db),
+            "--output", str(mapping_file),
+            "--xui-path", xui_listen["path"],
+        ]
+        await self._run_cmd(map_cmd, cwd=str(xui_tool))
+        if mapping_file.exists():
+            norm = normalize_subscription_mapping(mapping_file)
+            self.job.log(
+                f"Normalized subscription mapping paths "
+                f"(stripped ?name= query; {norm.get('_normalized_entries', 0)} entries touched)"
+            )
 
         if target_db != "sqlite":
             self.job.set_progress(88, f"Two-phase: SQLite → {target_db}...")
@@ -405,59 +584,170 @@ class XuiMigrator(BaseMigrator):
                 land_db, target_db, install_env_snapshot,
             )
 
-        self.job.set_progress(95, "راه‌اندازی مجدد PasarGuard...")
+        self.job.set_progress(92, "راه‌اندازی مجدد PasarGuard...")
         await safe_start_pasarguard(self)
 
+        redirect_installed = False
+        redirect_port = xui_listen["port"]
+        redirect_domain = (
+            (params.get("redirect_domain") or "").strip()
+            or pasarguard_subscription_base_url(
+                PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+                if PASARGUARD_ENV.exists()
+                else install_env_snapshot
+            )
+        )
+        if install_redirect and mapping_file.exists():
+            self.job.set_progress(96, "نصب سرور ریدایرکت لینک‌های قدیمی...")
+            redirect_installed = await self._install_redirect_server(
+                mapping_file,
+                listen_port=redirect_port,
+                redirect_domain=redirect_domain,
+                ssl_cert=xui_listen.get("cert") or "",
+                ssl_key=xui_listen.get("key") or "",
+            )
+
         self.job.set_progress(100, "3x-ui migration complete!")
+        warn_en = [
+            "Old /sub/{subId} links are redirected to PasarGuard via redirect-server.",
+            f"Redirect listens on port {redirect_port} → {redirect_domain}/sub/…",
+            "Create admin: pasarguard cli generate-temp-key",
+            "Add Hosts in the panel for each inbound so new subscription configs resolve.",
+        ]
+        warn_fa = [
+            "لینک‌های قدیمی /sub/{subId} با redirect-server به پاسارگارد هدایت می‌شوند.",
+            f"ریدایرکت روی پورت {redirect_port} → {redirect_domain}/sub/…",
+            "ادمین بسازید: pasarguard cli generate-temp-key",
+            "برای هر inbound در پنل Host بسازید تا کانفیگ سابسکریپشن جدید کامل شود.",
+        ]
+        warn_ru = [
+            "Старые /sub/{subId} перенаправляются на PasarGuard через redirect-server.",
+            f"Redirect слушает порт {redirect_port} → {redirect_domain}/sub/…",
+            "Создайте админа: pasarguard cli generate-temp-key",
+            "Создайте Hosts для inbound'ов в панели для новых подписок.",
+        ]
+        if not redirect_installed and install_redirect:
+            warn_en.insert(0, "Redirect server did NOT install — old subscription links will not work until fixed.")
+            warn_fa.insert(0, "سرور ریدایرکت نصب نشد — لینک‌های قدیمی کار نمی‌کنند تا درست شود.")
+            warn_ru.insert(0, "Redirect-server не установился — старые ссылки не работают.")
+
         return {
             "panel_url": self._get_panel_url(),
             "subscription_mode": "redirect",
             "redirect_installed": redirect_installed,
+            "redirect_port": redirect_port,
+            "redirect_domain": redirect_domain,
             "target_db": target_db,
             "mapping_file": str(mapping_file) if mapping_file.exists() else None,
             "source_counts": src_counts,
             "migrated_counts": out_counts,
             "warnings": {
-                "en": [
-                    "Old /sub/{token} links keep working via the redirect server (installed by default).",
-                    "Create admin: pasarguard cli generate-temp-key",
-                    "Add Hosts in the panel for each inbound so new subscription configs resolve.",
-                ],
-                "fa": [
-                    "لینک‌های قدیمی /sub/{token} با redirect server بدون تغییر می‌مانند.",
-                    "ادمین بسازید: pasarguard cli generate-temp-key",
-                    "برای هر inbound در پنل Host بسازید تا کانفیگ سابسکریپشن جدید کامل شود.",
-                ],
-                "ru": [
-                    "Старые ссылки /sub/{token} сохраняются через redirect server.",
-                    "Создайте админа: pasarguard cli generate-temp-key",
-                    "Создайте Hosts для inbound'ов в панели для новых подписок.",
-                ],
+                "en": warn_en,
+                "fa": warn_fa,
+                "ru": warn_ru,
             },
         }
 
-    async def _install_redirect_server(self, mapping_file: Path) -> bool:
+    async def _stop_xui_for_redirect_port(self, port: int) -> None:
+        """Free the old 3x-ui subscription port so redirect-server can bind it."""
+        # Best-effort: stop common x-ui unit / process without failing migration
+        await self._run_cmd(
+            ["bash", "-c", "systemctl stop x-ui 2>/dev/null || true"],
+            timeout=60,
+        )
+        await self._run_cmd(
+            ["bash", "-c", "systemctl stop x-ui.service 2>/dev/null || true"],
+            timeout=60,
+        )
+        # Kill anything still listening on the subscription port (usually x-ui sub)
+        await self._run_cmd(
+            [
+                "bash", "-c",
+                f"fuser -k {int(port)}/tcp 2>/dev/null || "
+                f"(command -v lsof >/dev/null && "
+                f"lsof -ti tcp:{int(port)} | xargs -r kill -9) || true",
+            ],
+            timeout=30,
+        )
+        self.job.log(f"Freed port {port} for redirect-server (stopped x-ui if present)")
+
+    async def _install_redirect_server(
+        self,
+        mapping_file: Path,
+        *,
+        listen_port: int = 2096,
+        redirect_domain: str = "",
+        ssl_cert: str = "",
+        ssl_key: str = "",
+    ) -> bool:
         """Install PasarGuard redirect-server so old x-ui /sub links keep working.
 
-        Upstream installer expects ``MAP_FILE=/path`` (not ``--mapping``). Prefer the
-        locally cloned script under tools/migrations/redirect-server.
+        Critical details vs upstream defaults:
+        - ``MAP_FILE`` env (not ``--mapping``)
+        - ``CONFIG_FILE`` with listen port = old x-ui sub port and
+          ``redirect_domain`` = PasarGuard base (empty domain would redirect
+          back to the redirect port and 404)
+        - Mapping paths must be query-free (``normalize_subscription_mapping``)
         """
         mapping = Path(mapping_file)
         if not mapping.is_file():
             return False
+
+        normalize_subscription_mapping(mapping)
+        if not redirect_domain:
+            redirect_domain = pasarguard_subscription_base_url()
+        await self._stop_xui_for_redirect_port(listen_port)
+
+        cfg = build_redirect_server_config(
+            listen_port=listen_port,
+            redirect_domain=redirect_domain,
+            ssl_cert=ssl_cert,
+            ssl_key=ssl_key,
+        )
+        cfg_path = mapping.parent / "redirect-server-config.json"
+        cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+        self.job.log(
+            f"Redirect config: port={listen_port} redirect_domain={redirect_domain} "
+            f"ssl={cfg['ssl']['enabled']}"
+        )
+
+        # Remove previous config so installer accepts our CONFIG_FILE
+        await self._run_cmd(
+            ["bash", "-c", "rm -f /etc/redirect-server/config.json 2>/dev/null || true"],
+            timeout=15,
+        )
+
         local = TOOLS_DIR / "migrations" / "redirect-server" / "install_redirect_server.sh"
-        # Official API: MAP_FILE env + optional version arg (default latest)
         if local.is_file():
-            cmd = f'MAP_FILE="{mapping}" bash "{local}" latest'
+            cmd = (
+                f'MAP_FILE="{mapping}" CONFIG_FILE="{cfg_path}" '
+                f'bash "{local}" latest'
+            )
         else:
             url = (
                 "https://raw.githubusercontent.com/PasarGuard/migrations/main/"
                 "redirect-server/install_redirect_server.sh"
             )
-            cmd = f'MAP_FILE="{mapping}" bash -c \'curl -fsSL "{url}" | bash -s -- latest\''
+            cmd = (
+                f'MAP_FILE="{mapping}" CONFIG_FILE="{cfg_path}" '
+                f"bash -c 'curl -fsSL \"{url}\" | bash -s -- latest'"
+            )
         ok, out = await self._run_cmd(["bash", "-c", cmd], timeout=600)
         if ok:
-            self.job.log("Redirect server installed — old subscription URLs stay valid")
+            # Ensure our config/mapping won even if installer skipped overwrite
+            await self._run_cmd(
+                [
+                    "bash", "-c",
+                    f'cp -f "{mapping}" /etc/redirect-server/subscription_url_mapping.json && '
+                    f'cp -f "{cfg_path}" /etc/redirect-server/config.json && '
+                    f'chown redirectsrv:redirectsrv /etc/redirect-server/* 2>/dev/null || true && '
+                    f'systemctl restart redirect-server 2>/dev/null || true',
+                ],
+                timeout=60,
+            )
+            self.job.log(
+                "Redirect server installed — old /sub/{subId} → PasarGuard /sub/{token}"
+            )
             return True
         self.job.log(
             "Redirect server install failed (old /sub links may break until fixed): "
@@ -490,6 +780,7 @@ class XuiMigrator(BaseMigrator):
             if PASARGUARD_ENV.exists()
             else ""
         )
+        target_db = normalize_target_db(target_db)
         app_user = (
             read_env_var(env, "DB_USER")
             or read_env_var(env, "MYSQL_USER")
@@ -502,14 +793,22 @@ class XuiMigrator(BaseMigrator):
             or read_env_var(env, "POSTGRES_DB")
             or "pasarguard"
         )
-        # Prefer MYSQL_ROOT_PASSWORD for sync (matches restore convert); URL keeps app user.
-        sync_pwd = (
-            read_env_var(env, "MYSQL_ROOT_PASSWORD")
-            or read_env_var(env, "DB_PASSWORD")
-            or read_env_var(env, "MYSQL_PASSWORD")
-            or read_env_var(env, "POSTGRES_PASSWORD")
-            or ""
-        )
+        # Prefer engine-native root/admin secret for sync; URL keeps app user.
+        if target_db in ("mysql", "mariadb"):
+            sync_pwd = (
+                read_env_var(env, "MYSQL_ROOT_PASSWORD")
+                or read_env_var(env, "DB_PASSWORD")
+                or read_env_var(env, "MYSQL_PASSWORD")
+                or ""
+            )
+        elif target_db in ("postgresql", "timescaledb"):
+            sync_pwd = (
+                read_env_var(env, "POSTGRES_PASSWORD")
+                or read_env_var(env, "DB_PASSWORD")
+                or ""
+            )
+        else:
+            sync_pwd = read_env_var(env, "DB_PASSWORD") or ""
         admin = get_target_connection(self.params) or {}
         if not sync_pwd:
             sync_pwd = admin.get("password") or ""
