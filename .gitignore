@@ -8,6 +8,9 @@ backups/
 uploads/
 logs/
 tools/
+# Ship native redirect with the app (cloned PasarGuard tools stay ignored)
+!tools/pg_redirect/
+!tools/pg_redirect/**
 
 tests/_tmp_*
 __pycache__/
