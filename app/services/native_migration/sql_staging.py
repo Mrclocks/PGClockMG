@@ -28,6 +28,34 @@ def _compose_has_service(name: str) -> bool:
     return bool(name and re.search(rf"^\s*{re.escape(name)}\s*:", text, re.MULTILINE))
 
 
+def _safe_mysql_ident(name: str) -> str:
+    """Validate a MySQL identifier (alphanumeric + underscore only)."""
+    safe = "".join(c for c in (name or "") if c.isalnum() or c == "_")
+    if safe != name or not safe:
+        raise RuntimeError(f"Invalid MySQL database name: {name}")
+    return safe
+
+
+def mysql_shell_e_arg(sql: str) -> str:
+    """Embed SQL in a shell -e argument safely.
+
+    Must use single quotes: double-quoted shell strings expand backticks as
+    command substitution, turning ``CREATE DATABASE `pgmig_abc`;`` into
+    ``CREATE DATABASE ;`` and breaking ephemeral/compose MySQL staging.
+    """
+    if "'" in sql:
+        raise RuntimeError("MySQL -e SQL must not contain single quotes")
+    return f"'{sql}'"
+
+
+def mysql_create_db_sql(db: str, *, drop_first: bool = False) -> str:
+    """Build CREATE DATABASE SQL with backticks (safe when not shell-double-quoted)."""
+    safe = _safe_mysql_ident(db)
+    if drop_first:
+        return f"DROP DATABASE IF EXISTS `{safe}`; CREATE DATABASE `{safe}`;"
+    return f"CREATE DATABASE `{safe}`;"
+
+
 async def _import_via_compose_service(
     migrator, dump_path: Path, source_db: str, service: str, conn: dict, staging_db: str,
 ) -> None:
@@ -38,20 +66,29 @@ async def _import_via_compose_service(
     cwd = str(PASARGUARD_DIR)
 
     if source_db in ("mysql", "mariadb"):
+        # Single-quote -e payload — backticks inside double quotes are eaten by the shell
+        e_sql = mysql_shell_e_arg(mysql_create_db_sql(staging_db, drop_first=True))
         create_cmd = (
             f'cd "{cwd}" && docker compose exec -T {service} '
-            f'mysql -u {user} -p"{pwd}" -e '
-            f'"DROP DATABASE IF EXISTS `{staging_db}`; CREATE DATABASE `{staging_db}`;"'
+            f'mysql -u {user} -p"{pwd}" -e {e_sql}'
         )
+        safe_db = _safe_mysql_ident(staging_db)
         import_cmd = (
             f'cd "{cwd}" && docker compose exec -T {service} '
-            f'mysql -u {user} -p"{pwd}" {staging_db} < "{dump_path}"'
+            f'mysql -u {user} -p"{pwd}" {safe_db} < "{dump_path}"'
         )
         for cmd in (create_cmd, import_cmd):
-            proc = await asyncio.create_subprocess_shell(cmd)
-            await proc.wait()
+            proc = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out_b, _ = await proc.communicate()
             if proc.returncode != 0:
-                raise RuntimeError(f"SQL staging failed (db={staging_db})")
+                out = (out_b or b"").decode("utf-8", errors="replace")
+                raise RuntimeError(
+                    f"SQL staging failed (db={staging_db}): {out[-400:]}"
+                )
         return
 
     # PostgreSQL / TimescaleDB via compose
@@ -150,28 +187,56 @@ async def _import_via_compose_service(
         await p.wait()
 
 
-async def _import_via_ephemeral_mysql(
-    migrator, dump_path: Path, conn: dict, staging_db: str, container: str,
-) -> dict:
-    pwd = "pgmigrator"
-    user = "root"
-    port = _pick_free_host_port(33060)
+async def _mysql_ephemeral(
+    container: str,
+    pwd: str,
+    *,
+    sql: str | None = None,
+    database: str | None = None,
+    stdin_path: Path | None = None,
+) -> tuple[int, str]:
+    """Run mysql via docker exec argv (never through a shell).
 
-    await migrator._run_cmd(["docker", "rm", "-f", container], timeout=30)
-    await migrator._run_cmd([
-        "docker", "run", "-d", "--name", container,
-        "-e", f"MYSQL_ROOT_PASSWORD={pwd}",
-        "-p", f"127.0.0.1:{port}:3306",
-        "mysql:8",
-    ], timeout=180)
+    Shell -e with double-quoted ``CREATE DATABASE `name`;`` expands backticks
+    via command substitution and yields ``CREATE DATABASE ;``.
+    """
+    base = [
+        "docker", "exec",
+        *(["-i"] if stdin_path is not None else []),
+        container,
+        "mysql", "-h", "127.0.0.1", "-u", "root", f"-p{pwd}",
+    ]
+    if database:
+        base.append(database)
+    if stdin_path is not None:
+        with open(stdin_path, "rb") as fh:
+            proc = await asyncio.create_subprocess_exec(
+                *base,
+                stdin=fh,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out_b, _ = await proc.communicate()
+            return proc.returncode or 0, (out_b or b"").decode("utf-8", errors="replace")
+    proc = await asyncio.create_subprocess_exec(
+        *base, "-e", sql or "SELECT 1",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    out_b, _ = await proc.communicate()
+    return proc.returncode or 0, (out_b or b"").decode("utf-8", errors="replace")
 
-    # Wait until mysql accepts connections (init can take a while)
-    ready = False
+
+async def _wait_ephemeral_mysql_ready(container: str, pwd: str, attempts: int = 90) -> None:
+    """Wait until MySQL accepts queries (not just mysqladmin ping during init)."""
     last = ""
-    for i in range(60):
+    streak = 0
+    need_streak = 3  # ~6s of continuous readiness at 2s interval
+    for _ in range(attempts):
         if not await _container_running(container):
+            logs = await _container_logs_tail(container)
             raise RuntimeError(
-                f"Ephemeral MySQL exited early:\n{(await _container_logs_tail(container))[-800:]}"
+                f"Ephemeral MySQL container {container} exited early:\n{logs[-1000:]}"
             )
         proc = await asyncio.create_subprocess_exec(
             "docker", "exec", container,
@@ -180,40 +245,77 @@ async def _import_via_ephemeral_mysql(
             stderr=asyncio.subprocess.STDOUT,
         )
         out_b, _ = await proc.communicate()
-        last = (out_b or b"").decode("utf-8", errors="replace")
         if proc.returncode == 0:
-            ready = True
-            break
+            rc, out = await _mysql_ephemeral(container, pwd, sql="SELECT 1;")
+            if rc == 0:
+                streak += 1
+                if streak >= need_streak:
+                    return
+            else:
+                streak = 0
+                last = out or (out_b or b"").decode("utf-8", errors="replace")
+        else:
+            streak = 0
+            last = (out_b or b"").decode("utf-8", errors="replace")
         await asyncio.sleep(2)
-    if not ready:
-        await migrator._run_cmd(["docker", "rm", "-f", container], timeout=30)
-        raise RuntimeError(f"Ephemeral MySQL did not become ready: {last[-300:]}")
-
-    init_cmd = (
-        f'docker exec -i {container} mysql -h127.0.0.1 -u root -p"{pwd}" -e '
-        f'"CREATE DATABASE `{staging_db}`;"'
+    logs = await _container_logs_tail(container)
+    raise RuntimeError(
+        f"Ephemeral MySQL container {container} did not become ready: {last[-400:]}\n"
+        f"--- docker logs ---\n{logs[-800:]}"
     )
-    proc = await asyncio.create_subprocess_shell(init_cmd)
-    await proc.wait()
-    if proc.returncode != 0:
-        await migrator._run_cmd(["docker", "rm", "-f", container], timeout=30)
-        raise RuntimeError(f"Failed to create ephemeral MySQL database {staging_db}")
 
-    with open(dump_path, "rb") as fh:
-        proc = await asyncio.create_subprocess_exec(
-            "docker", "exec", "-i", container,
-            "mysql", "-h127.0.0.1", "-u", "root", f"-p{pwd}", staging_db,
-            stdin=fh,
+
+async def _import_via_ephemeral_mysql(
+    migrator, dump_path: Path, conn: dict, staging_db: str, container: str,
+) -> dict:
+    pwd = "pgmigrator"
+    user = "root"
+    port = _pick_free_host_port(33060)
+    safe_db = _safe_mysql_ident(staging_db)
+
+    await migrator._run_cmd(["docker", "rm", "-f", container], timeout=30)
+    ok, out = await migrator._run_cmd([
+        "docker", "run", "-d", "--name", container,
+        "-e", f"MYSQL_ROOT_PASSWORD={pwd}",
+        "-p", f"127.0.0.1:{port}:3306",
+        "mysql:8",
+    ], timeout=180)
+    if not ok:
+        raise RuntimeError(f"Failed to start ephemeral MySQL: {out[-500:]}")
+
+    try:
+        migrator.job.log("Waiting for ephemeral MySQL to finish init...")
+        await _wait_ephemeral_mysql_ready(container, pwd)
+
+        create_sql = mysql_create_db_sql(safe_db)
+        rc, create_out = await _mysql_ephemeral(container, pwd, sql=create_sql)
+        if rc != 0:
+            raise RuntimeError(
+                f"Failed to create ephemeral MySQL database {safe_db}: {create_out[-500:]}"
+            )
+
+        rc, import_out = await _mysql_ephemeral(
+            container, pwd, database=safe_db, stdin_path=dump_path,
         )
-        await proc.wait()
-        if proc.returncode != 0:
-            await migrator._run_cmd(["docker", "rm", "-f", container], timeout=30)
-            raise RuntimeError("Failed to import MySQL dump into ephemeral container")
+        if rc != 0:
+            raise RuntimeError(
+                f"Failed to import MySQL dump into ephemeral container: {import_out[-500:]}"
+            )
+    except Exception as e:
+        migrator.job.log(f"Ephemeral MySQL staging failed — cleaning up ({e})")
+        try:
+            logs = await _container_logs_tail(container)
+            if logs.strip():
+                migrator.job.log(f"Ephemeral MySQL logs:\n{logs[-1200:]}")
+        except Exception:
+            pass
+        await migrator._run_cmd(["docker", "rm", "-f", container], timeout=30)
+        raise
 
     return {
         "host": "127.0.0.1",
         "port": port,
-        "database": staging_db,
+        "database": safe_db,
         "user": user,
         "password": pwd,
         "_ephemeral_container": container,

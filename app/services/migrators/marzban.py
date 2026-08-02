@@ -627,10 +627,16 @@ class MarzbanMigrator(BaseMigrator):
         svc = resolve_db_service("mysql") or resolve_db_service("mariadb") or "mysql"
         await self._run_cmd(["docker", "compose", "up", "-d", svc], cwd=str(PASARGUARD_DIR))
         await asyncio.sleep(6)
+        from app.services.native_migration.sql_staging import (
+            mysql_create_db_sql,
+            mysql_shell_e_arg,
+        )
+
+        # Single-quote -e SQL: double quotes expand backticks via command substitution
+        e_sql = mysql_shell_e_arg(mysql_create_db_sql(db, drop_first=True))
         wipe = await asyncio.create_subprocess_shell(
             f'cd "{PASARGUARD_DIR}" && docker compose exec -T {svc} '
-            f'mysql -u {user} -p"{pwd}" -h {host} -e '
-            f'"DROP DATABASE IF EXISTS `{db}`; CREATE DATABASE `{db}`; "'
+            f'mysql -u {user} -p"{pwd}" -h {host} -e {e_sql}'
         )
         await wipe.wait()
         proc = await asyncio.create_subprocess_shell(

@@ -478,11 +478,19 @@ async def read_mysql_alembic_version(migrator, target_db: str) -> str | None:
     db = conn.get("database") or "pasarguard"
     cwd = str(PASARGUARD_DIR)
     pwd_q = (pwd or "").replace('"', '\\"')
+    from app.services.native_migration.sql_staging import (
+        _safe_mysql_ident,
+        mysql_shell_e_arg,
+    )
+
+    safe_db = _safe_mysql_ident(db)
+    e_sql = mysql_shell_e_arg(
+        f"SELECT version_num FROM `{safe_db}`.alembic_version LIMIT 1"
+    )
     for bin_name in mysql_client_bins(target_db, service):
         cmd = (
             f'cd "{cwd}" && docker compose exec -T {service} '
-            f'{bin_name} -u {user} -p"{pwd_q}" -h {host} -N -e '
-            f'"SELECT version_num FROM `{db}`.alembic_version LIMIT 1"'
+            f'{bin_name} -u {user} -p"{pwd_q}" -h {host} -N -e {e_sql}'
         )
         proc = await asyncio.create_subprocess_shell(
             cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
@@ -653,12 +661,19 @@ async def read_target_alembic_version(migrator, target_db: str) -> str | None:
         host = conn.get("host") or "127.0.0.1"
         pwd_q = (pwd or "").replace('"', '\\"')
         from app.services.native_migration.source_version import normalize_alembic_revision
+        from app.services.native_migration.sql_staging import (
+            _safe_mysql_ident,
+            mysql_shell_e_arg,
+        )
 
+        safe_db = _safe_mysql_ident(db)
+        e_sql = mysql_shell_e_arg(
+            f"SELECT version_num FROM `{safe_db}`.alembic_version LIMIT 1"
+        )
         for bin_name in mysql_client_bins(target_db, service):
             cmd = (
                 f'cd "{cwd}" && docker compose exec -T {service} '
-                f'{bin_name} -u {user} -p"{pwd_q}" -h {host} -N -e '
-                f'"SELECT version_num FROM `{db}`.alembic_version LIMIT 1"'
+                f'{bin_name} -u {user} -p"{pwd_q}" -h {host} -N -e {e_sql}'
             )
             proc = await asyncio.create_subprocess_shell(
                 cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,

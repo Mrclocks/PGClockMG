@@ -208,6 +208,203 @@ def test_transient_pg_error_detection():
     print("OK: transient pg error detection")
 
 
+def test_mysql_shell_e_arg_preserves_backticks():
+    """Regression: double-quoted -e ate backticks → CREATE DATABASE ;"""
+    import subprocess
+    from app.services.native_migration.sql_staging import (
+        mysql_create_db_sql,
+        mysql_shell_e_arg,
+    )
+
+    staging_db = "pgmig_89b78bab"
+    sql = mysql_create_db_sql(staging_db)
+    assert f"`{staging_db}`" in sql
+
+    # Buggy historical pattern (double quotes) expands backticks away
+    buggy = subprocess.run(
+        f'echo "CREATE DATABASE `{staging_db}`;"',
+        shell=True, capture_output=True, text=True,
+    )
+    assert "CREATE DATABASE ;" in buggy.stdout, buggy.stdout
+
+    # Fixed pattern (single quotes via helper) must keep identifier
+    fixed = subprocess.run(
+        f"echo {mysql_shell_e_arg(sql)}",
+        shell=True, capture_output=True, text=True,
+    )
+    assert f"`{staging_db}`" in fixed.stdout, fixed.stdout
+    assert "CREATE DATABASE ;" not in fixed.stdout
+    print("OK: mysql_shell_e_arg preserves backticks under shell")
+
+
+def test_mysql_create_db_sql_drop_first():
+    from app.services.native_migration.sql_staging import mysql_create_db_sql
+
+    s = mysql_create_db_sql("pgmig_abc123", drop_first=True)
+    assert "DROP DATABASE IF EXISTS `pgmig_abc123`" in s
+    assert "CREATE DATABASE `pgmig_abc123`" in s
+    try:
+        mysql_create_db_sql("evil;drop")
+        assert False, "expected invalid name"
+    except RuntimeError:
+        pass
+    print("OK: mysql_create_db_sql validates names")
+
+
+def test_mysql_ephemeral_create_uses_exec_not_shell():
+    """CREATE DATABASE must go through docker exec argv, never shell -e."""
+    import asyncio
+    from app.services.native_migration import sql_staging as mod
+
+    calls: list[tuple] = []
+
+    async def fake_mysql(container, pwd, *, sql=None, database=None, stdin_path=None):
+        calls.append({"sql": sql, "database": database, "stdin": stdin_path})
+        return 0, "ok"
+
+    async def fake_ready(container, pwd, attempts=90):
+        return None
+
+    class Job:
+        def log(self, *_a, **_k):
+            pass
+
+    class Mini:
+        def __init__(self):
+            self.job = Job()
+
+        async def _run_cmd(self, *a, **k):
+            return True, "cid"
+
+    tmp = Path("/tmp/pgmig_mysql_ephemeral_test.sql")
+    tmp.write_text("CREATE TABLE t (id int);\n", encoding="utf-8")
+
+    orig_mysql = mod._mysql_ephemeral
+    orig_ready = mod._wait_ephemeral_mysql_ready
+    mod._mysql_ephemeral = fake_mysql
+    mod._wait_ephemeral_mysql_ready = fake_ready
+    try:
+        result = asyncio.run(
+            mod._import_via_ephemeral_mysql(
+                Mini(), tmp, {}, "pgmig_89b78bab", "pgmig-mysql-test",
+            )
+        )
+        assert result["database"] == "pgmig_89b78bab"
+        assert result.get("_ephemeral_container") == "pgmig-mysql-test"
+        assert any(
+            c["sql"] and "CREATE DATABASE `pgmig_89b78bab`" in c["sql"]
+            for c in calls
+        ), calls
+        assert any(c["stdin"] == tmp for c in calls), calls
+        # Must not use shell-eaten empty CREATE DATABASE
+        assert not any(c["sql"] == "CREATE DATABASE ;" for c in calls)
+        print("OK: ephemeral MySQL create uses exec helper with intact backticks")
+    finally:
+        mod._mysql_ephemeral = orig_mysql
+        mod._wait_ephemeral_mysql_ready = orig_ready
+        tmp.unlink(missing_ok=True)
+
+
+def test_import_mysql_dump_routes_to_ephemeral_when_target_is_timescale():
+    """MariaDB/MySQL → Timescale: no mysql compose service → ephemeral MySQL."""
+    import asyncio
+    from app.services.native_migration import sql_staging as mod
+
+    calls = {"ephemeral": 0}
+
+    async def fake_ephemeral(migrator, dump_path, conn, staging_db, container):
+        calls["ephemeral"] += 1
+        assert staging_db.startswith("pgmig_")
+        assert container.startswith("pgmig-mysql-")
+        return {
+            "host": "127.0.0.1",
+            "port": "33060",
+            "database": staging_db,
+            "user": "root",
+            "password": "pgmigrator",
+            "_ephemeral_container": container,
+        }
+
+    class Job:
+        def log(self, *_a, **_k):
+            pass
+
+    class Mini:
+        def __init__(self):
+            self.job = Job()
+
+        async def _run_cmd(self, *a, **k):
+            return True, ""
+
+    orig_compose = mod._compose_text
+    orig_resolve = mod.resolve_db_service
+    orig_ephemeral = mod._import_via_ephemeral_mysql
+    # Live panel is Timescale only — matches reported MariaDB→Timescale migration
+    mod._compose_text = lambda: (
+        "services:\n  timescaledb:\n    image: timescale/timescaledb:latest-pg17\n"
+    )
+    mod.resolve_db_service = lambda db: "timescaledb" if db == "timescaledb" else None
+    mod._import_via_ephemeral_mysql = fake_ephemeral
+
+    tmp = Path("/tmp/pgmig_mariadb_to_ts.sql")
+    tmp.write_text("CREATE TABLE users (id int);\nINSERT INTO users VALUES (1);\n", encoding="utf-8")
+    try:
+        for source in ("mysql", "mariadb"):
+            calls["ephemeral"] = 0
+            result = asyncio.run(
+                mod.import_sql_dump_to_live_db(
+                    Mini(), str(tmp), source, {"password": "x"},
+                )
+            )
+            assert calls["ephemeral"] == 1, source
+            assert result.get("_ephemeral_container")
+        print("OK: mysql/mariadb dump routes to ephemeral MySQL when compose has timescale only")
+    finally:
+        mod._compose_text = orig_compose
+        mod.resolve_db_service = orig_resolve
+        mod._import_via_ephemeral_mysql = orig_ephemeral
+        tmp.unlink(missing_ok=True)
+
+
+def test_mysql_ephemeral_passes_create_sql_as_exec_argv():
+    """_mysql_ephemeral must invoke create_subprocess_exec with -e SQL intact."""
+    import asyncio
+    from app.services.native_migration import sql_staging as mod
+
+    captured: list[list[str]] = []
+
+    class FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", None
+
+    async def fake_exec(*argv, **kwargs):
+        captured.append(list(argv))
+        return FakeProc()
+
+    orig = asyncio.create_subprocess_exec
+    asyncio.create_subprocess_exec = fake_exec
+    try:
+        sql = "CREATE DATABASE `pgmig_89b78bab`;"
+        rc, _ = asyncio.run(mod._mysql_ephemeral("c", "pgmigrator", sql=sql))
+        assert rc == 0
+        assert captured, "expected docker exec invocation"
+        argv = captured[0]
+        assert "docker" in argv[0]
+        assert "exec" in argv
+        assert "mysql" in argv
+        assert "-e" in argv
+        e_idx = argv.index("-e")
+        assert argv[e_idx + 1] == sql
+        assert "`pgmig_89b78bab`" in argv[e_idx + 1]
+        # Must not go through a shell string
+        assert not any("CREATE DATABASE ;" in a for a in argv)
+        print("OK: _mysql_ephemeral passes CREATE DATABASE via exec argv")
+    finally:
+        asyncio.create_subprocess_exec = orig
+
+
 if __name__ == "__main__":
     test_filter_timescaledb_extension_in_staging()
     test_compose_has_service_helper()
@@ -216,4 +413,9 @@ if __name__ == "__main__":
     test_timescale_never_stages_into_plain_postgres_compose()
     test_create_staging_db_runs_drop_and_create_separately()
     test_transient_pg_error_detection()
+    test_mysql_shell_e_arg_preserves_backticks()
+    test_mysql_create_db_sql_drop_first()
+    test_mysql_ephemeral_create_uses_exec_not_shell()
+    test_import_mysql_dump_routes_to_ephemeral_when_target_is_timescale()
+    test_mysql_ephemeral_passes_create_sql_as_exec_argv()
     print("\nAll sql staging tests passed.")
