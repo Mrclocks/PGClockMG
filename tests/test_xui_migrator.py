@@ -18,6 +18,8 @@ from app.services.migrators.xui import (
     bundled_xui_schema_db,
     assert_xui_source_has_data,
     assert_migrated_pg_has_data,
+    assert_migrated_core_config,
+    patch_xui_converter_tag_bug,
     XuiMigrator,
 )
 from app.services.migrators.base import MigrationJob
@@ -43,14 +45,16 @@ def _make_xui_db(path: Path, clients: int = 1, inbounds: int = 1) -> Path:
     return path
 
 
-def _make_pg_sqlite(path: Path, users: int = 1, inbounds: int = 1) -> Path:
+def _make_pg_sqlite(path: Path, users: int = 1, inbounds: int = 1, core_configs: int = 1) -> Path:
     conn = sqlite3.connect(path)
-    for table in ("users", "admins", "hosts", "inbounds", "nodes", "groups"):
+    for table in ("users", "admins", "hosts", "inbounds", "nodes", "groups", "core_configs"):
         conn.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
     for i in range(users):
         conn.execute("INSERT INTO users VALUES (?)", (i + 1,))
     for i in range(inbounds):
         conn.execute("INSERT INTO inbounds VALUES (?)", (i + 1,))
+    for i in range(core_configs):
+        conn.execute("INSERT INTO core_configs VALUES (?)", (i + 1,))
     if users or inbounds:
         conn.execute("INSERT INTO groups VALUES (1)")
     conn.commit()
@@ -385,6 +389,111 @@ def test_run_uses_bundled_schema_not_mysql_start():
     asyncio.run(_run())
 
 
+def test_patch_xui_converter_tag_bug_moves_assignment():
+    """Upstream uses `tag` in debug logs before assignment when externalProxy exists."""
+    buggy = '''
+            # Remove external proxy and TLS settings from streamSettings if present
+            if isinstance(stream_settings, dict):
+                # Remove proxy-related settings
+                stream_settings.pop("proxySettings", None)
+                stream_settings.pop("sockopt", None)
+                # Remove external proxy
+                if "externalProxy" in stream_settings:
+                    stream_settings.pop("externalProxy")
+                    logger.debug(f"Removed externalProxy from inbound {tag}")
+                # Remove TLS settings (certificate files won't exist on new system)
+                if "tlsSettings" in stream_settings:
+                    stream_settings.pop("tlsSettings")
+                    logger.debug(f"Removed tlsSettings from inbound {tag}")
+                # Remove security field (TLS indicator)
+                if "security" in stream_settings:
+                    stream_settings.pop("security")
+                    logger.debug(f"Removed security field from inbound {tag}")
+            
+            tag = inbound_row.get("tag", f"inbound-{inbound_row.get('id', 'unknown')}")
+            protocol = inbound_row.get("protocol", "vless")
+'''
+    with tempfile.TemporaryDirectory() as tmp:
+        tool = Path(tmp) / "x-ui"
+        conv = tool / "migration" / "transformers" / "converter.py"
+        conv.parent.mkdir(parents=True)
+        conv.write_text("prefix\n" + buggy + "\nsuffix\n", encoding="utf-8")
+        assert patch_xui_converter_tag_bug(tool) is True
+        text = conv.read_text(encoding="utf-8")
+        assign = text.find(
+            'tag = inbound_row.get("tag", f"inbound-{inbound_row.get(\'id\', \'unknown\')}")'
+        )
+        use = text.find('Removed externalProxy from inbound {tag}')
+        assert assign != -1 and use != -1
+        assert assign < use
+        # idempotent
+        assert patch_xui_converter_tag_bug(tool) is False
+
+
+def test_assert_migrated_core_config_rejects_empty():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "db.sqlite3"
+        _make_pg_sqlite(path, users=1, inbounds=1, core_configs=0)
+        try:
+            assert_migrated_core_config(path)
+            raise AssertionError("expected empty core_configs error")
+        except RuntimeError as e:
+            assert "core_configs" in str(e)
+
+
+def test_run_cmd_shell_string_uses_subprocess_shell():
+    """Regression: db_auth MySQL probe passes shell strings; must not char-split exec."""
+    async def _run():
+        job = MigrationJob(job_id="shell1")
+        migrator = XuiMigrator(job, {})
+
+        class FakeProc:
+            returncode = 0
+            stdout = None
+
+            def __init__(self):
+                self._done = False
+
+            async def wait(self):
+                return 0
+
+            def kill(self):
+                pass
+
+        calls = {"shell": 0, "exec": 0}
+
+        async def fake_shell(cmd, **kwargs):
+            calls["shell"] += 1
+            assert isinstance(cmd, str)
+            assert "docker compose exec" in cmd
+            proc = FakeProc()
+
+            class Out:
+                async def readline(self):
+                    return b""
+
+            proc.stdout = Out()
+            return proc
+
+        async def fake_exec(*args, **kwargs):
+            calls["exec"] += 1
+            raise AssertionError("shell string must not use create_subprocess_exec")
+
+        with patch("asyncio.create_subprocess_shell", fake_shell), \
+             patch("asyncio.create_subprocess_exec", fake_exec):
+            ok, _ = await migrator._run_cmd(
+                'cd "/opt/pasarguard" && docker compose exec -T mysql mysql -u root -p"x" -N -e "SELECT 1"',
+                timeout=5,
+            )
+        assert ok
+        assert calls["shell"] == 1
+        assert calls["exec"] == 0
+        # Must not log character-spaced command
+        assert not any("$ c d" in line for line in job.logs)
+
+    asyncio.run(_run())
+
+
 if __name__ == "__main__":
     test_find_xui_db_prefers_named_file()
     test_find_xui_db_fallback_any_db()
@@ -405,4 +514,7 @@ if __name__ == "__main__":
     test_assert_migrated_pg_has_data()
     test_run_does_not_copy2_directory()
     test_run_uses_bundled_schema_not_mysql_start()
+    test_patch_xui_converter_tag_bug_moves_assignment()
+    test_assert_migrated_core_config_rejects_empty()
+    test_run_cmd_shell_string_uses_subprocess_shell()
     print("\nAll x-ui migrator tests passed.")
