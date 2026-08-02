@@ -58,8 +58,34 @@ def test_requirements_fresh_marzban():
     print("OK: requirements")
 
 
+def test_marzban_db_still_normalized_to_db_sqlite3():
+    """x-ui.db preserve must not change Marzban .db → db.sqlite3 staging."""
+    bid = init_bundle()
+    save_bundle_slot(
+        bid, "database", b"sqlite-content", "custom.db",
+        panel_id="marzban", source_db="sqlite", marzban_mode="fresh",
+    )
+    work = prepare_bundle_workspace(bid)
+    assert (work / "db.sqlite3").exists()
+    assert not (work / "custom.db").exists()
+    print("OK: marzban custom.db normalized")
+
+
+def test_marzban_db_sqlite3_unchanged():
+    bid = init_bundle()
+    save_bundle_slot(
+        bid, "database", b"sqlite-content", "db.sqlite3",
+        panel_id="marzban", source_db="sqlite", marzban_mode="fresh",
+    )
+    work = prepare_bundle_workspace(bid)
+    assert (work / "db.sqlite3").read_bytes() == b"sqlite-content"
+    print("OK: marzban db.sqlite3 unchanged")
+
+
 if __name__ == "__main__":
     test_requirements_fresh_marzban()
     test_marzban_zip_bundle()
     test_marzban_separate_slots()
+    test_marzban_db_still_normalized_to_db_sqlite3()
+    test_marzban_db_sqlite3_unchanged()
     print("\nAll upload bundle tests passed.")

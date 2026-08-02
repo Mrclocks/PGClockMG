@@ -249,12 +249,14 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
 
 def _detect_panel(inventory: list[dict], paths: dict) -> str | None:
     sqlite_path = paths.get("sqlite") or ""
-    if "x-ui" in sqlite_path.lower():
+    sqlite_name = Path(sqlite_path).name.lower() if sqlite_path else ""
+    # Only the DB filename (not arbitrary path text) identifies 3x-ui
+    if sqlite_name == "x-ui.db" or "x-ui" in sqlite_name:
         return "3x-ui"
     for item in inventory:
         name = item["name"].lower()
         p = item["path"].lower()
-        if "x-ui" in name or "x-ui" in p:
+        if name == "x-ui.db":
             return "3x-ui"
         if "hiddify" in p:
             return "hiddify"
