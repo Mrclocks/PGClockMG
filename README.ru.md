@@ -1,4 +1,4 @@
-> ⚠️ **`v1.12`** — Перед restore или миграцией сделайте полный бэкап.
+> ⚠️ **`v1.13`** — Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <a href="README.en.md">English</a> · <b>Русский</b>
@@ -45,7 +45,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 | Панель | Статус |
 |--------|--------|
 | Marzban | Полная |
-| PasarGuard | Полная |
+| PasarGuard | Restore / смена БД (не в миграции панелей) |
 | 3x-ui | Частичная |
 | Remnawave / Hiddify | Скоро |
 
@@ -55,6 +55,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | Версия | Основные изменения |
 |--------|-------------------|
+| v1.13 | Убрана смена БД PasarGuard из раздела миграции панелей |
 | v1.12 | Предупреждение о сертификатах 3x-ui + временно отключены Hiddify/Remnawave |
 | v1.11 | Прямая установка redirect-server (без хрупкого официального installer) |
 | v1.10 | Старые ссылки 3x-ui: нормализация mapping + реальный порт/домен redirect |

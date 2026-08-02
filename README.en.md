@@ -1,4 +1,4 @@
-> ⚠️ **`v1.12`** — Always take a full backup before restore or migration.
+> ⚠️ **`v1.13`** — Always take a full backup before restore or migration.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <b>English</b> · <a href="README.ru.md">Русский</a>
@@ -45,7 +45,7 @@ Requirements: Ubuntu/Debian · root · Docker
 | Panel | Status |
 |-------|--------|
 | Marzban | Full |
-| PasarGuard | Full |
+| PasarGuard | Restore / Change DB (not in panel migrate) |
 | 3x-ui | Partial |
 | Remnawave / Hiddify | Coming soon |
 
@@ -55,6 +55,7 @@ Requirements: Ubuntu/Debian · root · Docker
 
 | Version | Key changes |
 |---------|-------------|
+| v1.13 | Remove PasarGuard DB-change option from panel migrate |
 | v1.12 | 3x-ui cert upload warning + disable Hiddify/Remnawave (coming soon) |
 | v1.11 | Direct redirect-server install (skip fragile upstream installer) |
 | v1.10 | Old 3x-ui links: normalize mapping paths + real redirect port/domain |

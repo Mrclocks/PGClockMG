@@ -718,7 +718,7 @@ function buildMigrationBody() {
 function renderPanels() {
   const grid = document.getElementById('panelGrid');
   const lang = state.lang;
-  grid.innerHTML = state.panels.map(p => {
+  grid.innerHTML = state.panels.filter(p => p.show_in_migrate !== false).map(p => {
     const disabled = p.enabled === false || p.coming_soon;
     const badge = disabled
       ? `<span class="support-badge support-soon">${t('support.comingSoon')}</span>`

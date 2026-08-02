@@ -22,6 +22,7 @@ class PanelInfo(BaseModel):
     supported_source_dbs: List[str]
     enabled: bool = True
     coming_soon: bool = False
+    show_in_migrate: bool = True
 
 
 class MigrationRequest(BaseModel):

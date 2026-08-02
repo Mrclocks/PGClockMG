@@ -282,6 +282,9 @@ PANELS: dict[str, PanelInfo] = {
         icon="🔄",
         support_level="db_only",
         subscription_mode="native",
+        # Cross-engine PasarGuard moves live under Restore / Change DB — not migrate-from-panel
+        show_in_migrate=False,
+        enabled=False,
         description={
             "en": "Migrate PasarGuard data between database engines (SQLite, MySQL, PostgreSQL, TimescaleDB).",
             "fa": "انتقال داده PasarGuard بین انواع دیتابیس.",

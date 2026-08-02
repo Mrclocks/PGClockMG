@@ -28,13 +28,13 @@ def validate_migration(params: dict) -> dict:
     panel = PANELS.get(panel_id)
     if not panel:
         return {"ok": False, "errors": [_msg("Invalid panel", "پنل نامعتبر", "Неверная панель")]}
-    if not getattr(panel, "enabled", True):
+    if not getattr(panel, "enabled", True) or not getattr(panel, "show_in_migrate", True):
         return {
             "ok": False,
             "errors": [_msg(
-                "This panel migration is not available yet (coming soon).",
-                "مهاجرت این پنل فعلاً در دسترس نیست (به‌زودی).",
-                "Миграция этой панели пока недоступна (скоро).",
+                "This panel migration is not available in Migrate. Use Restore / Change DB if you need a PasarGuard database move.",
+                "این گزینه در بخش مهاجرت در دسترس نیست. برای تغییر دیتابیس PasarGuard از مسیر ریستور استفاده کنید.",
+                "Эта миграция недоступна в разделе Migrate. Для смены БД PasarGuard используйте Restore.",
             )],
         }
 
