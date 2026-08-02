@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> ⚠️ **`v1.10`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
+> ⚠️ **`v1.11`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
   <b>فارسی</b> · <a href="README.en.md">English</a> · <a href="README.ru.md">Русский</a>
@@ -57,6 +57,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | نسخه | تغییرات اصلی |
 |------|--------------|
+| v1.11 | نصب مستقیم redirect-server (بدون اسکریپت شکنندهٔ رسمی) |
 | v1.10 | لینک‌های قدیمی 3x-ui: نرمال‌سازی mapping + پورت/دامنه redirect واقعی |
 | v1.9 | رفع Access denied بعد مهاجرت 3x-ui→MySQL + نصب صحیح redirect سابسکریپشن |
 | v1.8 | رفع مهاجرت 3x-ui به MySQL (پروب DB + core_configs) |

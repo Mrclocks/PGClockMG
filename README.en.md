@@ -1,4 +1,4 @@
-> ⚠️ **`v1.10`** — Always take a full backup before restore or migration.
+> ⚠️ **`v1.11`** — Always take a full backup before restore or migration.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <b>English</b> · <a href="README.ru.md">Русский</a>
@@ -55,6 +55,7 @@ Requirements: Ubuntu/Debian · root · Docker
 
 | Version | Key changes |
 |---------|-------------|
+| v1.11 | Direct redirect-server install (skip fragile upstream installer) |
 | v1.10 | Old 3x-ui links: normalize mapping paths + real redirect port/domain |
 | v1.9 | Fix Access denied after 3x-ui→MySQL + correct subscription redirect install |
 | v1.8 | Fix 3x-ui → MySQL migration (DB credential probe + core_configs) |

@@ -430,8 +430,8 @@ def test_build_redirect_config_sets_domain_and_port():
     assert cfg["ssl"]["enabled"] is False
 
 
-def test_install_redirect_uses_map_file_and_config_file():
-    """Upstream wants MAP_FILE= + CONFIG_FILE= with redirect_domain set."""
+def test_install_redirect_uses_direct_deploy():
+    """Wizard installs redirect-server directly (not fragile upstream interactive script)."""
     async def _run():
         job = MigrationJob(job_id="redir1")
         migrator = XuiMigrator(job, {})
@@ -454,12 +454,7 @@ def test_install_redirect_uses_map_file_and_config_file():
                 }),
                 encoding="utf-8",
             )
-            tools = Path(tmp) / "tools"
-            script = tools / "migrations" / "redirect-server" / "install_redirect_server.sh"
-            script.parent.mkdir(parents=True)
-            script.write_text("#!/bin/bash\n", encoding="utf-8")
-            with patch("app.services.migrators.xui.TOOLS_DIR", tools), \
-                 patch.object(XuiMigrator, "_run_cmd", _fake_cmd):
+            with patch.object(XuiMigrator, "_run_cmd", _fake_cmd):
                 ok = await migrator._install_redirect_server(
                     mapping,
                     listen_port=2096,
@@ -469,10 +464,10 @@ def test_install_redirect_uses_map_file_and_config_file():
             blob = " ".join(
                 c if isinstance(c, str) else " ".join(c) for c in seen
             )
-            assert "MAP_FILE=" in blob
-            assert "CONFIG_FILE=" in blob
-            assert "--mapping" not in blob
-            assert "install_redirect_server.sh" in blob
+            assert "github.com/PasarGuard/migrations/releases" in blob
+            assert "/usr/local/bin/redirect-server" in blob
+            assert "systemctl restart redirect-server" in blob or "systemctl enable redirect-server" in blob
+            assert "install_redirect_server.sh" not in blob  # direct path succeeded first
             data = json.loads(mapping.read_text(encoding="utf-8"))
             assert data["mappings"]["a"]["old_subscription_url"] == "/sub/tok"
             cfg = json.loads(
@@ -480,6 +475,59 @@ def test_install_redirect_uses_map_file_and_config_file():
             )
             assert cfg["port"] == 2096
             assert cfg["redirect_domain"] == "http://10.0.0.1:8000"
+
+    asyncio.run(_run())
+
+
+def test_install_redirect_retries_without_ssl_then_upstream():
+    async def _run():
+        job = MigrationJob(job_id="redir2")
+        migrator = XuiMigrator(job, {})
+        deploys = {"n": 0}
+
+        async def _fake_cmd(self, cmd, cwd=None, timeout=600):
+            text = cmd if isinstance(cmd, str) else " ".join(cmd)
+            # First direct deploy fails; second (no-ssl) succeeds
+            if "github.com/PasarGuard/migrations/releases" in text:
+                deploys["n"] += 1
+                if deploys["n"] == 1:
+                    return False, "ssl handshake boom"
+                return True, "redirect-server active"
+            if "systemctl is-active" in text:
+                return True, "active"
+            return True, "ok"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cert = Path(tmp) / "c.pem"
+            key = Path(tmp) / "k.pem"
+            cert.write_text("CERT", encoding="utf-8")
+            key.write_text("KEY", encoding="utf-8")
+            mapping = Path(tmp) / "subscription_url_mapping.json"
+            mapping.write_text(
+                json.dumps({
+                    "mappings": {
+                        "a": {
+                            "old_subscription_url": "/sub/tok",
+                            "new_subscription_url": "/sub/new",
+                        }
+                    }
+                }),
+                encoding="utf-8",
+            )
+            with patch.object(XuiMigrator, "_run_cmd", _fake_cmd):
+                ok = await migrator._install_redirect_server(
+                    mapping,
+                    listen_port=2096,
+                    redirect_domain="http://10.0.0.1:8000",
+                    ssl_cert=str(cert),
+                    ssl_key=str(key),
+                )
+            assert ok
+            assert deploys["n"] == 2
+            cfg = json.loads(
+                (mapping.parent / "redirect-server-config.json").read_text(encoding="utf-8")
+            )
+            assert cfg["ssl"]["enabled"] is False
 
     asyncio.run(_run())
 
@@ -745,7 +793,8 @@ if __name__ == "__main__":
     test_run_uses_bundled_schema_not_mysql_start()
     test_normalize_subscription_mapping_strips_query()
     test_build_redirect_config_sets_domain_and_port()
-    test_install_redirect_uses_map_file_and_config_file()
+    test_install_redirect_uses_direct_deploy()
+    test_install_redirect_retries_without_ssl_then_upstream()
     test_normalize_target_db_aliases()
     test_convert_landed_sqlite_syncs_mysql_and_finalizes_env()
     test_convert_landed_sqlite_for_all_server_engines()
