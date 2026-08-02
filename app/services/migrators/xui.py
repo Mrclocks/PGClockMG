@@ -597,9 +597,10 @@ class XuiMigrator(BaseMigrator):
                 else install_env_snapshot
             )
         )
+        redirect_error = ""
         if install_redirect and mapping_file.exists():
             self.job.set_progress(96, "نصب سرور ریدایرکت لینک‌های قدیمی...")
-            redirect_installed = await self._install_redirect_server(
+            redirect_installed, redirect_error = await self._install_redirect_server(
                 mapping_file,
                 listen_port=redirect_port,
                 redirect_domain=redirect_domain,
@@ -627,23 +628,24 @@ class XuiMigrator(BaseMigrator):
             "Создайте Hosts для inbound'ов в панели для новых подписок.",
         ]
         if not redirect_installed and install_redirect:
+            detail = (redirect_error or "").strip()
+            if len(detail) > 280:
+                detail = "…" + detail[-280:]
             warn_en.insert(
                 0,
-                "Redirect server did NOT install — old /sub links will not work. "
-                "Check migration logs for 'Direct redirect install failed' "
-                "(often: GitHub download blocked from the server, or port still busy).",
+                "Redirect server did NOT install — old /sub links will not work until fixed. "
+                "Users/inbounds already migrated. "
+                + (f"Cause: {detail}" if detail else "Often: GitHub download blocked, or old sub port still busy."),
             )
             warn_fa.insert(
                 0,
-                "سرور ریدایرکت نصب نشد — لینک‌های قدیمی کار نمی‌کنند. "
-                "در لاگ مهاجرت دنبال «Direct redirect install failed» بگرد "
-                "(معمولاً دانلود از GitHub بسته است یا پورت ساب هنوز اشغال است).",
+                "سرور ریدایرکت نصب نشد — لینک‌های قدیمی کار نمی‌کنند (یوزرها منتقل شده‌اند). "
+                + (f"علت: {detail}" if detail else "معمولاً دانلود از GitHub روی سرور بسته است یا پورت ساب هنوز اشغال است."),
             )
             warn_ru.insert(
                 0,
-                "Redirect-server не установился — старые /sub не работают. "
-                "Смотрите лог: Direct redirect install failed "
-                "(часто блок GitHub или порт занят).",
+                "Redirect-server не установился — старые /sub не работают (пользователи уже перенесены). "
+                + (f"Причина: {detail}" if detail else "Часто блок GitHub или порт занят."),
             )
 
         return {
@@ -694,18 +696,16 @@ class XuiMigrator(BaseMigrator):
         redirect_domain: str = "",
         ssl_cert: str = "",
         ssl_key: str = "",
-    ) -> bool:
+    ) -> tuple[bool, str]:
         """Install redirect-server so old x-ui /sub links keep working.
 
-        Uses a direct (non-interactive) install instead of the upstream
-        ``install_redirect_server.sh``, which often fails under the wizard because:
-        - GitHub API / interactive prompts / ``set -e`` + ``systemctl status``
-        - default port 8080 and empty ``redirect_domain`` when env vars are lost
+        Returns ``(ok, error_detail)``. Uses a direct install (plus GitHub mirrors)
+        instead of the fragile upstream interactive script.
         """
         mapping = Path(mapping_file)
         if not mapping.is_file():
             self.job.log("Redirect install skipped: mapping file missing")
-            return False
+            return False, "mapping file missing"
 
         normalize_subscription_mapping(mapping)
         if not redirect_domain:
@@ -725,9 +725,11 @@ class XuiMigrator(BaseMigrator):
             f"ssl={cfg['ssl']['enabled']}"
         )
 
-        ok = await self._deploy_redirect_server_direct(mapping, cfg_path, listen_port)
+        last_err = ""
+        ok, err = await self._deploy_redirect_server_direct(mapping, cfg_path, listen_port)
         if ok:
-            return True
+            return True, ""
+        last_err = err or last_err
 
         # Retry without SSL if cert/key made the service fail to start
         if cfg.get("ssl", {}).get("enabled"):
@@ -737,25 +739,27 @@ class XuiMigrator(BaseMigrator):
                 redirect_domain=redirect_domain,
             )
             cfg_path.write_text(json.dumps(cfg_no_ssl, indent=2), encoding="utf-8")
-            ok = await self._deploy_redirect_server_direct(mapping, cfg_path, listen_port)
+            ok, err = await self._deploy_redirect_server_direct(mapping, cfg_path, listen_port)
             if ok:
-                return True
+                return True, ""
+            last_err = err or last_err
 
         # Last resort: official installer (MAP_FILE/CONFIG_FILE), then force our files
-        ok = await self._deploy_redirect_server_upstream(mapping, cfg_path)
+        ok, err = await self._deploy_redirect_server_upstream(mapping, cfg_path)
         if ok or await self._redirect_server_is_active():
             await self._force_redirect_runtime_files(mapping, cfg_path)
             if await self._redirect_server_is_active():
                 self.job.log(
                     "Redirect server installed — old /sub/{subId} → PasarGuard /sub/{token}"
                 )
-                return True
+                return True, ""
+        last_err = err or last_err
 
         self.job.log(
             "Redirect server install failed — check job logs above "
             "(common: GitHub download blocked, port still busy, missing curl/jq/tar)"
         )
-        return False
+        return False, last_err or "redirect-server install failed"
 
     async def _redirect_server_is_active(self) -> bool:
         ok, out = await self._run_cmd(
@@ -787,7 +791,7 @@ class XuiMigrator(BaseMigrator):
         mapping: Path,
         cfg_path: Path,
         listen_port: int,
-    ) -> bool:
+    ) -> tuple[bool, str]:
         """Download binary + write systemd unit (no interactive upstream script)."""
         script = f'''set -euo pipefail
 if [[ "$(id -u)" -ne 0 ]]; then
@@ -807,20 +811,28 @@ case "$(uname -m)" in
 esac
 
 ASSET="redirect-server_0.0.1_${{ARCH_ASSET}}.tar.gz"
-URL="https://github.com/PasarGuard/migrations/releases/download/v0.0.1/${{ASSET}}"
+GH_URL="https://github.com/PasarGuard/migrations/releases/download/v0.0.1/${{ASSET}}"
+# Fallbacks for servers where github.com is blocked/slow (common)
+URLS=(
+  "$GH_URL"
+  "https://ghproxy.net/$GH_URL"
+  "https://mirror.ghproxy.com/$GH_URL"
+  "https://gitdl.cn/$GH_URL"
+)
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-echo "Downloading redirect-server: $URL"
-if ! curl -fsSL --connect-timeout 20 --max-time 180 -o "$TMP/$ASSET" "$URL"; then
-  echo "Direct download failed — trying GitHub API..."
-  if command -v jq >/dev/null 2>&1; then
-    API="https://api.github.com/repos/PasarGuard/migrations/releases/tags/v0.0.1"
-    URL="$(curl -fsSL --connect-timeout 20 "$API" | jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.browser_download_url')"
-    [[ -n "$URL" && "$URL" != null ]] || {{ echo "Could not resolve asset URL" >&2; exit 1; }}
-    curl -fsSL --connect-timeout 20 --max-time 180 -o "$TMP/$ASSET" "$URL"
-  else
-    exit 1
+DOWNLOADED=0
+for URL in "${{URLS[@]}}"; do
+  echo "Downloading redirect-server: $URL"
+  if curl -fsSL --connect-timeout 15 --max-time 120 -o "$TMP/$ASSET" "$URL"; then
+    DOWNLOADED=1
+    break
   fi
+  echo "Download failed from $URL"
+done
+if [[ "$DOWNLOADED" -ne 1 ]]; then
+  echo "All download mirrors failed (GitHub likely blocked from this server)" >&2
+  exit 1
 fi
 
 tar -xzf "$TMP/$ASSET" -C "$TMP"
@@ -862,7 +874,7 @@ systemctl enable redirect-server
 systemctl restart redirect-server
 sleep 1
 if ! systemctl is-active --quiet redirect-server; then
-  echo "redirect-server failed to start:" >&2
+  echo "redirect-server failed to start on port {int(listen_port)}:" >&2
   systemctl status redirect-server --no-pager -l || true
   journalctl -u redirect-server -n 40 --no-pager || true
   ss -lntp "sport = :{int(listen_port)}" 2>/dev/null || true
@@ -875,16 +887,14 @@ echo "redirect-server active on port {int(listen_port)}"
             self.job.log(
                 "Redirect server installed — old /sub/{subId} → PasarGuard /sub/{token}"
             )
-            return True
-        self.job.log(
-            "Direct redirect install failed: "
-            f"{(out or '')[-800:]}"
-        )
-        return False
+            return True, ""
+        detail = (out or "")[-800:]
+        self.job.log(f"Direct redirect install failed: {detail}")
+        return False, detail
 
     async def _deploy_redirect_server_upstream(
         self, mapping: Path, cfg_path: Path,
-    ) -> bool:
+    ) -> tuple[bool, str]:
         await self._run_cmd(
             ["bash", "-c", "rm -f /etc/redirect-server/config.json 2>/dev/null || true"],
             timeout=15,
@@ -906,11 +916,10 @@ echo "redirect-server active on port {int(listen_port)}"
             )
         ok, out = await self._run_cmd(["bash", "-c", cmd], timeout=600)
         if not ok:
-            self.job.log(
-                "Upstream redirect installer failed: "
-                f"{(out or '')[-500:]}"
-            )
-        return ok
+            detail = (out or "")[-500:]
+            self.job.log(f"Upstream redirect installer failed: {detail}")
+            return False, detail
+        return True, ""
 
     async def _convert_landed_sqlite_to_target(
         self,

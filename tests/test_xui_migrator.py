@@ -455,16 +455,17 @@ def test_install_redirect_uses_direct_deploy():
                 encoding="utf-8",
             )
             with patch.object(XuiMigrator, "_run_cmd", _fake_cmd):
-                ok = await migrator._install_redirect_server(
+                ok, err = await migrator._install_redirect_server(
                     mapping,
                     listen_port=2096,
                     redirect_domain="http://10.0.0.1:8000",
                 )
-            assert ok
+            assert ok and not err
             blob = " ".join(
                 c if isinstance(c, str) else " ".join(c) for c in seen
             )
             assert "github.com/PasarGuard/migrations/releases" in blob
+            assert "ghproxy" in blob or "mirror.ghproxy" in blob
             assert "/usr/local/bin/redirect-server" in blob
             assert "systemctl restart redirect-server" in blob or "systemctl enable redirect-server" in blob
             assert "install_redirect_server.sh" not in blob  # direct path succeeded first
@@ -515,14 +516,14 @@ def test_install_redirect_retries_without_ssl_then_upstream():
                 encoding="utf-8",
             )
             with patch.object(XuiMigrator, "_run_cmd", _fake_cmd):
-                ok = await migrator._install_redirect_server(
+                ok, err = await migrator._install_redirect_server(
                     mapping,
                     listen_port=2096,
                     redirect_domain="http://10.0.0.1:8000",
                     ssl_cert=str(cert),
                     ssl_key=str(key),
                 )
-            assert ok
+            assert ok and not err
             assert deploys["n"] == 2
             cfg = json.loads(
                 (mapping.parent / "redirect-server-config.json").read_text(encoding="utf-8")
