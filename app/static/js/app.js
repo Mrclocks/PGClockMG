@@ -1191,20 +1191,19 @@ function renderRedirectVerifyBox(result) {
     return;
   }
   const redirPort = result?.redirect_port || 2096;
+  const redirPath = String(result?.redirect_path || 'sub').replace(/^\/+|\/+$/g, '') || 'sub';
   const cmds = [
     'systemctl status pg-redirect --no-pager',
     `curl -kI https://127.0.0.1:${redirPort}/healthz`,
     `curl -I http://127.0.0.1:${redirPort}/healthz`,
-    `curl -kI https://127.0.0.1:${redirPort}/sub/YOUR_OLD_SUB_ID`,
+    `curl -kI https://127.0.0.1:${redirPort}/${redirPath}/YOUR_OLD_SUB_ID`,
   ].join('\n');
   box.classList.remove('hidden');
   box.innerHTML = `
     <h3 class="post-migrate-title">${t('step6.redirectVerifyTitle')}</h3>
     <p class="desc-sm">${t('step6.redirectVerifyHint')}</p>
-    <div class="install-cmd-row">
-      <div class="install-cmd-box"><code id="redirectVerifyCmds">${escapeHtmlApp(cmds)}</code></div>
-      <button type="button" class="btn btn-copy" id="btnCopyRedirectVerify">${t('copy')}</button>
-    </div>`;
+    <div class="install-cmd-box"><code id="redirectVerifyCmds">${escapeHtmlApp(cmds)}</code></div>
+    <button type="button" class="btn btn-copy redirect-verify-copy" id="btnCopyRedirectVerify">${t('step6.redirectVerifyCopyAll')}</button>`;
   document.getElementById('btnCopyRedirectVerify')?.addEventListener('click', () => {
     if (typeof copyText === 'function') copyText('redirectVerifyCmds');
     else copyTextToClipboard(cmds);

@@ -174,6 +174,360 @@ def assert_xui_source_has_data(path: Path) -> dict[str, int]:
     return counts
 
 
+def _xui_table_names(conn: sqlite3.Connection) -> set[str]:
+    return {
+        str(r[0])
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+
+
+def safe_copy_sqlite(src: Path, dst: Path) -> None:
+    """Copy a SQLite DB including pending WAL data (avoids stale .db-only copies)."""
+    src = Path(src)
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        dst.unlink()
+    # URI read + backup API folds -wal into the destination
+    src_conn = sqlite3.connect(f"file:{src.as_posix()}?mode=ro", uri=True)
+    try:
+        dst_conn = sqlite3.connect(str(dst))
+        try:
+            src_conn.backup(dst_conn)
+            dst_conn.commit()
+        finally:
+            dst_conn.close()
+    finally:
+        src_conn.close()
+
+
+def is_modern_xui_multi_inbound_schema(path: Path) -> bool:
+    """Newer 3x-ui (multi-inbound clients): ``clients`` + ``client_inbounds`` tables."""
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        names = _xui_table_names(conn)
+        return "clients" in names and "client_inbounds" in names
+    finally:
+        conn.close()
+
+
+def _client_entry_for_protocol(protocol: str, client: dict, flow_override: str = "") -> dict:
+    """Build a classic ``settings.clients[]`` entry from a ``clients`` row."""
+    email = (client.get("email") or "").strip()
+    sub_id = (client.get("sub_id") or client.get("subId") or "").strip()
+    flow = (flow_override or client.get("flow") or "").strip()
+    entry: dict = {
+        "email": email,
+        "enable": bool(client.get("enable", 1)),
+        "expiryTime": int(client.get("expiry_time") or 0),
+        "totalGB": int(client.get("total_gb") or 0),
+        "subId": sub_id,
+        "limitIp": int(client.get("limit_ip") or 0),
+        "tgId": str(client.get("tg_id") or ""),
+        "comment": str(client.get("comment") or ""),
+        "reset": int(client.get("reset") or 0),
+        "security": str(client.get("security") or "auto"),
+    }
+    proto = (protocol or "").lower()
+    uuid = (client.get("uuid") or client.get("id") or "").strip()
+    password = (client.get("password") or "").strip()
+    if proto in ("vless", "vmess", "tunnel"):
+        if uuid:
+            entry["id"] = uuid
+    if proto in ("trojan", "shadowsocks", "shadowsocks2022", "socks", "http"):
+        if password:
+            entry["password"] = password
+    if proto == "vless":
+        entry["flow"] = flow
+        # Keep auth if present (some panels store it); harmless for PG converter.
+        auth = (client.get("auth") or "").strip()
+        if auth:
+            entry["auth"] = auth
+    if proto == "vmess" and password and "id" not in entry:
+        entry["id"] = password
+    # Trojan often also carries uuid in modern panels — keep password primary.
+    if proto == "trojan" and uuid and "id" not in entry:
+        entry["id"] = uuid
+    return entry
+
+
+def normalize_modern_xui_sqlite(db_path: Path) -> dict:
+    """Rewrite modern multi-inbound 3x-ui DB into classic shape for PasarGuard migrator.
+
+    Official ``migrate.py`` only reads ``client_traffics`` (+ ``inbounds.settings.clients``).
+    New 3x-ui keeps membership in ``client_inbounds`` and may leave inbound
+    ``settings.clients`` empty / incomplete → broken UUID map and /sub errors.
+
+    Important: do **not** expand ``client_traffics`` to one row per inbound.
+    PasarGuard maps ``email → username`` with UNIQUE username + INSERT OR REPLACE,
+    so duplicate emails leave orphan ``users_groups_association`` rows and each
+    user stuck on a single inbound group. Keep one traffic row per email; full
+    multi-inbound group membership is repaired after migrate via
+    ``sync_user_groups_from_xui_settings``.
+    """
+    path = Path(db_path)
+    if not is_modern_xui_multi_inbound_schema(path):
+        return {"normalized": False, "reason": "legacy-schema"}
+
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.row_factory = sqlite3.Row
+        tables = _xui_table_names(conn)
+        if "client_traffics" not in tables or "inbounds" not in tables:
+            return {"normalized": False, "reason": "missing-core-tables"}
+
+        clients = {
+            int(r["id"]): dict(r)
+            for r in conn.execute("SELECT * FROM clients")
+        }
+        links = [dict(r) for r in conn.execute("SELECT * FROM client_inbounds")]
+        if not clients or not links:
+            return {"normalized": False, "reason": "empty-clients"}
+
+        # Preserve traffic counters when present
+        traffic_cols = [r[1] for r in conn.execute("PRAGMA table_info(client_traffics)")]
+        existing_by_email: dict[str, dict] = {}
+        for r in conn.execute("SELECT * FROM client_traffics"):
+            d = dict(r)
+            email = (d.get("email") or "").strip()
+            if email and email not in existing_by_email:
+                existing_by_email[email] = d
+
+        # email -> ordered inbound ids from membership
+        email_inbounds: dict[str, list[int]] = {}
+        for link in links:
+            client = clients.get(int(link.get("client_id") or 0))
+            if not client:
+                continue
+            email = (client.get("email") or "").strip()
+            iid = int(link.get("inbound_id") or 0)
+            if not email or iid <= 0:
+                continue
+            bucket = email_inbounds.setdefault(email, [])
+            if iid not in bucket:
+                bucket.append(iid)
+
+        # Rebuild settings.clients on every inbound from relational membership
+        inbounds = list(conn.execute("SELECT id, protocol, settings FROM inbounds"))
+        settings_fixed = 0
+        for inbound in inbounds:
+            iid = int(inbound["id"])
+            protocol = str(inbound["protocol"] or "")
+            try:
+                settings = json.loads(inbound["settings"] or "{}")
+            except json.JSONDecodeError:
+                settings = {}
+            if not isinstance(settings, dict):
+                settings = {}
+            attached: list[dict] = []
+            for link in links:
+                if int(link.get("inbound_id") or 0) != iid:
+                    continue
+                client = clients.get(int(link.get("client_id") or 0))
+                if not client:
+                    continue
+                attached.append(
+                    _client_entry_for_protocol(
+                        protocol, client, str(link.get("flow_override") or ""),
+                    )
+                )
+            if attached:
+                settings["clients"] = attached
+            # Panel-only keys that can break PasarGuard subscription/config build
+            if "encryption" in settings and protocol.lower() == "vless":
+                settings.pop("encryption", None)
+            if attached or "encryption" in (inbound["settings"] or ""):
+                conn.execute(
+                    "UPDATE inbounds SET settings=? WHERE id=?",
+                    (json.dumps(settings, ensure_ascii=False), iid),
+                )
+                settings_fixed += 1
+
+        # One traffic row per email (UNIQUE email). Official migrator uses
+        # traffic.id as users.id and email as username — duplicates break groups.
+        has_all_time = "all_time" in traffic_cols
+        has_last_online = "last_online" in traffic_cols
+        conn.execute("ALTER TABLE client_traffics RENAME TO client_traffics__legacy")
+        col_defs = [
+            "id integer PRIMARY KEY AUTOINCREMENT",
+            "inbound_id integer",
+            "enable numeric",
+            "email text UNIQUE",
+            "up integer",
+            "down integer",
+            "expiry_time integer",
+            "total integer",
+            "reset integer DEFAULT 0",
+        ]
+        if has_all_time:
+            col_defs.append("all_time integer DEFAULT 0")
+        if has_last_online:
+            col_defs.append("last_online integer DEFAULT 0")
+        conn.execute(f"CREATE TABLE client_traffics ({', '.join(col_defs)})")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_client_traffics_inbound "
+            "ON client_traffics(inbound_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_client_traffics_renew "
+            "ON client_traffics(expiry_time, reset)"
+        )
+        conn.execute("DROP TABLE client_traffics__legacy")
+
+        inserted = 0
+        next_id = 1
+        for client in clients.values():
+            email = (client.get("email") or "").strip()
+            if not email:
+                continue
+            inbound_ids = email_inbounds.get(email) or []
+            if not inbound_ids:
+                continue
+            prev = existing_by_email.get(email) or {}
+            # Prefer existing inbound_id if still a member; else first membership
+            preferred = int(prev.get("inbound_id") or 0)
+            iid = preferred if preferred in inbound_ids else inbound_ids[0]
+            cols = ["id", "inbound_id", "enable", "email", "up", "down", "expiry_time", "total", "reset"]
+            vals: list = [
+                next_id,
+                iid,
+                1 if client.get("enable", 1) else 0,
+                email,
+                int(prev.get("up") or 0),
+                int(prev.get("down") or 0),
+                int(client.get("expiry_time") or prev.get("expiry_time") or 0),
+                int(client.get("total_gb") or prev.get("total") or 0),
+                int(client.get("reset") or prev.get("reset") or 0),
+            ]
+            if has_all_time:
+                cols.append("all_time")
+                vals.append(int(prev.get("all_time") or 0))
+            if has_last_online:
+                cols.append("last_online")
+                vals.append(int(prev.get("last_online") or 0))
+            placeholders = ",".join("?" * len(cols))
+            conn.execute(
+                f"INSERT INTO client_traffics ({','.join(cols)}) VALUES ({placeholders})",
+                vals,
+            )
+            next_id += 1
+            inserted += 1
+
+        conn.commit()
+        return {
+            "normalized": True,
+            "clients": len(clients),
+            "memberships": len(links),
+            "traffics_written": inserted,
+            "inbounds_settings_updated": settings_fixed,
+            "one_traffic_per_email": True,
+        }
+    finally:
+        conn.close()
+
+
+def sync_user_groups_from_xui_settings(pg_db: Path, xui_db: Path) -> dict:
+    """Ensure each PG user is in every inbound group their x-ui email belongs to.
+
+    Official migrator associates a user with only the single ``inbound_id`` from
+    their ``client_traffics`` row. After modern-schema normalize, that under-links
+    multi-inbound clients. Also removes orphan association rows left by REPLACE.
+    """
+    pg_path = Path(pg_db)
+    xui_path = Path(xui_db)
+    email_to_inbounds: dict[str, set[int]] = {}
+
+    xui = sqlite3.connect(f"file:{xui_path.as_posix()}?mode=ro", uri=True)
+    try:
+        xui.row_factory = sqlite3.Row
+        for row in xui.execute("SELECT id, settings FROM inbounds"):
+            iid = int(row["id"])
+            try:
+                settings = json.loads(row["settings"] or "{}")
+            except json.JSONDecodeError:
+                settings = {}
+            for client in (settings.get("clients") or []) if isinstance(settings, dict) else []:
+                if not isinstance(client, dict):
+                    continue
+                email = (client.get("email") or "").strip()
+                if email:
+                    email_to_inbounds.setdefault(email, set()).add(iid)
+    finally:
+        xui.close()
+
+    if not email_to_inbounds:
+        return {"synced": False, "reason": "no-clients-in-settings"}
+
+    conn = sqlite3.connect(str(pg_path))
+    try:
+        tables = {
+            str(r[0])
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        needed = {"users", "groups", "users_groups_association", "inbounds_groups_association"}
+        if not needed.issubset(tables):
+            return {"synced": False, "reason": "missing-pg-tables"}
+
+        inbound_to_group = {
+            int(r[0]): int(r[1])
+            for r in conn.execute(
+                "SELECT inbound_id, group_id FROM inbounds_groups_association"
+            )
+        }
+        users = {
+            str(r[0]): int(r[1])
+            for r in conn.execute("SELECT username, id FROM users")
+            if r[0]
+        }
+
+        # Drop associations pointing at missing users
+        orphan_deleted = conn.execute(
+            """
+            DELETE FROM users_groups_association
+            WHERE user_id NOT IN (SELECT id FROM users)
+            """
+        ).rowcount
+
+        existing = {
+            (int(r[0]), int(r[1]))
+            for r in conn.execute(
+                "SELECT user_id, groups_id FROM users_groups_association"
+            )
+        }
+        added = 0
+        for email, inbound_ids in email_to_inbounds.items():
+            user_id = users.get(email)
+            if not user_id:
+                continue
+            for iid in inbound_ids:
+                group_id = inbound_to_group.get(iid)
+                if not group_id:
+                    continue
+                key = (user_id, group_id)
+                if key in existing:
+                    continue
+                conn.execute(
+                    "INSERT INTO users_groups_association (user_id, groups_id) VALUES (?, ?)",
+                    key,
+                )
+                existing.add(key)
+                added += 1
+
+        conn.commit()
+        return {
+            "synced": True,
+            "emails": len(email_to_inbounds),
+            "links_added": added,
+            "orphans_removed": int(orphan_deleted or 0),
+        }
+    finally:
+        conn.close()
+
+
 def assert_migrated_pg_has_data(path: Path) -> dict[str, int]:
     counts = inspect_pasarguard_sqlite(path)
     data_tables = ("users", "inbounds", "groups")
@@ -522,7 +876,17 @@ class XuiMigrator(BaseMigrator):
         work_dir = BACKUP_DIR / f"xui-{self.job.job_id}"
         work_dir.mkdir(parents=True, exist_ok=True)
         input_db = work_dir / "x-ui.db"
-        shutil.copy2(xui_db, input_db)
+        # WAL-safe copy so uploads next to .db-wal/.db-shm stay consistent
+        safe_copy_sqlite(Path(xui_db), input_db)
+        # Newer 3x-ui multi-inbound clients schema → classic client_traffics shape
+        norm = normalize_modern_xui_sqlite(input_db)
+        if norm.get("normalized"):
+            self.job.log(
+                "Normalized modern 3x-ui multi-inbound schema: "
+                f"clients={norm.get('clients')} memberships={norm.get('memberships')} "
+                f"traffics={norm.get('traffics_written')} "
+                f"settings_inbounds={norm.get('inbounds_settings_updated')}"
+            )
         output_dir = work_dir / "output-db"
 
         self.job.set_progress(45, "اجرای مهاجرت x-ui → PasarGuard SQLite...")
@@ -547,6 +911,16 @@ class XuiMigrator(BaseMigrator):
         output_db = output_dir / "db.sqlite3"
         if not output_db.exists():
             raise RuntimeError("دیتابیس خروجی ایجاد نشد")
+
+        # Multi-inbound clients: official tool links each user to one inbound only
+        group_sync = sync_user_groups_from_xui_settings(output_db, input_db)
+        if group_sync.get("synced"):
+            self.job.log(
+                "Synced user↔inbound groups from x-ui settings: "
+                f"emails={group_sync.get('emails')} "
+                f"links_added={group_sync.get('links_added')} "
+                f"orphans_removed={group_sync.get('orphans_removed')}"
+            )
 
         out_counts = assert_migrated_pg_has_data(output_db)
         assert_migrated_core_config(output_db)
@@ -623,20 +997,21 @@ class XuiMigrator(BaseMigrator):
 
         self.job.set_progress(100, "3x-ui migration complete!")
         redir_scheme = "https" if xui_listen.get("ssl_wanted") else "http"
+        redirect_path = (xui_listen.get("path") or "sub").strip().strip("/") or "sub"
         warn_en = [
-            "Old /sub/{subId} links are redirected to PasarGuard via redirect-server.",
+            f"Old /{redirect_path}/{{subId}} links are redirected to PasarGuard via redirect-server.",
             f"Redirect listens {redir_scheme} on port {redirect_port} → {redirect_domain}/sub/…",
             "Create admin: pasarguard cli generate-temp-key",
             "Add Hosts in the panel for each inbound so new subscription configs resolve.",
         ]
         warn_fa = [
-            "لینک‌های قدیمی /sub/{subId} با redirect-server به پاسارگارد هدایت می‌شوند.",
+            f"لینک‌های قدیمی /{redirect_path}/{{subId}} با redirect-server به پاسارگارد هدایت می‌شوند.",
             f"ریدایرکت {redir_scheme} روی پورت {redirect_port} → {redirect_domain}/sub/…",
             "ادمین بسازید: pasarguard cli generate-temp-key",
             "برای هر inbound در پنل Host بسازید تا کانفیگ سابسکریپشن جدید کامل شود.",
         ]
         warn_ru = [
-            "Старые /sub/{subId} перенаправляются на PasarGuard через redirect-server.",
+            f"Старые /{redirect_path}/{{subId}} перенаправляются на PasarGuard через redirect-server.",
             f"Redirect слушает {redir_scheme} на порту {redirect_port} → {redirect_domain}/sub/…",
             "Создайте админа: pasarguard cli generate-temp-key",
             "Создайте Hosts для inbound'ов в панели для новых подписок.",
@@ -667,6 +1042,7 @@ class XuiMigrator(BaseMigrator):
             "subscription_mode": "redirect",
             "redirect_installed": redirect_installed,
             "redirect_port": redirect_port,
+            "redirect_path": redirect_path,
             "redirect_domain": redirect_domain,
             "target_db": target_db,
             "mapping_file": str(mapping_file) if mapping_file.exists() else None,

@@ -1,4 +1,4 @@
-> ⚠️ **`v1.16`** — Always take a full backup before restore or migration.
+> ⚠️ **`v1.16.1`** — Always take a full backup before restore or migration.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <b>English</b> · <a href="README.ru.md">Русский</a>
@@ -55,6 +55,7 @@ Requirements: Ubuntu/Debian · root · Docker
 
 | Version | Key changes |
 |---------|-------------|
+| v1.16.1 | Full modern 3x-ui (multi-inbound) migrate + redirect with real path/port |
 | v1.16 | 3X-UI migrate UI: DB-only upload, Full badge, redirect verify commands |
 | v1.15.5 | Fix Errno 36 when PasarGuard PEM in .env was treated as a file path |
 | v1.15.4 | Redirect TLS from PasarGuard certs; HTTP when old sub had no TLS |
