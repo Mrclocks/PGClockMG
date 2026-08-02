@@ -251,6 +251,31 @@ def test_mysql_create_db_sql_drop_first():
     print("OK: mysql_create_db_sql validates names")
 
 
+def test_prepare_mysql_dump_strips_use_and_create_database():
+    """Regression: USE pasarguard diverts data away from pgmig_* staging DB."""
+    from app.services.native_migration.sql_staging import prepare_mysql_dump_for_staging
+
+    raw = "\n".join([
+        "-- MySQL dump",
+        "CREATE DATABASE /*!32312 IF NOT EXISTS*/ `pasarguard` /*!40100 DEFAULT CHARACTER SET utf8mb4 */;",
+        "USE `pasarguard`;",
+        "DROP DATABASE IF EXISTS `old`;",
+        "CREATE TABLE users (id INT);",
+        "INSERT INTO users VALUES (1);",
+        "USE marzban;",
+        "",
+    ])
+    out, stripped = prepare_mysql_dump_for_staging(raw, "pgmig_deadbeef")
+    assert stripped >= 3, stripped
+    assert "USE `pasarguard`" not in out
+    assert "USE marzban" not in out
+    assert "CREATE DATABASE" not in out
+    assert "DROP DATABASE" not in out
+    assert "CREATE TABLE users" in out
+    assert "INSERT INTO users VALUES (1);" in out
+    print("OK: prepare_mysql_dump strips USE/CREATE/DROP DATABASE")
+
+
 def test_mysql_ephemeral_create_uses_exec_not_shell():
     """CREATE DATABASE must go through docker exec argv, never shell -e."""
     import asyncio
@@ -263,6 +288,9 @@ def test_mysql_ephemeral_create_uses_exec_not_shell():
         return 0, "ok"
 
     async def fake_ready(container, pwd, attempts=90, *, client="mysql", admin_client="mysqladmin"):
+        return None
+
+    async def fake_verify(*_a, **_k):
         return None
 
     class Job:
@@ -281,8 +309,10 @@ def test_mysql_ephemeral_create_uses_exec_not_shell():
 
     orig_mysql = mod._mysql_ephemeral
     orig_ready = mod._wait_ephemeral_mysql_ready
+    orig_verify = mod._verify_mysql_staging_has_data
     mod._mysql_ephemeral = fake_mysql
     mod._wait_ephemeral_mysql_ready = fake_ready
+    mod._verify_mysql_staging_has_data = fake_verify
     try:
         result = asyncio.run(
             mod._import_via_ephemeral_mysql(
@@ -303,6 +333,7 @@ def test_mysql_ephemeral_create_uses_exec_not_shell():
     finally:
         mod._mysql_ephemeral = orig_mysql
         mod._wait_ephemeral_mysql_ready = orig_ready
+        mod._verify_mysql_staging_has_data = orig_verify
         tmp.unlink(missing_ok=True)
 
 
@@ -328,6 +359,9 @@ def test_ephemeral_mariadb_uses_mariadb_image():
         assert client == "mariadb"
         assert admin_client == "mariadb-admin"
 
+    async def fake_verify(*_a, **_k):
+        return None
+
     class Job:
         def log(self, *_a, **_k):
             pass
@@ -344,8 +378,10 @@ def test_ephemeral_mariadb_uses_mariadb_image():
     tmp.write_text("CREATE TABLE t (id int);\n", encoding="utf-8")
     orig_mysql = mod._mysql_ephemeral
     orig_ready = mod._wait_ephemeral_mysql_ready
+    orig_verify = mod._verify_mysql_staging_has_data
     mod._mysql_ephemeral = fake_mysql
     mod._wait_ephemeral_mysql_ready = fake_ready
+    mod._verify_mysql_staging_has_data = fake_verify
     try:
         result = asyncio.run(
             mod._import_via_ephemeral_mysql(
@@ -359,6 +395,7 @@ def test_ephemeral_mariadb_uses_mariadb_image():
     finally:
         mod._mysql_ephemeral = orig_mysql
         mod._wait_ephemeral_mysql_ready = orig_ready
+        mod._verify_mysql_staging_has_data = orig_verify
         tmp.unlink(missing_ok=True)
 
 
@@ -474,6 +511,7 @@ if __name__ == "__main__":
     test_transient_pg_error_detection()
     test_mysql_shell_e_arg_preserves_backticks()
     test_mysql_create_db_sql_drop_first()
+    test_prepare_mysql_dump_strips_use_and_create_database()
     test_mysql_ephemeral_create_uses_exec_not_shell()
     test_ephemeral_mariadb_uses_mariadb_image()
     test_import_mysql_dump_routes_to_ephemeral_when_target_is_timescale()
