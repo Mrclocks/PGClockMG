@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
-from app.config import BASE_DIR, TOOLS_DIR
+from app.config import BASE_DIR, PASARGUARD_ENV, TOOLS_DIR
 
 # POSIX paths as strings so Windows-hosted unit tests don't rewrite separators
 INSTALL_ROOT = "/opt/pg-redirect"
@@ -36,6 +38,141 @@ def _ensure_pg_redirect_importable(src: Path | None = None) -> None:
     parent = str(root.parent)
     if parent not in sys.path:
         sys.path.insert(0, parent)
+
+
+def _load_pem_pair(cert: str, key: str) -> tuple[str, str] | None:
+    """Load cert/key from PEM text or filesystem paths (incl. PasarGuard remaps)."""
+    cert = (cert or "").strip()
+    key = (key or "").strip()
+    if not cert or not key:
+        return None
+    if "BEGIN" in cert and "BEGIN" in key:
+        return cert, key
+    try:
+        from app.services.env_migration import _resolve_ssl_cert_path
+
+        cp = _resolve_ssl_cert_path(cert)
+        kp = _resolve_ssl_cert_path(key)
+    except Exception:
+        cp, kp = Path(cert), Path(key)
+    if cp and kp and Path(cp).is_file() and Path(kp).is_file():
+        return (
+            Path(cp).read_text(encoding="utf-8", errors="ignore"),
+            Path(kp).read_text(encoding="utf-8", errors="ignore"),
+        )
+    return None
+
+
+def generate_self_signed_pem(common_name: str, work_dir: Path) -> tuple[str, str] | None:
+    """Create a short-lived self-signed cert so https://IP:subPort still handshakes."""
+    cn = (common_name or "127.0.0.1").strip() or "127.0.0.1"
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    cert_path = work_dir / "pg-redirect-self.crt"
+    key_path = work_dir / "pg-redirect-self.key"
+    openssl = shutil.which("openssl")
+    if not openssl:
+        return None
+
+    # Prefer IP SAN when CN looks like an IPv4 address (openssl 1.1.1+).
+    is_ip = cn.replace(".", "").isdigit() and cn.count(".") == 3
+    san = f"IP:{cn}" if is_ip else f"DNS:{cn}"
+    conf = work_dir / "pg-redirect-openssl.cnf"
+    conf.write_text(
+        f"""[req]
+distinguished_name = req_distinguished_name
+x509_extensions = v3_req
+prompt = no
+[req_distinguished_name]
+CN = {cn}
+[v3_req]
+subjectAltName = {san}
+""",
+        encoding="utf-8",
+    )
+    cmd = [
+        openssl, "req", "-x509", "-nodes", "-newkey", "rsa:2048",
+        "-keyout", str(key_path), "-out", str(cert_path),
+        "-days", "3650", "-config", str(conf), "-extensions", "v3_req",
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=60)
+    except Exception:
+        # Older openssl without -extensions / config SAN
+        try:
+            subprocess.run(
+                [
+                    openssl, "req", "-x509", "-nodes", "-newkey", "rsa:2048",
+                    "-keyout", str(key_path), "-out", str(cert_path),
+                    "-days", "3650", "-subj", f"/CN={cn}",
+                ],
+                check=True, capture_output=True, text=True, timeout=60,
+            )
+        except Exception:
+            return None
+    if not cert_path.is_file() or not key_path.is_file():
+        return None
+    return (
+        cert_path.read_text(encoding="utf-8", errors="ignore"),
+        key_path.read_text(encoding="utf-8", errors="ignore"),
+    )
+
+
+def resolve_redirect_tls(
+    *,
+    cert_path: str = "",
+    key_path: str = "",
+    env_text: str = "",
+    common_name: str = "",
+    work_dir: Path | None = None,
+    want_ssl: bool = False,
+) -> tuple[str, str, str]:
+    """Resolve TLS material for pg-redirect.
+
+    Order: x-ui cert paths → PasarGuard UVICORN_SSL_* → certs under data →
+    self-signed (only when ``want_ssl``).
+
+    Returns ``(cert_pem, key_pem, source_label)``.
+    """
+    pair = _load_pem_pair(cert_path, key_path)
+    if pair:
+        return pair[0], pair[1], "x-ui-cert-files"
+
+    text = env_text or ""
+    if not text and PASARGUARD_ENV.exists():
+        try:
+            text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            text = ""
+    if text:
+        from app.services.env_migration import read_env_var
+
+        pg_cert = (read_env_var(text, "UVICORN_SSL_CERTFILE") or "").strip()
+        pg_key = (read_env_var(text, "UVICORN_SSL_KEYFILE") or "").strip()
+        pair = _load_pem_pair(pg_cert, pg_key)
+        if pair:
+            return pair[0], pair[1], "pasarguard-uvicorn-ssl"
+
+    try:
+        from app.services.env_migration import _find_ssl_pair_under_certs
+
+        found = _find_ssl_pair_under_certs()
+        if found:
+            c, k = found
+            return (
+                c.read_text(encoding="utf-8", errors="ignore"),
+                k.read_text(encoding="utf-8", errors="ignore"),
+                "pasarguard-certs-dir",
+            )
+    except Exception:
+        pass
+
+    if want_ssl and work_dir is not None:
+        generated = generate_self_signed_pem(common_name or "127.0.0.1", Path(work_dir))
+        if generated:
+            return generated[0], generated[1], "self-signed"
+
+    return "", "", ""
 
 
 def build_runtime_config(

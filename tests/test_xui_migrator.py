@@ -489,6 +489,7 @@ def test_install_redirect_uses_native_pg_redirect():
 
 
 def test_install_redirect_retries_without_ssl():
+    """Optional TLS (no ssl_wanted, http PG URL): may fall back to plain HTTP."""
     async def _run():
         job = MigrationJob(job_id="redir2")
         migrator = XuiMigrator(job, {})
@@ -531,9 +532,67 @@ def test_install_redirect_retries_without_ssl():
                     redirect_domain="http://10.0.0.1:8000",
                     ssl_cert=str(cert),
                     ssl_key=str(key),
+                    ssl_wanted=False,
                 )
             assert ok and not err
             assert installs["n"] == 2
+            # Second attempt must be plain HTTP
+            assert installs["n"] == 2
+
+    asyncio.run(_run())
+
+
+def test_install_redirect_retries_self_signed_when_https_required():
+    """When old links need HTTPS, never silent-HTTP; retry self-signed instead."""
+    async def _run():
+        job = MigrationJob(job_id="redir3")
+        migrator = XuiMigrator(job, {})
+        installs = []
+
+        async def _fake_install(migrator, mapping, **kwargs):
+            installs.append(kwargs)
+            if len(installs) == 1:
+                return False, "ssl boom"
+            assert kwargs.get("ssl_cert") == "SELF_CERT"
+            return True, ""
+
+        async def _fake_active(_migrator):
+            return False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            mapping = Path(tmp) / "subscription_url_mapping.json"
+            mapping.write_text(
+                json.dumps({
+                    "mappings": {
+                        "a": {
+                            "old_subscription_url": "/sub/tok",
+                            "new_subscription_url": "/sub/new",
+                        }
+                    }
+                }),
+                encoding="utf-8",
+            )
+            with patch(
+                "app.services.redirect_ops.install_pg_redirect", _fake_install,
+            ), patch(
+                "app.services.redirect_ops.pg_redirect_is_active", _fake_active,
+            ), patch(
+                "app.services.redirect_ops.resolve_redirect_tls",
+                return_value=("", "", ""),
+            ), patch(
+                "app.services.redirect_ops.generate_self_signed_pem",
+                return_value=("SELF_CERT", "SELF_KEY"),
+            ):
+                ok, err = await migrator._install_redirect_server(
+                    mapping,
+                    listen_port=2096,
+                    redirect_domain="https://10.0.0.1:8000",
+                    ssl_wanted=True,
+                    work_dir=Path(tmp),
+                )
+            assert ok and not err
+            assert len(installs) == 2
+            assert installs[1]["ssl_cert"] == "SELF_CERT"
 
     asyncio.run(_run())
 
@@ -801,6 +860,7 @@ if __name__ == "__main__":
     test_build_redirect_config_sets_domain_and_port()
     test_install_redirect_uses_native_pg_redirect()
     test_install_redirect_retries_without_ssl()
+    test_install_redirect_retries_self_signed_when_https_required()
     test_normalize_target_db_aliases()
     test_convert_landed_sqlite_syncs_mysql_and_finalizes_env()
     test_convert_landed_sqlite_for_all_server_engines()

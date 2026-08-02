@@ -52,7 +52,9 @@ def test_sample_db_listen_and_bundled_redirect():
     listen = read_xui_subscription_listen(SAMPLE_DB)
     assert listen["port"] == 2096
     assert listen["path"] == "sub"
-    assert listen["ssl"] is False  # this sample has no cert files on disk
+    assert listen["ssl"] is False  # cert paths set but files not on this host
+    assert listen["ssl_wanted"] is True  # https://IP:2096/sub/... was used
+    assert "fullchain.pem" in (listen.get("cert_path") or "")
     assert bundled_pg_redirect_src() is not None
 
     clients = _extract_clients(SAMPLE_DB)

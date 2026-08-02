@@ -348,14 +348,21 @@ def normalize_subscription_mapping(mapping_path: Path) -> dict:
 
 
 def read_xui_subscription_listen(xui_db: Path) -> dict:
-    """Read 3x-ui subscription listener settings (port/path/certs)."""
+    """Read 3x-ui subscription listener settings (port/path/certs).
+
+    ``ssl_wanted`` is True when the panel had cert/key paths configured (typical
+    ``https://IP:2096/sub/...`` links), even if those files are missing on this host.
+    """
     out = {
         "port": 2096,
         "path": "sub",
         "domain": "",
         "cert": "",
         "key": "",
+        "cert_path": "",
+        "key_path": "",
         "ssl": False,
+        "ssl_wanted": False,
     }
     try:
         conn = sqlite3.connect(f"file:{xui_db}?mode=ro", uri=True)
@@ -383,14 +390,18 @@ def read_xui_subscription_listen(xui_db: Path) -> dict:
     ).strip()
     cert = (settings.get("subCertFile") or settings.get("webCertFile") or "").strip()
     key = (settings.get("subKeyFile") or settings.get("webKeyFile") or "").strip()
-    ssl = bool(cert and key and Path(cert).is_file() and Path(key).is_file())
+    ssl_wanted = bool(cert and key)
+    ssl = bool(ssl_wanted and Path(cert).is_file() and Path(key).is_file())
     out.update({
         "port": port,
         "path": path,
         "domain": domain,
+        "cert_path": cert,
+        "key_path": key,
         "cert": cert if ssl else "",
         "key": key if ssl else "",
         "ssl": ssl,
+        "ssl_wanted": ssl_wanted,
     })
     return out
 
@@ -604,26 +615,31 @@ class XuiMigrator(BaseMigrator):
                 mapping_file,
                 listen_port=redirect_port,
                 redirect_domain=redirect_domain,
-                ssl_cert=xui_listen.get("cert") or "",
-                ssl_key=xui_listen.get("key") or "",
+                ssl_cert=xui_listen.get("cert_path") or xui_listen.get("cert") or "",
+                ssl_key=xui_listen.get("key_path") or xui_listen.get("key") or "",
+                ssl_wanted=bool(xui_listen.get("ssl_wanted")),
+                work_dir=work_dir,
             )
 
         self.job.set_progress(100, "3x-ui migration complete!")
+        redir_scheme = "https" if (
+            xui_listen.get("ssl_wanted") or str(redirect_domain).startswith("https://")
+        ) else "http"
         warn_en = [
             "Old /sub/{subId} links are redirected to PasarGuard via redirect-server.",
-            f"Redirect listens on port {redirect_port} → {redirect_domain}/sub/…",
+            f"Redirect listens {redir_scheme} on port {redirect_port} → {redirect_domain}/sub/…",
             "Create admin: pasarguard cli generate-temp-key",
             "Add Hosts in the panel for each inbound so new subscription configs resolve.",
         ]
         warn_fa = [
             "لینک‌های قدیمی /sub/{subId} با redirect-server به پاسارگارد هدایت می‌شوند.",
-            f"ریدایرکت روی پورت {redirect_port} → {redirect_domain}/sub/…",
+            f"ریدایرکت {redir_scheme} روی پورت {redirect_port} → {redirect_domain}/sub/…",
             "ادمین بسازید: pasarguard cli generate-temp-key",
             "برای هر inbound در پنل Host بسازید تا کانفیگ سابسکریپشن جدید کامل شود.",
         ]
         warn_ru = [
             "Старые /sub/{subId} перенаправляются на PasarGuard через redirect-server.",
-            f"Redirect слушает порт {redirect_port} → {redirect_domain}/sub/…",
+            f"Redirect слушает {redir_scheme} на порту {redirect_port} → {redirect_domain}/sub/…",
             "Создайте админа: pasarguard cli generate-temp-key",
             "Создайте Hosts для inbound'ов в панели для новых подписок.",
         ]
@@ -673,12 +689,23 @@ class XuiMigrator(BaseMigrator):
         redirect_domain: str = "",
         ssl_cert: str = "",
         ssl_key: str = "",
+        ssl_wanted: bool = False,
+        work_dir: Path | None = None,
     ) -> tuple[bool, str]:
         """Install native pg-redirect so old x-ui /sub links keep working.
 
+        When 3x-ui had subscription TLS configured, old client links are almost
+        always ``https://…:subPort/sub/…``. In that case we must speak HTTPS —
+        falling back to plain HTTP silently breaks every old link.
+
         Returns ``(ok, error_detail)``. Uses bundled stdlib service — no GitHub download.
         """
-        from app.services.redirect_ops import install_pg_redirect, pg_redirect_is_active
+        from app.services.redirect_ops import (
+            generate_self_signed_pem,
+            install_pg_redirect,
+            pg_redirect_is_active,
+            resolve_redirect_tls,
+        )
 
         mapping = Path(mapping_file)
         if not mapping.is_file():
@@ -689,20 +716,76 @@ class XuiMigrator(BaseMigrator):
         if not redirect_domain:
             redirect_domain = pasarguard_subscription_base_url()
 
+        env_text = ""
+        if PASARGUARD_ENV.exists():
+            env_text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+
+        # Old https://IP:subPort/sub links need a TLS listener. Prefer when x-ui
+        # had sub certs, or when PasarGuard public URL is already HTTPS.
+        want_tls = bool(ssl_wanted) or str(redirect_domain or "").startswith("https://")
+
+        cert_pem, key_pem, tls_src = resolve_redirect_tls(
+            cert_path=ssl_cert,
+            key_path=ssl_key,
+            env_text=env_text,
+            common_name=detect_public_ip(),
+            work_dir=work_dir or mapping.parent,
+            want_ssl=want_tls,
+        )
+        if cert_pem and key_pem:
+            self.job.log(f"pg-redirect TLS material: {tls_src}")
+        elif want_tls:
+            self.job.log(
+                "pg-redirect: old links need HTTPS but no cert found yet — "
+                "will try self-signed after first failure"
+            )
+
         ok, err = await install_pg_redirect(
             self,
             mapping,
             listen_port=listen_port,
             redirect_base=redirect_domain,
             panel="x-ui",
-            ssl_cert=ssl_cert,
-            ssl_key=ssl_key,
+            ssl_cert=cert_pem,
+            ssl_key=key_pem,
         )
         if ok:
             return True, ""
 
-        # Retry without SSL if cert/key made the service fail to start
-        if ssl_cert and ssl_key:
+        # If TLS material was bad/unreadable, retry with a fresh self-signed cert.
+        if want_tls:
+            self.job.log("Retrying pg-redirect with self-signed HTTPS (for old https://sub links)...")
+            generated = generate_self_signed_pem(
+                detect_public_ip(),
+                Path(work_dir or mapping.parent),
+            )
+            if generated:
+                ok2, err2 = await install_pg_redirect(
+                    self,
+                    mapping,
+                    listen_port=listen_port,
+                    redirect_base=redirect_domain,
+                    panel="x-ui",
+                    ssl_cert=generated[0],
+                    ssl_key=generated[1],
+                )
+                if ok2 or await pg_redirect_is_active(self):
+                    self.job.log("pg-redirect active with self-signed TLS")
+                    return True, ""
+                err = err2 or err
+            else:
+                self.job.log("self-signed cert generation failed (openssl missing?)")
+
+            # Do NOT fall back to plain HTTP when clients expect https:// — that
+            # "succeeds" install while every old subscription link stays broken.
+            self.job.log(
+                "pg-redirect HTTPS install failed — refusing HTTP fallback "
+                "(old https://IP:subPort/sub/… links would not work)"
+            )
+            return False, err or "HTTPS redirect required but TLS install failed"
+
+        # Plain HTTP was intended (x-ui had no sub certs) — optional SSL retry-off
+        if cert_pem and key_pem:
             self.job.log("Retrying pg-redirect without SSL (plain HTTP on old sub port)...")
             ok2, err2 = await install_pg_redirect(
                 self,
