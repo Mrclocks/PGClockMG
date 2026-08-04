@@ -2780,3 +2780,16 @@ html[dir="rtl"] .ios-toggle input:checked ~ .ios-toggle-track .ios-toggle-thumb 
   font-size: 0.85rem;
   font-weight: 500;
 }
+
+
+.owner-guide-box .owner-guide-steps {
+  margin: 0.75rem 0 1rem;
+  padding-inline-start: 1.25rem;
+}
+.owner-guide-box .owner-guide-steps li {
+  margin: 0.35rem 0;
+  line-height: 1.45;
+}
+.owner-guide-box .install-cmd-row {
+  margin-top: 0.5rem;
+}

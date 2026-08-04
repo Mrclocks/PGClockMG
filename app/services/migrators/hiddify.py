@@ -138,14 +138,18 @@ class HiddifyMigrator(BaseMigrator):
                 work_dir=work,
             )
 
+        # By design (not a failure): user asked to skip inbounds/proxies.
         warn_en: list[str] = [
-            "Partial migration: users + subscription redirects only. Inbounds/proxies are NOT migrated — configure them in PasarGuard.",
+            "By design (not an error): only users + subscription redirect. Inbounds/proxies are skipped — configure them in PasarGuard.",
+            "Hiddify admin accounts are not migrated — create a PasarGuard owner with the command below.",
         ]
         warn_fa: list[str] = [
-            "مهاجرت ناقص: فقط کاربران و ریدایرکت لینک اشتراک. اینباند/پروکسی منتقل نشده — در پاسارگارد تنظیم کنید.",
+            "عمدی است (خطا نیست): فقط کاربران + ریدایرکت لینک اشتراک. اینباند/پروکسی عمداً منتقل نشده — در پاسارگارد تنظیم کنید.",
+            "ادمین هیدیفای منتقل نمی‌شود — Owner پاسارگارد را با دستور زیر بسازید.",
         ]
         warn_ru: list[str] = [
-            "Частичная миграция: только пользователи и redirect подписки. Inbound/proxy не переносятся.",
+            "Намеренно (не ошибка): только пользователи + redirect. Inbound/proxy не переносятся — настройте в PasarGuard.",
+            "Админы Hiddify не переносятся — создайте owner PasarGuard командой ниже.",
         ]
         if errors:
             warn_en.append(f"{len(errors)} users failed to import — see logs.")
@@ -185,6 +189,8 @@ class HiddifyMigrator(BaseMigrator):
             "group": group_name,
             "proxy_path_client": client_path,
             "summary": summary,
+            "show_owner_guide": True,
+            "owner_cmd": "pasarguard cli generate-temp-key",
             "incomplete": [
                 {
                     "name": {"en": "Inbounds / proxies", "fa": "اینباند / پروکسی", "ru": "Inbound / proxy"},

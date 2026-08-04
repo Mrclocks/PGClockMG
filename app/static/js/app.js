@@ -1292,8 +1292,49 @@ function showSuccess(result) {
     details += `<p>${result.users_migrated} / ${result.users_total} users</p>`;
   }
   document.getElementById('resultDetails').innerHTML = details;
+  renderOwnerGuideBox(result);
   renderRedirectVerifyBox(result);
   renderPostMigrateSection(result);
+}
+
+function resolveOwnerTempKeyCmd(result) {
+  return (
+    (result && result.owner_cmd)
+    || state.installGuide?.owner_temp_key_cmd
+    || 'pasarguard cli generate-temp-key'
+  );
+}
+
+function renderOwnerGuideBox(result) {
+  const box = document.getElementById('ownerGuideBox');
+  if (!box) return;
+  const show = !!(
+    result?.show_owner_guide
+    || state.selectedPanel?.id === 'hiddify'
+  );
+  if (!show) {
+    box.classList.add('hidden');
+    box.innerHTML = '';
+    return;
+  }
+  const cmd = resolveOwnerTempKeyCmd(result);
+  box.classList.remove('hidden');
+  box.innerHTML = `
+    <h3 class="post-migrate-title">${t('step6.ownerGuideTitle')}</h3>
+    <p class="desc-sm">${t('step6.ownerGuideHint')}</p>
+    <ol class="guide-steps owner-guide-steps">
+      <li>${t('step6.ownerGuideStep1')}</li>
+      <li>${t('step6.ownerGuideStep2')}</li>
+      <li>${t('step6.ownerGuideStep3')}</li>
+    </ol>
+    <div class="install-cmd-row">
+      <div class="install-cmd-box"><code id="postMigrateOwnerCmd">${escapeHtmlApp(cmd)}</code></div>
+      <button type="button" class="btn btn-copy" id="btnCopyPostMigrateOwner">${t('step6.ownerGuideCopy')}</button>
+    </div>`;
+  document.getElementById('btnCopyPostMigrateOwner')?.addEventListener('click', () => {
+    if (typeof copyText === 'function') copyText('postMigrateOwnerCmd');
+    else copyTextToClipboard(cmd);
+  });
 }
 
 function renderRedirectVerifyBox(result) {
