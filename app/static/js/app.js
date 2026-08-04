@@ -444,7 +444,7 @@ async function fetchJson(url, opts = {}, { retries = 2, timeoutMs = 20000 } = {}
     try {
       const res = await fetch(url, { ...opts, signal: ctrl?.signal });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return await res.json();
+      return await parseResponseJson(res);
     } catch (e) {
       lastErr = e;
       if (attempt < retries) await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
@@ -453,6 +453,26 @@ async function fetchJson(url, opts = {}, { retries = 2, timeoutMs = 20000 } = {}
     }
   }
   throw lastErr || new Error('fetch failed');
+}
+
+/** Parse JSON body safely — empty/truncated responses become a clear Error. */
+async function parseResponseJson(res) {
+  const text = await res.text();
+  if (!text || !String(text).trim()) {
+    throw new Error(
+      `Empty response from server (HTTP ${res.status}). `
+      + 'Migration was not started — check pg-migrator is running, then retry once. '
+      + `/ پاسخ خالی از سرور (HTTP ${res.status}). مهاجرت شروع نشده؛ سرویس را چک کنید و فقط یک‌بار دوباره بزنید.`,
+    );
+  }
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    const snippet = String(text).replace(/\s+/g, ' ').slice(0, 160);
+    throw new Error(
+      `Invalid JSON from server (HTTP ${res.status}): ${snippet}`,
+    );
+  }
 }
 
 function applySystemCheck(sys) {
@@ -691,7 +711,16 @@ async function validateMigrationRequest() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    return await res.json();
+    const data = await parseResponseJson(res);
+    if (!res.ok) {
+      return {
+        ok: false,
+        errors: data?.detail?.errors || data?.errors || [
+          { en: data?.detail || `HTTP ${res.status}`, fa: data?.detail || `HTTP ${res.status}`, ru: data?.detail || `HTTP ${res.status}` },
+        ],
+      };
+    }
+    return data;
   } catch (e) {
     return { ok: false, errors: [{ en: e.message, fa: e.message, ru: e.message }] };
   }
@@ -965,36 +994,60 @@ function renderSummary() {
 }
 
 async function startMigration() {
-  const v = await validateMigrationRequest();
-  if (!v.ok) {
-    showStepBlock(4, tr(v.errors[0], state.lang) || t('block.validationFailed'));
-    return;
-  }
-
-  await goStep(5);
-  const terminal = document.getElementById('logTerminal');
-  terminal.textContent = '';
-  if (typeof resetUiProgress === 'function') resetUiProgress('_migrateUiProgress');
-  const fill = document.getElementById('progressFill');
-  const text = document.getElementById('progressText');
-  if (fill) fill.style.width = '0%';
-  if (text) text.textContent = '0%';
-
-  const body = buildMigrationBody();
+  const btn = document.getElementById('btnStep4');
+  if (state._migrateStarting) return;
+  state._migrateStarting = true;
+  if (btn) btn.disabled = true;
 
   try {
-    const res = await fetch('/api/migrate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    if (!res.ok) {
-      const err = await res.json();
-      const msg = err.detail?.errors?.[0] ? tr(err.detail.errors[0], state.lang) : (err.detail || res.statusText);
-      showError(msg);
+    const v = await validateMigrationRequest();
+    if (!v.ok) {
+      showStepBlock(4, tr(v.errors[0], state.lang) || t('block.validationFailed'));
       return;
     }
-    const data = await res.json();
+
+    await goStep(5);
+    const terminal = document.getElementById('logTerminal');
+    terminal.textContent = '';
+    if (typeof resetUiProgress === 'function') resetUiProgress('_migrateUiProgress');
+    const fill = document.getElementById('progressFill');
+    const text = document.getElementById('progressText');
+    if (fill) fill.style.width = '0%';
+    if (text) text.textContent = '0%';
+
+    const body = buildMigrationBody();
+
+    const res = await fetch('/api/migrate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    let data;
+    try {
+      data = await parseResponseJson(res);
+    } catch (e) {
+      // Still on step 5 — show clear message; job was not started without job_id
+      showError(e.message);
+      return;
+    }
+    if (!res.ok) {
+      const d = data?.detail;
+      let msg;
+      if (d?.errors?.[0]) msg = tr(d.errors[0], state.lang);
+      else if (d && typeof d === 'object' && (d.fa || d.en)) msg = tr(d, state.lang) || d.en || d.fa;
+      else if (typeof d === 'string') msg = d;
+      else msg = res.statusText;
+      showError(typeof msg === 'string' ? msg : JSON.stringify(msg));
+      return;
+    }
     state.jobId = data.job_id;
     connectWebSocket(data.job_id);
   } catch (e) {
     showError(e.message);
+  } finally {
+    state._migrateStarting = false;
+    // Re-enable only if we never left confirmation (validation failed)
+    if (btn && state.currentStep === 4) btn.disabled = false;
   }
 }
 

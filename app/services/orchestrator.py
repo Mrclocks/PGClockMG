@@ -27,11 +27,34 @@ def get_job(job_id: str) -> MigrationJob | None:
     return _active_jobs.get(job_id)
 
 
+def get_running_migration_job() -> MigrationJob | None:
+    """Return the in-flight job if any (pending/running)."""
+    for job in _active_jobs.values():
+        if job.status in ("pending", "running"):
+            return job
+    return None
+
+
+class MigrationAlreadyRunning(RuntimeError):
+    """Raised when a second migrate is requested while one is active."""
+
+    def __init__(self, job: MigrationJob):
+        self.job = job
+        super().__init__(
+            f"A migration is already running (job_id={job.job_id}, "
+            f"progress={job.progress}%). Wait for it to finish before starting another."
+        )
+
+
 async def start_migration(params: dict, on_log: Callable | None = None) -> MigrationJob:
     panel = params.get("source_panel")
     migrator_cls = MIGRATORS.get(panel)
     if not migrator_cls:
         raise ValueError(f"Unsupported panel: {panel}")
+
+    existing = get_running_migration_job()
+    if existing:
+        raise MigrationAlreadyRunning(existing)
 
     job = MigrationJob()
     _active_jobs[job.job_id] = job

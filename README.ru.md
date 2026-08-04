@@ -1,4 +1,4 @@
-> ⚠️ **`v2.0.4`** — Перед restore или миграцией сделайте полный бэкап.
+> ⚠️ **`v2.0.5`** — Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <a href="README.en.md">English</a> · <b>Русский</b>
@@ -55,6 +55,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | Версия | Основные изменения |
 |--------|-------------------|
+| v2.0.5 | Исправление пустого JSON при старте миграции + блокировка параллельных запусков |
 | v2.0.4 | Исправление миграции Marzban MySQL→Timescale при неизвестном alembic_version (heal только на staging) |
 | v2.0.3 | Исправление restore Timescale: детект старого каталога chunk.schema_name и pin образа на 2.28.3 для хостов 2.29+ |
 | v2.0.2 | Исправление миграции MariaDB→Timescale (CREATE DATABASE + staging на mariadb:11) |
