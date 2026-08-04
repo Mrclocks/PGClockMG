@@ -204,6 +204,8 @@ def test_alembic_duplicate_heal_helpers():
     from app.services.pasarguard_ops import (
         _parse_upgrade_target_revision,
         _is_duplicate_schema_error,
+        _parse_missing_revision,
+        _is_missing_revision_error,
     )
     log = (
         "Running upgrade 931ed40d6eec -> 68edca039166, "
@@ -213,7 +215,93 @@ def test_alembic_duplicate_heal_helpers():
     assert _is_duplicate_schema_error(log) is True
     assert _is_duplicate_schema_error("column already exists") is True
     assert _is_duplicate_schema_error("ok") is False
-    print("OK: alembic duplicate heal helpers")
+
+    missing = (
+        "ERROR [alembic.util.messaging] Can't locate revision identified by '5b41f7d2e9a1'"
+    )
+    assert _parse_missing_revision(missing) == "5b41f7d2e9a1"
+    assert _is_missing_revision_error(missing) is True
+    assert _is_missing_revision_error(log) is False
+    print("OK: alembic duplicate/missing revision heal helpers")
+
+
+def test_write_alembic_version_on_sqlite_conn(tmp_path=None):
+    import tempfile
+    from pathlib import Path
+    from app.services.pasarguard_ops import (
+        write_alembic_version_on_conn,
+        read_sqlite_alembic_version,
+    )
+
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "db.sqlite3"
+        conn = {"sqlite_path": str(path), "_allow_live_alembic_heal": True}
+        assert write_alembic_version_on_conn("sqlite", conn, "5b41f7d2e9a1") is True
+        assert read_sqlite_alembic_version(path) == "5b41f7d2e9a1"
+        assert write_alembic_version_on_conn("sqlite", conn, "0b62f893092b") is True
+        assert read_sqlite_alembic_version(path) == "0b62f893092b"
+        assert write_alembic_version_on_conn("sqlite", conn, None) is True
+        assert read_sqlite_alembic_version(path) is None
+        print("OK: write_alembic_version_on_conn sqlite")
+
+
+def test_heal_unknown_refuses_live_mysql():
+    import asyncio
+    from unittest.mock import MagicMock
+    from app.services.pasarguard_ops import heal_unknown_alembic_revision
+
+    migrator = MagicMock()
+    migrator.job = MagicMock()
+    conn = {
+        "host": "127.0.0.1",
+        "port": 3306,
+        "user": "root",
+        "password": "x",
+        "database": "marzban",  # live Marzban — must not heal
+    }
+
+    async def _run():
+        return await heal_unknown_alembic_revision(
+            migrator, "mysql", conn, missing_revision="5b41f7d2e9a1",
+        )
+
+    assert asyncio.run(_run()) is False
+    print("OK: heal refuses live Marzban MySQL")
+
+
+def test_heal_unknown_marzban_shaped_sqlite(tmp_path=None):
+    import asyncio
+    import sqlite3
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from app.services import pasarguard_ops as ops
+
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "db.sqlite3"
+        db = sqlite3.connect(str(path))
+        db.execute("CREATE TABLE proxies (id INTEGER PRIMARY KEY)")
+        db.execute("CREATE TABLE alembic_version (version_num VARCHAR(32))")
+        db.execute("INSERT INTO alembic_version VALUES ('5b41f7d2e9a1')")
+        db.commit()
+        db.close()
+
+        migrator = MagicMock()
+        migrator.job = MagicMock()
+        conn = {"sqlite_path": str(path), "_allow_live_alembic_heal": True}
+
+        async def _run():
+            with patch.object(
+                ops, "_pick_marzban_bridge_revision",
+                new=AsyncMock(return_value="0b62f893092b"),
+            ):
+                return await ops.heal_unknown_alembic_revision(
+                    migrator, "sqlite", conn, missing_revision="5b41f7d2e9a1",
+                )
+
+        assert asyncio.run(_run()) is True
+        assert ops.read_sqlite_alembic_version(path) == "0b62f893092b"
+        print("OK: heal Marzban-shaped sqlite stamps bridge")
 
 
 def test_build_local_alembic_url_from_ops():
@@ -282,6 +370,9 @@ if __name__ == "__main__":
     test_parse_sqlalchemy_urls()
     test_read_sqlite_alembic_version()
     test_alembic_duplicate_heal_helpers()
+    test_write_alembic_version_on_sqlite_conn()
+    test_heal_unknown_refuses_live_mysql()
+    test_heal_unknown_marzban_shaped_sqlite()
     test_build_local_alembic_url_from_ops()
     test_resolve_pasarguard_service()
     test_pasarguard_install_dbs()

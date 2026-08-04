@@ -19,6 +19,7 @@ STARTUP_MARKERS = (
 FAIL_LOG_PATTERNS = (
     "Database migrations failed",
     "ERROR: Database migrations failed",
+    "Can't locate revision identified by",
     "sqlalchemy.exc.",
     "asyncpg.exceptions.",
     "DuplicateColumnError",
@@ -33,6 +34,15 @@ FAIL_LOG_PATTERNS = (
     "ValueError:",
     "SSL certificate file",
     "column \"user_template_id\" of relation \"next_plans\" already exists",
+)
+
+# Stamp Marzban-shaped DBs (still have `proxies`) just before PasarGuard transforms
+# (gozargah_node → groups → migrate_to_groups → move/drop proxies).
+_MARZBAN_BRIDGE_REVISIONS = (
+    "0b62f893092b",  # parent of c41c441de44c (gozargah-node)
+    "2b231de97dc3",  # common shared Marzban revision
+    "dd725e4d3628",
+    "6980e98bba01",
 )
 
 # Harmless lines from DB restarts — must not fail the panel health check
@@ -876,8 +886,245 @@ async def _run_pasarguard_alembic(
     return False, out or ""
 
 
+def _parse_missing_revision(output: str) -> str | None:
+    """Extract revision id from Alembic 'Can't locate revision identified by 'XXX''."""
+    m = re.search(
+        r"Can't locate revision identified by ['\"]([0-9a-fA-F]+)['\"]",
+        output or "",
+    )
+    return m.group(1).lower() if m else None
+
+
+def _is_missing_revision_error(output: str) -> bool:
+    return _parse_missing_revision(output) is not None
+
+
+def _parse_upgrade_target_revision(output: str) -> str | None:
+    m = re.search(r"Running upgrade\s+\S+\s*->\s*([0-9a-f]+)", output, re.I)
+    if m:
+        return m.group(1)
+    m = re.search(r"versions/([0-9a-f]+)_", output, re.I)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _is_duplicate_schema_error(output: str) -> bool:
+    low = (output or "").lower()
+    return "duplicatecolumn" in low or "already exists" in low
+
+
+def _conn_table_exists(db_type: str, conn: dict, table: str) -> bool:
+    """Check whether a table exists on a live connection (staging-safe)."""
+    host = conn.get("host") or "127.0.0.1"
+    port = int(migration_port(conn, db_type))
+    user = conn.get("user") or (
+        "postgres" if db_type in ("postgresql", "timescaledb") else "root"
+    )
+    password = conn.get("password") or ""
+    database = conn.get("database") or "pasarguard"
+    table_l = (table or "").lower()
+    try:
+        if db_type == "sqlite":
+            path = conn.get("sqlite_path") or str(PASARGUARD_DATA / "db.sqlite3")
+            db = sqlite3.connect(path)
+            try:
+                row = db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+                    (table,),
+                ).fetchone()
+                return bool(row)
+            finally:
+                db.close()
+        if db_type in ("postgresql", "timescaledb"):
+            import psycopg2
+
+            with psycopg2.connect(
+                host=host, port=port, dbname=database, user=user, password=password,
+            ) as pg:
+                with pg.cursor() as cur:
+                    cur.execute(
+                        "SELECT 1 FROM information_schema.tables "
+                        "WHERE table_schema='public' AND table_name=%s LIMIT 1",
+                        (table_l,),
+                    )
+                    return bool(cur.fetchone())
+        import pymysql
+
+        with pymysql.connect(
+            host=host, port=port, user=user, password=password,
+            database=database, charset="utf8mb4",
+        ) as mysql:
+            with mysql.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema=%s AND table_name=%s LIMIT 1",
+                    (database, table),
+                )
+                return bool(cur.fetchone())
+    except Exception:
+        return False
+
+
+def write_alembic_version_on_conn(
+    db_type: str, conn: dict, version: str | None,
+) -> bool:
+    """Clear and optionally set alembic_version on a specific connection.
+
+    Used for intermediate/staging DBs so we never stamp the wrong compose service
+    or the live Marzban source when working on a pgmig_* copy.
+    """
+    host = conn.get("host") or "127.0.0.1"
+    port = int(migration_port(conn, db_type))
+    user = conn.get("user") or (
+        "postgres" if db_type in ("postgresql", "timescaledb") else "root"
+    )
+    password = conn.get("password") or ""
+    database = conn.get("database") or "pasarguard"
+    try:
+        if db_type == "sqlite":
+            path = Path(conn.get("sqlite_path") or PASARGUARD_DATA / "db.sqlite3")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            db = sqlite3.connect(str(path))
+            try:
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS alembic_version "
+                    "(version_num VARCHAR(32) NOT NULL)"
+                )
+                db.execute("DELETE FROM alembic_version")
+                if version:
+                    db.execute(
+                        "INSERT INTO alembic_version (version_num) VALUES (?)",
+                        (version,),
+                    )
+                db.commit()
+                return True
+            finally:
+                db.close()
+
+        if db_type in ("postgresql", "timescaledb"):
+            import psycopg2
+
+            with psycopg2.connect(
+                host=host, port=port, dbname=database, user=user, password=password,
+            ) as pg:
+                with pg.cursor() as cur:
+                    cur.execute(
+                        "CREATE TABLE IF NOT EXISTS alembic_version "
+                        "(version_num VARCHAR(32) NOT NULL)"
+                    )
+                    cur.execute("DELETE FROM alembic_version")
+                    if version:
+                        cur.execute(
+                            "INSERT INTO alembic_version (version_num) VALUES (%s)",
+                            (version,),
+                        )
+                pg.commit()
+            return True
+
+        import pymysql
+
+        with pymysql.connect(
+            host=host, port=port, user=user, password=password,
+            database=database, charset="utf8mb4", autocommit=True,
+        ) as mysql:
+            with mysql.cursor() as cur:
+                cur.execute(
+                    "CREATE TABLE IF NOT EXISTS alembic_version "
+                    "(version_num VARCHAR(32) NOT NULL)"
+                )
+                cur.execute("DELETE FROM alembic_version")
+                if version:
+                    cur.execute(
+                        "INSERT INTO alembic_version (version_num) VALUES (%s)",
+                        (version,),
+                    )
+        return True
+    except Exception:
+        return False
+
+
+async def _revision_known_to_pasarguard(migrator, revision: str) -> bool:
+    if not revision:
+        return False
+    ok, out = await _run_pasarguard_alembic(migrator, "show", revision)
+    text = (out or "").lower()
+    if "can't locate" in text or "no such revision" in text or "invalid revision key" in text:
+        return False
+    if ok or _alembic_output_indicates_success(out or ""):
+        return True
+    # Infra/docker noise — do not treat as missing
+    return True
+
+
+async def _pick_marzban_bridge_revision(migrator) -> str | None:
+    for rev in _MARZBAN_BRIDGE_REVISIONS:
+        if await _revision_known_to_pasarguard(migrator, rev):
+            return rev
+    # Prefer a deterministic fallback so staging heal still works if `alembic show` is flaky
+    return _MARZBAN_BRIDGE_REVISIONS[0] if _MARZBAN_BRIDGE_REVISIONS else None
+
+
+async def heal_unknown_alembic_revision(
+    migrator,
+    db_type: str,
+    conn: dict,
+    *,
+    missing_revision: str | None = None,
+) -> bool:
+    """Replace an unknown alembic stamp on staging/intermediate only.
+
+    Marzban-shaped (proxies present, groups absent): stamp just before PasarGuard
+    transform migrations so panel-boot can run proxies→inbounds/groups.
+    PasarGuard-shaped: stamp head.
+    """
+    if conn.get("_ephemeral_container") is None and conn.get("_allow_live_alembic_heal") is not True:
+        # Refuse to mutate a live source unless it is clearly a staging DB name.
+        db_name = str(conn.get("database") or "")
+        if not db_name.startswith("pgmig_") and db_type != "sqlite":
+            migrator.job.log(
+                "Refusing alembic heal on non-staging connection "
+                f"(db={db_name}) — live Marzban left untouched"
+            )
+            return False
+
+    label = missing_revision or "unknown"
+    has_proxies = _conn_table_exists(db_type, conn, "proxies")
+    has_groups = _conn_table_exists(db_type, conn, "groups")
+
+    if has_proxies and not has_groups:
+        bridge = await _pick_marzban_bridge_revision(migrator)
+        if not bridge:
+            migrator.job.log(
+                f"Unknown alembic revision {label} on Marzban-shaped DB, "
+                "but no bridge revision found in PasarGuard image"
+            )
+            return False
+        migrator.job.log(
+            f"Unknown alembic revision {label} — Marzban-shaped schema detected; "
+            f"stamping bridge {bridge} on staging (proxies→PasarGuard transforms)"
+        )
+        return write_alembic_version_on_conn(db_type, conn, bridge)
+
+    head = await get_alembic_head_revision(migrator)
+    if head:
+        migrator.job.log(
+            f"Unknown alembic revision {label} — stamping PasarGuard head {head} on staging"
+        )
+        return write_alembic_version_on_conn(db_type, conn, head)
+
+    migrator.job.log(
+        f"Unknown alembic revision {label} — clearing alembic_version on staging"
+    )
+    return write_alembic_version_on_conn(db_type, conn, None)
+
+
 async def run_alembic_upgrade_head(
-    migrator, *, url_override: str | None = None, heal_db: str | None = None,
+    migrator,
+    *,
+    url_override: str | None = None,
+    heal_db: str | None = None,
+    heal_conn: dict | None = None,
 ) -> None:
     """Upgrade schema to head only — never bootstrap to a source revision."""
     migrator.job.log("Alembic upgrade head...")
@@ -886,9 +1133,27 @@ async def run_alembic_upgrade_head(
     )
     if ok:
         return
+
+    if _is_missing_revision_error(out or "") and heal_db and heal_conn:
+        missing = _parse_missing_revision(out or "")
+        migrator.job.log(
+            f"Alembic missing revision {missing} — healing staging stamp..."
+        )
+        if await heal_unknown_alembic_revision(
+            migrator, heal_db, heal_conn, missing_revision=missing,
+        ):
+            ok2, out2 = await _run_pasarguard_alembic(
+                migrator, "upgrade", "head", url_override=url_override,
+            )
+            if ok2:
+                return
+            out = out2 or out
+
     if _is_duplicate_schema_error(out or "") and heal_db:
         migrator.job.log("Schema partially exists — healing alembic_version...")
-        if await _heal_alembic_duplicate_schema(migrator, heal_db, out or ""):
+        if await _heal_alembic_duplicate_schema(
+            migrator, heal_db, out or "", heal_conn=heal_conn,
+        ):
             ok2, out2 = await _run_pasarguard_alembic(
                 migrator, "upgrade", "head", url_override=url_override,
             )
@@ -912,35 +1177,31 @@ async def get_alembic_head_revision(migrator) -> str | None:
     return None
 
 
-def _parse_upgrade_target_revision(output: str) -> str | None:
-    m = re.search(r"Running upgrade\s+\S+\s*->\s*([0-9a-f]+)", output, re.I)
-    if m:
-        return m.group(1)
-    m = re.search(r"versions/([0-9a-f]+)_", output, re.I)
-    if m:
-        return m.group(1)
-    return None
-
-
-def _is_duplicate_schema_error(output: str) -> bool:
-    low = (output or "").lower()
-    return "duplicatecolumn" in low or "already exists" in low
-
-
-async def _heal_alembic_duplicate_schema(migrator, target_db: str, output: str) -> bool:
+async def _heal_alembic_duplicate_schema(
+    migrator, target_db: str, output: str, *, heal_conn: dict | None = None,
+) -> bool:
     """When schema already has migration changes but alembic_version lags, stamp the right revision."""
     target_rev = _parse_upgrade_target_revision(output)
     if not target_rev:
         target_rev = await get_alembic_head_revision(migrator)
     if target_rev:
         migrator.job.log(f"Healing alembic_version → {target_rev} (schema already migrated)")
-        if await set_target_alembic_version(migrator, target_db, target_rev):
+        if heal_conn is not None:
+            if write_alembic_version_on_conn(target_db, heal_conn, target_rev):
+                return True
+        elif await set_target_alembic_version(migrator, target_db, target_rev):
             return True
     migrator.job.log("Falling back to alembic stamp head...")
-    if await stamp_alembic_head(migrator):
+    if heal_conn is not None:
+        head = await get_alembic_head_revision(migrator)
+        if head and write_alembic_version_on_conn(target_db, heal_conn, head):
+            return True
+    elif await stamp_alembic_head(migrator):
         return True
     head = await get_alembic_head_revision(migrator)
     if head:
+        if heal_conn is not None:
+            return write_alembic_version_on_conn(target_db, heal_conn, head)
         return await set_target_alembic_version(migrator, target_db, head)
     return False
 
