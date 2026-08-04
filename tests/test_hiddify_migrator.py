@@ -294,3 +294,42 @@ def test_disabled_user_status(fixture_data):
     disabled = [u for u in users if u["uuid"] == "33333333-3333-4333-8333-333333333333"][0]
     assert disabled["status"] == "disabled"
     assert disabled["enabled"] is False
+
+
+def test_import_script_is_valid_python_and_hardened():
+    """In-container import script must parse and always write a result on failure."""
+    import ast
+    import re
+
+    from app.services.migrators import hiddify as hiddify_mod
+
+    src = Path(hiddify_mod.__file__).read_text(encoding="utf-8")
+    m = re.search(r"_IMPORT_SCRIPT = r'''(.*?)'''", src, re.S)
+    assert m, "missing _IMPORT_SCRIPT"
+    script = m.group(1)
+    ast.parse(script)
+    for needle in (
+        "write_result",
+        "ensure_groups",
+        "hiddify-migrated",
+        "make_sub_token",
+        "traceback.format_exc()",
+        "UserStatus.disabled",
+        "datetime.fromtimestamp",
+    ):
+        assert needle in script, needle
+
+
+def test_normalized_users_ready_for_pasarguard_create(real_data):
+    """Payload fields must be usable by PasarGuard UserCreate rules."""
+    users, _paths = parse_users_from_backup(real_data)
+    assert len(users) == 237
+    statuses = {u["status"] for u in users}
+    assert statuses <= {"active", "on_hold", "disabled"}
+    for u in users:
+        assert isinstance(u["data_limit"], int)
+        assert u["username"] and u["uuid"]
+        if u["status"] == "on_hold":
+            assert int(u["on_hold_expire_duration"] or 0) > 0
+        if u["expire"] is not None:
+            assert int(u["expire"]) > 0
