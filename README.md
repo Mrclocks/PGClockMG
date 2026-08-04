@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> ⚠️ **`v2.0.7`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
+> ⚠️ **`v2.1`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
   <b>فارسی</b> · <a href="README.en.md">English</a> · <a href="README.ru.md">Русский</a>
@@ -58,7 +58,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | نسخه | تغییرات اصلی |
 |------|--------------|
-| v2.0.7 | فعال‌سازی مهاجرت ناقص Hiddify: کاربران با همان UUID + ریدایرکت لینک‌های قدیمی |
+| v2.1 | مهاجرت ناقص Hiddify: کاربران با همان UUID، ریدایرکت لینک‌های قدیمی، آپلود فقط JSON |
 | v2.0.6 | افزایش انتظار panel-boot وقتی Alembic هنوز در حال اجراست (جلوگیری از حذف زودهنگام MySQL موقت) |
 | v2.0.5 | فیکس خطای JSON خالی هنگام شروع مهاجرت + جلوگیری از اجرای هم‌زمان (پورت staging) |
 | v2.0.4 | فیکس مهاجرت Marzban MySQL→Timescale وقتی alembic_version مرزبان در PasarGuard نیست (heal فقط روی staging) |

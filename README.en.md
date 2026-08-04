@@ -1,4 +1,4 @@
-> ⚠️ **`v2.0.7`** — Always take a full backup before restore or migration.
+> ⚠️ **`v2.1`** — Always take a full backup before restore or migration.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <b>English</b> · <a href="README.ru.md">Русский</a>
@@ -56,7 +56,7 @@ Requirements: Ubuntu/Debian · root · Docker
 
 | Version | Key changes |
 |---------|-------------|
-| v2.0.7 | Enable partial Hiddify migrate: same UUID users + old link redirect |
+| v2.1 | Partial Hiddify migrate: same UUID users, old link redirect, JSON-only upload |
 | v2.0.6 | Extend panel-boot health wait while Alembic is still running (avoid early ephemeral MySQL deletion) |
 | v2.0.5 | Fix empty-JSON error on migrate start + block concurrent migrations (staging port races) |
 | v2.0.4 | Fix Marzban MySQL→Timescale when source alembic_version is missing from PasarGuard (staging-only heal) |
