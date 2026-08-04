@@ -165,58 +165,38 @@ def get_upload_requirements(
             }
 
     elif panel_id == "hiddify":
+        hiddify_json_slot = _slot(
+            "database",
+            not hiddify_live,
+            accept=[".json"],
+            db_types=["mysql", "mariadb"],
+            label={
+                "en": "Hiddify JSON backup",
+                "fa": "بکاپ JSON هیدیفای",
+                "ru": "JSON бэкап Hiddify",
+            },
+            hint={
+                "en": "Upload the panel JSON Export file only",
+                "fa": "فقط فایل JSON Export پنل را آپلود کنید",
+                "ru": "Загрузите только JSON Export панели",
+            },
+        )
         if hiddify_live:
             upload_mode = "optional"
             reason = {
-                "en": "Live Hiddify found — upload JSON Export optional if migrating another backup",
+                "en": "Live Hiddify found — JSON Export upload optional if migrating another backup",
                 "fa": "هیدیفای روی سرور یافت شد — آپلود بکاپ JSON اختیاری است",
                 "ru": "Hiddify на сервере найден — загрузка JSON опциональна",
             }
-            slots = [
-                _slot("bundle_zip", False, exclusive=True),
-                _slot(
-                    "database",
-                    False,
-                    accept=[".json", ".sql", ".zip"],
-                    db_types=["mysql", "mariadb"],
-                    label={
-                        "en": "Hiddify JSON Export / SQL",
-                        "fa": "بکاپ JSON یا SQL هیدیفای",
-                        "ru": "JSON Export / SQL Hiddify",
-                    },
-                    hint={
-                        "en": "Panel JSON Export preferred (users + proxy paths)",
-                        "fa": "ترجیحاً JSON Export پنل (کاربران + مسیر پروکسی)",
-                        "ru": "Предпочтительно JSON Export панели",
-                    },
-                ),
-            ]
+            slots = [hiddify_json_slot]
         else:
             upload_mode = "required"
             reason = {
-                "en": "Upload Hiddify JSON Export (preferred) or MySQL dump",
-                "fa": "بکاپ JSON Export هیدیفای (ترجیحی) یا dump MySQL را آپلود کنید",
-                "ru": "Загрузите JSON Export Hiddify (предпочтительно) или дамп MySQL",
+                "en": "Upload Hiddify JSON Export backup",
+                "fa": "بکاپ JSON Export هیدیفای را آپلود کنید",
+                "ru": "Загрузите JSON Export Hiddify",
             }
-            slots = [
-                _slot("bundle_zip", False, exclusive=True),
-                _slot(
-                    "database",
-                    True,
-                    accept=[".json", ".sql", ".zip"],
-                    db_types=["mysql", "mariadb"],
-                    label={
-                        "en": "Hiddify JSON Export / SQL",
-                        "fa": "بکاپ JSON یا SQL هیدیفای",
-                        "ru": "JSON Export / SQL Hiddify",
-                    },
-                    hint={
-                        "en": "Panel JSON Export preferred — keeps UUID + old link paths",
-                        "fa": "ترجیحاً JSON Export — UUID و مسیر لینک‌های قدیمی حفظ می‌شود",
-                        "ru": "Предпочтительно JSON Export — UUID и старые пути сохраняются",
-                    },
-                ),
-            ]
+            slots = [hiddify_json_slot]
 
     elif panel_id == "pasarguard":
         upload_mode = "optional"
@@ -238,10 +218,12 @@ def get_upload_requirements(
             "ru": "Remnawave через API — загрузка не нужна",
         }
 
+    allow_zip = panel_id not in ("3x-ui", "hiddify")
+    allow_separate = panel_id not in ("3x-ui", "hiddify")
     return {
         "upload_mode": upload_mode,
-        "allow_zip": True,
-        "allow_separate": True,
+        "allow_zip": allow_zip,
+        "allow_separate": allow_separate,
         "reason": reason,
         "slots": slots,
     }

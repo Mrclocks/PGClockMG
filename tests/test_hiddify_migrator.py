@@ -67,10 +67,14 @@ def test_panel_enabled_partial_redirect():
 def test_upload_requirements_accept_json():
     reqs = get_upload_requirements("hiddify")
     assert reqs["upload_mode"] in ("required", "optional")
-    db_slots = [s for s in reqs["slots"] if s["id"] == "database"]
-    assert db_slots
-    accept = db_slots[0]["accept"]
-    assert ".json" in accept
+    assert reqs.get("allow_zip") is False
+    assert reqs.get("allow_separate") is False
+    assert len(reqs["slots"]) == 1
+    slot = reqs["slots"][0]
+    assert slot["id"] == "database"
+    assert slot["accept"] == [".json"]
+    assert ".sql" not in slot["accept"]
+    assert ".zip" not in slot["accept"]
 
 
 def test_fixture_is_hiddify_backup(fixture_data):

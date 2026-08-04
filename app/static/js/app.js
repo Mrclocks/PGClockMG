@@ -1525,15 +1525,19 @@ async function renderUploadSection() {
   document.getElementById('uploadModeSeparate').textContent = t('upload.modeSeparate');
 
   const isXuiDbOnly = panel.id === '3x-ui';
+  const isHiddifyJsonOnly = panel.id === 'hiddify';
+  const isSingleFileUpload = isXuiDbOnly || isHiddifyJsonOnly;
   const modeTabs = document.getElementById('uploadModeTabs');
   const zipInput = document.getElementById('fileInputZip');
-  if (isXuiDbOnly) {
+  if (isSingleFileUpload) {
     state.uploadPrimarySlot = 'database';
     state.uploadMode = 'zip'; // reuse single dropzone panel
     modeTabs?.classList.add('hidden');
     document.getElementById('uploadZipPanel')?.classList.remove('hidden');
     document.getElementById('uploadSeparatePanel')?.classList.add('hidden');
-    if (zipInput) zipInput.accept = '.db,.sqlite3';
+    if (zipInput) {
+      zipInput.accept = isHiddifyJsonOnly ? '.json,application/json' : '.db,.sqlite3';
+    }
   } else {
     state.uploadPrimarySlot = 'bundle_zip';
     modeTabs?.classList.remove('hidden');
@@ -1544,7 +1548,7 @@ async function renderUploadSection() {
 
   const slotsEl = document.getElementById('uploadSlots');
   if (slotsEl) {
-    const separateSlots = isXuiDbOnly
+    const separateSlots = isSingleFileUpload
       ? []
       : (reqs.slots || []).filter(s => s.id !== 'bundle_zip');
     slotsEl.innerHTML = separateSlots.map(s => {
