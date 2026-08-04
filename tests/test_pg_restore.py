@@ -16,10 +16,18 @@ from app.services.pg_restore import (
     parse_timescale_wanted,
     detect_ts_mismatch_from_text,
     is_auth_failure_text,
+    is_ts_catalog_mismatch_error,
+    detect_dump_chunk_catalog_era,
+    resolve_wanted_ts_for_live,
+    wanted_ts_for_restore_retry,
+    collect_backup_ts_versions,
+    TS_LAST_SCHEMA_NAME_CHUNK,
+    TS_FIRST_RELID_CHUNK,
     _sql_literal,
     _set_env_var,
     _parse_manifest_ts_versions,
     analyze_pasarguard_backup,
+    explain_restore_error,
 )
 
 
@@ -88,6 +96,101 @@ The restore was stopped BEFORE changing anything
     pair = detect_ts_mismatch_from_text(text)
     assert pair == ("2.28.1", "2.28.2")
     print("OK: detect timescale mismatch text")
+
+
+def test_is_ts_catalog_mismatch_error_schema_name():
+    err = 'ERROR:  column "schema_name" of relation "chunk" does not exist'
+    assert is_ts_catalog_mismatch_error(err)
+    assert is_ts_catalog_mismatch_error(
+        'ERROR: column "relid" of relation "chunk" does not exist'
+    )
+    assert not is_ts_catalog_mismatch_error('ERROR: relation "users" does not exist')
+    print("OK: catalog mismatch detection")
+
+
+def test_detect_dump_chunk_catalog_era():
+    old = (
+        "COPY _timescaledb_catalog.chunk (id, hypertable_id, schema_name, "
+        "table_name, compressed_chunk_id, status) FROM stdin;\n"
+    )
+    new = (
+        "COPY _timescaledb_catalog.chunk (id, hypertable_id, relid, status) "
+        "FROM stdin;\n"
+    )
+    assert detect_dump_chunk_catalog_era(old) == "schema_name"
+    assert detect_dump_chunk_catalog_era(new) == "relid"
+    assert detect_dump_chunk_catalog_era("COPY public.users (id) FROM stdin;") is None
+    print("OK: dump chunk catalog era")
+
+
+def test_resolve_wanted_ts_for_live_pins_pre_229():
+    # Live latest (2.29+) + old dump fingerprint → pin 2.28.3
+    assert (
+        resolve_wanted_ts_for_live(None, live_ver="2.29.1", catalog_era="schema_name")
+        == TS_LAST_SCHEMA_NAME_CHUNK
+    )
+    # Live already 2.28.x + old dump → no realign
+    assert (
+        resolve_wanted_ts_for_live(None, live_ver="2.28.1", catalog_era="schema_name")
+        is None
+    )
+    # Explicit older version still preferred when live is 2.29+
+    assert (
+        resolve_wanted_ts_for_live("2.17.2", live_ver="2.29.0", catalog_era="schema_name")
+        == "2.17.2"
+    )
+    # New dump on old live → pin 2.29.0
+    assert (
+        resolve_wanted_ts_for_live(None, live_ver="2.28.3", catalog_era="relid")
+        == TS_FIRST_RELID_CHUNK
+    )
+    print("OK: resolve wanted ts for live")
+
+
+def test_wanted_ts_for_restore_retry_from_catalog_error():
+    err = 'ERROR:  column "schema_name" of relation "chunk" does not exist'
+    assert (
+        wanted_ts_for_restore_retry(err, {"timescaledb_versions": [], "timescaledb_chunk_catalog": "schema_name"})
+        == TS_LAST_SCHEMA_NAME_CHUNK
+    )
+    assert (
+        wanted_ts_for_restore_retry(err, {})
+        == TS_LAST_SCHEMA_NAME_CHUNK
+    )
+    print("OK: wanted ts for restore retry")
+
+
+def test_explain_schema_name_chunk_error():
+    exc = RuntimeError(
+        'PostgreSQL dump restore failed:\nERROR:  column "schema_name" of relation "chunk" does not exist'
+    )
+    info = explain_restore_error(exc, "timescaledb", "timescaledb")
+    assert "schema_name" in (info.get("en") or "").lower() or "catalog" in (info.get("en") or "").lower()
+    assert info.get("causes_fa")
+    print("OK: explain schema_name chunk error")
+
+
+def test_collect_backup_ts_from_compose_and_catalog():
+    import tempfile
+    import shutil
+
+    td = Path(tempfile.mkdtemp(prefix="pg-ts-collect-"))
+    try:
+        (td / "db_backup.sql").write_text(
+            "COPY _timescaledb_catalog.chunk (id, hypertable_id, schema_name, table_name) FROM stdin;\n1\t1\t_timescaledb_internal\t_hyper_1_1_chunk\n\\.\n",
+            encoding="utf-8",
+        )
+        (td / "docker-compose.yml").write_text(
+            "services:\n  timescaledb:\n    image: timescale/timescaledb:2.17.2-pg17\n",
+            encoding="utf-8",
+        )
+        versions = collect_backup_ts_versions(td)
+        assert "2.17.2" in versions
+        from app.services.pg_restore import detect_backup_chunk_catalog_era
+        assert detect_backup_chunk_catalog_era(td) == "schema_name"
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    print("OK: collect backup ts from compose + catalog")
 
 
 def test_is_auth_failure_text():
@@ -235,6 +338,12 @@ if __name__ == "__main__":
     test_filter_timescaledb_strip_all_for_plain_pg()
     test_parse_timescale_wanted()
     test_detect_ts_mismatch_from_official_error()
+    test_is_ts_catalog_mismatch_error_schema_name()
+    test_detect_dump_chunk_catalog_era()
+    test_resolve_wanted_ts_for_live_pins_pre_229()
+    test_wanted_ts_for_restore_retry_from_catalog_error()
+    test_explain_schema_name_chunk_error()
+    test_collect_backup_ts_from_compose_and_catalog()
     test_is_auth_failure_text()
     test_sql_literal_escapes_quotes()
     test_merge_env_preserves_password()

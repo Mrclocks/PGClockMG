@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> ⚠️ **`v2.0.2`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
+> ⚠️ **`v2.0.3`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
   <b>فارسی</b> · <a href="README.en.md">English</a> · <a href="README.ru.md">Русский</a>
@@ -57,6 +57,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | نسخه | تغییرات اصلی |
 |------|--------------|
+| v2.0.3 | فیکس ریستور Timescale: تشخیص کاتالوگ قدیمی chunk.schema_name و پین ایمیج به 2.28.3 روی سرورهای 2.29+ |
 | v2.0.2 | فیکس مهاجرت MariaDB→Timescale (ساخت DB موقت + staging با mariadb:11) |
 | v2.0.1 | ریدایرکت/لینک پنل: اولویت دامنه پاسارگارد، در غیر این‌صورت IP؛ دنبال‌کردن تغییر دامنه/.env |
 | v2.0 | مهاجرت کامل 3X-UI قدیم/جدید (تشخیص خودکار، Host/Admin/Group، ریدایرکت path/port) |
