@@ -225,6 +225,30 @@ def test_alembic_duplicate_heal_helpers():
     print("OK: alembic duplicate/missing revision heal helpers")
 
 
+def test_alembic_still_running_helpers():
+    from app.services.pasarguard_ops import _alembic_still_running
+
+    active = (
+        "INFO [alembic.runtime.migration] Context impl MySQLImpl.\n"
+        "INFO [alembic.runtime.migration] Running upgrade 0b62f893092b -> c41c441de44c\n"
+    )
+    assert _alembic_still_running(active) is True
+
+    done = active + "Application startup complete.\n"
+    assert _alembic_still_running(done) is False
+
+    missing = (
+        "INFO [alembic.runtime.migration] Context impl MySQLImpl.\n"
+        "ERROR [alembic.util.messaging] Can't locate revision identified by '5b41f7d2e9a1'\n"
+    )
+    assert _alembic_still_running(missing) is False
+
+    # Stale upgrade lines outside the trailing window should not extend forever
+    stale = ("INFO Running upgrade a -> b\n" + ("x\n" * 50) + "something else\n")
+    assert _alembic_still_running(stale) is False
+    print("OK: alembic still-running helpers")
+
+
 def test_write_alembic_version_on_sqlite_conn(tmp_path=None):
     import tempfile
     from pathlib import Path
@@ -370,6 +394,7 @@ if __name__ == "__main__":
     test_parse_sqlalchemy_urls()
     test_read_sqlite_alembic_version()
     test_alembic_duplicate_heal_helpers()
+    test_alembic_still_running_helpers()
     test_write_alembic_version_on_sqlite_conn()
     test_heal_unknown_refuses_live_mysql()
     test_heal_unknown_marzban_shaped_sqlite()

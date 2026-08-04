@@ -363,9 +363,49 @@ async def _heal_silent_restart_loop(migrator) -> bool:
     return True
 
 
+# Alembic activity markers — panel is still migrating; keep waiting
+_ALEMBIC_ACTIVITY_MARKERS = (
+    "Running upgrade",
+    "Context impl",
+    "Will assume transactional DDL",
+    "Will assume non-transactional DDL",
+    "alembic.runtime.migration",
+)
+
+
+def _alembic_still_running(output: str) -> bool:
+    """True if logs show alembic mid-upgrade without a completed startup.
+
+    Only recent 'Running upgrade' lines count as active work. Context/impl lines
+    also appear on hard failures (e.g. Can't locate revision), so they must not
+    extend the wait. Stale upgrade lines outside the trailing window are ignored.
+    """
+    text = output or ""
+    if any(m in text for m in STARTUP_MARKERS):
+        return False
+    hard_fails = (
+        "Can't locate revision",
+        "Database migrations failed",
+        "ERROR: Database migrations failed",
+    )
+    if any(h in text for h in hard_fails):
+        return False
+    lines = text.splitlines()
+    tail = "\n".join(lines[-40:])
+    return "Running upgrade" in tail
+
+
 async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
-    """Fail unless PasarGuard logs show a clean startup (no migration errors)."""
-    migrator.job.log("Verifying PasarGuard started without errors...")
+    """Fail unless PasarGuard logs show a clean startup (no migration errors).
+
+    max_wait is a soft budget. While alembic is clearly still applying revisions,
+    the wait is extended so long schema upgrades (e.g. custom Marzban → PasarGuard)
+    are not aborted early — which would delete ephemeral staging and surface as
+    Connection refused on the staging port.
+    """
+    migrator.job.log(
+        f"Verifying PasarGuard started without errors (budget {max_wait}s)..."
+    )
     await asyncio.sleep(8)
 
     stable_ready = 0
@@ -373,10 +413,34 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
     healed_once = False
     silent_loop_healed = False
     prev_restart_count = 0
-    attempts = max(12, max_wait // 4)
-    for i in range(attempts):
+    alembic_extensions = 0
+    max_alembic_extensions = 8  # allow long Marzban→PG migration chains
+    deadline = asyncio.get_event_loop().time() + max(60, int(max_wait))
+    while True:
+        now = asyncio.get_event_loop().time()
+        if now >= deadline:
+            break
+
         out = await fetch_pasarguard_logs(migrator, tail=400)
         _log_failures_from_output(migrator, out)
+
+        # Alembic still applying — do not fail yet; extend the health budget
+        if _alembic_still_running(out):
+            if alembic_extensions < max_alembic_extensions:
+                alembic_extensions += 1
+                extra = max(120, int(max_wait) // 2)
+                deadline = max(deadline, now + extra)
+                migrator.job.log(
+                    f"Alembic still running — extending health wait "
+                    f"(+{extra}s, extension {alembic_extensions}/{max_alembic_extensions})..."
+                )
+            else:
+                migrator.job.log(
+                    "Alembic still running (max extensions reached) — continuing to wait "
+                    f"until deadline ({int(deadline - now)}s left)..."
+                )
+            await asyncio.sleep(5)
+            continue
 
         hit = _check_logs_for_failure(out)
         if hit:
@@ -1252,8 +1316,12 @@ async def sync_alembic_for_startup(migrator, target_db: str) -> None:
     migrator.job.log(f"Alembic ready for startup: {final or 'head'}")
 
 
-async def safe_start_pasarguard(migrator) -> None:
-    """Start PasarGuard and fail if the panel does not become healthy."""
+async def safe_start_pasarguard(migrator, *, health_max_wait: int | None = None) -> None:
+    """Start PasarGuard and fail if the panel does not become healthy.
+
+    health_max_wait: optional soft budget for verify_pasarguard_healthy.
+    Panel-boot schema upgrades (Marzban→PasarGuard) should pass a larger value.
+    """
     cwd = str(PASARGUARD_DIR)
     target_db = (migrator.params or {}).get("target_db")
     # After DROP SCHEMA CASCADE, PgBouncer may hold stale enum OIDs
@@ -1276,7 +1344,8 @@ async def safe_start_pasarguard(migrator) -> None:
         cwd=cwd,
         timeout=180,
     )
-    await verify_pasarguard_healthy(migrator)
+    wait = 180 if health_max_wait is None else int(health_max_wait)
+    await verify_pasarguard_healthy(migrator, max_wait=wait)
 
 
 async def stamp_alembic_head(migrator) -> bool:

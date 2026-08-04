@@ -350,7 +350,8 @@ async def _panel_boot_upgrade_intermediate(
         migrator.job.log(f"Panel-boot upgrade on intermediate {inter_db}...")
         orig = migrator.params.get("target_db")
         migrator.params["target_db"] = inter_db
-        await safe_start_pasarguard(migrator)
+        # Custom/large Marzban schemas can take well over the default 180s.
+        await safe_start_pasarguard(migrator, health_max_wait=900)
         migrator.params["target_db"] = orig
         await _stop_panel(migrator)
         migrator.job.log("Panel-boot schema upgrade complete")
