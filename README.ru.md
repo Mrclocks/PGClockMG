@@ -1,4 +1,4 @@
-> ⚠️ **`v2.0.6`** — Перед restore или миграцией сделайте полный бэкап.
+> ⚠️ **`v2.0.7`** — Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <a href="README.en.md">English</a> · <b>Русский</b>
@@ -47,7 +47,8 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 | Marzban | Полная |
 | PasarGuard | Restore / смена БД (не в миграции панелей) |
 | 3X-UI | Полная |
-| Remnawave / Hiddify | Скоро |
+| Remnawave | Скоро |
+| Hiddify | Частично (пользователи + redirect ссылок) |
 
 ---
 
@@ -55,6 +56,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | Версия | Основные изменения |
 |--------|-------------------|
+| v2.0.7 | Частичная миграция Hiddify: пользователи с тем же UUID + redirect старых ссылок |
 | v2.0.6 | Увеличено ожидание panel-boot, пока Alembic ещё выполняется (без раннего удаления staging MySQL) |
 | v2.0.5 | Исправление пустого JSON при старте миграции + блокировка параллельных запусков |
 | v2.0.4 | Исправление миграции Marzban MySQL→Timescale при неизвестном alembic_version (heal только на staging) |

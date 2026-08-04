@@ -983,7 +983,10 @@ function renderSummary() {
     <div class="summary-row"><span class="summary-label">${s.links}</span><span>${linkLabel}</span></div>
     <div class="summary-row"><span class="summary-label">${s.backup}</span><span>${state.uploadInfo?.filename || state.bundleStatus?.mode === 'zip' ? t('upload.fullZip') : state.bundleStatus?.mode === 'separate' ? t('upload.separateFiles') : s.server}</span></div>`;
 
-  document.getElementById('redirectOption').classList.toggle('hidden', panel.id !== '3x-ui');
+  document.getElementById('redirectOption').classList.toggle(
+    'hidden',
+    panel.id !== '3x-ui' && panel.id !== 'hiddify',
+  );
 
   const warnEl = document.getElementById('finalWarnings');
   const warnings = tr(panel.warnings, lang);

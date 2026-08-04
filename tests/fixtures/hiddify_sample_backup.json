@@ -1,0 +1,340 @@
+{
+  "admin_users": [
+    {
+      "name": "Owner",
+      "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "mode": "super_admin"
+    }
+  ],
+  "childs": [
+    {
+      "id": 0,
+      "mode": "virtual",
+      "name": "Root",
+      "unique_id": "164e106b-c475-497f-a771-a83074b1f2cd"
+    }
+  ],
+  "domains": [
+    {
+      "domain": "204.10.194.194",
+      "mode": "direct",
+      "sub_link_only": false
+    },
+    {
+      "domain": "204.10.194.194.sslip.io",
+      "mode": "direct",
+      "sub_link_only": false
+    },
+    {
+      "domain": "www.redditstatic.com",
+      "mode": "special_reality_tcp",
+      "sub_link_only": false
+    },
+    {
+      "domain": "play.google.com",
+      "mode": "special_reality_tcp",
+      "sub_link_only": false
+    },
+    {
+      "domain": "www.amd.com",
+      "mode": "special_reality_grpc",
+      "sub_link_only": false
+    },
+    {
+      "domain": "dar.vodka-vip1.com",
+      "mode": "fake",
+      "sub_link_only": false
+    },
+    {
+      "domain": "sab.vodka-vip.com",
+      "mode": "sub_link_only",
+      "sub_link_only": false
+    },
+    {
+      "domain": "yahoo.com",
+      "mode": "special_reality_xhttp",
+      "sub_link_only": false
+    },
+    {
+      "domain": "masouddevelop.global.ssl.fastly.net",
+      "mode": "cdn",
+      "sub_link_only": false
+    },
+    {
+      "domain": "www.wechat.com",
+      "mode": "special_reality_xhttp",
+      "sub_link_only": false
+    },
+    {
+      "domain": "apk.quvexa.info",
+      "mode": "cdn",
+      "sub_link_only": false
+    },
+    {
+      "domain": "www.ookla.com",
+      "mode": "special_reality_tcp",
+      "sub_link_only": false
+    }
+  ],
+  "hconfigs": [
+    {
+      "key": "unique_id",
+      "value": "a62f4445-2146-4661-baa7-08e3c7a1b426",
+      "child_unique_id": "164e106b-c475-497f-a771-a83074b1f2cd"
+    },
+    {
+      "key": "proxy_path",
+      "value": "SIDhgu5wXZ1bJt8MLLm",
+      "child_unique_id": "164e106b-c475-497f-a771-a83074b1f2cd"
+    },
+    {
+      "key": "proxy_path_admin",
+      "value": "w3z0gMec5X",
+      "child_unique_id": "164e106b-c475-497f-a771-a83074b1f2cd"
+    },
+    {
+      "key": "proxy_path_client",
+      "value": "DmPnY3A1UQ9tm58e97",
+      "child_unique_id": "164e106b-c475-497f-a771-a83074b1f2cd"
+    }
+  ],
+  "proxies": [
+    {
+      "name": "tls_h2 xhttp direct vless dl=h1",
+      "proto": "vless",
+      "enable": false
+    },
+    {
+      "name": "tls_h2 xhttp direct vless dl=h2",
+      "proto": "vless",
+      "enable": false
+    },
+    {
+      "name": "tls_h2 xhttp direct vless dl=h3",
+      "proto": "vless",
+      "enable": false
+    }
+  ],
+  "users": [
+    {
+      "name": "default",
+      "uuid": "c6fca10a-6d6c-4b4c-860b-913900dd93cc",
+      "usage_limit_GB": 3000.0,
+      "current_usage_GB": 72.37854089494795,
+      "package_days": 3650,
+      "start_date": "2026-07-03",
+      "enable": true,
+      "mode": "no_reset",
+      "comment": "",
+      "lang": "en",
+      "is_active": true,
+      "added_by_uuid": "bb4d9591-fc2f-47f3-9db1-bc214f12566f",
+      "telegram_id": null,
+      "last_online": null,
+      "last_reset_time": null,
+      "ed25519_private_key": "",
+      "ed25519_public_key": "",
+      "wg_pk": "",
+      "wg_psk": "",
+      "wg_pub": ""
+    },
+    {
+      "name": "default",
+      "uuid": "c60082d5-77e6-4c45-9282-9cef5f550d13",
+      "usage_limit_GB": 3000.0,
+      "current_usage_GB": 0.0,
+      "package_days": 3650,
+      "start_date": null,
+      "enable": true,
+      "mode": "no_reset",
+      "comment": "",
+      "lang": "en",
+      "is_active": true,
+      "added_by_uuid": "bb4d9591-fc2f-47f3-9db1-bc214f12566f",
+      "telegram_id": null,
+      "last_online": null,
+      "last_reset_time": null,
+      "ed25519_private_key": "",
+      "ed25519_public_key": "",
+      "wg_pk": "",
+      "wg_psk": "",
+      "wg_pub": ""
+    },
+    {
+      "name": "عمو جواد ",
+      "uuid": "a013f100-cd00-47f2-a0b7-7c01afbbf0ef",
+      "usage_limit_GB": 50.0,
+      "current_usage_GB": 12.493797563947737,
+      "package_days": 90,
+      "start_date": "2026-06-16",
+      "enable": true,
+      "mode": "no_reset",
+      "comment": "",
+      "lang": "en",
+      "is_active": true,
+      "added_by_uuid": "efa4e3ff-b7d1-4b2b-a162-d21e57579b36",
+      "telegram_id": null,
+      "last_online": null,
+      "last_reset_time": null,
+      "ed25519_private_key": "",
+      "ed25519_public_key": "",
+      "wg_pk": "",
+      "wg_psk": "",
+      "wg_pub": ""
+    },
+    {
+      "name": "Masoud",
+      "uuid": "a2bb85d0-7f02-429b-9f0e-fb505a3170a7",
+      "usage_limit_GB": 1000.0,
+      "current_usage_GB": 1.191294969059527,
+      "package_days": 90,
+      "start_date": "2026-05-30",
+      "enable": true,
+      "mode": "no_reset",
+      "comment": "",
+      "lang": "en",
+      "is_active": true,
+      "added_by_uuid": "efa4e3ff-b7d1-4b2b-a162-d21e57579b36",
+      "telegram_id": null,
+      "last_online": null,
+      "last_reset_time": null,
+      "ed25519_private_key": "",
+      "ed25519_public_key": "",
+      "wg_pk": "",
+      "wg_psk": "",
+      "wg_pub": ""
+    },
+    {
+      "name": "Me",
+      "uuid": "5c0b3871-12fc-4cfa-9b8e-56d7df7de258",
+      "usage_limit_GB": 30.0,
+      "current_usage_GB": 0.3131126193329692,
+      "package_days": 30,
+      "start_date": "2026-08-04",
+      "enable": true,
+      "mode": "no_reset",
+      "comment": "",
+      "lang": "en",
+      "is_active": true,
+      "added_by_uuid": "b25da4c4-e949-45d9-b1a2-1db3ac32c346",
+      "telegram_id": null,
+      "last_online": null,
+      "last_reset_time": null,
+      "ed25519_private_key": "",
+      "ed25519_public_key": "",
+      "wg_pk": "",
+      "wg_psk": "",
+      "wg_pub": ""
+    },
+    {
+      "name": "@arynoxir",
+      "uuid": "402ae30f-018e-4952-ad28-4866ae53935f",
+      "usage_limit_GB": 50.0,
+      "current_usage_GB": 50.00571782514453,
+      "package_days": 90,
+      "start_date": "2026-05-30",
+      "enable": true,
+      "mode": "no_reset",
+      "comment": "",
+      "lang": "en",
+      "is_active": false,
+      "added_by_uuid": "efa4e3ff-b7d1-4b2b-a162-d21e57579b36",
+      "telegram_id": null,
+      "last_online": null,
+      "last_reset_time": null,
+      "ed25519_private_key": "",
+      "ed25519_public_key": "",
+      "wg_pk": "",
+      "wg_psk": "",
+      "wg_pub": ""
+    },
+    {
+      "name": "Meysam soltani",
+      "uuid": "44dd0bd5-d57f-44a4-b1b0-84fd61291200",
+      "usage_limit_GB": 30.0,
+      "current_usage_GB": 25.900783919729292,
+      "package_days": 30,
+      "start_date": "2026-06-30",
+      "enable": true,
+      "mode": "no_reset",
+      "comment": "",
+      "lang": "en",
+      "is_active": false,
+      "added_by_uuid": "b25da4c4-e949-45d9-b1a2-1db3ac32c346",
+      "telegram_id": null,
+      "last_online": null,
+      "last_reset_time": null,
+      "ed25519_private_key": "",
+      "ed25519_public_key": "",
+      "wg_pk": "",
+      "wg_psk": "",
+      "wg_pub": ""
+    },
+    {
+      "name": "Afsar ",
+      "uuid": "befa0345-a163-41af-97df-d854b1dfbeda",
+      "usage_limit_GB": 30.0,
+      "current_usage_GB": 17.536419046111405,
+      "package_days": 30,
+      "start_date": "2026-07-09",
+      "enable": true,
+      "mode": "no_reset",
+      "comment": "",
+      "lang": "en",
+      "is_active": true,
+      "added_by_uuid": "b25da4c4-e949-45d9-b1a2-1db3ac32c346",
+      "telegram_id": null,
+      "last_online": null,
+      "last_reset_time": null,
+      "ed25519_private_key": "",
+      "ed25519_public_key": "",
+      "wg_pk": "",
+      "wg_psk": "",
+      "wg_pub": ""
+    },
+    {
+      "name": "",
+      "uuid": "11111111-1111-4111-8111-111111111111",
+      "usage_limit_GB": 10,
+      "current_usage_GB": 1,
+      "package_days": 30,
+      "start_date": null,
+      "enable": true,
+      "mode": "no_reset",
+      "comment": "empty-name"
+    },
+    {
+      "name": "default",
+      "uuid": "22222222-2222-4222-8222-222222222222",
+      "usage_limit_GB": 5,
+      "current_usage_GB": 0,
+      "package_days": 30,
+      "start_date": "2026-01-01",
+      "enable": true,
+      "mode": "no_reset",
+      "comment": "dup-name"
+    },
+    {
+      "name": "disabled-user",
+      "uuid": "33333333-3333-4333-8333-333333333333",
+      "usage_limit_GB": 1,
+      "current_usage_GB": 0,
+      "package_days": 7,
+      "start_date": "2026-01-01",
+      "enable": false,
+      "mode": "no_reset",
+      "comment": "off"
+    },
+    {
+      "name": "User Name!! @#",
+      "uuid": "44444444-4444-4444-8444-444444444444",
+      "usage_limit_GB": 0,
+      "current_usage_GB": 0,
+      "package_days": 0,
+      "start_date": null,
+      "enable": true,
+      "mode": "no_reset",
+      "comment": "sanitize"
+    }
+  ]
+}

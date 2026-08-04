@@ -234,7 +234,7 @@ const I18N = {
     step4: {
       h2: 'Review & Confirm',
       desc: 'Check the summary before starting.',
-      redirect: 'Install redirect server to keep old 3x-ui subscription links working (recommended)',
+      redirect: 'Install redirect server to keep old subscription links working (recommended)',
       start: 'Start Migration',
       back: '← Back',
       summary: {
@@ -296,7 +296,7 @@ const I18N = {
     },
     support: {
       full: 'Full',
-      partial: 'Partial',
+      partial: 'Incomplete',
       experimental: 'Experimental',
       db_only: 'DB only',
       comingSoon: 'Coming soon',
@@ -625,7 +625,7 @@ const I18N = {
     step4: {
       h2: 'تأیید نهایی',
       desc: 'خلاصه را بررسی کنید.',
-      redirect: 'نصب redirect server برای حفظ لینک‌های قدیمی 3x-ui (توصیه‌شده)',
+      redirect: 'نصب redirect برای حفظ لینک‌های قدیمی اشتراک (توصیه‌شده)',
       start: 'شروع مهاجرت',
       back: '→ بازگشت',
       summary: {
@@ -684,7 +684,7 @@ const I18N = {
     },
     support: {
       full: 'کامل',
-      partial: 'جزئی',
+      partial: 'ناقص',
       experimental: 'آزمایشی',
       db_only: 'فقط DB',
       comingSoon: 'به‌زودی',
@@ -1013,7 +1013,7 @@ const I18N = {
     step4: {
       h2: 'Подтверждение',
       desc: 'Проверьте сводку.',
-      redirect: 'Установить redirect server для старых ссылок 3x-ui (рекомендуется)',
+      redirect: 'Установить redirect для старых ссылок подписки (рекомендуется)',
       start: 'Начать миграцию',
       back: '← Назад',
       summary: {

@@ -167,16 +167,55 @@ def get_upload_requirements(
     elif panel_id == "hiddify":
         if hiddify_live:
             upload_mode = "optional"
-        else:
-            upload_mode = "required"
             reason = {
-                "en": "Upload Hiddify MySQL dump",
-                "fa": "dump MySQL هیدیفای را آپلود کنید",
-                "ru": "Загрузите дамп MySQL Hiddify",
+                "en": "Live Hiddify found — upload JSON Export optional if migrating another backup",
+                "fa": "هیدیفای روی سرور یافت شد — آپلود بکاپ JSON اختیاری است",
+                "ru": "Hiddify на сервере найден — загрузка JSON опциональна",
             }
             slots = [
                 _slot("bundle_zip", False, exclusive=True),
-                _slot("database", True, accept=[".sql"], db_types=["mysql", "mariadb"]),
+                _slot(
+                    "database",
+                    False,
+                    accept=[".json", ".sql", ".zip"],
+                    db_types=["mysql", "mariadb"],
+                    label={
+                        "en": "Hiddify JSON Export / SQL",
+                        "fa": "بکاپ JSON یا SQL هیدیفای",
+                        "ru": "JSON Export / SQL Hiddify",
+                    },
+                    hint={
+                        "en": "Panel JSON Export preferred (users + proxy paths)",
+                        "fa": "ترجیحاً JSON Export پنل (کاربران + مسیر پروکسی)",
+                        "ru": "Предпочтительно JSON Export панели",
+                    },
+                ),
+            ]
+        else:
+            upload_mode = "required"
+            reason = {
+                "en": "Upload Hiddify JSON Export (preferred) or MySQL dump",
+                "fa": "بکاپ JSON Export هیدیفای (ترجیحی) یا dump MySQL را آپلود کنید",
+                "ru": "Загрузите JSON Export Hiddify (предпочтительно) или дамп MySQL",
+            }
+            slots = [
+                _slot("bundle_zip", False, exclusive=True),
+                _slot(
+                    "database",
+                    True,
+                    accept=[".json", ".sql", ".zip"],
+                    db_types=["mysql", "mariadb"],
+                    label={
+                        "en": "Hiddify JSON Export / SQL",
+                        "fa": "بکاپ JSON یا SQL هیدیفای",
+                        "ru": "JSON Export / SQL Hiddify",
+                    },
+                    hint={
+                        "en": "Panel JSON Export preferred — keeps UUID + old link paths",
+                        "fa": "ترجیحاً JSON Export — UUID و مسیر لینک‌های قدیمی حفظ می‌شود",
+                        "ru": "Предпочтительно JSON Export — UUID и старые пути сохраняются",
+                    },
+                ),
             ]
 
     elif panel_id == "pasarguard":

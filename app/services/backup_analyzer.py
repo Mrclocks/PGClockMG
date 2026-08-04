@@ -85,6 +85,9 @@ def _score_directory(path: Path) -> int:
             score += 10
         if name.endswith(".sql"):
             score += 8
+        if name.endswith(".json") and name not in ("xray_config.json", "package.json"):
+            # Cheap boost; full Hiddify detect happens later
+            score += 2
         if name == ".env":
             score += 6
         if name == "xray_config.json":
@@ -130,6 +133,7 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
         "compose": None,
         "xray_config": None,
         "data_dir": None,
+        "hiddify_json": None,
     }
 
     for p in sorted(root.rglob("*")):
@@ -160,6 +164,15 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
             paths["xray_config"] = str(p)
             if not paths["data_dir"]:
                 paths["data_dir"] = str(p.parent)
+        if name.endswith(".json") and not paths["hiddify_json"] and name != "xray_config.json":
+            if _file_looks_like_hiddify_json(p):
+                paths["hiddify_json"] = str(p)
+                categories["database_hiddify_json"] = categories.get("database_hiddify_json", 0) + 1
+                # Retag inventory entry if we already recorded it as other
+                for item in inventory:
+                    if item.get("path") == rel:
+                        item["category"] = "database_hiddify_json"
+                        break
 
     # Also scan upload_dir for single-file uploads (sql/sqlite at top level)
     for p in upload_dir.iterdir():
@@ -172,12 +185,21 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
             name_l in SQLITE_DB_NAMES or name_l.endswith((".db", ".sqlite3"))
         ):
             paths["sqlite"] = str(p)
+        if (
+            not paths["hiddify_json"]
+            and name_l.endswith(".json")
+            and name_l != "xray_config.json"
+            and _file_looks_like_hiddify_json(p)
+        ):
+            paths["hiddify_json"] = str(p)
 
     panel_hint = _detect_panel(inventory, paths)
     # Renamed 3x-ui dumps (*.db) may not match x-ui.db — detect via tables
     if panel_hint != "3x-ui" and paths.get("sqlite"):
         if _sqlite_looks_like_xui(Path(paths["sqlite"])):
             panel_hint = "3x-ui"
+    if panel_hint != "hiddify" and paths.get("hiddify_json"):
+        panel_hint = "hiddify"
     env_text = ""
     if paths["env"]:
         env_text = Path(paths["env"]).read_text(encoding="utf-8", errors="ignore")
@@ -186,6 +208,8 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
     if not detected_source_db:
         if paths["sqlite"]:
             detected_source_db = "sqlite"
+        elif paths.get("hiddify_json") or panel_hint == "hiddify":
+            detected_source_db = "mysql"
         elif paths["sql"]:
             low = paths["sql"].lower()
             detected_source_db = "mariadb" if "mariadb" in low else "mysql"
@@ -222,8 +246,16 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
             backup_ok = bool(paths["sqlite"] or paths["sql"])
     elif panel_hint == "3x-ui":
         backup_ok = paths["sqlite"] is not None
+    elif panel_hint == "hiddify":
+        backup_ok = bool(paths.get("hiddify_json") or paths.get("sql"))
+        if not backup_ok:
+            missing.append(_msg(
+                "Hiddify JSON Export or .sql dump not found",
+                "بکاپ JSON هیدیفای یا فایل .sql یافت نشد",
+                "JSON Export Hiddify или .sql не найден",
+            ))
     else:
-        backup_ok = bool(paths["sqlite"] or paths["sql"])
+        backup_ok = bool(paths["sqlite"] or paths["sql"] or paths.get("hiddify_json"))
 
     warnings: list[dict] = []
     if panel_hint == "marzban" and backup_ok and not paths["env"]:
@@ -298,18 +330,33 @@ def _detect_panel(inventory: list[dict], paths: dict) -> str | None:
     # Only the DB filename (not arbitrary path text) identifies 3x-ui
     if sqlite_name == "x-ui.db" or "x-ui" in sqlite_name:
         return "3x-ui"
+    if paths.get("hiddify_json"):
+        return "hiddify"
     for item in inventory:
         name = item["name"].lower()
         p = item["path"].lower()
         if name == "x-ui.db":
             return "3x-ui"
-        if "hiddify" in p:
+        if item.get("category") == "database_hiddify_json":
+            return "hiddify"
+        if "hiddify" in p or name in ("current.json",):
             return "hiddify"
         if "marzban" in p or name in ("db.sqlite3", "marzban.db"):
             return "marzban"
     if paths.get("sqlite") or paths.get("sql"):
         return "marzban"
     return None
+
+
+def _file_looks_like_hiddify_json(path: Path) -> bool:
+    try:
+        from app.services.migrators.hiddify_lib import is_hiddify_json_backup
+        import json as _json
+
+        data = _json.loads(Path(path).read_text(encoding="utf-8", errors="ignore"))
+        return is_hiddify_json_backup(data)
+    except Exception:
+        return False
 
 
 def _pasarguard_note(path: Path, category: str) -> str | None:

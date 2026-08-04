@@ -249,9 +249,9 @@ def check_prerequisites(panel_id: str, marzban_mode: str | None = None, upload_i
             "ok": hiddify_installed,
             "optional": not hiddify_installed,
             "detail": {
-                "en": f"At {HIDDIFY_DIR}" if hiddify_installed else "Upload MySQL dump in next step",
-                "fa": "یا dump آپلود کنید" if not hiddify_installed else f"در {HIDDIFY_DIR}",
-                "ru": "Загрузите дамп MySQL" if not hiddify_installed else "Найден",
+                "en": f"At {HIDDIFY_DIR}" if hiddify_installed else "Upload Hiddify JSON Export in next step",
+                "fa": "یا بکاپ JSON آپلود کنید" if not hiddify_installed else f"در {HIDDIFY_DIR}",
+                "ru": "Загрузите JSON Export" if not hiddify_installed else "Найден",
             },
         })
 

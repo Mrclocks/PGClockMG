@@ -78,6 +78,8 @@ def validate_migration(params: dict) -> dict:
         errors.extend(_validate_marzban(source_db, target_db, upload_path, upload_analysis, bundle_status))
     elif panel_id == "3x-ui":
         errors.extend(_validate_xui(upload_path, bundle_status))
+    elif panel_id == "hiddify":
+        errors.extend(_validate_hiddify(upload_path, bundle_status, upload_analysis))
     elif panel_id == "remnawave":
         if not params.get("remnawave_url") or not params.get("remnawave_token"):
             errors.append(_msg("Remnawave URL and API token required", "URL و Token رمناوی لازم است", "Нужны URL и токен Remnawave"))
@@ -175,6 +177,31 @@ def _validate_xui(upload_path, bundle_status=None) -> list:
     has_db = find_xui_db() or upload_path or (bundle_status and bundle_status.get("complete"))
     if not has_db:
         errors.append(_msg("x-ui.db not found — upload backup", "x-ui.db یافت نشد — بکاپ آپلود کنید", "x-ui.db не найден — загрузите копию"))
+    return errors
+
+
+def _validate_hiddify(upload_path, bundle_status=None, upload_analysis=None) -> list:
+    errors = []
+    if not is_pasarguard_installed():
+        errors.append(_msg(
+            "PasarGuard must be installed first",
+            "ابتدا PasarGuard را نصب کنید",
+            "Сначала установите PasarGuard",
+        ))
+    from app.services.prerequisites import is_hiddify_installed
+
+    has_source = bool(upload_path) or (bundle_status and bundle_status.get("complete"))
+    has_source = has_source or is_hiddify_installed()
+    if upload_analysis and upload_analysis.get("backup_ok"):
+        has_source = True
+    if upload_analysis and upload_analysis.get("paths", {}).get("hiddify_json"):
+        has_source = True
+    if not has_source:
+        errors.append(_msg(
+            "Hiddify JSON Export not found — upload backup",
+            "بکاپ JSON هیدیفای یافت نشد — آپلود کنید",
+            "JSON Export Hiddify не найден — загрузите копию",
+        ))
     return errors
 
 
