@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> ⚠️ **`v2.0.5`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
+> ⚠️ **`v2.0.6`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
   <b>فارسی</b> · <a href="README.en.md">English</a> · <a href="README.ru.md">Русский</a>
@@ -57,6 +57,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | نسخه | تغییرات اصلی |
 |------|--------------|
+| v2.0.6 | افزایش انتظار panel-boot وقتی Alembic هنوز در حال اجراست (جلوگیری از حذف زودهنگام MySQL موقت) |
 | v2.0.5 | فیکس خطای JSON خالی هنگام شروع مهاجرت + جلوگیری از اجرای هم‌زمان (پورت staging) |
 | v2.0.4 | فیکس مهاجرت Marzban MySQL→Timescale وقتی alembic_version مرزبان در PasarGuard نیست (heal فقط روی staging) |
 | v2.0.3 | فیکس ریستور Timescale: تشخیص کاتالوگ قدیمی chunk.schema_name و پین ایمیج به 2.28.3 روی سرورهای 2.29+ |
