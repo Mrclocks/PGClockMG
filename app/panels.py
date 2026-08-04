@@ -236,27 +236,27 @@ PANELS: dict[str, PanelInfo] = {
         enabled=True,
         coming_soon=False,
         description={
-            "en": "Partial: migrates users (same UUID). Previous subscription links keep working via redirect. Inbounds are not migrated.",
-            "fa": "ناقص: انتقال کاربران با همان UUID. لینک‌های قبلی اشتراک با ریدایرکت کار می‌کنند. اینباند منتقل نمی‌شود.",
-            "ru": "Частично: пользователи с тем же UUID. Старые ссылки работают через redirect. Inbound не переносится.",
+            "en": "Partial: JSON → group hiddify-test → users (same UUID) → pg-redirect like 3x-ui. Inbounds not migrated.",
+            "fa": "ناقص: JSON → گروه hiddify-test → کاربران (همان UUID) → ریدایرکت مثل 3x-ui. اینباند منتقل نمی‌شود.",
+            "ru": "Частично: JSON → группа hiddify-test → пользователи (тот же UUID) → redirect как 3x-ui. Inbound не переносится.",
         },
         warnings={
             "en": [
-                "Partial migration — users + subscription redirect only (no inbounds/proxies).",
+                "Creates group hiddify-test; imports users with preserved UUID; redirects like 3x-ui.",
                 "PasarGuard MUST be installed before migration (any DB engine).",
                 "Upload Hiddify JSON Export backup (or use live panel / current.json on this server).",
                 "Previous user links keep working via pg-redirect on port 443.",
                 "Create the PasarGuard owner account before migration.",
             ],
             "fa": [
-                "مهاجرت ناقص — فقط کاربران + ریدایرکت لینک اشتراک (بدون اینباند/پروکسی).",
+                "گروه hiddify-test ساخته می‌شود؛ کاربران با حفظ UUID وارد می‌شوند؛ ریدایرکت مثل 3x-ui.",
                 "PasarGuard باید قبل از مهاجرت نصب باشد (هر نوع دیتابیس).",
                 "بکاپ JSON Export هیدیفای را آپلود کنید (یا پنل زنده / current.json روی همین سرور).",
                 "لینک‌های قبلی کاربران با pg-redirect روی پورت 443 کار می‌کنند.",
                 "قبل از مهاجرت حساب Owner پاسارگارد را بسازید.",
             ],
             "ru": [
-                "Частичная миграция — только пользователи + redirect (без inbound/proxy).",
+                "Создаётся группа hiddify-test; пользователи с UUID; redirect как 3x-ui.",
                 "PasarGuard должен быть установлен заранее (любая СУБД).",
                 "Загрузите JSON Export Hiddify (или live / current.json на этом сервере).",
                 "Старые ссылки пользователей работают через pg-redirect на порту 443.",

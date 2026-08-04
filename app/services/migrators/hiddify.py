@@ -1,6 +1,11 @@
 """Hiddify Manager → PasarGuard migration (users + subscription redirect).
 
-Priority: keep old Hiddify client links working via pg-redirect.
+Flow (same idea as 3x-ui):
+1. Read users + old subscription paths from Hiddify JSON export
+2. Create PasarGuard group ``hiddify-test``
+3. Create users (preserve UUID) into that group
+4. Install pg-redirect so old Hiddify links → new /sub/{token}
+
 Inbounds / proxy templates are intentionally NOT migrated.
 """
 
@@ -26,328 +31,12 @@ from app.services.migrators.hiddify_lib import (
     parse_users_from_backup,
     summarize_backup,
 )
+from app.services.migrators.hiddify_pg_import import (
+    HIDDIFY_TEST_GROUP,
+    run_hiddify_user_import,
+)
 from app.services.pasarguard_ops import safe_start_pasarguard
 from app.services.pg_access import resolve_pasarguard_public_base
-
-
-# Python script executed inside the PasarGuard container (any target DB).
-# Must always write result JSON — even on fatal errors — so the host can report causes.
-_IMPORT_SCRIPT = r'''
-import asyncio
-import hmac
-import json
-import sys
-import traceback
-from base64 import b64encode
-from datetime import datetime, timezone
-from hashlib import sha256
-from math import ceil
-from pathlib import Path
-from time import time
-from uuid import UUID
-
-payload_path = Path(sys.argv[1])
-result_path = Path(sys.argv[2])
-
-def write_result(payload):
-    result_path.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
-
-try:
-    payload = json.loads(payload_path.read_text(encoding="utf-8"))
-except Exception as e:
-    write_result({
-        "ok": False,
-        "error": f"bad payload: {e}",
-        "traceback": traceback.format_exc(),
-        "created": [],
-        "errors": [{"username": "*", "error": f"bad payload: {e}"}],
-        "skipped": [],
-    })
-    sys.exit(0)
-
-users = payload.get("users") or []
-
-
-async def make_sub_token(db, user_id: int) -> str:
-    """Build subscription token in the current DB session (no nested GetDB)."""
-    from app.db.crud.general import get_jwt_secret_key
-
-    secret = await get_jwt_secret_key(db)
-    if not secret:
-        raise RuntimeError("PasarGuard JWT secret is missing")
-    data = "v3," + str(int(user_id)) + "," + str(ceil(time()))
-    data_b64 = b64encode(data.encode("utf-8"), altchars=b"-_").decode("utf-8").rstrip("=")
-    signature = (
-        b64encode(
-            hmac.new(secret.encode("utf-8"), data_b64.encode("utf-8"), sha256).digest(),
-            altchars=b"-_",
-        )
-        .decode("utf-8")
-        .rstrip("=")
-    )
-    return data_b64 + "." + signature
-
-
-async def ensure_groups(db):
-    """PasarGuard UserCreate requires >=1 group — create a migration group if needed."""
-    from sqlalchemy import select
-    from sqlalchemy.orm import selectinload
-
-    from app.db.crud.group import create_group, get_group
-    from app.db.models import Group
-    from app.models.group import GroupCreate, GroupListQuery
-
-    groups = []
-    try:
-        groups, _total = await get_group(db, GroupListQuery(limit=100))
-        groups = list(groups or [])
-    except TypeError:
-        # Older PasarGuard: get_group(db, offset, limit)
-        try:
-            groups, _total = await get_group(db, 0, 100)
-            groups = list(groups or [])
-        except Exception:
-            groups = []
-    except Exception:
-        groups = []
-
-    if not groups:
-        try:
-            rows = await db.execute(select(Group).options(selectinload(Group.inbounds)).limit(100))
-            groups = list(rows.unique().scalars().all())
-        except Exception:
-            groups = []
-
-    if not groups:
-        try:
-            g = await create_group(
-                db,
-                GroupCreate(name="hiddify-migrated", inbound_tags=["hiddify-migrated"]),
-            )
-            groups = [g]
-        except Exception as e:
-            raise RuntimeError(
-                "No PasarGuard groups found and auto-create failed "
-                f"({e}). Create at least one group in the panel, then retry."
-            ) from e
-
-    return groups
-
-
-async def main():
-    from app.db import GetDB
-    from app.db.crud.admin import get_owner
-    from app.db.crud.user import create_user, get_user
-    from app.db.models import UserStatus
-    from app.models.proxy import ProxyTable, VlessSettings, VMessSettings, TrojanSettings
-    from app.models.user import UserCreate
-
-    created = []
-    errors = []
-    skipped = []
-    fatal = None
-
-    async with GetDB() as db:
-        owner = await get_owner(db)
-        if owner is None:
-            write_result({
-                "ok": False,
-                "error": "No PasarGuard owner found — create owner first (pasarguard cli generate-temp-key)",
-                "created": [],
-                "errors": [{"username": "*", "error": "no owner"}],
-                "skipped": [],
-            })
-            return
-
-        try:
-            groups = await ensure_groups(db)
-        except Exception as e:
-            write_result({
-                "ok": False,
-                "error": str(e)[:500],
-                "traceback": traceback.format_exc(),
-                "created": [],
-                "errors": [{"username": "*", "error": str(e)[:300]}],
-                "skipped": [],
-            })
-            return
-
-        group_ids = [int(g.id) for g in groups if getattr(g, "id", None) is not None]
-        if not group_ids:
-            write_result({
-                "ok": False,
-                "error": "PasarGuard groups resolved empty — create a group and retry",
-                "created": [],
-                "errors": [{"username": "*", "error": "empty groups"}],
-                "skipped": [],
-            })
-            return
-
-        for row in users:
-            username = (row.get("username") or "").strip()
-            uuid_s = (row.get("uuid") or "").strip()
-            if not username or not uuid_s:
-                skipped.append({"username": username, "reason": "missing username/uuid"})
-                continue
-            try:
-                uid = UUID(uuid_s)
-            except Exception as e:
-                errors.append({"username": username, "error": f"bad uuid: {e}"})
-                continue
-
-            try:
-                existing = await get_user(
-                    db, username,
-                    load_admin=False, load_next_plan=False,
-                    load_usage_logs=False, load_groups=False,
-                )
-            except TypeError:
-                existing = await get_user(db, username)
-            except Exception as e:
-                errors.append({"username": username, "error": f"get_user: {e}"})
-                try:
-                    await db.rollback()
-                except Exception:
-                    pass
-                continue
-
-            if existing is not None:
-                skipped.append({"username": username, "reason": "already_exists", "user_id": int(existing.id)})
-                try:
-                    token = await make_sub_token(db, int(existing.id))
-                    created.append({
-                        "username": username,
-                        "uuid": uuid_s,
-                        "user_id": int(existing.id),
-                        "subscription_url": f"/sub/{token}",
-                        "reused": True,
-                    })
-                except Exception as e:
-                    errors.append({"username": username, "error": f"exists but token failed: {e}"})
-                continue
-
-            want_disabled = (row.get("status") or "").strip() == "disabled"
-            raw_status = (row.get("status") or "active").strip()
-            # UserCreate only accepts active / on_hold
-            create_status = "on_hold" if raw_status == "on_hold" and not want_disabled else "active"
-
-            trojan_pw = uuid_s.replace("-", "")[:22]
-            if len(trojan_pw) < 22:
-                trojan_pw = (trojan_pw + "hiddify-migrate-pass00")[:22]
-
-            try:
-                proxy = ProxyTable(
-                    vless=VlessSettings(id=uid),
-                    vmess=VMessSettings(id=uid),
-                    trojan=TrojanSettings(password=trojan_pw),
-                )
-            except Exception as e:
-                errors.append({"username": username, "error": f"proxy: {e}"})
-                continue
-
-            body = {
-                "username": username,
-                "status": create_status,
-                "data_limit": int(row.get("data_limit") or 0) or None,
-                "data_limit_reset_strategy": row.get("data_limit_reset_strategy") or "no_reset",
-                "note": (row.get("note") or "")[:500] or None,
-                "proxy_settings": proxy,
-                "group_ids": list(group_ids),
-            }
-
-            expire_raw = row.get("expire")
-            if expire_raw and create_status != "on_hold":
-                try:
-                    body["expire"] = datetime.fromtimestamp(int(expire_raw), tz=timezone.utc)
-                except Exception:
-                    try:
-                        body["expire"] = int(expire_raw)
-                    except Exception:
-                        pass
-
-            hold_dur = row.get("on_hold_expire_duration")
-            if create_status == "on_hold":
-                try:
-                    hold_dur = int(hold_dur or 0)
-                except Exception:
-                    hold_dur = 0
-                if hold_dur <= 0:
-                    create_status = "active"
-                    body["status"] = "active"
-                else:
-                    body["on_hold_expire_duration"] = hold_dur
-
-            try:
-                new_user = UserCreate(**body)
-            except Exception:
-                body["status"] = "active"
-                body.pop("on_hold_expire_duration", None)
-                body.pop("on_hold_timeout", None)
-                try:
-                    new_user = UserCreate(**body)
-                except Exception as e2:
-                    errors.append({"username": username, "error": f"validate: {e2}"})
-                    continue
-
-            try:
-                user = await create_user(db, new_user, groups=list(groups), admin=owner)
-                if want_disabled:
-                    try:
-                        user.status = UserStatus.disabled
-                        await db.commit()
-                    except Exception:
-                        try:
-                            await db.rollback()
-                        except Exception:
-                            pass
-                token = await make_sub_token(db, int(user.id))
-                used = int(row.get("used_traffic") or 0)
-                if used > 0:
-                    try:
-                        user.used_traffic = used
-                        await db.commit()
-                    except Exception:
-                        try:
-                            await db.rollback()
-                        except Exception:
-                            pass
-                created.append({
-                    "username": username,
-                    "uuid": uuid_s,
-                    "user_id": int(user.id),
-                    "subscription_url": f"/sub/{token}",
-                    "reused": False,
-                })
-            except Exception as e:
-                try:
-                    await db.rollback()
-                except Exception:
-                    pass
-                errors.append({"username": username, "error": str(e)[:300]})
-
-    write_result({
-        "ok": True,
-        "created": created,
-        "errors": errors,
-        "skipped": skipped,
-        "created_count": len([c for c in created if not c.get("reused")]),
-        "mapped_count": len(created),
-        "fatal": fatal,
-    })
-
-
-try:
-    asyncio.run(main())
-except Exception as e:
-    write_result({
-        "ok": False,
-        "error": str(e)[:500],
-        "traceback": traceback.format_exc(),
-        "created": [],
-        "errors": [{"username": "*", "error": str(e)[:300]}],
-        "skipped": [],
-    })
-'''
 
 
 class HiddifyMigrator(BaseMigrator):
@@ -363,7 +52,7 @@ class HiddifyMigrator(BaseMigrator):
         work = BACKUP_DIR / self.job.job_id
         work.mkdir(parents=True, exist_ok=True)
 
-        self.job.set_progress(15, "خواندن بکاپ Hiddify...")
+        self.job.set_progress(15, "خواندن کاربران و لینک‌ها از JSON هیدیفای...")
         data = await self._load_backup(upload_path, upload_work_dir, params)
         summary = summarize_backup(data)
         users, paths = parse_users_from_backup(data)
@@ -376,13 +65,16 @@ class HiddifyMigrator(BaseMigrator):
             self.job.log("هشدار: proxy_path_client در بکاپ خالی است — ریدایرکت ممکن است ناقص باشد")
 
         self.job.log(
-            f"Hiddify backup: {summary['users_total']} users "
+            f"Hiddify JSON: {summary['users_total']} users "
             f"(enabled={summary['users_enabled']}), "
             f"proxy_path_client={client_path!r}"
         )
 
-        self.job.set_progress(35, "ایجاد کاربران در PasarGuard (با همان UUID)...")
-        import_result = await self._import_users_in_panel(users, work)
+        self.job.set_progress(
+            30,
+            f"ساخت گروه {HIDDIFY_TEST_GROUP} و ایجاد کاربران در PasarGuard...",
+        )
+        import_result = await run_hiddify_user_import(self, users, work)
         created = import_result.get("created") or []
         errors = import_result.get("errors") or []
         if not created:
@@ -397,15 +89,16 @@ class HiddifyMigrator(BaseMigrator):
                 detail = detail[:400] + "\n…\n" + detail[-400:]
             raise RuntimeError(f"ایجاد کاربران در PasarGuard ناموفق بود: {detail}")
 
+        group_name = import_result.get("group") or HIDDIFY_TEST_GROUP
         self.job.log(
-            f"Mapped {len(created)}/{len(users)} users "
+            f"Group {group_name!r}: mapped {len(created)}/{len(users)} users "
             f"(new={import_result.get('created_count', 0)}, "
             f"errors={len(errors)})"
         )
         for err in errors[:20]:
             self.job.log(f"✗ {err.get('username')}: {err.get('error')}")
 
-        self.job.set_progress(70, "ساخت mapping ریدایرکت لینک‌های قدیمی...")
+        self.job.set_progress(70, "ساخت mapping ریدایرکت (مثل 3x-ui)...")
         mapping = build_subscription_mapping(
             created,
             proxy_path_client=client_path,
@@ -437,7 +130,7 @@ class HiddifyMigrator(BaseMigrator):
         )
 
         if install_redirect and mapping_file.exists():
-            self.job.set_progress(92, "نصب pg-redirect برای لینک‌های قدیمی Hiddify...")
+            self.job.set_progress(92, "نصب pg-redirect: لینک قدیمی هیدیفای → /sub جدید...")
             redirect_installed, redirect_error = await self._install_redirect(
                 mapping_file,
                 listen_port=redirect_port,
@@ -489,6 +182,7 @@ class HiddifyMigrator(BaseMigrator):
             "users_migrated": len(created),
             "users_total": len(users),
             "users_failed": len(errors),
+            "group": group_name,
             "proxy_path_client": client_path,
             "summary": summary,
             "incomplete": [
@@ -618,102 +312,6 @@ class HiddifyMigrator(BaseMigrator):
                     hconfigs.append({"key": parts[0], "value": parts[1]})
 
         return {"users": users, "hconfigs": hconfigs, "domains": [], "proxies": [], "admin_users": []}
-
-    async def _import_users_in_panel(self, users: list[dict], work: Path) -> dict:
-        """Import via in-container Python (works for any PasarGuard DB engine)."""
-        PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
-        stamp = self.job.job_id
-        payload_host = PASARGUARD_DATA / f"hiddify_import_{stamp}.json"
-        result_host = PASARGUARD_DATA / f"hiddify_import_{stamp}_result.json"
-        script_host = PASARGUARD_DATA / f"hiddify_import_{stamp}.py"
-
-        payload_host.write_text(
-            json.dumps({"users": users}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        script_host.write_text(_IMPORT_SCRIPT, encoding="utf-8")
-        if result_host.exists():
-            result_host.unlink()
-
-        payload_c = f"/var/lib/pasarguard/{payload_host.name}"
-        result_c = f"/var/lib/pasarguard/{result_host.name}"
-        script_c = f"/var/lib/pasarguard/{script_host.name}"
-
-        # Ensure panel is up enough to exec
-        await self._run_cmd(
-            ["docker", "compose", "up", "-d", "pasarguard"],
-            cwd=str(PASARGUARD_DIR),
-            timeout=120,
-        )
-
-        timeout = max(180, min(1800, 30 + len(users) * 3))
-        ok, out = await self._run_cmd(
-            [
-                "docker", "compose", "exec", "-T", "pasarguard",
-                "python", script_c, payload_c, result_c,
-            ],
-            cwd=str(PASARGUARD_DIR),
-            timeout=timeout,
-        )
-        if not result_host.is_file():
-            # Fallback service name
-            for svc in ("panel", "app", "pg"):
-                ok2, out2 = await self._run_cmd(
-                    [
-                        "docker", "compose", "exec", "-T", svc,
-                        "python", script_c, payload_c, result_c,
-                    ],
-                    cwd=str(PASARGUARD_DIR),
-                    timeout=timeout,
-                )
-                out = ((out or "") + "\n" + (out2 or "")).strip()
-                ok = ok2
-                if result_host.is_file():
-                    break
-
-        # Persist docker output for debugging on the host
-        try:
-            (work / "hiddify_import_docker.log").write_text(out or "", encoding="utf-8")
-        except Exception:
-            pass
-
-        if not result_host.is_file():
-            err = (out or "import script produced no result").strip()
-            # Prefer the last traceback chunk if present
-            if "Traceback" in err:
-                err = err[err.rfind("Traceback"):]
-            return {
-                "ok": False,
-                "error": err[:800],
-                "created": [],
-                "errors": [{"username": "*", "error": err[:400]}],
-                "skipped": [],
-            }
-
-        try:
-            result = json.loads(result_host.read_text(encoding="utf-8"))
-        except Exception as e:
-            return {
-                "ok": False,
-                "error": f"bad result json: {e}; docker={(out or '')[:300]}",
-                "created": [],
-                "errors": [{"username": "*", "error": str(e)}],
-                "skipped": [],
-            }
-
-        if not result.get("ok", True) and not (result.get("created") or []):
-            # Surface fatal script error clearly in job logs
-            fatal = result.get("error") or result.get("traceback") or ""
-            if fatal:
-                self.job.log(f"import fatal: {str(fatal)[:500]}")
-
-        # Cleanup temp scripts (keep result for debug)
-        for p in (script_host, payload_host):
-            try:
-                p.unlink(missing_ok=True)
-            except Exception:
-                pass
-        return result
 
     async def _install_redirect(
         self,

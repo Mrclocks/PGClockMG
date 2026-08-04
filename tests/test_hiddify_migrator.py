@@ -59,9 +59,10 @@ def test_panel_enabled_partial_redirect():
     assert panel.coming_soon is False
     assert panel.support_level == "partial"
     assert panel.subscription_mode == "redirect"
-    # Box copy must say previous links work (fa)
-    assert "لینک" in panel.description["fa"]
+    # Box copy: group + redirect flow
+    assert "hiddify-test" in panel.description["en"]
     assert "ریدایرکت" in panel.description["fa"] or "redirect" in panel.description["en"].lower()
+    assert "3x-ui" in panel.description["en"].lower() or "3x-ui" in panel.description["fa"].lower()
 
 
 def test_upload_requirements_accept_json():
@@ -297,27 +298,31 @@ def test_disabled_user_status(fixture_data):
 
 
 def test_import_script_is_valid_python_and_hardened():
-    """In-container import script must parse and always write a result on failure."""
+    """In-container import script must parse and bootstrap /code onto sys.path."""
     import ast
-    import re
 
-    from app.services.migrators import hiddify as hiddify_mod
+    from app.services.migrators import hiddify_pg_import as imp
 
-    src = Path(hiddify_mod.__file__).read_text(encoding="utf-8")
-    m = re.search(r"_IMPORT_SCRIPT = r'''(.*?)'''", src, re.S)
-    assert m, "missing _IMPORT_SCRIPT"
-    script = m.group(1)
-    ast.parse(script)
+    ast.parse(imp.IMPORT_SCRIPT)
+    assert imp.HIDDIFY_TEST_GROUP == "hiddify-test"
+    assert callable(imp.run_hiddify_user_import)
     for needle in (
+        "sys.path.insert",
+        "/code",
         "write_result",
-        "ensure_groups",
-        "hiddify-migrated",
+        "ensure_hiddify_test_group",
+        "hiddify-test",
         "make_sub_token",
         "traceback.format_exc()",
         "UserStatus.disabled",
         "datetime.fromtimestamp",
     ):
-        assert needle in script, needle
+        assert needle in imp.IMPORT_SCRIPT, needle
+
+    runner_src = Path(imp.__file__).read_text(encoding="utf-8")
+    assert "PYTHONPATH=/code" in runner_src
+    assert '"-w", "/code"' in runner_src or "-w\", \"/code\"" in runner_src
+    assert "network=container" in runner_src
 
 
 def test_normalized_users_ready_for_pasarguard_create(real_data):
