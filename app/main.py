@@ -14,7 +14,7 @@ from app.panels import (
     OWNER_TEMP_KEY_CMD, SSH_TUNNEL_CMD, can_convert_databases,
 )
 from app.services.prerequisites import check_prerequisites, get_recommended_target_dbs, get_system_status
-from app.services.orchestrator import start_migration, get_job
+from app.services.orchestrator import start_migration, get_job, MigrationAlreadyRunning
 from app.services.validation import validate_migration
 from app.services.upload import save_upload, get_upload_path, get_upload_analysis
 from app.services.upload_bundle import (
@@ -28,7 +28,7 @@ from app.services.pg_restore import (
 from app.services.self_uninstall import uninstall_preview, schedule_self_uninstall
 from app.config import WEB_PORT
 
-APP_VERSION = "2.0.4"
+APP_VERSION = "2.0.5"
 app = FastAPI(title="PGClockMG", version=APP_VERSION)
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -262,7 +262,22 @@ async def api_migrate(req: MigrationRequest):
     if not validation["ok"]:
         raise HTTPException(400, {"errors": validation["errors"]})
 
-    job = await start_migration(params)
+    try:
+        job = await start_migration(params)
+    except MigrationAlreadyRunning as e:
+        raise HTTPException(
+            409,
+            {
+                "en": str(e),
+                "fa": (
+                    f"یک مهاجرت در حال اجرا است (job={e.job.job_id}، "
+                    f"{e.job.progress}٪). تا پایان صبر کنید؛ کلیک دوباره نکنید."
+                ),
+                "ru": str(e),
+                "job_id": e.job.job_id,
+                "progress": e.job.progress,
+            },
+        )
     return {"job_id": job.job_id, "status": job.status}
 
 
