@@ -20,9 +20,15 @@ from app.services.pasarguard_ops import (
     build_local_alembic_url,
     run_alembic_upgrade_head,
     read_target_alembic_version,
+    heal_unknown_alembic_revision,
+    read_sqlite_alembic_version,
 )
 from app.services.native_migration.sql_staging import import_sql_dump_to_live_db
 from app.services.native_migration.universal_copy import copy_database_universal
+from app.services.native_migration.source_version import (
+    normalize_alembic_revision,
+    _read_live_alembic_version,
+)
 
 SUPPORTED_ENGINES = frozenset({
     "sqlite", "mysql", "mariadb", "postgresql", "timescaledb",
@@ -165,14 +171,44 @@ async def _reset_target_schema(migrator, target_db: str) -> None:
         migrator.job.log("Warning: target schema reset returned non-zero — continuing")
 
 
+async def _heal_staging_alembic_if_unknown(
+    migrator, db_type: str, conn: dict,
+) -> None:
+    """If staging alembic_version is missing from PasarGuard scripts, re-stamp it."""
+    from app.services.pasarguard_ops import _revision_known_to_pasarguard
+
+    if db_type == "sqlite":
+        path = conn.get("sqlite_path") or ""
+        current = read_sqlite_alembic_version(path) if path else None
+    else:
+        current = _read_live_alembic_version(conn, db_type)
+    current = normalize_alembic_revision(current) if current else None
+    if not current:
+        return
+    if await _revision_known_to_pasarguard(migrator, current):
+        return
+    migrator.job.log(
+        f"Staging alembic_version {current} not in PasarGuard image — healing..."
+    )
+    await heal_unknown_alembic_revision(
+        migrator, db_type, conn, missing_revision=current,
+    )
+
+
 async def _phase1_land_intermediate(
     migrator,
     source_path: str,
     source_db: str,
+    *,
+    skip_alembic: bool = False,
 ) -> tuple[str, str, dict | None]:
     """Land source data on an intermediate DB and upgrade it to alembic head.
 
     Returns (intermediate_path, intermediate_db, staging_conn).
+
+    When skip_alembic=True (Marzban panel-boot path), only land + heal unknown
+    revision stamps — host-network upgrade is deferred so proxies→inbounds
+    transforms are not skipped.
     """
     path = Path(source_path)
     staging_conn: dict | None = None
@@ -188,8 +224,14 @@ async def _phase1_land_intermediate(
         if dest.resolve() != path.resolve():
             shutil.copy2(path, dest)
         migrator.job.log(f"Phase1: intermediate SQLite at {dest}")
+        sqlite_conn = {"sqlite_path": str(dest), "_allow_live_alembic_heal": True}
+        if skip_alembic:
+            await _heal_staging_alembic_if_unknown(migrator, "sqlite", sqlite_conn)
+            return str(dest), "sqlite", None
         url = build_sqlite_alembic_url(dest)
-        await run_alembic_upgrade_head(migrator, url_override=url, heal_db="sqlite")
+        await run_alembic_upgrade_head(
+            migrator, url_override=url, heal_db="sqlite", heal_conn=sqlite_conn,
+        )
         return str(dest), "sqlite", None
 
     # MySQL/MariaDB/PG source: .sql dump → staging, or live connection
@@ -198,18 +240,33 @@ async def _phase1_land_intermediate(
         staging_conn = await import_sql_dump_to_live_db(
             migrator, source_path, source_db, conn,
         )
+        # Dump lands in pgmig_* / ephemeral — never the live Marzban database.
+        await _heal_staging_alembic_if_unknown(migrator, source_db, staging_conn)
+        if skip_alembic:
+            migrator.job.log(
+                "Phase1: skip host alembic (panel-boot will upgrade Marzban schema)"
+            )
+            return source_path, source_db, staging_conn
         url = build_alembic_url_from_conn(source_db, staging_conn)
         await run_alembic_upgrade_head(
-            migrator, url_override=url, heal_db=source_db,
+            migrator,
+            url_override=url,
+            heal_db=source_db,
+            heal_conn=staging_conn,
         )
         return source_path, source_db, staging_conn
 
-    # Live non-sqlite source (credentials from wizard)
+    # Live non-sqlite source (credentials from wizard) — do not heal/stamp live.
     conn = get_source_connection(migrator.params)
+    if skip_alembic:
+        migrator.job.log(
+            "Phase1: live source + panel-boot — host alembic skipped "
+            "(will not mutate live alembic_version)"
+        )
+        return source_path, source_db, None
     url = build_alembic_url_from_conn(source_db, conn)
     await run_alembic_upgrade_head(migrator, url_override=url, heal_db=source_db)
     return source_path, source_db, None
-
 
 async def _prepare_target_for_migration(migrator, target_db: str) -> None:
     """Ensure target DB is up, credentials verified, and role passwords aligned."""
@@ -328,12 +385,17 @@ async def run_two_phase_migration(
     staging_conn: dict | None = None
     try:
         # Phase 1 — land + upgrade intermediate to head
+        # Marzban panel-boot path skips host alembic (avoids early stamp / missing-rev crash).
         migrator.job.set_progress(min(92, base + 3), "Phase 1: intermediate DB → alembic head...")
         inter_path, inter_db, staging_conn = await _phase1_land_intermediate(
-            migrator, source_path, source_db,
+            migrator, source_path, source_db, skip_alembic=upgrade_via_panel,
         )
 
         if upgrade_via_panel:
+            if staging_conn:
+                await _heal_staging_alembic_if_unknown(
+                    migrator, inter_db, staging_conn,
+                )
             migrator.job.set_progress(
                 min(93, base + 5),
                 "Phase 1b: panel-boot Marzban→PasarGuard schema upgrade...",

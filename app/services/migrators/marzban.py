@@ -178,6 +178,12 @@ class MarzbanMigrator(BaseMigrator):
             await self._import_mysql_dump(source_sql)
             if extra_data_dir:
                 await self._copy_marzban_assets(extra_data_dir)
+            # Dump is in PasarGuard target DB (Marzban live untouched). Heal unknown stamp.
+            from app.services.native_migration.cross_db import _heal_staging_alembic_if_unknown
+
+            tconn = dict(get_target_connection(self.params))
+            tconn["_allow_live_alembic_heal"] = True
+            await _heal_staging_alembic_if_unknown(self, source_db, tconn)
             self.job.set_progress(70, "Upgrading Marzban MySQL schema via panel boot...")
             await safe_start_pasarguard(self)
             return
