@@ -54,15 +54,37 @@ def _slot_dir(bundle_id: str, slot: str) -> Path:
     return bundle_dir(bundle_id) / "slots" / slot
 
 
-def _validate_slot_file(slot: str, filename: str, source_db: str | None) -> str | None:
+def _validate_slot_file(
+    slot: str,
+    filename: str,
+    source_db: str | None,
+    panel_id: str | None = None,
+) -> str | None:
     name = filename.lower()
     ext = Path(filename).suffix.lower()
     if slot == "env" and (name.endswith(".env") or name == "env" or ext in (".env", ".txt")):
         return None
+
+    # Prefer accept list from upload requirements when panel is known
+    if panel_id:
+        try:
+            reqs = get_upload_requirements(panel_id, source_db)
+            for s in reqs.get("slots") or []:
+                if s.get("id") == slot:
+                    allowed = [a.lower() for a in (s.get("accept") or [])]
+                    if allowed and ext in allowed:
+                        return None
+                    if allowed:
+                        return f"Invalid file type for {slot}: {ext}"
+        except Exception:
+            pass
+
     rules = {
         "bundle_zip": [".zip"],
-        "database": [".sqlite3", ".db", ".sql"] if not source_db else (
-            [".sqlite3", ".db"] if source_db == "sqlite" else [".sql"]
+        "database": [".sqlite3", ".db", ".sql", ".json"] if panel_id == "hiddify" else (
+            [".sqlite3", ".db", ".sql"] if not source_db else (
+                [".sqlite3", ".db"] if source_db == "sqlite" else [".sql", ".json"]
+            )
         ),
         "env": [".env", ".txt"],
         "xray_config": [".json"],
@@ -84,7 +106,7 @@ def save_bundle_slot(
     source_db: str | None = None,
     marzban_mode: str | None = None,
 ) -> dict:
-    err = _validate_slot_file(slot, filename, source_db)
+    err = _validate_slot_file(slot, filename, source_db, panel_id=panel_id)
     if err:
         return {"ok": False, "error": err}
 
@@ -120,12 +142,9 @@ def save_bundle_slot(
         if slot == "bundle_zip":
             slot_meta["ok"] = analysis.get("backup_ok", False)
         elif slot == "database":
-            if source_db == "sqlite":
-                slot_meta["ok"] = analysis["categories"].get("database_sqlite", 0) > 0 or dest.suffix.lower() in (".sqlite3", ".db")
-            elif source_db in ("mysql", "mariadb"):
-                slot_meta["ok"] = analysis["categories"].get("database_sql", 0) > 0 or dest.suffix.lower() == ".sql"
-            else:
-                slot_meta["ok"] = dest.exists()
+            slot_meta["ok"] = _database_slot_ok(
+                dest, analysis, source_db=source_db, panel_id=panel_id,
+            )
         else:
             slot_meta["ok"] = dest.exists()
     elif slot == "env":
@@ -152,6 +171,39 @@ def save_bundle_slot(
         "slot_meta": slot_meta,
         "bundle_status": status,
     }
+
+
+def _database_slot_ok(
+    dest: Path,
+    analysis: dict,
+    *,
+    source_db: str | None,
+    panel_id: str | None,
+) -> bool:
+    """Mark database slot complete for sqlite/sql/Hiddify JSON uploads."""
+    if not dest.exists():
+        return False
+    ext = dest.suffix.lower()
+    cats = analysis.get("categories") or {}
+    paths = analysis.get("paths") or {}
+    if panel_id == "hiddify" or analysis.get("panel_hint") == "hiddify":
+        return bool(
+            paths.get("hiddify_json")
+            or cats.get("database_hiddify_json", 0) > 0
+            or ext == ".json"
+            or cats.get("database_sql", 0) > 0
+            or ext == ".sql"
+        )
+    if source_db == "sqlite":
+        return cats.get("database_sqlite", 0) > 0 or ext in (".sqlite3", ".db")
+    if source_db in ("mysql", "mariadb"):
+        return (
+            cats.get("database_sql", 0) > 0
+            or ext == ".sql"
+            or cats.get("database_hiddify_json", 0) > 0
+            or (ext == ".json" and analysis.get("panel_hint") == "hiddify")
+        )
+    return True
 
 
 def validate_bundle(

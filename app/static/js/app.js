@@ -318,7 +318,10 @@ function copyEnvCmd(role) {
 function updateSourceCredentialsVisibility() {
   const box = document.getElementById('sourceDbCredentials');
   if (!box) return;
-  const needs = dbNeedsPassword(state.sourceDb) && state.selectedPanel?.id !== 'remnawave';
+  // Hiddify JSON migrate does not read source MySQL — no password UI
+  const needs = dbNeedsPassword(state.sourceDb)
+    && state.selectedPanel?.id !== 'remnawave'
+    && state.selectedPanel?.id !== 'hiddify';
   box.classList.toggle('hidden', !needs);
   if (needs) {
     const portEl = document.getElementById('sourceDbPort');
@@ -332,7 +335,11 @@ function updateTargetCredentialsVisibility() {
   const box = document.getElementById('targetDbCredentials');
   if (!box) return;
   const db = getDetectedTargetDb();
-  const needs = db && dbNeedsPassword(db) && !needsPasarguardInstall();
+  // Hiddify imports via panel container — no target DB password needed from user
+  const needs = db
+    && dbNeedsPassword(db)
+    && !needsPasarguardInstall()
+    && state.selectedPanel?.id !== 'hiddify';
   box.classList.toggle('hidden', !needs);
   if (needs) {
     applyTargetEnvDefaults();
@@ -552,6 +559,12 @@ function canProceedStep2() {
     const db = detectMarzbanSourceDb();
     if (!db) return t('block.detectSourceDb');
     state.sourceDb = db;
+  } else if (panel?.id === 'hiddify') {
+    // JSON export — source engine is implicit; no manual DB/password
+    const detected = state.bundleStatus?.analysis?.detected_source_db
+      || state.uploadInfo?.analysis?.detected_source_db
+      || 'mysql';
+    state.sourceDb = detected;
   } else if (!state.sourceDb) {
     return t('block.noSourceDb');
   }
@@ -562,7 +575,12 @@ function canProceedStep2() {
   }
   const needsPwd = dbNeedsPassword(state.sourceDb);
   const analysis = state.bundleStatus?.analysis || state.uploadInfo?.analysis;
-  if (needsPwd && panel?.id !== 'remnawave' && !hasDbCredentials('source')) {
+  if (
+    needsPwd
+    && panel?.id !== 'remnawave'
+    && panel?.id !== 'hiddify'
+    && !hasDbCredentials('source')
+  ) {
     if (!passwordCandidatesConfirmed('source')) {
       return t('block.passwordNotConfirmed');
     }
@@ -571,7 +589,11 @@ function canProceedStep2() {
   if (!uploadSatisfied()) {
     return t('block.uploadsIncomplete');
   }
-  if (analysis?.detected_source_db && state.sourceDb !== analysis.detected_source_db) {
+  if (
+    panel?.id !== 'hiddify'
+    && analysis?.detected_source_db
+    && state.sourceDb !== analysis.detected_source_db
+  ) {
     return t('block.dbMismatch');
   }
   return null;
@@ -594,7 +616,11 @@ function canProceedStep3() {
   if (!db) return t('block.noTargetDbDetected');
   state.targetDb = db;
   if (needsPasarguardInstall()) return t('block.pasarguardMissing');
-  if (dbNeedsPassword(db) && !hasDbCredentials('target')) {
+  if (
+    state.selectedPanel?.id !== 'hiddify'
+    && dbNeedsPassword(db)
+    && !hasDbCredentials('target')
+  ) {
     if (!passwordCandidatesConfirmed('target')) {
       return t('block.passwordNotConfirmed');
     }
@@ -876,6 +902,23 @@ function renderSourceDbs() {
     if (desc) desc.textContent = t('step2.marzbanDesc');
     renderMarzbanDetectedSource();
     renderUploadSection();
+    return;
+  }
+
+  if (panel.id === 'hiddify') {
+    const h2 = document.querySelector('#step2 h2');
+    const desc = document.querySelector('#step2 .desc');
+    if (h2) h2.textContent = t('step2.hiddifyH2') || t('step2.h2');
+    if (desc) desc.textContent = t('step2.hiddifyDesc') || t('step2.uploadDesc');
+    document.getElementById('marzbanSourceSection')?.classList.add('hidden');
+    const grid = document.getElementById('sourceDbGrid');
+    grid?.classList.add('hidden');
+    grid && (grid.innerHTML = '');
+    // Implicit source — Hiddify JSON export (no engine picker / password)
+    state.sourceDb = state.bundleStatus?.analysis?.detected_source_db || 'mysql';
+    updateSourceCredentialsVisibility();
+    renderUploadSection();
+    updateStepButtons();
     return;
   }
 
@@ -1694,6 +1737,9 @@ function applyBundleAnalysis(bs) {
   if (state.selectedPanel?.id === 'marzban') {
     renderMarzbanDetectedSource();
     if (a.detected_source_db) state.sourceDb = a.detected_source_db;
+    updateSourceCredentialsVisibility();
+  } else if (state.selectedPanel?.id === 'hiddify') {
+    state.sourceDb = a.detected_source_db || 'mysql';
     updateSourceCredentialsVisibility();
   } else if (a.detected_source_db && document.querySelector('#sourceDbGrid .db-card')) {
     selectSourceDb(a.detected_source_db);

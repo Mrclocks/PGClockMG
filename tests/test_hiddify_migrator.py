@@ -77,6 +77,28 @@ def test_upload_requirements_accept_json():
     assert ".zip" not in slot["accept"]
 
 
+def test_hiddify_json_bundle_upload_accepted():
+    from app.services.upload_bundle import init_bundle, save_bundle_slot, _validate_slot_file
+
+    assert _validate_slot_file("database", "export.json", "mysql", panel_id="hiddify") is None
+    assert _validate_slot_file("database", "export.json", None, panel_id="hiddify") is None
+    err = _validate_slot_file("database", "export.json", "mysql", panel_id="marzban")
+    assert err and ".json" in err
+
+    bid = init_bundle()
+    raw = FIXTURE.read_bytes()
+    result = save_bundle_slot(
+        bid, "database", raw, "hiddify_export.json",
+        panel_id="hiddify", source_db="mysql",
+    )
+    assert result.get("ok") is True, result
+    assert result.get("error") is None
+    bs = result["bundle_status"]
+    assert bs["complete"] is True, bs
+    assert bs.get("analysis", {}).get("panel_hint") == "hiddify"
+    assert bs.get("analysis", {}).get("backup_ok") is True
+
+
 def test_fixture_is_hiddify_backup(fixture_data):
     assert is_hiddify_json_backup(fixture_data)
     assert len(fixture_data["users"]) >= 8

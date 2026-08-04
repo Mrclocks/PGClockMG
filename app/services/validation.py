@@ -87,10 +87,18 @@ def validate_migration(params: dict) -> dict:
         if not (PASARGUARD_DATA / "db.sqlite3").exists() and not upload_path:
             errors.append(_msg("PasarGuard database or backup upload required", "دیتابیس یا بکاپ PasarGuard لازم است", "Нужна БД или копия PasarGuard"))
 
-    if source_db != target_db:
+    if source_db != target_db and panel_id not in ("hiddify", "3x-ui", "remnawave"):
         errors.extend(validate_db_credentials(params, "source"))
 
-    errors.extend(validate_db_credentials(params, "target"))
+    # Hiddify JSON import runs inside PasarGuard container — no wizard DB passwords
+    if panel_id not in ("hiddify",):
+        errors.extend(validate_db_credentials(params, "target"))
+    elif panel_id == "hiddify" and not is_pasarguard_installed():
+        errors.append(_msg(
+            "PasarGuard must be installed first",
+            "ابتدا PasarGuard را نصب کنید",
+            "Сначала установите PasarGuard",
+        ))
 
     return {"ok": len(errors) == 0, "errors": errors}
 
