@@ -161,15 +161,28 @@ class HiddifyMigrator(BaseMigrator):
                 detail = "…" + detail[-280:]
             warn_en.append(
                 "pg-redirect did NOT install — old Hiddify links will not work until fixed. "
+                "Hiddify usually owns port 443; it must stay stopped so pg-redirect can bind it. "
                 + (f"Cause: {detail}" if detail else "")
             )
             warn_fa.append(
-                "pg-redirect نصب نشد — لینک‌های قدیمی هیدیفای کار نمی‌کنند. "
+                "pg-redirect نصب نشد — لینک‌های قدیمی کار نمی‌کنند. "
+                "هیدیفای معمولاً پورت ۴۴۳ را گرفته؛ باید خاموش بماند تا pg-redirect بالا بیاید. "
                 + (f"علت: {detail}" if detail else "")
             )
             warn_ru.append(
-                "pg-redirect не установился — старые ссылки Hiddify не работают. "
+                "pg-redirect не установился — старые ссылки не работают. "
+                "Hiddify обычно занимает порт 443; его веб нужно остановить. "
                 + (f"Причина: {detail}" if detail else "")
+            )
+        elif redirect_installed:
+            warn_en.append(
+                "Hiddify web on port 443 was stopped so pg-redirect can serve old subscription paths. Do not start Hiddify nginx/haproxy on 443 again."
+            )
+            warn_fa.append(
+                "وب هیدیفای روی پورت ۴۴۳ متوقف شد تا pg-redirect لینک‌های قدیمی را سرو کند. دوباره nginx/haproxy هیدیفای را روی ۴۴۳ روشن نکنید."
+            )
+            warn_ru.append(
+                "Веб Hiddify на порту 443 остановлен, чтобы pg-redirect обслуживал старые ссылки. Не поднимайте nginx/haproxy Hiddify снова на 443."
             )
 
         self.job.set_progress(100, f"مهاجرت Hiddify انجام شد — {len(created)} کاربر")
@@ -334,20 +347,13 @@ class HiddifyMigrator(BaseMigrator):
             resolve_redirect_tls,
         )
 
-        # Stop Hiddify web stack so 443 is free for redirect
-        await self._run_cmd(
-            ["bash", "-c", "systemctl stop hiddify-panel 2>/dev/null || true"],
-            timeout=60,
+        # Hiddify multiplexes panel + client subscription paths on :443.
+        # Stop/disable that stack so pg-redirect can bind the same port.
+        self.job.log(
+            f"Freeing Hiddify port {listen_port} for pg-redirect "
+            "(old client links hit this port)…"
         )
-        await self._run_cmd(
-            ["bash", "-c", "systemctl stop hiddify-nginx 2>/dev/null || true"],
-            timeout=60,
-        )
-        await self._run_cmd(
-            ["bash", "-c", "systemctl stop nginx 2>/dev/null || true"],
-            timeout=30,
-        )
-        await free_listen_port(self, listen_port)
+        await free_listen_port(self, listen_port, panel="hiddify")
 
         cert_pem, key_pem, tls_src = resolve_redirect_tls(
             work_dir=work_dir,
@@ -369,28 +375,35 @@ class HiddifyMigrator(BaseMigrator):
         if ok or await pg_redirect_is_active(self):
             return True, ""
 
-        # Retry with forced self-signed if first attempt lacked certs
+        # Retry once after another aggressive free (services may have raced back)
+        self.job.log("pg-redirect start failed — freeing port again and retrying…")
+        await free_listen_port(self, listen_port, panel="hiddify")
         if not cert_pem:
             cert_pem, key_pem, tls_src = resolve_redirect_tls(
                 work_dir=work_dir,
                 want_ssl=True,
                 common_name="127.0.0.1",
             )
-            if cert_pem:
+            if tls_src:
                 self.job.log(f"pg-redirect retry TLS: {tls_src}")
-                ok2, err2 = await install_pg_redirect(
-                    self,
-                    mapping_file,
-                    listen_port=listen_port,
-                    redirect_base=redirect_domain,
-                    panel="hiddify",
-                    ssl_cert=cert_pem,
-                    ssl_key=key_pem,
-                )
-                if ok2 or await pg_redirect_is_active(self):
-                    return True, ""
-                return False, err2 or err or "pg-redirect install failed"
-        return False, err or "pg-redirect install failed"
+        ok2, err2 = await install_pg_redirect(
+            self,
+            mapping_file,
+            listen_port=listen_port,
+            redirect_base=redirect_domain,
+            panel="hiddify",
+            ssl_cert=cert_pem,
+            ssl_key=key_pem,
+        )
+        if ok2 or await pg_redirect_is_active(self):
+            return True, ""
+        detail = err2 or err or "pg-redirect install failed"
+        if "address already in use" in detail.lower() or "errno 98" in detail.lower():
+            detail += (
+                f" — port {listen_port} still busy (Hiddify/nginx/haproxy/docker). "
+                f"Stop Hiddify web on that port, then retry."
+            )
+        return False, detail
 
     def _get_panel_url(self) -> str:
         from app.services.pg_access import get_panel_access_info

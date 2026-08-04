@@ -1,4 +1,4 @@
-> ⚠️ **`v2.2.1`** — Always take a full backup before restore or migration.
+> ⚠️ **`v2.2.2`** — Always take a full backup before restore or migration.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <b>English</b> · <a href="README.ru.md">Русский</a>
@@ -56,6 +56,7 @@ Requirements: Ubuntu/Debian · root · Docker
 
 | Version | Key changes |
 |---------|-------------|
+| v2.2.2 | Free Hiddify port 443 so pg-redirect can bind |
 | v2.2.1 | Post-migrate owner guide + clearer Hiddify partial warning |
 | v2.2.0 | Rewrite Hiddify migrate: hiddify-test group + PYTHONPATH=/code + redirect like 3x-ui |
 | v2.1.2 | Fix Hiddify user-import crash (auto group + full error capture) |
