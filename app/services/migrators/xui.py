@@ -238,11 +238,25 @@ def is_modern_xui_multi_inbound_schema(path: Path) -> bool:
     return bool(detect_xui_db_schema(path).get("modern"))
 
 
+def _client_text(value) -> str:
+    """Coerce a clients-row field to stripped text.
+
+    Modern 3x-ui ``clients.id`` is an integer PK. Never treat ints/bools as
+    UUID/password/email strings — ``(… or id).strip()`` raises AttributeError.
+    Classic ``settings.clients[].id`` remains a UUID string and still works.
+    """
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, (int, float)):
+        return ""
+    return str(value).strip()
+
+
 def _client_entry_for_protocol(protocol: str, client: dict, flow_override: str = "") -> dict:
     """Build a classic ``settings.clients[]`` entry from a ``clients`` row."""
-    email = (client.get("email") or "").strip()
-    sub_id = (client.get("sub_id") or client.get("subId") or "").strip()
-    flow = (flow_override or client.get("flow") or "").strip()
+    email = _client_text(client.get("email"))
+    sub_id = _client_text(client.get("sub_id")) or _client_text(client.get("subId"))
+    flow = _client_text(flow_override) or _client_text(client.get("flow"))
     entry: dict = {
         "email": email,
         "enable": bool(client.get("enable", 1)),
@@ -256,8 +270,9 @@ def _client_entry_for_protocol(protocol: str, client: dict, flow_override: str =
         "security": str(client.get("security") or "auto"),
     }
     proto = (protocol or "").lower()
-    uuid = (client.get("uuid") or client.get("id") or "").strip()
-    password = (client.get("password") or "").strip()
+    # Prefer uuid column; fall back to string id only (classic JSON), never int PK.
+    uuid = _client_text(client.get("uuid")) or _client_text(client.get("id"))
+    password = _client_text(client.get("password"))
     if proto in ("vless", "vmess", "tunnel"):
         if uuid:
             entry["id"] = uuid
@@ -267,7 +282,7 @@ def _client_entry_for_protocol(protocol: str, client: dict, flow_override: str =
     if proto == "vless":
         entry["flow"] = flow
         # Keep auth if present (some panels store it); harmless for PG converter.
-        auth = (client.get("auth") or "").strip()
+        auth = _client_text(client.get("auth"))
         if auth:
             entry["auth"] = auth
     if proto == "vmess" and password and "id" not in entry:

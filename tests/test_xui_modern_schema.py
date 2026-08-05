@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from app.services.migrators.xui import (
+    _client_entry_for_protocol,
     detect_xui_db_schema,
     ensure_sudo_admin_from_xui,
     is_modern_xui_multi_inbound_schema,
@@ -264,5 +265,112 @@ def test_seed_hosts_and_admin_for_modern():
                 assert tag.startswith("in-")
                 assert alpn != "none"  # EnumArray-breaking value
             assert conn.execute("SELECT COUNT(*) FROM admins").fetchone()[0] == 1
+        finally:
+            conn.close()
+
+
+def test_client_entry_ignores_integer_pk_as_uuid():
+    """Modern clients.id is int PK — must not call .strip() on it (regression)."""
+    row = {
+        "id": 7,
+        "uuid": None,
+        "email": "user1",
+        "sub_id": "abc123",
+        "enable": 1,
+        "expiry_time": 0,
+        "total_gb": 0,
+        "limit_ip": 0,
+        "password": "",
+        "flow": "",
+    }
+    entry = _client_entry_for_protocol("vless", row)
+    assert entry["email"] == "user1"
+    assert "id" not in entry  # no uuid available; int PK must not become id
+
+    row["uuid"] = "f9d010f5-5812-487b-a2b4-3705b9f69dbb"
+    entry = _client_entry_for_protocol("vless", row)
+    assert entry["id"] == "f9d010f5-5812-487b-a2b4-3705b9f69dbb"
+
+    # Classic settings.clients[] uses string id as UUID
+    classic = {"id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "email": "c1"}
+    assert _client_entry_for_protocol("vmess", classic)["id"] == (
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    )
+
+
+def test_normalize_modern_with_null_uuid_does_not_crash():
+    """Reproduce AttributeError: 'int' object has no attribute 'strip'."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "x-ui.db"
+        conn = sqlite3.connect(db)
+        conn.executescript(
+            """
+            CREATE TABLE clients (
+                id INTEGER PRIMARY KEY,
+                email TEXT,
+                uuid TEXT,
+                sub_id TEXT,
+                enable INTEGER DEFAULT 1,
+                expiry_time INTEGER DEFAULT 0,
+                total_gb INTEGER DEFAULT 0,
+                limit_ip INTEGER DEFAULT 0,
+                password TEXT,
+                flow TEXT,
+                tg_id TEXT,
+                comment TEXT,
+                reset INTEGER DEFAULT 0,
+                security TEXT
+            );
+            CREATE TABLE client_inbounds (
+                id INTEGER PRIMARY KEY,
+                client_id INTEGER,
+                inbound_id INTEGER,
+                flow_override TEXT
+            );
+            CREATE TABLE client_traffics (
+                id INTEGER PRIMARY KEY,
+                inbound_id INTEGER,
+                enable NUMERIC,
+                email TEXT UNIQUE,
+                up INTEGER, down INTEGER,
+                expiry_time INTEGER, total INTEGER,
+                reset INTEGER DEFAULT 0
+            );
+            CREATE TABLE inbounds (
+                id INTEGER PRIMARY KEY,
+                protocol TEXT,
+                settings TEXT
+            );
+            INSERT INTO clients (id, email, uuid, sub_id, enable)
+            VALUES (1, 'u1', NULL, 'sub1', 1),
+                   (2, 'u2', '', 'sub2', 1),
+                   (3, 'u3', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'sub3', 1);
+            INSERT INTO client_inbounds (client_id, inbound_id) VALUES
+                (1, 1), (2, 1), (3, 1);
+            INSERT INTO client_traffics (inbound_id, enable, email, up, down, expiry_time, total)
+            VALUES (1, 1, 'u1', 0, 0, 0, 0),
+                   (1, 1, 'u2', 0, 0, 0, 0),
+                   (1, 1, 'u3', 0, 0, 0, 0);
+            INSERT INTO inbounds (id, protocol, settings)
+            VALUES (1, 'vless', '{"clients":[]}');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        stats = normalize_modern_xui_sqlite(db)
+        assert stats["normalized"] is True
+
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            settings = json.loads(
+                conn.execute("SELECT settings FROM inbounds WHERE id=1").fetchone()[0]
+            )
+            clients = settings["clients"]
+            assert len(clients) == 3
+            by_email = {c["email"]: c for c in clients}
+            assert "id" not in by_email["u1"]
+            assert "id" not in by_email["u2"]
+            assert by_email["u3"]["id"] == "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
         finally:
             conn.close()
