@@ -8,7 +8,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from app.config import PASARGUARD_DIR, PASARGUARD_DATA, BACKUP_DIR
+from app.config import PASARGUARD_DIR, PASARGUARD_DATA, PASARGUARD_ENV, BACKUP_DIR
 from app.services.db_credentials import get_source_connection, get_target_connection
 from app.services.pasarguard_ops import (
     docker_compose_up,

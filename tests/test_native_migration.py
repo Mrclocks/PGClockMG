@@ -1046,6 +1046,15 @@ def test_native_migration_import():
     print("OK: native migration imports")
 
 
+def test_cross_db_has_pasarguard_env():
+    """Regression: panel-boot upgrade references PASARGUARD_ENV at module scope."""
+    from app.config import PASARGUARD_ENV
+    from app.services.native_migration import cross_db
+
+    assert getattr(cross_db, "PASARGUARD_ENV", None) is PASARGUARD_ENV
+    print("OK: cross_db PASARGUARD_ENV import")
+
+
 if __name__ == "__main__":
     test_build_local_alembic_url()
     test_sqlite_column_intersection()
@@ -1069,4 +1078,5 @@ if __name__ == "__main__":
     test_prepare_replace_blocks_cascade_wipe()
     test_sanitize_env_text_for_docker()
     test_native_migration_import()
+    test_cross_db_has_pasarguard_env()
     print("\nAll native migration tests passed.")
