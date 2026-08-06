@@ -56,6 +56,7 @@ Requirements: Ubuntu/Debian · root · Docker
 
 | Version | Key changes |
 |---------|-------------|
+| v2.2.4 | Fix Marzban cross-DB migrate NameError: missing PASARGUARD_ENV import in panel-boot |
 | v2.2.3 | Fix modern 3x-ui migrate crash on empty uuid + integer clients.id |
 | v2.2.2 | Free Hiddify port 443 so pg-redirect can bind |
 | v2.2.1 | Post-migrate owner guide + clearer Hiddify partial warning |
