@@ -1,4 +1,4 @@
-> ⚠️ **`v2.2.3`** — Перед restore или миграцией сделайте полный бэкап.
+> ⚠️ **`v2.2.4`** — Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <a href="README.en.md">English</a> · <b>Русский</b>
@@ -56,6 +56,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | Версия | Основные изменения |
 |--------|-------------------|
+| v2.2.4 | Исправление NameError миграции Marzban cross-DB: отсутствовал import PASARGUARD_ENV в panel-boot |
 | v2.2.3 | Исправление краша миграции modern 3x-ui: пустой uuid + числовой clients.id |
 | v2.2.2 | Освобождение порта 443 Hiddify для pg-redirect |
 | v2.2.1 | Гайд owner после миграции + ясное предупреждение Hiddify |
