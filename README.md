@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> ⚠️ **`v2.2.4`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
+> ⚠️ **`v2.2.5`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
   <b>فارسی</b> · <a href="README.en.md">English</a> · <a href="README.ru.md">Русский</a>
@@ -58,6 +58,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | نسخه | تغییرات اصلی |
 |------|--------------|
+| v2.2.5 | فیکس heal ریستور MySQL وقتی رمز root داخل volume با .env یکی نیست (امتحان همهٔ کاندیداها، بعد recovery امن skip-grant روی همان volume) |
 | v2.2.4 | فیکس NameError مهاجرت Marzban cross-DB: import جاافتاده PASARGUARD_ENV در panel-boot |
 | v2.2.3 | فیکس کرش مهاجرت 3x-ui مدرن: uuid خالی + clients.id عددی |
 | v2.2.2 | آزادسازی پورت ۴۴۳ هیدیفای برای pg-redirect |

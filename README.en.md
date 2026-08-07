@@ -1,4 +1,4 @@
-> ⚠️ **`v2.2.4`** — Always take a full backup before restore or migration.
+> ⚠️ **`v2.2.5`** — Always take a full backup before restore or migration.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <b>English</b> · <a href="README.ru.md">Русский</a>
@@ -56,6 +56,7 @@ Requirements: Ubuntu/Debian · root · Docker
 
 | Version | Key changes |
 |---------|-------------|
+| v2.2.5 | Fix MySQL restore heal when root password in the volume no longer matches .env (try all candidates, then safe skip-grant recovery on the same volume) |
 | v2.2.4 | Fix Marzban cross-DB migrate NameError: missing PASARGUARD_ENV import in panel-boot |
 | v2.2.3 | Fix modern 3x-ui migrate crash on empty uuid + integer clients.id |
 | v2.2.2 | Free Hiddify port 443 so pg-redirect can bind |

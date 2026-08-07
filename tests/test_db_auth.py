@@ -170,7 +170,7 @@ def test_sync_mysql_roles_runs_alter_user_shell():
         with patch("app.services.db_auth.resolve_db_service", return_value="mysql"), \
              patch("app.services.db_auth.PASARGUARD_DIR", Path("/opt/pasarguard")), \
              patch.object(Dummy, "_run_cmd", fake_run):
-            await sync_mysql_roles_to_password(
+            ok = await sync_mysql_roles_to_password(
                 migrator,
                 "mysql",
                 {"user": "root", "password": "rootpw"},
@@ -178,11 +178,207 @@ def test_sync_mysql_roles_runs_alter_user_shell():
                 password="rootpw",
                 env_text="DB_USER=pasarguard\nMYSQL_ROOT_PASSWORD=rootpw\n",
             )
+        assert ok is True
         assert seen
         assert any("ALTER USER" in s and "pasarguard" in s for s in seen)
+        assert any("127.0.0.1" in s for s in seen)
+        assert not any("skip-grant-tables" in s for s in seen)
 
     asyncio.run(_run())
     print("OK: sync_mysql_roles ALTER USER")
+
+
+def test_build_mysql_role_password_sql_hosts_and_grants():
+    from app.services.db_auth import build_mysql_role_password_sql
+
+    sql = build_mysql_role_password_sql("s3cret", app_user="pasarguard", db_name="pasarguard")
+    assert "CREATE USER IF NOT EXISTS 'pasarguard'@'127.0.0.1'" in sql
+    assert "ALTER USER 'pasarguard'@'127.0.0.1' IDENTIFIED BY 's3cret'" in sql
+    assert "ALTER USER 'root'@'%'" in sql
+    assert "GRANT ALL PRIVILEGES ON `pasarguard`.* TO 'pasarguard'@'%'" in sql
+    assert "FLUSH PRIVILEGES;" in sql
+    skip = build_mysql_role_password_sql(
+        "x", app_user="u", include_flush_first=True,
+    )
+    assert skip.startswith("FLUSH PRIVILEGES;")
+    print("OK: build_mysql_role_password_sql hosts/grants")
+
+
+def test_mysql_sync_auth_candidates_merges_env_and_extras():
+    from app.services.db_auth import mysql_sync_auth_candidates
+
+    env = "MYSQL_ROOT_PASSWORD=rootpw\nDB_PASSWORD=apppw\n"
+    c = mysql_sync_auth_candidates("extra", "rootpw", env_text=env)
+    assert c[0] == "extra"
+    assert "rootpw" in c
+    assert "apppw" in c
+    print("OK: mysql_sync_auth_candidates merge")
+
+
+def test_sync_mysql_roles_tries_old_password_then_succeeds():
+    """Install root password still works even when .env target password differs."""
+    import asyncio
+    from unittest.mock import patch
+
+    from app.services.db_auth import sync_mysql_roles_to_password
+    from app.services.migrators.base import BaseMigrator, MigrationJob
+
+    class Dummy(BaseMigrator):
+        async def run(self, params):
+            return {}
+
+    async def _run():
+        job = MigrationJob(job_id="sync2")
+        migrator = Dummy(job, {})
+        seen = []
+
+        async def fake_run(self, cmd, cwd=None, timeout=600):
+            text = cmd if isinstance(cmd, str) else " ".join(cmd)
+            seen.append(text)
+            # Fail until we authenticate with the old/install password.
+            if '-p"oldroot"' in text or "-poldroot" in text:
+                return True, "ok"
+            if "skip-grant-tables" in text:
+                raise AssertionError("skip-grant must not run when a candidate works")
+            return False, "Access denied"
+
+        with patch("app.services.db_auth.resolve_db_service", return_value="mysql"), \
+             patch("app.services.db_auth.PASARGUARD_DIR", Path("/opt/pasarguard")), \
+             patch.object(Dummy, "_run_cmd", fake_run):
+            ok = await sync_mysql_roles_to_password(
+                migrator,
+                "mysql",
+                {"user": "root", "password": "oldroot"},
+                app_user="pasarguard",
+                password="newroot",
+                env_text="DB_USER=pasarguard\nMYSQL_ROOT_PASSWORD=newroot\nDB_PASSWORD=newroot\n",
+            )
+        assert ok is True
+        assert any("oldroot" in s for s in seen)
+        assert not any("skip-grant-tables" in s for s in seen)
+
+    asyncio.run(_run())
+    print("OK: sync tries install password before skip-grant")
+
+
+def test_sync_mysql_roles_skip_grant_recovery_when_locked_out():
+    import asyncio
+    from unittest.mock import patch
+
+    from app.services.db_auth import sync_mysql_roles_to_password
+    from app.services.migrators.base import BaseMigrator, MigrationJob
+
+    class Dummy(BaseMigrator):
+        async def run(self, params):
+            return {}
+
+    async def _run():
+        job = MigrationJob(job_id="sync3")
+        migrator = Dummy(job, {})
+        seen = []
+        heal_ready = {"n": 0}
+
+        async def immediate_sleep(*_a, **_k):
+            return None
+
+        async def fake_run(self, cmd, cwd=None, timeout=600):
+            if isinstance(cmd, list):
+                text = " ".join(cmd)
+            else:
+                text = cmd
+            seen.append(text)
+
+            # Post-recovery verify on the normal service.
+            if "compose exec" in text and "MYSQL_PWD=newroot" in text and "SELECT 1" in text:
+                return True, "1\n"
+
+            # Normal exec attempts fail (locked out) — shell strings from sync.
+            if "compose exec" in text and "skip-grant" not in text:
+                return False, (
+                    "ERROR 1045 (28000): Access denied for user 'root'@'localhost'"
+                )
+
+            if isinstance(cmd, list) and len(cmd) >= 3 and cmd[0] == "docker" and cmd[1] == "rm":
+                return True, ""
+            if isinstance(cmd, list) and cmd[:3] == ["docker", "compose", "stop"]:
+                return True, ""
+            if isinstance(cmd, list) and "run" in cmd and "--skip-grant-tables" in cmd:
+                return True, "healcid"
+            if isinstance(cmd, list) and cmd[:2] == ["docker", "exec"] and "SELECT 1" in text:
+                heal_ready["n"] += 1
+                return True, "1\n"
+            if isinstance(cmd, list) and cmd[:2] == ["docker", "exec"] and "ALTER USER" in text:
+                assert "FLUSH PRIVILEGES;" in text
+                assert "127.0.0.1" in text
+                return True, "ok"
+            if isinstance(cmd, list) and cmd[:2] == ["docker", "stop"]:
+                return True, ""
+            if isinstance(cmd, list) and cmd[:3] == ["docker", "compose", "up"]:
+                return True, ""
+            return False, "no"
+
+        with patch("app.services.db_auth.resolve_db_service", return_value="mysql"), \
+             patch("app.services.db_auth.PASARGUARD_DIR", Path("/opt/pasarguard")), \
+             patch("asyncio.sleep", immediate_sleep), \
+             patch.object(Dummy, "_run_cmd", fake_run):
+            ok = await sync_mysql_roles_to_password(
+                migrator,
+                "mysql",
+                {"user": "root", "password": "wrong"},
+                app_user="pasarguard",
+                password="newroot",
+                env_text="DB_USER=pasarguard\nMYSQL_ROOT_PASSWORD=newroot\n",
+            )
+        assert ok is True
+        assert any("skip-grant-tables" in s for s in seen)
+        assert any("compose stop" in s for s in seen)
+        assert any("compose up" in s and "-d" in s and "mysql" in s for s in seen)
+        assert heal_ready["n"] >= 1
+
+    asyncio.run(_run())
+    print("OK: skip-grant recovery when root locked out")
+
+
+def test_pg_restore_sync_mysql_uses_candidates_then_recovery():
+    import asyncio
+    from unittest.mock import patch
+
+    from app.services.migrators.base import MigrationJob
+    from app.services import pg_restore
+
+    async def _run():
+        job = MigrationJob(job_id="rsync1")
+        calls = []
+
+        async def fake_run(job_arg, cmd, cwd=None, timeout=600):
+            text = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            calls.append(text)
+            if "compose exec" in text and "MYSQL_PWD=oldinstall" in text and "ALTER USER" in text:
+                return True, "ok"
+            if "compose exec" in text:
+                return False, "Access denied"
+            return True, "ok"
+
+        with patch.object(pg_restore, "_run", fake_run), \
+             patch.object(pg_restore, "_read_current_env", return_value=(
+                 "DB_USER=pasarguard\nMYSQL_ROOT_PASSWORD=newbak\nDB_PASSWORD=newbak\n"
+             )), \
+             patch.object(pg_restore, "PASARGUARD_DIR", Path("/opt/pasarguard")):
+            ok = await pg_restore._sync_mysql_passwords(
+                job,
+                "mysql",
+                "newbak",
+                user="pasarguard",
+                db_type="mysql",
+                db_name="pasarguard",
+                auth_passwords=["oldinstall"],
+            )
+        assert ok is True
+        assert any("MYSQL_PWD=oldinstall" in c for c in calls)
+        assert not any("skip-grant-tables" in c for c in calls)
+
+    asyncio.run(_run())
+    print("OK: pg_restore sync uses auth_passwords before recovery")
 
 
 def test_mysql_probe_shell_string_via_base_migrator():
@@ -257,6 +453,11 @@ if __name__ == "__main__":
     test_mysql_password_candidates()
     test_mysql_password_candidates_from_sqlalchemy_url()
     test_explain_auth_mariadb_target_from_timescale()
+    test_build_mysql_role_password_sql_hosts_and_grants()
+    test_mysql_sync_auth_candidates_merges_env_and_extras()
     test_sync_mysql_roles_runs_alter_user_shell()
+    test_sync_mysql_roles_tries_old_password_then_succeeds()
+    test_sync_mysql_roles_skip_grant_recovery_when_locked_out()
+    test_pg_restore_sync_mysql_uses_candidates_then_recovery()
     test_mysql_probe_shell_string_via_base_migrator()
     print("\nAll db_auth tests passed")
