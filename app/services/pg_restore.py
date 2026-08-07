@@ -1916,14 +1916,29 @@ async def _verify_restored_data(
         raise RuntimeError(f"Unsupported final_db for verification: {final_db}")
 
     gaps = []
+    soft_gaps = []
+    # settings row counts often drift across PasarGuard versions (many KV rows →
+    # one JSON blob) and mysqldump INSERT estimators over-count parentheses in
+    # JSON values. Do not fail restore on settings alone when data is present.
+    soft_tables = frozenset({"settings"})
     for table, want in expected.items():
         got = actual.get(table, -1)
         if got < 0:
             gaps.append(f"{table}: unreadable/{want}")
         elif got < want:
-            gaps.append(f"{table}: {got}/{want}")
+            msg = f"{table}: {got}/{want}"
+            if table in soft_tables and got > 0:
+                soft_gaps.append(msg)
+                job.log(f"Verified {table}: {got} rows (expected ≥{want}, soft OK)")
+            else:
+                gaps.append(msg)
         else:
             job.log(f"Verified {table}: {got} rows (expected ≥{want})")
+
+    if soft_gaps:
+        job.log(
+            "Soft verify note (non-fatal): " + "; ".join(soft_gaps)
+        )
 
     # Even without precise dump estimates: refuse empty critical panel after restore
     critical = [t for t in STRICT_COMPLETE_TABLES if t in ("users", "hosts", "groups", "nodes", "admins", "inbounds")]
