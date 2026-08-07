@@ -1041,38 +1041,68 @@ async def _sync_mysql_passwords(
     password: str,
     user: str = "root",
     db_type: str = "mysql",
-) -> None:
-    """Align MySQL/MariaDB root (and app user) passwords to the value we keep in .env."""
+    db_name: str = "pasarguard",
+    auth_passwords: list[str] | None = None,
+    *,
+    allow_skip_grant_recovery: bool = True,
+) -> bool:
+    """Align MySQL/MariaDB root (and app user) passwords to the value we keep in .env.
+
+    Tries every known root password candidate first (env + extras). Only if root is
+    unreachable does it use temporary ``--skip-grant-tables`` recovery on the same
+    data volume — never wipes MySQL data.
+    """
     if not password or not svc:
-        return
-    # Escape single quotes for SQL
-    lit = (password or "").replace("\\", "\\\\").replace("'", "\\'")
-    statements = [
-        f"ALTER USER 'root'@'%' IDENTIFIED BY '{lit}';",
-        f"ALTER USER 'root'@'localhost' IDENTIFIED BY '{lit}';",
-    ]
+        return False
+
+    from app.services.db_auth import (
+        build_mysql_role_password_sql,
+        mysql_sync_auth_candidates,
+        recover_mysql_passwords_via_skip_grants,
+    )
+
+    env_now = _read_current_env()
     if user and user != "root":
-        statements.append(f"ALTER USER '{user}'@'%' IDENTIFIED BY '{lit}';")
-        statements.append(f"ALTER USER '{user}'@'localhost' IDENTIFIED BY '{lit}';")
-    statements.append("FLUSH PRIVILEGES;")
-    sql = " ".join(statements)
+        app_user = user
+    else:
+        # Still align the panel app role even when caller syncs as root.
+        app_user = (
+            read_env_var(env_now, "DB_USER")
+            or read_env_var(env_now, "MYSQL_USER")
+            or "pasarguard"
+        )
+
+    sql = build_mysql_role_password_sql(
+        password, app_user=app_user, db_name=db_name or "pasarguard",
+    )
+    auth_pwds = mysql_sync_auth_candidates(
+        password,
+        *(auth_passwords or []),
+        env_text=env_now,
+    )
+    job.log(
+        f"Syncing MySQL passwords on {svc} (app user={app_user}, "
+        f"auth candidates={len(auth_pwds)})..."
+    )
     last_out = ""
     for bin_name in _mysql_client_bins(db_type, svc):
-        ok, out = await _run(
-            job,
-            [
-                "docker", "compose", "exec", "-T",
-                svc, bin_name, "-u", "root", f"-p{password}",
-                "-e", sql,
-            ],
-            cwd=str(PASARGUARD_DIR),
-            timeout=60,
-        )
-        if ok:
-            job.log(f"Synced MySQL passwords on {svc} ({bin_name})")
-            return
-        last_out = out or last_out
-        # Retry without assuming current password (fresh container / dump restored old secret)
+        for auth_pwd in auth_pwds:
+            ok, out = await _run(
+                job,
+                [
+                    "docker", "compose", "exec", "-T",
+                    "-e", f"MYSQL_PWD={auth_pwd}",
+                    svc, bin_name, "-u", "root",
+                    "-e", sql,
+                ],
+                cwd=str(PASARGUARD_DIR),
+                timeout=60,
+            )
+            if ok:
+                job.log(f"Synced MySQL passwords on {svc} ({bin_name})")
+                return True
+            last_out = out or last_out
+        # Retry without assuming current password (fresh container / empty root)
         ok2, out2 = await _run(
             job,
             [
@@ -1085,9 +1115,26 @@ async def _sync_mysql_passwords(
         )
         if ok2:
             job.log(f"Synced MySQL passwords on {svc} ({bin_name}, no-password retry)")
-            return
+            return True
         last_out = out2 or last_out
     job.log(f"MySQL password sync note: {(last_out or '')[-300:]}")
+
+    if not allow_skip_grant_recovery:
+        return False
+
+    async def _run_list(cmd, cwd=None, timeout=600):
+        return await _run(job, cmd, cwd=cwd, timeout=timeout)
+
+    return await recover_mysql_passwords_via_skip_grants(
+        _run_list,
+        service=svc,
+        password=password,
+        app_user=app_user,
+        db_type=db_type,
+        db_name=db_name or "pasarguard",
+        compose_cwd=str(PASARGUARD_DIR),
+        log=job.log,
+    )
 
 
 async def _sync_pg_role_passwords(
@@ -1218,7 +1265,10 @@ async def _heal_panel_auth_if_needed(job: MigrationJob, password: str, user: str
         svc = await _detect_db_container(job, db_type)
         if svc and password:
             await _sync_mysql_passwords(
-                job, svc, password, user=user or "root", db_type=db_type,
+                job, svc, password,
+                user=user or "pasarguard",
+                db_type=db_type,
+                db_name=db_name or "pasarguard",
             )
     await _compose(job, "restart", "pasarguard", timeout=120)
     await asyncio.sleep(6)
@@ -2125,8 +2175,15 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                 if svc and sync_pass:
                     await _sync_mysql_passwords(
                         job, svc, sync_pass,
-                        user=bak_user or cur_user or "root",
+                        user=bak_user or cur_user or "pasarguard",
                         db_type=restore_into or installed_db or backup_db,
+                        db_name=bak_name or cur_name or "pasarguard",
+                        auth_passwords=[
+                            p for p in (
+                                bak_mysql_root, bak_db_pass,
+                                cur_mysql_root, cur_db_pass,
+                            ) if p
+                        ],
                     )
         elif backup_db in ("postgresql", "timescaledb"):
             if needs_convert:
@@ -2324,8 +2381,16 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                 )
                 await _sync_mysql_passwords(
                     job, svc, verify_pass,
-                    user=verify_user or "root",
+                    user=verify_user or "pasarguard",
                     db_type=final_engine_pre,
+                    db_name=verify_db or "pasarguard",
+                    auth_passwords=[
+                        p for p in (
+                            cur_mysql_root, cur_db_pass,
+                            bak_mysql_root, bak_db_pass,
+                            live_admin.get("password"),
+                        ) if p
+                    ],
                 )
 
         job.set_progress(88, "Finalizing .env for target database...")

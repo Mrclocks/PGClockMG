@@ -239,6 +239,199 @@ def _mysql_client_bins(db_type: str, service: str | None = None) -> list[str]:
     return mysql_client_bins(db_type, service)
 
 
+def _mysql_sql_literal(password: str) -> str:
+    return (password or "").replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _mysql_ident(name: str) -> str:
+    """Quote a MySQL identifier (database / user) safely for generated SQL."""
+    return "`" + (name or "").replace("`", "``") + "`"
+
+
+def build_mysql_role_password_sql(
+    password: str,
+    app_user: str | None = None,
+    db_name: str | None = None,
+    *,
+    include_flush_first: bool = False,
+) -> str:
+    """SQL to align root + app user passwords for %, localhost, and 127.0.0.1.
+
+    Panel traffic often uses TCP to 127.0.0.1 (distinct from localhost socket).
+    CREATE USER IF NOT EXISTS keeps the statement safe when a host row is missing.
+    """
+    lit = _mysql_sql_literal(password)
+    hosts = ("%", "localhost", "127.0.0.1")
+    statements: list[str] = []
+    if include_flush_first:
+        # Required before ALTER USER while mysqld runs with --skip-grant-tables.
+        statements.append("FLUSH PRIVILEGES;")
+    for host in hosts:
+        statements.append(f"CREATE USER IF NOT EXISTS 'root'@'{host}' IDENTIFIED BY '{lit}';")
+        statements.append(f"ALTER USER 'root'@'{host}' IDENTIFIED BY '{lit}';")
+    user = (app_user or "").strip()
+    if user and user != "root":
+        for host in hosts:
+            statements.append(
+                f"CREATE USER IF NOT EXISTS '{user}'@'{host}' IDENTIFIED BY '{lit}';"
+            )
+            statements.append(f"ALTER USER '{user}'@'{host}' IDENTIFIED BY '{lit}';")
+        db = (db_name or "").strip() or "pasarguard"
+        db_q = _mysql_ident(db)
+        for host in hosts:
+            statements.append(
+                f"GRANT ALL PRIVILEGES ON {db_q}.* TO '{user}'@'{host}';"
+            )
+    statements.append("FLUSH PRIVILEGES;")
+    return " ".join(statements)
+
+
+def mysql_sync_auth_candidates(
+    *extra: str | None,
+    env_text: str | None = None,
+) -> list[str]:
+    """Passwords to try when authenticating as root for a role sync."""
+    text = env_text if env_text is not None else read_env_text()
+    return _unique_strings(*extra, *mysql_password_candidates(text))
+
+
+async def recover_mysql_passwords_via_skip_grants(
+    run_cmd,
+    *,
+    service: str,
+    password: str,
+    app_user: str,
+    db_type: str,
+    db_name: str = "pasarguard",
+    compose_cwd: str | None = None,
+    log=None,
+) -> bool:
+    """Last-resort password reset when root auth is unknown.
+
+    Stops the compose DB service, starts a temporary sibling container on the
+    *same data volume* with ``--skip-grant-tables --skip-networking``, sets
+    passwords, then brings the normal service back. Does not delete volumes.
+    """
+    import asyncio
+
+    if not password or not service:
+        return False
+
+    cwd = compose_cwd or str(PASARGUARD_DIR)
+    heal_name = f"pasarguard-{service}-pwd-heal"
+    bins = _mysql_client_bins(db_type, service)
+    sql = build_mysql_role_password_sql(
+        password, app_user=app_user, db_name=db_name, include_flush_first=True,
+    )
+
+    def _log(msg: str) -> None:
+        if log:
+            log(msg)
+
+    async def _run(cmd: list[str], timeout: int = 120) -> tuple[bool, str]:
+        return await run_cmd(cmd, cwd=cwd, timeout=timeout)
+
+    _log(
+        f"MySQL root locked out on {service} — temporary skip-grant recovery "
+        "(same volume, no data wipe)..."
+    )
+
+    # Drop leftover heal container from a previous interrupted run.
+    await _run(["docker", "rm", "-f", heal_name], timeout=60)
+    # Stop the normal service so the volume is free for the heal container.
+    stop_ok, stop_out = await _run(
+        ["docker", "compose", "stop", service], timeout=120
+    )
+    if not stop_ok:
+        _log(f"MySQL recover: could not stop {service}: {(stop_out or '')[-200:]}")
+        # Still try — volume may already be idle.
+    started = False
+    success = False
+    try:
+        # Keep docker-entrypoint.sh (do not override entrypoint) so existing
+        # datadir startup stays identical to a normal boot; only add mysqld flags.
+        run_ok, run_out = await _run(
+            [
+                "docker", "compose", "run", "-d", "--no-deps",
+                "--name", heal_name,
+                service,
+                "--skip-grant-tables", "--skip-networking",
+            ],
+            timeout=180,
+        )
+        if not run_ok:
+            _log(f"MySQL recover: compose run failed: {(run_out or '')[-300:]}")
+            return False
+        started = True
+
+        ready = False
+        ready_bin = bins[0]
+        for _ in range(40):
+            await asyncio.sleep(2)
+            for bin_name in bins:
+                ok, out = await _run(
+                    [
+                        "docker", "exec", heal_name, bin_name,
+                        "-u", "root", "-N", "-e", "SELECT 1",
+                    ],
+                    timeout=20,
+                )
+                if ok and "1" in (out or ""):
+                    ready = True
+                    ready_bin = bin_name
+                    break
+            if ready:
+                break
+        if not ready:
+            _log("MySQL recover: heal container never accepted root connections")
+            return False
+
+        ok, out = await _run(
+            [
+                "docker", "exec", heal_name, ready_bin,
+                "-u", "root", "-e", sql,
+            ],
+            timeout=60,
+        )
+        if not ok:
+            _log(f"MySQL recover: ALTER/CREATE failed: {(out or '')[-300:]}")
+            return False
+        _log(f"MySQL recover: passwords set via skip-grant ({ready_bin})")
+        success = True
+        return True
+    finally:
+        if started:
+            await _run(["docker", "stop", heal_name], timeout=60)
+        await _run(["docker", "rm", "-f", heal_name], timeout=60)
+        # Always restore the normal DB service — even if ALTER failed.
+        up_ok, up_out = await _run(
+            ["docker", "compose", "up", "-d", service], timeout=180
+        )
+        if not up_ok:
+            _log(f"MySQL recover: failed to restart {service}: {(up_out or '')[-300:]}")
+        elif success:
+            # Wait until normal mysqld accepts the new password before callers proceed.
+            for _ in range(30):
+                await asyncio.sleep(2)
+                verified = False
+                for bin_name in bins:
+                    ok, out = await _run(
+                        [
+                            "docker", "compose", "exec", "-T",
+                            "-e", f"MYSQL_PWD={password}",
+                            service, bin_name,
+                            "-u", "root", "-N", "-e", "SELECT 1",
+                        ],
+                        timeout=20,
+                    )
+                    if ok and "1" in (out or ""):
+                        verified = True
+                        break
+                if verified:
+                    _log(f"MySQL recover: {service} accepting new root password")
+                    break
+
+
 async def sync_mysql_roles_to_password(
     migrator,
     db_type: str,
@@ -247,12 +440,17 @@ async def sync_mysql_roles_to_password(
     app_user: str | None = None,
     password: str | None = None,
     env_text: str | None = None,
-) -> None:
+    db_name: str | None = None,
+    allow_skip_grant_recovery: bool = True,
+) -> bool:
     """Align MySQL/MariaDB root + app-user passwords so the panel URL can connect.
 
     Cross-DB copy authenticates as root; the panel uses DB_USER (often ``pasarguard``).
     Without this sync, ``Access denied for user 'pasarguard'@...`` is common after
     sqlite→mysql convert (same heal used by PasarGuard restore).
+
+    Tries every known password candidate first. Only if root is fully unreachable
+    does it fall back to temporary ``--skip-grant-tables`` recovery (same volume).
     """
     text = env_text if env_text is not None else read_env_text()
     service = resolve_db_service(db_type) or ("mariadb" if db_type == "mariadb" else "mysql")
@@ -265,7 +463,7 @@ async def sync_mysql_roles_to_password(
         or admin_pwd
     )
     if not new_pwd or not service:
-        return
+        return False
 
     user = (
         app_user
@@ -273,23 +471,21 @@ async def sync_mysql_roles_to_password(
         or read_env_var(text, "MYSQL_USER")
         or "pasarguard"
     )
-    lit = new_pwd.replace("\\", "\\\\").replace("'", "\\'")
-    statements = [
-        f"ALTER USER 'root'@'%' IDENTIFIED BY '{lit}';",
-        f"ALTER USER 'root'@'localhost' IDENTIFIED BY '{lit}';",
-    ]
-    if user and user != "root":
-        statements.append(f"ALTER USER '{user}'@'%' IDENTIFIED BY '{lit}';")
-        statements.append(f"ALTER USER '{user}'@'localhost' IDENTIFIED BY '{lit}';")
-    statements.append("FLUSH PRIVILEGES;")
-    sql = " ".join(statements)
+    schema = (
+        db_name
+        or (admin_conn or {}).get("database")
+        or target_database_name(text, db_type)
+        or "pasarguard"
+    )
+    sql = build_mysql_role_password_sql(new_pwd, app_user=user, db_name=schema)
     cwd = str(PASARGUARD_DIR)
-    auth_pwds = _unique_strings(admin_pwd, new_pwd)
+    auth_pwds = mysql_sync_auth_candidates(admin_pwd, new_pwd, env_text=text)
     migrator.job.log(
-        f"Syncing MySQL passwords on {service} (app user={user})..."
+        f"Syncing MySQL passwords on {service} (app user={user}, "
+        f"auth candidates={len(auth_pwds)})..."
     )
     last_out = ""
-    # Use single-quoted -e payload so SQL single-quotes stay intact; escape ' as '\'' 
+    # Use single-quoted -e payload so SQL single-quotes stay intact; escape ' as '\''
     sql_q = sql.replace("'", "'\\''")
     for bin_name in _mysql_client_bins(db_type, service):
         for auth_pwd in auth_pwds:
@@ -301,7 +497,7 @@ async def sync_mysql_roles_to_password(
             ok, out = await migrator._run_cmd(cmd, timeout=60)
             if ok:
                 migrator.job.log(f"Synced MySQL passwords on {service} ({bin_name})")
-                return
+                return True
             last_out = out or last_out
         cmd2 = (
             f'cd "{cwd}" && docker compose exec -T {service} '
@@ -310,9 +506,27 @@ async def sync_mysql_roles_to_password(
         ok2, out2 = await migrator._run_cmd(cmd2, timeout=60)
         if ok2:
             migrator.job.log(f"Synced MySQL passwords on {service} ({bin_name}, no-password)")
-            return
+            return True
         last_out = out2 or last_out
+
     migrator.job.log(f"MySQL password sync note: {(last_out or '')[-300:]}")
+    if not allow_skip_grant_recovery:
+        return False
+
+    async def _run_list(cmd, cwd=None, timeout=600):
+        return await migrator._run_cmd(cmd, cwd=cwd, timeout=timeout)
+
+    recovered = await recover_mysql_passwords_via_skip_grants(
+        _run_list,
+        service=service,
+        password=new_pwd,
+        app_user=user,
+        db_type=db_type,
+        db_name=schema,
+        compose_cwd=cwd,
+        log=migrator.job.log,
+    )
+    return bool(recovered)
 
 
 async def sync_postgres_roles_to_app_password(
