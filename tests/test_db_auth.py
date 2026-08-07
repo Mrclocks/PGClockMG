@@ -195,6 +195,8 @@ def test_build_mysql_role_password_sql_hosts_and_grants():
     assert "CREATE USER IF NOT EXISTS 'pasarguard'@'127.0.0.1'" in sql
     assert "ALTER USER 'pasarguard'@'127.0.0.1' IDENTIFIED BY 's3cret'" in sql
     assert "ALTER USER 'root'@'%'" in sql
+    assert "GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION" in sql
+    assert "GRANT ALL PRIVILEGES ON *.* TO 'root'@'%'" in sql
     assert "GRANT ALL PRIVILEGES ON `pasarguard`.* TO 'pasarguard'@'%'" in sql
     assert "FLUSH PRIVILEGES;" in sql
     skip = build_mysql_role_password_sql(

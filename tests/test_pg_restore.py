@@ -332,6 +332,97 @@ def test_filter_globals_sql_makes_create_role_idempotent():
     assert "ALTER ROLE pasarguard WITH NOSUPERUSER NOCREATEDB LOGIN;" in result
 
 
+def test_verify_settings_soft_when_critical_ok():
+    """settings 1/16 must not fail restore when users/hosts/… match (dump estimator noise)."""
+    import asyncio
+    from unittest.mock import patch
+
+    from app.services.migrators.base import MigrationJob
+    from app.services import pg_restore
+
+    counts = {
+        "users": "69",
+        "hosts": "15",
+        "groups": "2",
+        "nodes": "2",
+        "inbounds": "3",
+        "admins": "2",
+        "settings": "1",
+        "users_groups_association": "70",
+        "inbounds_groups_association": "3",
+        "core_configs": "2",
+    }
+    expected = {k: int(v) if k != "settings" else 16 for k, v in counts.items()}
+    # expected settings=16, actual=1 via counts
+
+    async def fake_run(job, cmd, cwd=None, timeout=600):
+        text = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+        for table, n in counts.items():
+            if f"FROM `{table}`" in text or f'FROM "{table}"' in text:
+                return True, f"{n}\n"
+        return False, "no"
+
+    async def _run():
+        job = MigrationJob(job_id="verify1")
+        with patch.object(pg_restore, "_run", fake_run), \
+             patch.object(pg_restore, "_detect_db_container", return_value="mysql"), \
+             patch.object(pg_restore, "PASARGUARD_DIR", Path("/opt/pasarguard")):
+            actual = await pg_restore._verify_restored_data(
+                job,
+                "mysql",
+                "secret",
+                "pasarguard",
+                "pasarguard",
+                expected,
+                require_any_data=True,
+            )
+        assert actual["users"] == 69
+        assert actual["settings"] == 1
+        assert any("soft" in (ln or "").lower() or "settings" in (ln or "").lower()
+                   for ln in job.logs)
+
+    asyncio.run(_run())
+    print("OK: settings soft verify when critical tables match")
+
+
+def test_verify_users_gap_still_hard_fails():
+    import asyncio
+    from unittest.mock import patch
+
+    from app.services.migrators.base import MigrationJob
+    from app.services import pg_restore
+
+    async def fake_run(job, cmd, cwd=None, timeout=600):
+        text = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+        if "FROM `users`" in text:
+            return True, "10\n"
+        if "FROM `hosts`" in text:
+            return True, "15\n"
+        return True, "0\n"
+
+    async def _run():
+        job = MigrationJob(job_id="verify2")
+        with patch.object(pg_restore, "_run", fake_run), \
+             patch.object(pg_restore, "_detect_db_container", return_value="mysql"), \
+             patch.object(pg_restore, "PASARGUARD_DIR", Path("/opt/pasarguard")):
+            try:
+                await pg_restore._verify_restored_data(
+                    job,
+                    "mysql",
+                    "secret",
+                    "pasarguard",
+                    "pasarguard",
+                    {"users": 69, "hosts": 15},
+                    require_any_data=True,
+                )
+                raise AssertionError("expected RuntimeError for users gap")
+            except RuntimeError as e:
+                assert "users: 10/69" in str(e)
+
+    asyncio.run(_run())
+    print("OK: users gap still hard-fails")
+
+
 if __name__ == "__main__":
     test_soft_db_family_matrix()
     test_filter_timescaledb_extension_sql()
@@ -351,4 +442,6 @@ if __name__ == "__main__":
     test_analyze_all_db_types()
     test_analyze_experimental_hard_mismatch()
     test_filter_globals_sql_makes_create_role_idempotent()
+    test_verify_settings_soft_when_critical_ok()
+    test_verify_users_gap_still_hard_fails()
     print("\nAll pg_restore tests passed")

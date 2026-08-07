@@ -257,8 +257,10 @@ def build_mysql_role_password_sql(
 ) -> str:
     """SQL to align root + app user passwords for %, localhost, and 127.0.0.1.
 
-    Panel traffic often uses TCP to 127.0.0.1 (distinct from localhost socket).
-    CREATE USER IF NOT EXISTS keeps the statement safe when a host row is missing.
+    Panel / alembic traffic often uses TCP to 127.0.0.1 (distinct from localhost
+    socket). CREATE USER IF NOT EXISTS is safe when a host row is missing, but a
+    newly created ``root@127.0.0.1`` is *not* a superuser — we must GRANT *.*
+    WITH GRANT OPTION or alembic fails with error 1044 (Access denied to database).
     """
     lit = _mysql_sql_literal(password)
     hosts = ("%", "localhost", "127.0.0.1")
@@ -269,6 +271,10 @@ def build_mysql_role_password_sql(
     for host in hosts:
         statements.append(f"CREATE USER IF NOT EXISTS 'root'@'{host}' IDENTIFIED BY '{lit}';")
         statements.append(f"ALTER USER 'root'@'{host}' IDENTIFIED BY '{lit}';")
+        # Critical: new root@host rows start with zero privileges.
+        statements.append(
+            f"GRANT ALL PRIVILEGES ON *.* TO 'root'@'{host}' WITH GRANT OPTION;"
+        )
     user = (app_user or "").strip()
     if user and user != "root":
         for host in hosts:
