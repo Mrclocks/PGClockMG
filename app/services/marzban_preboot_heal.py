@@ -1,0 +1,420 @@
+"""Pre-panel-boot hygiene for Marzban → PasarGuard dumps.
+
+Small/clean dumps are a no-op (0 rows touched). Dirty/large Marzban dumps may
+need:
+  - case-insensitive unique-name renames (nodes / user_templates)
+  - orphan FK cleanup (node_usages → nodes, etc.) mirroring PasarGuard's own
+    alembic orphan cleanup so FK creation / table rebuilds do not fail with 1452.
+"""
+
+from __future__ import annotations
+
+import re
+import sqlite3
+from pathlib import Path
+
+from app.config import PASARGUARD_DATA
+from app.services.db_credentials import get_target_connection, migration_port
+from app.services.unique_name_heal import (
+    heal_duplicate_unique_names,
+    logs_indicate_duplicate_unique_name,
+)
+
+_SAFE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _ident(name: str) -> str:
+    if not _SAFE_IDENT.match(name or ""):
+        raise RuntimeError(f"Invalid SQL identifier: {name!r}")
+    return name
+
+
+# Matches PasarGuard panel migration orphan cleanup (delete side).
+ORPHAN_DELETE_SPECS: tuple[tuple[str, str, str, str], ...] = (
+    ("node_usages", "node_id", "nodes", "id"),
+    ("node_user_usages", "node_id", "nodes", "id"),
+    ("node_user_usages", "user_id", "users", "id"),
+    ("node_usage_reset_logs", "node_id", "nodes", "id"),
+    ("next_plans", "user_id", "users", "id"),
+)
+
+# SET NULL style refs (parent missing → null child column).
+ORPHAN_NULL_SPECS: tuple[tuple[str, str, str, str], ...] = (
+    ("hosts", "inbound_tag", "inbounds", "tag"),
+    ("next_plans", "user_template_id", "user_templates", "id"),
+)
+
+
+def orphan_delete_sql(child: str, child_col: str, parent: str, parent_col: str = "id") -> str:
+    child, child_col, parent, parent_col = map(_ident, (child, child_col, parent, parent_col))
+    return (
+        f"DELETE FROM {child} WHERE {child}.{child_col} IS NOT NULL "
+        f"AND NOT EXISTS (SELECT 1 FROM {parent} "
+        f"WHERE {parent}.{parent_col} = {child}.{child_col})"
+    )
+
+
+def orphan_null_sql(child: str, child_col: str, parent: str, parent_col: str = "id") -> str:
+    child, child_col, parent, parent_col = map(_ident, (child, child_col, parent, parent_col))
+    return (
+        f"UPDATE {child} SET {child_col} = NULL "
+        f"WHERE {child}.{child_col} IS NOT NULL "
+        f"AND NOT EXISTS (SELECT 1 FROM {parent} "
+        f"WHERE {parent}.{parent_col} = {child}.{child_col})"
+    )
+
+
+def logs_indicate_orphan_fk(logs: str) -> bool:
+    """True when panel/alembic logs show an orphan FK failure we can heal."""
+    low = (logs or "").lower()
+    if not any(
+        s in low
+        for s in (
+            "foreign key constraint fails",
+            "foreign key violation",
+            "violates foreign key",
+            "1452",
+            "integrityerror",
+        )
+    ):
+        return False
+    return any(
+        s in low
+        for s in (
+            "node_usages",
+            "node_user_usages",
+            "node_usage_reset",
+            "next_plans",
+            "node_id",
+            "inbound_tag",
+            "references nodes",
+            "references users",
+        )
+    )
+
+
+def _sqlite_table_exists(db: sqlite3.Connection, table: str) -> bool:
+    row = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+        (table,),
+    ).fetchone()
+    return bool(row)
+
+
+def _sqlite_column_exists(db: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = db.execute(f'PRAGMA table_info("{_ident(table)}")').fetchall()
+    cols = {r[1] for r in rows}
+    return column in cols
+
+
+def cleanup_orphans_sqlite(sqlite_path: str | Path) -> tuple[int, int]:
+    """Delete/null orphan FK rows in SQLite. Returns (deleted, nulled)."""
+    path = Path(sqlite_path)
+    if not path.exists():
+        return 0, 0
+    deleted = 0
+    nulled = 0
+    db = sqlite3.connect(str(path))
+    try:
+        for child, child_col, parent, parent_col in ORPHAN_DELETE_SPECS:
+            if not (_sqlite_table_exists(db, child) and _sqlite_table_exists(db, parent)):
+                continue
+            if not _sqlite_column_exists(db, child, child_col):
+                continue
+            cur = db.execute(orphan_delete_sql(child, child_col, parent, parent_col))
+            deleted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        for child, child_col, parent, parent_col in ORPHAN_NULL_SPECS:
+            if not (_sqlite_table_exists(db, child) and _sqlite_table_exists(db, parent)):
+                continue
+            if not (
+                _sqlite_column_exists(db, child, child_col)
+                and _sqlite_column_exists(db, parent, parent_col)
+            ):
+                continue
+            cur = db.execute(orphan_null_sql(child, child_col, parent, parent_col))
+            nulled += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        if deleted or nulled:
+            db.commit()
+    finally:
+        db.close()
+    return deleted, nulled
+
+
+def _mysql_table_exists(cur, database: str, table: str) -> bool:
+    cur.execute(
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_schema=%s AND table_name=%s LIMIT 1",
+        (database, table),
+    )
+    return bool(cur.fetchone())
+
+
+def _mysql_column_exists(cur, database: str, table: str, column: str) -> bool:
+    cur.execute(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_schema=%s AND table_name=%s AND column_name=%s LIMIT 1",
+        (database, table, column),
+    )
+    return bool(cur.fetchone())
+
+
+def cleanup_orphans_mysql_conn(
+    *,
+    host: str,
+    port: int | str,
+    user: str,
+    password: str,
+    database: str,
+) -> tuple[int, int]:
+    import pymysql
+
+    deleted = 0
+    nulled = 0
+    with pymysql.connect(
+        host=host,
+        port=int(port),
+        user=user,
+        password=password or "",
+        database=database,
+        charset="utf8mb4",
+        autocommit=True,
+    ) as conn:
+        with conn.cursor() as cur:
+            for child, child_col, parent, parent_col in ORPHAN_DELETE_SPECS:
+                if not (
+                    _mysql_table_exists(cur, database, child)
+                    and _mysql_table_exists(cur, database, parent)
+                    and _mysql_column_exists(cur, database, child, child_col)
+                ):
+                    continue
+                cur.execute(orphan_delete_sql(child, child_col, parent, parent_col))
+                deleted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            for child, child_col, parent, parent_col in ORPHAN_NULL_SPECS:
+                if not (
+                    _mysql_table_exists(cur, database, child)
+                    and _mysql_table_exists(cur, database, parent)
+                    and _mysql_column_exists(cur, database, child, child_col)
+                    and _mysql_column_exists(cur, database, parent, parent_col)
+                ):
+                    continue
+                cur.execute(orphan_null_sql(child, child_col, parent, parent_col))
+                nulled += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+    return deleted, nulled
+
+
+def cleanup_orphans_postgres_conn(
+    *,
+    host: str,
+    port: int | str,
+    user: str,
+    password: str,
+    database: str,
+) -> tuple[int, int]:
+    import psycopg2
+
+    deleted = 0
+    nulled = 0
+    with psycopg2.connect(
+        host=host,
+        port=int(port),
+        dbname=database,
+        user=user,
+        password=password or "",
+    ) as conn:
+        with conn.cursor() as cur:
+            for child, child_col, parent, parent_col in ORPHAN_DELETE_SPECS:
+                cur.execute(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema='public' AND table_name=%s LIMIT 1",
+                    (child,),
+                )
+                if not cur.fetchone():
+                    continue
+                cur.execute(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema='public' AND table_name=%s LIMIT 1",
+                    (parent,),
+                )
+                if not cur.fetchone():
+                    continue
+                cur.execute(orphan_delete_sql(child, child_col, parent, parent_col))
+                deleted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            for child, child_col, parent, parent_col in ORPHAN_NULL_SPECS:
+                cur.execute(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema='public' AND table_name=%s AND column_name=%s LIMIT 1",
+                    (child, child_col),
+                )
+                if not cur.fetchone():
+                    continue
+                cur.execute(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema='public' AND table_name=%s AND column_name=%s LIMIT 1",
+                    (parent, parent_col),
+                )
+                if not cur.fetchone():
+                    continue
+                cur.execute(orphan_null_sql(child, child_col, parent, parent_col))
+                nulled += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        conn.commit()
+    return deleted, nulled
+
+
+def cleanup_orphans_on_conn(db_type: str, conn: dict) -> tuple[int, int]:
+    db_type = (db_type or "").lower()
+    if db_type == "sqlite":
+        path = conn.get("sqlite_path") or str(PASARGUARD_DATA / "db.sqlite3")
+        return cleanup_orphans_sqlite(path)
+    host = conn.get("host") or "127.0.0.1"
+    port = migration_port(conn, db_type)
+    password = conn.get("password") or ""
+    database = conn.get("database") or "pasarguard"
+    if db_type in ("mysql", "mariadb"):
+        return cleanup_orphans_mysql_conn(
+            host=host,
+            port=port,
+            user=conn.get("user") or "root",
+            password=password,
+            database=database,
+        )
+    if db_type in ("postgresql", "timescaledb"):
+        return cleanup_orphans_postgres_conn(
+            host=host,
+            port=port,
+            user=conn.get("user") or "postgres",
+            password=password,
+            database=database,
+        )
+    return 0, 0
+
+
+async def _cleanup_orphans_mysql_via_compose(migrator, conn: dict) -> tuple[int, int]:
+    from app.config import PASARGUARD_DIR
+    from app.services.pasarguard_ops import resolve_db_service
+    from app.services.unique_name_heal import _mysql_compose_query
+
+    svc = resolve_db_service("mysql") or resolve_db_service("mariadb") or "mysql"
+    user = conn.get("user") or "root"
+    pwd = conn.get("password") or ""
+    db = conn.get("database") or "pasarguard"
+    host = conn.get("host") or "127.0.0.1"
+    cwd = str(PASARGUARD_DIR)
+
+    deleted = 0
+    nulled = 0
+
+    async def _table_ok(table: str) -> bool:
+        rc, out = await _mysql_compose_query(
+            svc=svc, user=user, pwd=pwd, host=host, db=db, cwd=cwd,
+            sql=(
+                "SELECT COUNT(*) FROM information_schema.tables "
+                f"WHERE table_schema='{db}' AND table_name='{table}'"
+            ),
+            tabular=True,
+        )
+        last = ""
+        for line in out.splitlines():
+            if line.strip() and not line.lower().startswith("mysql:"):
+                last = line.strip()
+        return rc == 0 and last == "1"
+
+    async def _count_orphans(
+        child: str, child_col: str, parent: str, parent_col: str,
+    ) -> int:
+        count_sql = (
+            f"SELECT COUNT(*) FROM `{child}` WHERE `{child_col}` IS NOT NULL "
+            f"AND NOT EXISTS (SELECT 1 FROM `{parent}` "
+            f"WHERE `{parent}`.`{parent_col}` = `{child}`.`{child_col}`)"
+        )
+        rc, cout = await _mysql_compose_query(
+            svc=svc, user=user, pwd=pwd, host=host, db=db, cwd=cwd,
+            sql=count_sql, tabular=True,
+        )
+        if rc != 0:
+            return 0
+        for line in cout.splitlines():
+            if line.strip().isdigit():
+                return int(line.strip())
+        return 0
+
+    for child, child_col, parent, parent_col in ORPHAN_DELETE_SPECS:
+        child_i, child_col_i = _ident(child), _ident(child_col)
+        parent_i, parent_col_i = _ident(parent), _ident(parent_col)
+        if not (await _table_ok(child_i) and await _table_ok(parent_i)):
+            continue
+        n = await _count_orphans(child_i, child_col_i, parent_i, parent_col_i)
+        if n == 0:
+            continue
+        rc, _ = await _mysql_compose_query(
+            svc=svc, user=user, pwd=pwd, host=host, db=db, cwd=cwd,
+            sql=orphan_delete_sql(child_i, child_col_i, parent_i, parent_col_i),
+        )
+        if rc == 0:
+            deleted += n
+
+    for child, child_col, parent, parent_col in ORPHAN_NULL_SPECS:
+        child_i, child_col_i = _ident(child), _ident(child_col)
+        parent_i, parent_col_i = _ident(parent), _ident(parent_col)
+        if not (await _table_ok(child_i) and await _table_ok(parent_i)):
+            continue
+        n = await _count_orphans(child_i, child_col_i, parent_i, parent_col_i)
+        if n == 0:
+            continue
+        rc, _ = await _mysql_compose_query(
+            svc=svc, user=user, pwd=pwd, host=host, db=db, cwd=cwd,
+            sql=orphan_null_sql(child_i, child_col_i, parent_i, parent_col_i),
+        )
+        if rc == 0:
+            nulled += n
+
+    return deleted, nulled
+
+
+async def heal_orphan_fk_refs(migrator) -> tuple[int, int]:
+    """Remove/null orphan FK rows on the migration target. Clean DBs → (0, 0)."""
+    params = migrator.params or {}
+    target_db = (params.get("target_db") or "").lower()
+    if target_db not in ("mysql", "mariadb", "postgresql", "timescaledb", "sqlite"):
+        return 0, 0
+
+    conn = dict(get_target_connection(params))
+    if target_db == "sqlite":
+        conn["sqlite_path"] = conn.get("sqlite_path") or str(PASARGUARD_DATA / "db.sqlite3")
+
+    try:
+        deleted, nulled = cleanup_orphans_on_conn(target_db, conn)
+    except Exception as e:
+        migrator.job.log(f"Orphan-FK heal via direct DB failed ({e}); trying compose fallback…")
+        deleted, nulled = 0, 0
+        if target_db in ("mysql", "mariadb"):
+            try:
+                deleted, nulled = await _cleanup_orphans_mysql_via_compose(migrator, conn)
+            except Exception as e2:
+                migrator.job.log(f"Orphan-FK compose heal failed: {e2}")
+                return 0, 0
+        else:
+            return 0, 0
+
+    if deleted or nulled:
+        migrator.job.log(
+            f"Orphan FK heal: deleted {deleted} row(s), nulled {nulled} ref(s) "
+            f"(node_usages/node_user_usages/…)"
+        )
+    else:
+        migrator.job.log("Orphan FK heal: no orphan references found")
+    return deleted, nulled
+
+
+async def heal_marzban_preboot(migrator) -> dict[str, int]:
+    """Run all safe Marzban pre-boot heals. No-op on clean small dumps."""
+    renamed = await heal_duplicate_unique_names(migrator)
+    deleted, nulled = await heal_orphan_fk_refs(migrator)
+    return {
+        "renamed": int(renamed or 0),
+        "orphans_deleted": int(deleted or 0),
+        "orphans_nulled": int(nulled or 0),
+    }
+
+
+def logs_indicate_marzban_preboot_issue(logs: str) -> bool:
+    return logs_indicate_duplicate_unique_name(logs) or logs_indicate_orphan_fk(logs)

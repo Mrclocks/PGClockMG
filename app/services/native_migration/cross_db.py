@@ -350,23 +350,26 @@ async def _panel_boot_upgrade_intermediate(
         migrator.job.log(f"Panel-boot upgrade on intermediate {inter_db}...")
         orig = migrator.params.get("target_db")
         migrator.params["target_db"] = inter_db
-        # Marzban dumps can have duplicate nodes.name; PasarGuard unique index rejects them.
+        # Safe pre-boot hygiene (no-op when clean): unique names + orphan FKs.
         try:
-            from app.services.unique_name_heal import (
-                dedupe_unique_names_on_conn,
-                heal_duplicate_unique_names,
+            from app.services.marzban_preboot_heal import (
+                cleanup_orphans_on_conn,
+                heal_marzban_preboot,
             )
+            from app.services.unique_name_heal import dedupe_unique_names_on_conn
 
             if staging_conn:
                 renamed = dedupe_unique_names_on_conn(inter_db, staging_conn)
-                if renamed:
+                deleted, nulled = cleanup_orphans_on_conn(inter_db, staging_conn)
+                if renamed or deleted or nulled:
                     migrator.job.log(
-                        f"Renamed {renamed} duplicate unique-name row(s) on intermediate DB"
+                        f"Intermediate pre-boot heal: renamed={renamed} "
+                        f"orphans_deleted={deleted} orphans_nulled={nulled}"
                     )
             else:
-                await heal_duplicate_unique_names(migrator)
+                await heal_marzban_preboot(migrator)
         except Exception as e:
-            migrator.job.log(f"Unique-name heal note (intermediate): {e}")
+            migrator.job.log(f"Pre-boot heal note (intermediate): {e}")
         # Custom/large Marzban schemas (bigint id alters) can take a long time.
         await safe_start_pasarguard(migrator, health_max_wait=1800)
         migrator.params["target_db"] = orig
