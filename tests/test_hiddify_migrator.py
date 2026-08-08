@@ -452,3 +452,17 @@ def test_install_script_forces_root_only_for_privileged_ports():
     assert "masked Hiddify web units" in src
     # Ensure we did not hardcode root for every install
     assert 'SVC_USER="{SERVICE_USER}"' in src
+
+
+def test_hiddify_free_port_avoids_compose_down_hang():
+    """92% hang fix: stop path must not use unbounded docker compose down / fuser."""
+    src = Path("app/services/redirect_ops.py").read_text(encoding="utf-8")
+    # Fast path markers
+    assert "stop_competing" in src
+    assert "timeout 5 fuser" in src or "timeout 3 fuser" in src
+    assert "timeouts enforced" in src
+    # Must not reintroduce unbounded compose down in the stop helper body
+    stop_fn = src.split("async def _stop_hiddify_web_stack", 1)[1].split("async def install_pg_redirect", 1)[0]
+    assert "compose down --remove-orphans" not in stop_fn
+    assert "docker compose stop" in stop_fn or "docker stop" in stop_fn
+    assert "timeout" in stop_fn

@@ -98,11 +98,21 @@ class BaseMigrator(ABC):
         except (TimeoutError, asyncio.TimeoutError):
             proc.kill()
             try:
-                await proc.wait()
+                await asyncio.wait_for(proc.wait(), timeout=5)
             except Exception:
                 pass
             return False, "Timeout"
-        await proc.wait()
+        # stdout EOF does not always mean the process exited (e.g. hung fuser).
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except (TimeoutError, asyncio.TimeoutError):
+            proc.kill()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=3)
+            except Exception:
+                pass
+            self.job.log("command hung after stdout closed — killed")
+            return False, "Timeout"
         return proc.returncode == 0, "\n".join(output_lines)
 
     def _backup_file(self, path, backup_dir) -> str | None:

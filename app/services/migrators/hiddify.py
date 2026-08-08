@@ -424,9 +424,10 @@ class HiddifyMigrator(BaseMigrator):
                 "Hiddify redirect needs privileged bind (:443) — "
                 "pg-redirect will run as root (not pgredirect) so listen succeeds"
             )
-        await free_listen_port(self, listen_port, panel="hiddify")
+        # Stop Hiddify web ONCE, then only poke each port (prevents 92% hang).
+        await free_listen_port(self, listen_port, panel="hiddify", stop_competing=True)
         for ep in extra_ports:
-            await free_listen_port(self, ep, panel="hiddify")
+            await free_listen_port(self, ep, panel="hiddify", stop_competing=False)
 
         # Prefer real Hiddify certs for old subscription hostnames so TLS stays valid.
         cn = (subscription_domains[0] if subscription_domains else "") or "127.0.0.1"
@@ -464,9 +465,9 @@ class HiddifyMigrator(BaseMigrator):
 
         # Retry once after another aggressive free (services may have raced back)
         self.job.log("pg-redirect start failed — freeing ports again and retrying…")
-        await free_listen_port(self, listen_port, panel="hiddify")
+        await free_listen_port(self, listen_port, panel="hiddify", stop_competing=True)
         for ep in extra_ports:
-            await free_listen_port(self, ep, panel="hiddify")
+            await free_listen_port(self, ep, panel="hiddify", stop_competing=False)
         if not cert_pem:
             cert_pem, key_pem, tls_src = resolve_redirect_tls(
                 work_dir=work_dir,
