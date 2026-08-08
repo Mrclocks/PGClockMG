@@ -476,50 +476,68 @@ echo "pg-redirect runtime user=$SVC_USER group=$SVC_GROUP"
 '''
 
 
-async def free_listen_port(migrator, port: int, *, panel: str = "") -> None:
+async def free_listen_port(
+    migrator,
+    port: int,
+    *,
+    panel: str = "",
+    stop_competing: bool = True,
+) -> None:
     """Best-effort: stop competing panels/web proxies and free the listen port.
 
     Hiddify usually multiplexes panel + client subscription paths on **443**.
     pg-redirect must take that port, so we stop/disable the Hiddify web stack
     (nginx/haproxy/panel units + compose) before killing whatever still binds it.
+
+    ``stop_competing=False`` only kills listeners on ``port`` — use after the
+    Hiddify stack was already stopped once (avoids multi-minute hangs at 92%).
     """
     port = int(port)
     panel = (panel or "").strip().lower()
 
-    # Always stop common subscription redirect competitors
-    await migrator._run_cmd(
-        ["bash", "-c", "systemctl stop x-ui x-ui.service redirect-server 2>/dev/null || true"],
-        timeout=60,
-    )
+    if stop_competing:
+        # Always stop common subscription redirect competitors (fast)
+        await migrator._run_cmd(
+            [
+                "bash", "-c",
+                "timeout 10 systemctl stop x-ui x-ui.service redirect-server "
+                "2>/dev/null || true",
+            ],
+            timeout=15,
+        )
 
-    if panel in ("hiddify", "all", "*") or port == 443:
-        await _stop_hiddify_web_stack(migrator)
+        if panel in ("hiddify", "all", "*") or port == 443:
+            await _stop_hiddify_web_stack(migrator)
 
-    # Kill whatever still holds the port (last resort)
+    # Kill whatever still holds the port — wrap fuser/lsof; they can hang forever.
     await migrator._run_cmd(
         [
             "bash", "-c",
-            f"fuser -k {port}/tcp 2>/dev/null || "
-            f"(command -v lsof >/dev/null && "
-            f"lsof -ti tcp:{port} | xargs -r kill -9) || true; "
-            f"sleep 1; "
-            f"ss -lntp \"sport = :{port}\" 2>/dev/null || "
-            f"ss -lntp | grep -E \":{port}\\\\b\" || true",
+            f"timeout 5 fuser -k {port}/tcp 2>/dev/null || true; "
+            f"if command -v lsof >/dev/null; then "
+            f"  timeout 5 bash -c 'lsof -ti tcp:{port} | xargs -r kill -9' 2>/dev/null || true; "
+            f"fi; "
+            f"sleep 0.3; "
+            f"timeout 3 ss -lntp 2>/dev/null | grep -E ':{port}\\b' || true",
         ],
-        timeout=45,
+        timeout=15,
     )
     migrator.job.log(f"Freed port {port} for pg-redirect (panel={panel or 'generic'})")
 
 
 async def _stop_hiddify_web_stack(migrator) -> None:
-    """Stop/disable Hiddify HTTP frontends that typically own :443."""
+    """Stop/disable Hiddify HTTP frontends that typically own :443.
+
+    Fast path: never wait minutes on ``docker compose down`` (was hanging the
+    wizard at 92%). Prefer systemctl + targeted container stop with hard timeouts.
+    """
     from app.config import HIDDIFY_DIR
 
     migrator.job.log(
         "Stopping Hiddify web stack so pg-redirect can bind the old subscription port (usually 443)…"
     )
 
-    # Named units first (disable so they don't race back up)
+    # Named units first (disable so they don't race back up) — hard-capped.
     units = (
         "hiddify-panel",
         "hiddify-nginx",
@@ -534,17 +552,25 @@ async def _stop_hiddify_web_stack(migrator) -> None:
     await migrator._run_cmd(
         [
             "bash", "-c",
-            f"systemctl disable --now {unit_list} 2>/dev/null || true; "
-            # Any other hiddify-* units (except keep mysql/redis if separate — stop web-ish only)
-            "systemctl list-units --type=service --all --no-legend 'hiddify*' 2>/dev/null "
-            "| awk '{print $1}' "
-            "| grep -Eiv 'mysql|mariadb|redis|postgres' "
-            "| while read -r u; do systemctl disable --now \"$u\" 2>/dev/null || true; done",
+            f"timeout 20 systemctl disable --now {unit_list} 2>/dev/null || true",
         ],
-        timeout=120,
+        timeout=25,
+    )
+    # Extra hiddify-* units (skip DB) — best-effort, hard timeout
+    await migrator._run_cmd(
+        [
+            "bash", "-c",
+            "timeout 20 bash -c '"
+            "systemctl list-units --type=service --all --no-legend \"hiddify*\" 2>/dev/null "
+            "| awk \"{print \\$1}\" "
+            "| grep -Eiv \"mysql|mariadb|redis|postgres\" "
+            "| while read -r u; do timeout 4 systemctl disable --now \"$u\" 2>/dev/null || true; done"
+            "' || true",
+        ],
+        timeout=25,
     )
 
-    # Official manager compose (web + proxies often publish 443)
+    # Stop only web-ish compose services (avoid full `compose down` hang).
     if HIDDIFY_DIR.is_dir():
         for compose_file in (
             HIDDIFY_DIR / "docker-compose.yml",
@@ -556,39 +582,30 @@ async def _stop_hiddify_web_stack(migrator) -> None:
                 [
                     "bash", "-c",
                     f'cd "{HIDDIFY_DIR}" && '
-                    f'(docker compose -f "{compose_file.name}" stop '
-                    f"nginx haproxy gateway panel hiddify 2>/dev/null || true); "
-                    f'(docker compose -f "{compose_file.name}" down --remove-orphans 2>/dev/null || true)',
+                    f'timeout 25 docker compose -f "{compose_file.name}" stop '
+                    f"nginx haproxy gateway panel hiddify 2>/dev/null || true",
                 ],
-                timeout=180,
+                timeout=35,
             )
             break
-        else:
-            await migrator._run_cmd(
-                [
-                    "bash", "-c",
-                    f'cd "{HIDDIFY_DIR}" && '
-                    "(docker compose stop 2>/dev/null || true); "
-                    "(docker compose down --remove-orphans 2>/dev/null || true)",
-                ],
-                timeout=180,
-            )
 
-    # Docker containers that still publish host 443
+    # Docker containers that still publish host 443 / common Hiddify TLS ports
     await migrator._run_cmd(
         [
             "bash", "-c",
             r"""
-ids=$(docker ps --format '{{.ID}} {{.Ports}}' 2>/dev/null | awk '/(^|[, ])0\.0\.0\.0:443->|:443->/ {print $1}')
+ids=$(timeout 5 docker ps --format '{{.ID}} {{.Ports}}' 2>/dev/null \
+  | awk '/(^|[, ])0\.0\.0\.0:443->|:443->|0\.0\.0\.0:2083->|:2083->/ {print $1}')
 if [[ -n "${ids:-}" ]]; then
-  echo "Stopping docker containers publishing :443: $ids"
+  echo "Stopping docker containers on :443/:2083: $ids"
   # shellcheck disable=SC2086
-  docker stop $ids 2>/dev/null || true
+  timeout 20 docker stop -t 5 $ids 2>/dev/null || true
 fi
 """,
         ],
-        timeout=120,
+        timeout=30,
     )
+    migrator.job.log("Hiddify web stop pass finished (timeouts enforced)")
 
 
 async def install_pg_redirect(
@@ -645,12 +662,13 @@ async def install_pg_redirect(
         + f" redirect_base={redirect_base} ssl={ssl_on}"
     )
 
-    # Free primary + extra listen ports (Hiddify tls_ports often include 2083 etc.)
-    await free_listen_port(migrator, listen_port, panel=panel)
-    for ep in extras:
-        await free_listen_port(migrator, ep, panel=panel)
-
+    # Free primary + extra listen ports (Hiddify tls_ports often include 2083 etc.).
+    # Stop competing stacks ONCE, then only kill listeners on each port.
     all_ports = [int(listen_port), *extras]
+    await free_listen_port(migrator, listen_port, panel=panel, stop_competing=True)
+    for ep in extras:
+        await free_listen_port(migrator, ep, panel=panel, stop_competing=False)
+
     privileged = needs_privileged_bind(all_ports)
     if privileged:
         migrator.job.log(
@@ -678,29 +696,24 @@ async def install_pg_redirect(
     hiddify_pre = ""
     hiddify_post = ""
     if is_hiddify:
+        # Fast pre-bind free only — never `docker compose down` here (hangs for minutes).
         hiddify_pre = f'''
 # Hiddify keeps panel + client subs on :{int(listen_port)} — free it before bind.
-systemctl disable --now hiddify-panel hiddify-nginx hiddify-haproxy hiddify-gateway nginx haproxy apache2 caddy 2>/dev/null || true
-systemctl list-units --type=service --all --no-legend 'hiddify*' 2>/dev/null \\
-  | awk '{{print $1}}' \\
-  | grep -Eiv 'mysql|mariadb|redis|postgres' \\
-  | while read -r u; do systemctl disable --now "$u" 2>/dev/null || true; done
-if [[ -d /opt/hiddify-manager ]]; then
-  (cd /opt/hiddify-manager && docker compose down --remove-orphans 2>/dev/null) || true
-fi
+timeout 15 systemctl disable --now hiddify-panel hiddify-nginx hiddify-haproxy hiddify-gateway nginx haproxy apache2 caddy 2>/dev/null || true
 for _p in {ports_kill}; do
-  ids=$(docker ps --format '{{{{.ID}}}} {{{{.Ports}}}}' 2>/dev/null | awk -v p="$_p" 'index($0, ":" p "->") {{print $1}}')
+  ids=$(timeout 5 docker ps --format '{{{{.ID}}}} {{{{.Ports}}}}' 2>/dev/null | awk -v p="$_p" 'index($0, ":" p "->") {{print $1}}')
   if [[ -n "${{ids:-}}" ]]; then
     echo "Stopping docker containers on :$_p: $ids"
     # shellcheck disable=SC2086
-    docker stop $ids 2>/dev/null || true
+    timeout 15 docker stop -t 3 $ids 2>/dev/null || true
   fi
+  timeout 3 fuser -k "${{_p}}/tcp" 2>/dev/null || true
 done
 '''
         # Prevent Hiddify web stack from racing back onto :443 after install.
         hiddify_post = '''
-systemctl mask hiddify-nginx hiddify-haproxy hiddify-gateway hiddify-panel 2>/dev/null || true
-systemctl disable --now nginx haproxy 2>/dev/null || true
+timeout 10 systemctl mask hiddify-nginx hiddify-haproxy hiddify-gateway hiddify-panel 2>/dev/null || true
+timeout 10 systemctl disable --now nginx haproxy 2>/dev/null || true
 echo "pg-redirect: masked Hiddify web units so they cannot reclaim :443"
 '''
 
@@ -743,12 +756,12 @@ chmod 0644 "{SERVICE_FILE}"
 echo "pg-redirect unit file identity:"
 grep -E '^(User|Group|AmbientCapabilities|CapabilityBoundingSet)=' "{SERVICE_FILE}" || true
 
-systemctl disable --now redirect-server 2>/dev/null || true
+timeout 10 systemctl disable --now redirect-server 2>/dev/null || true
 {hiddify_pre}
 for _p in {ports_kill}; do
-  fuser -k "${{_p}}/tcp" 2>/dev/null || true
+  timeout 3 fuser -k "${{_p}}/tcp" 2>/dev/null || true
 done
-sleep 1
+sleep 0.5
 systemctl daemon-reload
 systemctl enable {SERVICE_NAME}
 systemctl restart {SERVICE_NAME}
@@ -758,7 +771,7 @@ if ! systemctl is-active --quiet {SERVICE_NAME}; then
   systemctl status {SERVICE_NAME} --no-pager -l || true
   journalctl -u {SERVICE_NAME} -n 100 --no-pager || true
   echo "Processes still listening on :{int(listen_port)}:" >&2
-  ss -lntp "sport = :{int(listen_port)}" 2>/dev/null || ss -lntp | grep -E ":{int(listen_port)}\\b" || true
+  timeout 3 ss -lntp 2>/dev/null | grep -E ":{int(listen_port)}\\b" || true
   exit 1
 fi
 echo "pg-redirect runtime User=$(systemctl show -p User --value {SERVICE_NAME} 2>/dev/null || true)"
