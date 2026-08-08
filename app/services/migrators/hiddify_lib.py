@@ -14,6 +14,7 @@ from uuid import UUID
 GB = 1024 * 1024 * 1024
 
 # Common Hiddify client subscription suffixes under /{proxy_path}/{uuid}/
+# Keep both slash variants; load_path_index / path_only normalize duplicates.
 HIDDIFY_SUB_SUFFIXES = (
     "",
     "/",
@@ -27,7 +28,30 @@ HIDDIFY_SUB_SUFFIXES = (
     "/clash/",
     "/clashmeta",
     "/clashmeta/",
+    "/xray",
+    "/xray/",
+    "/v2ray",
+    "/v2ray/",
+    "/full-singbox.json",
+    "/full-clashmeta.yml",
+    "/full-clash.yml",
+    "/full-xray.json",
+    "/sfa",
+    "/sfa/",
+    "/streisand",
+    "/streisand/",
 )
+
+# Domain modes that typically host the *subscription web* (not Reality decoys).
+_SUB_HOST_MODES = frozenset({
+    "sub_link_only",
+    "direct",
+    "cdn",
+    "relay",
+    "old_xtls_direct",
+    "worker",
+    "fake",
+})
 
 
 def is_hiddify_json_backup(data: Any) -> bool:
@@ -112,6 +136,93 @@ def extract_proxy_paths(hconfigs: list[dict] | None) -> dict[str, str]:
         "proxy_path": root,
         "proxy_path_admin": admin,
     }
+
+
+def _parse_port_list(raw: Any) -> list[int]:
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    out: list[int] = []
+    seen: set[int] = set()
+    for part in re.split(r"[\s,;]+", text):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            port = int(part)
+        except ValueError:
+            continue
+        if 1 <= port <= 65535 and port not in seen:
+            seen.add(port)
+            out.append(port)
+    return out
+
+
+def extract_listen_ports(hconfigs: list[dict] | None) -> dict[str, list[int]]:
+    """Ports where Hiddify HAProxy serves panel/subscription HTTP(S).
+
+    Client subscription links almost always hit **443**. Hiddify may also bind
+    the same HTTPS frontend on ``tls_ports`` (e.g. 2083), so pg-redirect should
+    cover those too when present.
+    """
+    cfg = hconfig_map(hconfigs)
+    tls = [443] + _parse_port_list(cfg.get("tls_ports"))
+    http = [80] + _parse_port_list(cfg.get("http_ports"))
+    # Deduplicate preserving order
+    def _uniq(ports: list[int]) -> list[int]:
+        seen: set[int] = set()
+        out: list[int] = []
+        for p in ports:
+            if p not in seen:
+                seen.add(p)
+                out.append(p)
+        return out
+
+    return {"https": _uniq(tls), "http": _uniq(http)}
+
+
+def extract_subscription_domains(domains: list[dict] | None) -> list[str]:
+    """Hostnames that old client subscription URLs are likely to use.
+
+    Prefer ``sub_link_only`` / direct / CDN hosts; skip Reality decoy hostnames
+    (play.google.com, etc.) which are SNI targets, not subscription portals.
+    """
+    preferred: list[str] = []
+    secondary: list[str] = []
+    seen: set[str] = set()
+
+    def _add(bucket: list[str], host: str) -> None:
+        h = (host or "").strip().lower().rstrip(".")
+        if not h or h in seen:
+            return
+        # Skip obvious Reality/decoy public sites without a custom TLD owned by operator
+        seen.add(h)
+        bucket.append(h)
+
+    for row in domains or []:
+        if not isinstance(row, dict):
+            continue
+        host = str(row.get("domain") or "").strip()
+        if not host:
+            continue
+        mode = str(row.get("mode") or "").strip().lower()
+        sub_only = bool(row.get("sub_link_only")) or mode == "sub_link_only"
+        if mode.startswith("special_reality"):
+            continue
+        if sub_only or mode == "sub_link_only":
+            _add(preferred, host)
+        elif mode in _SUB_HOST_MODES:
+            _add(secondary, host)
+
+    # download_domain often points at the real sub portal behind CDN
+    for row in domains or []:
+        if not isinstance(row, dict):
+            continue
+        dl = str(row.get("download_domain") or "").strip()
+        if dl:
+            _add(preferred, dl)
+
+    return preferred + [h for h in secondary if h not in set(preferred)]
 
 
 def _valid_uuid(value: str | None) -> str | None:
@@ -233,13 +344,19 @@ def normalize_hiddify_users(users: list[dict]) -> list[dict]:
         note = (raw.get("comment") or "").strip()
         if len(note) > 500:
             note = note[:500]
+        mode = str(raw.get("mode") or "no_reset").strip().lower()
+        reset = "no_reset"
+        if mode in ("daily", "weekly", "monthly", "yearly"):
+            reset = mode
+        elif mode in ("no_reset", "start_on_first_use"):
+            reset = "no_reset"
         out.append({
             "username": username,
             "uuid": uuid,
             "original_name": raw.get("name") or "",
             "data_limit": gb_to_bytes(raw.get("usage_limit_GB")),
             "used_traffic": gb_to_bytes(raw.get("current_usage_GB")),
-            "data_limit_reset_strategy": "no_reset",
+            "data_limit_reset_strategy": reset,
             "enabled": bool(raw.get("enable", True)),
             "note": note or f"hiddify:{uuid}",
             "status": timing["status"] if raw.get("enable", True) else "disabled",
@@ -249,6 +366,26 @@ def normalize_hiddify_users(users: list[dict]) -> list[dict]:
             "package_days": int(raw.get("package_days") or 0),
             "start_date": raw.get("start_date"),
         })
+    return out
+
+
+def _uuid_path_variants(user_uuid: str) -> list[str]:
+    """Lower/upper UUID strings clients may embed in the URL path."""
+    raw = str(user_uuid or "").strip()
+    if not raw:
+        return []
+    variants = [raw, raw.lower(), raw.upper()]
+    try:
+        canon = str(UUID(raw))
+        variants.extend([canon, canon.lower(), canon.upper()])
+    except Exception:
+        pass
+    seen: set[str] = set()
+    out: list[str] = []
+    for v in variants:
+        if v and v not in seen:
+            seen.add(v)
+            out.append(v)
     return out
 
 
@@ -266,16 +403,16 @@ def old_hiddify_paths(proxy_path_client: str, user_uuid: str, *, proxy_path: str
         # Fallback: UUID-only deep paths some setups expose
         bases.append("")
 
-    uid = str(user_uuid).strip()
-    for base in bases:
-        prefix = f"/{base}/{uid}" if base else f"/{uid}"
-        for suf in HIDDIFY_SUB_SUFFIXES:
-            paths.append(prefix + suf)
+    for uid in _uuid_path_variants(user_uuid):
+        for base in bases:
+            prefix = f"/{base}/{uid}" if base else f"/{uid}"
+            for suf in HIDDIFY_SUB_SUFFIXES:
+                paths.append(prefix + suf)
     # Deduplicate preserving order
     seen: set[str] = set()
     ordered: list[str] = []
     for p in paths:
-        # normalize // 
+        # normalize //
         while "//" in p:
             p = p.replace("//", "/")
         if not p.startswith("/"):
@@ -307,11 +444,16 @@ def build_subscription_mapping(
     *,
     proxy_path_client: str,
     proxy_path: str = "",
+    subscription_domains: list[str] | None = None,
+    listen_ports: dict[str, list[int]] | None = None,
 ) -> dict:
     """Build pg-redirect mapping JSON structure.
 
     Each migrated entry needs:
       username, uuid, new_subscription_url (or subscription_url), optional user_id
+
+    Every old path is stored both on ``old_paths`` (consumed by load_path_index)
+    and as a flat ``username#i`` entry so older indexers still work.
     """
     mappings: dict[str, dict] = {}
     for row in migrated:
@@ -335,7 +477,7 @@ def build_subscription_mapping(
             "new_subscription_url": new_path,
             "old_paths": old_paths,
         }
-        # Extra exact-path keys so load_path_index can pick them up if we flatten
+        # Extra exact-path keys so legacy loaders that only read old_subscription_url work
         for i, old in enumerate(old_paths):
             if i == 0:
                 continue
@@ -347,10 +489,12 @@ def build_subscription_mapping(
                 "new_subscription_url": new_path,
             }
     return {
-        "version": 1,
+        "version": 2,
         "panel": "hiddify",
         "proxy_path_client": proxy_path_client,
         "proxy_path": proxy_path,
+        "subscription_domains": list(subscription_domains or []),
+        "listen_ports": listen_ports or {"https": [443], "http": [80]},
         "mappings": mappings,
     }
 
@@ -365,6 +509,8 @@ def parse_users_from_backup(data: dict) -> tuple[list[dict], dict[str, str]]:
 def summarize_backup(data: dict) -> dict:
     users, paths = parse_users_from_backup(data)
     enabled = sum(1 for u in users if u.get("enabled"))
+    domains = extract_subscription_domains(data.get("domains") or [])
+    ports = extract_listen_ports(data.get("hconfigs") or [])
     return {
         "panel": "hiddify",
         "users_total": len(users),
@@ -372,6 +518,8 @@ def summarize_backup(data: dict) -> dict:
         "users_disabled": len(users) - enabled,
         "proxy_path_client": paths.get("proxy_path_client") or "",
         "proxy_path": paths.get("proxy_path") or "",
+        "subscription_domains": domains,
+        "listen_ports": ports,
         "domains": len(data.get("domains") or []),
         "proxies": len(data.get("proxies") or []),
         "admin_users": len(data.get("admin_users") or []),

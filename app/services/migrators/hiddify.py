@@ -26,6 +26,8 @@ from app.config import (
 from app.services.migrators.base import BaseMigrator
 from app.services.migrators.hiddify_lib import (
     build_subscription_mapping,
+    extract_listen_ports,
+    extract_subscription_domains,
     find_hiddify_json_in_dir,
     load_hiddify_json_file,
     parse_users_from_backup,
@@ -61,13 +63,17 @@ class HiddifyMigrator(BaseMigrator):
 
         client_path = paths.get("proxy_path_client") or ""
         root_path = paths.get("proxy_path") or ""
+        sub_domains = extract_subscription_domains(data.get("domains") or [])
+        listen_ports = extract_listen_ports(data.get("hconfigs") or [])
         if not client_path:
             self.job.log("هشدار: proxy_path_client در بکاپ خالی است — ریدایرکت ممکن است ناقص باشد")
-
+        if sub_domains:
+            self.job.log(f"Hiddify subscription hosts: {', '.join(sub_domains[:8])}")
         self.job.log(
             f"Hiddify JSON: {summary['users_total']} users "
             f"(enabled={summary['users_enabled']}), "
-            f"proxy_path_client={client_path!r}"
+            f"proxy_path_client={client_path!r}, "
+            f"https_ports={listen_ports.get('https')}"
         )
 
         self.job.set_progress(
@@ -103,6 +109,8 @@ class HiddifyMigrator(BaseMigrator):
             created,
             proxy_path_client=client_path,
             proxy_path=root_path,
+            subscription_domains=sub_domains,
+            listen_ports=listen_ports,
         )
         mapping_file = work / "subscription_url_mapping.json"
         mapping_file.write_text(json.dumps(mapping, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -113,12 +121,22 @@ class HiddifyMigrator(BaseMigrator):
         except Exception as e:
             self.job.log(f"mapping copy note: {e}")
 
+        sample_old = ""
+        sample_new = ""
+        if created:
+            sample = created[0]
+            sample_new = sample.get("subscription_url") or ""
+            primary = (mapping.get("mappings") or {}).get(sample.get("username") or "") or {}
+            sample_old = primary.get("old_subscription_url") or ""
+
         self.job.set_progress(85, "راه‌اندازی مجدد PasarGuard...")
         await safe_start_pasarguard(self)
 
         redirect_installed = False
         redirect_error = ""
-        redirect_port = int(params.get("redirect_port") or 443)
+        https_ports = list(listen_ports.get("https") or [443])
+        redirect_port = int(params.get("redirect_port") or https_ports[0] or 443)
+        extra_https = [p for p in https_ports if p != redirect_port]
         env_text = (
             PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
             if PASARGUARD_ENV.exists()
@@ -134,8 +152,10 @@ class HiddifyMigrator(BaseMigrator):
             redirect_installed, redirect_error = await self._install_redirect(
                 mapping_file,
                 listen_port=redirect_port,
+                extra_ports=extra_https,
                 redirect_domain=redirect_domain,
                 work_dir=work,
+                subscription_domains=sub_domains,
             )
 
         # By design (not a failure): user asked to skip inbounds/proxies.
@@ -176,14 +196,24 @@ class HiddifyMigrator(BaseMigrator):
             )
         elif redirect_installed:
             warn_en.append(
-                "Hiddify web on port 443 was stopped so pg-redirect can serve old subscription paths. Do not start Hiddify nginx/haproxy on 443 again."
+                "Hiddify web on subscription HTTPS ports was stopped so pg-redirect can serve old paths. "
+                "Do not start Hiddify nginx/haproxy on those ports again."
             )
             warn_fa.append(
-                "وب هیدیفای روی پورت ۴۴۳ متوقف شد تا pg-redirect لینک‌های قدیمی را سرو کند. دوباره nginx/haproxy هیدیفای را روی ۴۴۳ روشن نکنید."
+                "وب هیدیفای روی پورت‌های HTTPS اشتراک متوقف شد تا pg-redirect لینک‌های قدیمی را سرو کند. "
+                "دوباره nginx/haproxy هیدیفای را روی آن پورت‌ها روشن نکنید."
             )
             warn_ru.append(
-                "Веб Hiddify на порту 443 остановлен, чтобы pg-redirect обслуживал старые ссылки. Не поднимайте nginx/haproxy Hiddify снова на 443."
+                "Веб Hiddify на HTTPS-портах подписки остановлен, чтобы pg-redirect обслуживал старые ссылки. "
+                "Не поднимайте nginx/haproxy Hiddify снова на этих портах."
             )
+            if sub_domains:
+                warn_en.append(
+                    f"Old client hosts should keep pointing at this server: {', '.join(sub_domains[:5])}."
+                )
+                warn_fa.append(
+                    f"دامنه‌های قدیمی اشتراک باید به همین سرور اشاره کنند: {', '.join(sub_domains[:5])}."
+                )
 
         self.job.set_progress(100, f"مهاجرت Hiddify انجام شد — {len(created)} کاربر")
         return {
@@ -192,9 +222,13 @@ class HiddifyMigrator(BaseMigrator):
             "subscription_preserved": True,
             "redirect_installed": redirect_installed,
             "redirect_port": redirect_port,
+            "redirect_extra_ports": extra_https,
             "redirect_path": client_path or "uuid",
             "redirect_domain": redirect_domain,
             "redirect_scheme": "https",
+            "redirect_sample_old": sample_old,
+            "redirect_sample_new": sample_new,
+            "subscription_domains": sub_domains,
             "mapping_file": str(mapping_file),
             "users_migrated": len(created),
             "users_total": len(users),
@@ -322,7 +356,10 @@ class HiddifyMigrator(BaseMigrator):
             "mysql", "-u", "hiddifypanel", f"-p{password}",
             "-h", "127.0.0.1", "hiddifypanel", "-N", "-e",
             "SELECT `key`, value FROM hconfig "
-            "WHERE `key` IN ('proxy_path_client','proxy_path','proxy_path_admin');",
+            "WHERE `key` IN ("
+            "'proxy_path_client','proxy_path','proxy_path_admin',"
+            "'tls_ports','http_ports'"
+            ");",
         ])
         if ok2:
             for line in (out2 or "").splitlines():
@@ -330,15 +367,43 @@ class HiddifyMigrator(BaseMigrator):
                 if len(parts) == 2:
                     hconfigs.append({"key": parts[0], "value": parts[1]})
 
-        return {"users": users, "hconfigs": hconfigs, "domains": [], "proxies": [], "admin_users": []}
+        # Best-effort domains for TLS SAN / sub_link_only detection
+        domains = []
+        ok3, out3 = await self._run_cmd([
+            "mysql", "-u", "hiddifypanel", f"-p{password}",
+            "-h", "127.0.0.1", "hiddifypanel", "-N", "-e",
+            "SELECT domain, mode, IFNULL(download_domain,''), "
+            "IFNULL(sub_link_only,0) FROM domain;",
+        ])
+        if ok3:
+            for line in (out3 or "").splitlines():
+                parts = line.split("\t")
+                if not parts or not parts[0]:
+                    continue
+                domains.append({
+                    "domain": parts[0],
+                    "mode": parts[1] if len(parts) > 1 else "direct",
+                    "download_domain": parts[2] if len(parts) > 2 else "",
+                    "sub_link_only": str(parts[3] if len(parts) > 3 else "0") in ("1", "true", "True"),
+                })
+
+        return {
+            "users": users,
+            "hconfigs": hconfigs,
+            "domains": domains,
+            "proxies": [],
+            "admin_users": [],
+        }
 
     async def _install_redirect(
         self,
         mapping_file: Path,
         *,
         listen_port: int,
+        extra_ports: list[int],
         redirect_domain: str,
         work_dir: Path,
+        subscription_domains: list[str],
     ) -> tuple[bool, str]:
         from app.services.redirect_ops import (
             free_listen_port,
@@ -347,18 +412,23 @@ class HiddifyMigrator(BaseMigrator):
             resolve_redirect_tls,
         )
 
-        # Hiddify multiplexes panel + client subscription paths on :443.
-        # Stop/disable that stack so pg-redirect can bind the same port.
+        # Hiddify multiplexes panel + client subscription paths on :443 (+ tls_ports).
         self.job.log(
-            f"Freeing Hiddify port {listen_port} for pg-redirect "
-            "(old client links hit this port)…"
+            f"Freeing Hiddify HTTPS ports {[listen_port, *extra_ports]} for pg-redirect "
+            "(old client links hit these ports)…"
         )
         await free_listen_port(self, listen_port, panel="hiddify")
+        for ep in extra_ports:
+            await free_listen_port(self, ep, panel="hiddify")
 
+        # Prefer real Hiddify certs for old subscription hostnames so TLS stays valid.
+        cn = (subscription_domains[0] if subscription_domains else "") or "127.0.0.1"
         cert_pem, key_pem, tls_src = resolve_redirect_tls(
             work_dir=work_dir,
             want_ssl=True,
-            common_name="127.0.0.1",
+            common_name=cn,
+            san_hosts=subscription_domains,
+            prefer_hiddify_ssl=True,
         )
         if tls_src:
             self.job.log(f"pg-redirect TLS: {tls_src}")
@@ -371,18 +441,23 @@ class HiddifyMigrator(BaseMigrator):
             panel="hiddify",
             ssl_cert=cert_pem,
             ssl_key=key_pem,
+            extra_ports=extra_ports,
         )
         if ok or await pg_redirect_is_active(self):
             return True, ""
 
         # Retry once after another aggressive free (services may have raced back)
-        self.job.log("pg-redirect start failed — freeing port again and retrying…")
+        self.job.log("pg-redirect start failed — freeing ports again and retrying…")
         await free_listen_port(self, listen_port, panel="hiddify")
+        for ep in extra_ports:
+            await free_listen_port(self, ep, panel="hiddify")
         if not cert_pem:
             cert_pem, key_pem, tls_src = resolve_redirect_tls(
                 work_dir=work_dir,
                 want_ssl=True,
-                common_name="127.0.0.1",
+                common_name=cn,
+                san_hosts=subscription_domains,
+                prefer_hiddify_ssl=True,
             )
             if tls_src:
                 self.job.log(f"pg-redirect retry TLS: {tls_src}")
@@ -394,6 +469,7 @@ class HiddifyMigrator(BaseMigrator):
             panel="hiddify",
             ssl_cert=cert_pem,
             ssl_key=key_pem,
+            extra_ports=extra_ports,
         )
         if ok2 or await pg_redirect_is_active(self):
             return True, ""

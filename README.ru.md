@@ -1,4 +1,4 @@
-> ⚠️ **`v2.2.6`** — Перед restore или миграцией сделайте полный бэкап.
+> ⚠️ **`v2.2.7`** — Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <a href="README.en.md">English</a> · <b>Русский</b>
@@ -56,6 +56,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | Версия | Основные изменения |
 |--------|-------------------|
+| v2.2.7 | Стабильная миграция Hiddify: надежный redirect старых ссылок (TLS/порты) + импорт по UUID (остальные панели без изменений) |
 | v2.2.6 | Исправление root@127.0.0.1 без привилегий (alembic 1044) + soft-проверка counts settings |
 | v2.2.5 | Исправление heal restore MySQL, когда пароль root в volume не совпадает с .env (все кандидаты, затем безопасный skip-grant recovery на том же volume) |
 | v2.2.4 | Исправление NameError миграции Marzban cross-DB: отсутствовал import PASARGUARD_ENV в panel-boot |
