@@ -226,7 +226,10 @@ def test_alembic_duplicate_heal_helpers():
 
 
 def test_alembic_still_running_helpers():
-    from app.services.pasarguard_ops import _alembic_still_running
+    from app.services.pasarguard_ops import (
+        _alembic_still_running,
+        _last_alembic_upgrade_line,
+    )
 
     active = (
         "INFO [alembic.runtime.migration] Context impl MySQLImpl.\n"
@@ -246,6 +249,16 @@ def test_alembic_still_running_helpers():
     # Stale upgrade lines outside the trailing window should not extend forever
     stale = ("INFO Running upgrade a -> b\n" + ("x\n" * 50) + "something else\n")
     assert _alembic_still_running(stale) is False
+
+    chain = (
+        "INFO [alembic.runtime.migration] Running upgrade a0a1125e46b1 -> ee97c01bfbaf\n"
+        "INFO [alembic.runtime.migration] Running upgrade 5213b80a795c -> 4f15c0789493, use bigint for id column\n"
+    )
+    assert _alembic_still_running(chain) is True
+    last = _last_alembic_upgrade_line(chain)
+    assert last is not None
+    assert "4f15c0789493" in last
+    assert "bigint" in last
     print("OK: alembic still-running helpers")
 
 

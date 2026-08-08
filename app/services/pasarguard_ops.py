@@ -427,16 +427,31 @@ def _alembic_still_running(output: str) -> bool:
     return "Running upgrade" in tail
 
 
+def _last_alembic_upgrade_line(output: str) -> str | None:
+    """Return the most recent 'Running upgrade …' line from panel logs."""
+    last = None
+    for line in (output or "").splitlines():
+        if "Running upgrade" in line:
+            last = line.strip()
+    return last
+
+
 async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
     """Fail unless PasarGuard logs show a clean startup (no migration errors).
 
     max_wait is a soft budget. While alembic is clearly still applying revisions,
-    the wait is extended so long schema upgrades (e.g. custom Marzban → PasarGuard)
-    are not aborted early — which would delete ephemeral staging and surface as
-    Connection refused on the staging port.
+    the wait is extended so long schema upgrades (e.g. custom Marzban → PasarGuard
+    on large MySQL dumps — bigint id alters, etc.) are not aborted early.
     """
+    soft_budget = max(60, int(max_wait))
+    # Hard ceiling: large Marzban→PG chains (esp. bigint id) can take a long time.
+    absolute_cap = max(soft_budget * 4, 3600)
+    # Same revision with no new upgrade line for this long ⇒ treat as stuck.
+    stuck_same_upgrade = max(900, soft_budget)
+
     migrator.job.log(
-        f"Verifying PasarGuard started without errors (budget {max_wait}s)..."
+        f"Verifying PasarGuard started without errors "
+        f"(budget {soft_budget}s, alembic cap {absolute_cap}s)..."
     )
     await asyncio.sleep(8)
 
@@ -446,30 +461,66 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
     silent_loop_healed = False
     prev_restart_count = 0
     alembic_extensions = 0
-    max_alembic_extensions = 8  # allow long Marzban→PG migration chains
-    deadline = asyncio.get_event_loop().time() + max(60, int(max_wait))
+    last_upgrade_sig: str | None = None
+    last_progress_at = asyncio.get_event_loop().time()
+    started_at = asyncio.get_event_loop().time()
+    deadline = started_at + soft_budget
     while True:
         now = asyncio.get_event_loop().time()
         if now >= deadline:
-            break
+            # Final chance: if alembic is still active under the absolute cap, keep going.
+            out_end = await fetch_pasarguard_logs(migrator, tail=400)
+            if (
+                _alembic_still_running(out_end)
+                and (now - started_at) < absolute_cap
+                and (now - last_progress_at) < stuck_same_upgrade
+            ):
+                extra = 180
+                deadline = now + extra
+                alembic_extensions += 1
+                migrator.job.log(
+                    f"Alembic still active at soft deadline — extending "
+                    f"(+{extra}s, total {int(now - started_at)}s, "
+                    f"last: {(_last_alembic_upgrade_line(out_end) or '?')[:120]})"
+                )
+            else:
+                break
 
         out = await fetch_pasarguard_logs(migrator, tail=400)
         _log_failures_from_output(migrator, out)
 
-        # Alembic still applying — do not fail yet; extend the health budget
+        # Alembic still applying — do not fail yet; extend while progress is observed
         if _alembic_still_running(out):
-            if alembic_extensions < max_alembic_extensions:
+            sig = _last_alembic_upgrade_line(out) or "Running upgrade"
+            if sig != last_upgrade_sig:
+                last_upgrade_sig = sig
+                last_progress_at = now
+                migrator.job.log(f"Alembic progress: {sig[:160]}")
+            elapsed = int(now - started_at)
+            same_for = int(now - last_progress_at)
+            if same_for >= stuck_same_upgrade:
+                raise RuntimeError(
+                    "PasarGuard alembic appears stuck on the same revision "
+                    f"for {same_for}s.\n"
+                    f"Last upgrade: {sig}\n"
+                    + _extract_failure_snippet(out)
+                )
+            if (now - started_at) >= absolute_cap:
+                raise RuntimeError(
+                    "PasarGuard alembic exceeded maximum wait "
+                    f"({absolute_cap}s) without reaching ready state.\n"
+                    f"Last upgrade: {sig}\n"
+                    + _extract_failure_snippet(out)
+                )
+            # Keep soft deadline ahead while work continues
+            if deadline - now < 90:
+                extra = 180
+                deadline = now + extra
                 alembic_extensions += 1
-                extra = max(120, int(max_wait) // 2)
-                deadline = max(deadline, now + extra)
                 migrator.job.log(
                     f"Alembic still running — extending health wait "
-                    f"(+{extra}s, extension {alembic_extensions}/{max_alembic_extensions})..."
-                )
-            else:
-                migrator.job.log(
-                    "Alembic still running (max extensions reached) — continuing to wait "
-                    f"until deadline ({int(deadline - now)}s left)..."
+                    f"(+{extra}s, #{alembic_extensions}, elapsed {elapsed}s, "
+                    f"same-rev {same_for}s)..."
                 )
             await asyncio.sleep(5)
             continue
@@ -559,6 +610,15 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
     if hit:
         raise RuntimeError(
             "PasarGuard startup failed.\n" + _extract_failure_snippet(out)
+        )
+    last_up = _last_alembic_upgrade_line(out)
+    if last_up and not any(m in (out or "") for m in STARTUP_MARKERS):
+        raise RuntimeError(
+            "PasarGuard did not finish alembic / reach ready state in time.\n"
+            f"Last upgrade still in progress or incomplete: {last_up}\n"
+            "Large Marzban MySQL upgrades (e.g. bigint id) can take a long time — "
+            "retry after updating PGClockMG, or check `docker compose logs pasarguard`.\n"
+            + _extract_failure_snippet(out)
         )
     raise RuntimeError(
         "PasarGuard did not reach ready state (no 'Application startup complete' in logs).\n"

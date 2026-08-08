@@ -149,7 +149,8 @@ class MarzbanMigrator(BaseMigrator):
         self.params["target_db"] = "sqlite"
         await heal_duplicate_unique_names(self)
         self.job.set_progress(50, "Upgrading Marzban schema via PasarGuard panel boot...")
-        await safe_start_pasarguard(self)
+        # Long Marzban→PG alembic chains (bigint id, etc.) need a large health budget.
+        await safe_start_pasarguard(self, health_max_wait=1800)
         self.params["target_db"] = orig_target or target_db
         await self._stop_panel()
         self._assert_sqlite_pasarguard_ready(dest)
@@ -195,7 +196,8 @@ class MarzbanMigrator(BaseMigrator):
 
             await heal_duplicate_unique_names(self)
             self.job.set_progress(70, "Upgrading Marzban MySQL schema via panel boot...")
-            await safe_start_pasarguard(self)
+            # Large dumps: alembic may spend a long time on "use bigint for id column".
+            await safe_start_pasarguard(self, health_max_wait=1800)
             return
 
         self.job.set_progress(40, "Preparing two-phase Marzban MySQL → target...")

@@ -367,8 +367,8 @@ async def _panel_boot_upgrade_intermediate(
                 await heal_duplicate_unique_names(migrator)
         except Exception as e:
             migrator.job.log(f"Unique-name heal note (intermediate): {e}")
-        # Custom/large Marzban schemas can take well over the default 180s.
-        await safe_start_pasarguard(migrator, health_max_wait=900)
+        # Custom/large Marzban schemas (bigint id alters) can take a long time.
+        await safe_start_pasarguard(migrator, health_max_wait=1800)
         migrator.params["target_db"] = orig
         await _stop_panel(migrator)
         migrator.job.log("Panel-boot schema upgrade complete")
