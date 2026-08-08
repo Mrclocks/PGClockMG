@@ -176,17 +176,22 @@ def _make_ssl_context(config: ServerConfig) -> ssl.SSLContext | None:
 async def serve(config: ServerConfig, path_index: dict[str, str]) -> None:
     app = RedirectApp(config, path_index)
     ssl_ctx = _make_ssl_context(config)
-    server = await asyncio.start_server(
-        app.handle,
-        host=config.host,
-        port=config.port,
-        ssl=ssl_ctx,
-    )
-    socks = ", ".join(str(s.getsockname()) for s in server.sockets or [])
+    ports = config.all_ports() if hasattr(config, "all_ports") else [config.port]
+    servers = []
+    sock_labels: list[str] = []
+    for port in ports:
+        server = await asyncio.start_server(
+            app.handle,
+            host=config.host,
+            port=int(port),
+            ssl=ssl_ctx,
+        )
+        servers.append(server)
+        sock_labels.extend(str(s.getsockname()) for s in server.sockets or [])
     mode = "HTTPS" if ssl_ctx else "HTTP"
     log.info(
         "pg-redirect listening %s on %s (%d mappings, base=%s)",
-        mode, socks, len(path_index), config.redirect_base or "(none)",
+        mode, ", ".join(sock_labels), len(path_index), config.redirect_base or "(none)",
     )
 
     stop = asyncio.Event()
@@ -202,11 +207,14 @@ async def serve(config: ServerConfig, path_index: dict[str, str]) -> None:
             # Windows
             signal.signal(sig, lambda *_: _stop())
 
-    async with server:
+    try:
         await stop.wait()
         log.info("pg-redirect shutting down")
-        server.close()
-        await server.wait_closed()
+    finally:
+        for server in servers:
+            server.close()
+        for server in servers:
+            await server.wait_closed()
 
 
 def run_from_files(config_path: str | Path, map_path: str | Path) -> None:

@@ -18,6 +18,7 @@ class SslConfig:
 class ServerConfig:
     host: str = "0.0.0.0"
     port: int = 2096
+    extra_ports: list[int] | None = None
     redirect_base: str = ""
     panel: str = ""
     pasarguard_env: str = "/opt/pasarguard/.env"
@@ -28,6 +29,17 @@ class ServerConfig:
         """Alias used by older PasarGuard-style configs."""
         return self.redirect_base
 
+    def all_ports(self) -> list[int]:
+        ports = [int(self.port)]
+        for p in self.extra_ports or []:
+            try:
+                pi = int(p)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= pi <= 65535 and pi not in ports:
+                ports.append(pi)
+        return ports
+
 
 def load_config(path: str | Path) -> ServerConfig:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -37,6 +49,17 @@ def load_config(path: str | Path) -> ServerConfig:
     port = int(data.get("port") or 2096)
     if port <= 0 or port > 65535:
         raise ValueError(f"invalid port: {port}")
+
+    extra_raw = data.get("extra_ports") or []
+    extra_ports: list[int] = []
+    if isinstance(extra_raw, (list, tuple)):
+        for item in extra_raw:
+            try:
+                p = int(item)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= p <= 65535 and p != port and p not in extra_ports:
+                extra_ports.append(p)
 
     redirect_base = (
         (data.get("redirect_base") or data.get("redirect_domain") or "")
@@ -58,6 +81,7 @@ def load_config(path: str | Path) -> ServerConfig:
     return ServerConfig(
         host=(data.get("host") or "0.0.0.0").strip() or "0.0.0.0",
         port=port,
+        extra_ports=extra_ports or None,
         redirect_base=redirect_base,
         panel=str(data.get("panel") or ""),
         pasarguard_env=pasarguard_env,
@@ -74,12 +98,22 @@ def build_config_dict(
     ssl_key_pem: str = "",
     host: str = "0.0.0.0",
     pasarguard_env: str = "/opt/pasarguard/.env",
+    extra_ports: list[int] | None = None,
 ) -> dict:
     ssl_enabled = bool(ssl_cert_pem and ssl_key_pem)
     base = (redirect_base or "").rstrip("/")
+    extras: list[int] = []
+    for p in extra_ports or []:
+        try:
+            pi = int(p)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= pi <= 65535 and pi != int(listen_port) and pi not in extras:
+            extras.append(pi)
     return {
         "host": host,
         "port": int(listen_port),
+        "extra_ports": extras,
         "redirect_base": base,
         "redirect_domain": base,
         "pasarguard_env": pasarguard_env or "/opt/pasarguard/.env",

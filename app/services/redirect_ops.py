@@ -69,8 +69,17 @@ def _load_pem_pair(cert: str, key: str) -> tuple[str, str] | None:
     return None
 
 
-def generate_self_signed_pem(common_name: str, work_dir: Path) -> tuple[str, str] | None:
-    """Create a short-lived self-signed cert so https://IP:subPort still handshakes."""
+def generate_self_signed_pem(
+    common_name: str,
+    work_dir: Path,
+    *,
+    san_hosts: list[str] | None = None,
+) -> tuple[str, str] | None:
+    """Create a short-lived self-signed cert so https://IP:subPort still handshakes.
+
+    ``san_hosts`` may list extra DNS/IP names (Hiddify subscription domains) so
+    clients hitting old hostnames still complete TLS after pg-redirect takes :443.
+    """
     cn = (common_name or "127.0.0.1").strip() or "127.0.0.1"
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -80,9 +89,25 @@ def generate_self_signed_pem(common_name: str, work_dir: Path) -> tuple[str, str
     if not openssl:
         return None
 
-    # Prefer IP SAN when CN looks like an IPv4 address (openssl 1.1.1+).
-    is_ip = cn.replace(".", "").isdigit() and cn.count(".") == 3
-    san = f"IP:{cn}" if is_ip else f"DNS:{cn}"
+    def _is_ipv4(value: str) -> bool:
+        return value.replace(".", "").isdigit() and value.count(".") == 3
+
+    hosts: list[str] = []
+    for h in [cn, *(san_hosts or [])]:
+        h = (h or "").strip().lower().rstrip(".")
+        if h and h not in hosts:
+            hosts.append(h)
+    if not hosts:
+        hosts = ["127.0.0.1"]
+
+    san_parts: list[str] = []
+    for i, h in enumerate(hosts, start=1):
+        kind = "IP" if _is_ipv4(h) else "DNS"
+        san_parts.append(f"{kind}.{i} = {h}")
+    san_block = "\n".join(san_parts)
+    # CN must be a single name; prefer first DNS-looking host
+    cn_final = next((h for h in hosts if not _is_ipv4(h)), hosts[0])
+
     conf = work_dir / "pg-redirect-openssl.cnf"
     conf.write_text(
         f"""[req]
@@ -90,9 +115,11 @@ distinguished_name = req_distinguished_name
 x509_extensions = v3_req
 prompt = no
 [req_distinguished_name]
-CN = {cn}
+CN = {cn_final}
 [v3_req]
-subjectAltName = {san}
+subjectAltName = @alt_names
+[alt_names]
+{san_block}
 """,
         encoding="utf-8",
     )
@@ -110,7 +137,7 @@ subjectAltName = {san}
                 [
                     openssl, "req", "-x509", "-nodes", "-newkey", "rsa:2048",
                     "-keyout", str(key_path), "-out", str(cert_path),
-                    "-days", "3650", "-subj", f"/CN={cn}",
+                    "-days", "3650", "-subj", f"/CN={cn_final}",
                 ],
                 check=True, capture_output=True, text=True, timeout=60,
             )
@@ -124,6 +151,60 @@ subjectAltName = {san}
     )
 
 
+def find_hiddify_ssl_pair(
+    domains: list[str] | None = None,
+    *,
+    hiddify_dir: Path | None = None,
+) -> tuple[str, str, str] | None:
+    """Locate Hiddify Manager TLS material for old subscription hostnames.
+
+    Hiddify stores per-domain files as::
+        /opt/hiddify-manager/ssl/{domain}.crt
+        /opt/hiddify-manager/ssl/{domain}.crt.key
+
+    Prefer exact domain matches (sub_link_only first), then any available pair.
+    Returns ``(cert_pem, key_pem, source_label)`` or ``None``.
+    """
+    from app.config import HIDDIFY_DIR
+
+    root = Path(hiddify_dir) if hiddify_dir else HIDDIFY_DIR
+    ssl_dir = root / "ssl"
+    if not ssl_dir.is_dir():
+        return None
+
+    wanted = [(d or "").strip().lower().rstrip(".") for d in (domains or []) if d]
+    candidates: list[tuple[str, Path, Path]] = []
+
+    for domain in wanted:
+        cert = ssl_dir / f"{domain}.crt"
+        key = ssl_dir / f"{domain}.crt.key"
+        if cert.is_file() and key.is_file():
+            candidates.append((f"hiddify-ssl:{domain}", cert, key))
+
+    if not candidates:
+        # Any leftover domain cert (skip generic placeholders)
+        for cert in sorted(ssl_dir.glob("*.crt")):
+            if cert.name.endswith(".crt.key"):
+                continue
+            key = Path(str(cert) + ".key")
+            if not key.is_file():
+                continue
+            name = cert.name[: -len(".crt")]
+            if not name or name in ("localhost",):
+                continue
+            candidates.append((f"hiddify-ssl:{name}", cert, key))
+
+    for label, cert, key in candidates:
+        try:
+            cert_pem = cert.read_text(encoding="utf-8", errors="ignore")
+            key_pem = key.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if "BEGIN" in cert_pem and "BEGIN" in key_pem:
+            return cert_pem, key_pem, label
+    return None
+
+
 def resolve_redirect_tls(
     *,
     cert_path: str = "",
@@ -132,6 +213,8 @@ def resolve_redirect_tls(
     common_name: str = "",
     work_dir: Path | None = None,
     want_ssl: bool = False,
+    san_hosts: list[str] | None = None,
+    prefer_hiddify_ssl: bool = False,
 ) -> tuple[str, str, str]:
     """Resolve TLS material for pg-redirect.
 
@@ -139,13 +222,19 @@ def resolve_redirect_tls(
     certificate clients already see on the panel (avoids random self-signed /
     stale x-ui paths after migrate). Fallback order:
 
-    1. PasarGuard ``UVICORN_SSL_*``
-    2. Files under PasarGuard ``certs/``
-    3. Legacy 3x-ui cert paths (if still on disk)
-    4. Self-signed (only when ``want_ssl``)
+    1. Hiddify ``/opt/hiddify-manager/ssl/{domain}.crt`` (when ``prefer_hiddify_ssl``)
+    2. PasarGuard ``UVICORN_SSL_*``
+    3. Files under PasarGuard ``certs/``
+    4. Legacy 3x-ui cert paths (if still on disk)
+    5. Self-signed (only when ``want_ssl``) with optional SAN hosts
 
     Returns ``(cert_pem, key_pem, source_label)``.
     """
+    if prefer_hiddify_ssl:
+        found = find_hiddify_ssl_pair(san_hosts)
+        if found:
+            return found
+
     text = env_text or ""
     if not text and PASARGUARD_ENV.exists():
         try:
@@ -179,8 +268,18 @@ def resolve_redirect_tls(
     if pair:
         return pair[0], pair[1], "x-ui-cert-files"
 
+    # Last chance: Hiddify certs even when not preferred (better than random CN)
+    if not prefer_hiddify_ssl:
+        found = find_hiddify_ssl_pair(san_hosts)
+        if found:
+            return found
+
     if want_ssl and work_dir is not None:
-        generated = generate_self_signed_pem(common_name or "127.0.0.1", Path(work_dir))
+        generated = generate_self_signed_pem(
+            common_name or (san_hosts[0] if san_hosts else "127.0.0.1"),
+            Path(work_dir),
+            san_hosts=san_hosts,
+        )
         if generated:
             return generated[0], generated[1], "self-signed"
 
@@ -219,6 +318,7 @@ def build_runtime_config(
     ssl_cert: str = "",
     ssl_key: str = "",
     pasarguard_env: str = "",
+    extra_ports: list[int] | None = None,
 ) -> dict:
     cert_pem, key_pem = _as_pem_pair(ssl_cert, ssl_key)
     from app.config import PASARGUARD_ENV
@@ -236,13 +336,23 @@ def build_runtime_config(
             ssl_cert_pem=cert_pem,
             ssl_key_pem=key_pem,
             pasarguard_env=env_path,
+            extra_ports=extra_ports,
         )
     except Exception:
         ssl_enabled = bool(cert_pem and key_pem)
         base = (redirect_base or "").rstrip("/")
+        extras: list[int] = []
+        for p in extra_ports or []:
+            try:
+                pi = int(p)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= pi <= 65535 and pi != int(listen_port) and pi not in extras:
+                extras.append(pi)
         return {
             "host": "0.0.0.0",
             "port": int(listen_port),
+            "extra_ports": extras,
             "redirect_base": base,
             "redirect_domain": base,
             "pasarguard_env": env_path,
@@ -457,6 +567,7 @@ async def install_pg_redirect(
     panel: str = "x-ui",
     ssl_cert: str = "",
     ssl_key: str = "",
+    extra_ports: list[int] | None = None,
 ) -> tuple[bool, str]:
     """Install/update native pg-redirect from bundled sources. No network required."""
     mapping = Path(mapping_file)
@@ -475,21 +586,36 @@ async def install_pg_redirect(
     except Exception as e:
         migrator.job.log(f"mapping normalize note: {e}")
 
+    extras: list[int] = []
+    for p in extra_ports or []:
+        try:
+            pi = int(p)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= pi <= 65535 and pi != int(listen_port) and pi not in extras:
+            extras.append(pi)
+
     cfg = build_runtime_config(
         listen_port=listen_port,
         redirect_base=redirect_base,
         panel=panel,
         ssl_cert=ssl_cert,
         ssl_key=ssl_key,
+        extra_ports=extras,
     )
     work_cfg = mapping.parent / "pg-redirect-config.json"
     work_cfg.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     ssl_on = bool(cfg.get("ssl", {}).get("enabled"))
     migrator.job.log(
-        f"pg-redirect config: port={listen_port} redirect_base={redirect_base} ssl={ssl_on}"
+        f"pg-redirect config: port={listen_port}"
+        + (f"+{extras}" if extras else "")
+        + f" redirect_base={redirect_base} ssl={ssl_on}"
     )
 
+    # Free primary + extra listen ports (Hiddify tls_ports often include 2083 etc.)
     await free_listen_port(migrator, listen_port, panel=panel)
+    for ep in extras:
+        await free_listen_port(migrator, ep, panel=panel)
 
     unit_path = mapping.parent / "pg-redirect.service"
     # Unit is finalized on the server after resolving the runtime user.
@@ -497,6 +623,8 @@ async def install_pg_redirect(
 
     ssl_py = "True" if ssl_on else "False"
     user_snippet = _install_user_snippet()
+    all_ports = [int(listen_port), *extras]
+    ports_kill = " ".join(str(p) for p in all_ports)
     hiddify_pre = ""
     if (panel or "").lower() == "hiddify" or int(listen_port) == 443:
         hiddify_pre = f'''
@@ -509,14 +637,17 @@ systemctl list-units --type=service --all --no-legend 'hiddify*' 2>/dev/null \\
 if [[ -d /opt/hiddify-manager ]]; then
   (cd /opt/hiddify-manager && docker compose down --remove-orphans 2>/dev/null) || true
 fi
-ids=$(docker ps --format '{{{{.ID}}}} {{{{.Ports}}}}' 2>/dev/null | awk '/(^|[, ])0\\.0\\.0\\.0:{int(listen_port)}->|:{int(listen_port)}->/ {{print $1}}')
-if [[ -n "${{ids:-}}" ]]; then
-  echo "Stopping docker containers on :{int(listen_port)}: $ids"
-  # shellcheck disable=SC2086
-  docker stop $ids 2>/dev/null || true
-fi
+for _p in {ports_kill}; do
+  ids=$(docker ps --format '{{{{.ID}}}} {{{{.Ports}}}}' 2>/dev/null | awk -v p="$_p" 'index($0, ":" p "->") {{print $1}}')
+  if [[ -n "${{ids:-}}" ]]; then
+    echo "Stopping docker containers on :$_p: $ids"
+    # shellcheck disable=SC2086
+    docker stop $ids 2>/dev/null || true
+  fi
+done
 '''
 
+    health_port = int(listen_port)
     script = f'''set -euo pipefail
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "pg-redirect install requires root" >&2
@@ -545,7 +676,9 @@ chmod 0644 "{SERVICE_FILE}"
 
 systemctl disable --now redirect-server 2>/dev/null || true
 {hiddify_pre}
-fuser -k {int(listen_port)}/tcp 2>/dev/null || true
+for _p in {ports_kill}; do
+  fuser -k "${{_p}}/tcp" 2>/dev/null || true
+done
 sleep 1
 systemctl daemon-reload
 systemctl enable {SERVICE_NAME}
@@ -562,7 +695,7 @@ fi
 
 python3 - <<PY
 import socket, ssl, sys
-port = {int(listen_port)}
+port = {health_port}
 ssl_on = {ssl_py}
 req = b"GET /healthz HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n"
 try:

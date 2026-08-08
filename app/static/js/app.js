@@ -1344,29 +1344,43 @@ function renderRedirectVerifyBox(result) {
     result?.redirect_installed
     || result?.subscription_mode === 'redirect'
     || state.selectedPanel?.id === '3x-ui'
+    || state.selectedPanel?.id === 'hiddify'
   );
   if (!show) {
     box.classList.add('hidden');
     box.innerHTML = '';
     return;
   }
-  const redirPort = result?.redirect_port || 2096;
+  const redirPort = result?.redirect_port || (state.selectedPanel?.id === 'hiddify' ? 443 : 2096);
   const redirPath = String(result?.redirect_path || 'sub').replace(/^\/+|\/+$/g, '') || 'sub';
+  const sampleOld = String(result?.redirect_sample_old || '').trim();
+  const isHiddify = state.selectedPanel?.id === 'hiddify' || result?.summary?.panel === 'hiddify';
+  const probePath = sampleOld
+    || (isHiddify
+      ? `/${redirPath}/YOUR_USER_UUID`
+      : `/${redirPath}/YOUR_OLD_SUB_ID`);
+  const extraPorts = Array.isArray(result?.redirect_extra_ports)
+    ? result.redirect_extra_ports.filter((p) => Number(p) && Number(p) !== Number(redirPort))
+    : [];
   const cmds = [
     'systemctl status pg-redirect --no-pager',
     `curl -kI https://127.0.0.1:${redirPort}/healthz`,
     `curl -I http://127.0.0.1:${redirPort}/healthz`,
-    `curl -kI https://127.0.0.1:${redirPort}/${redirPath}/YOUR_OLD_SUB_ID`,
-  ].join('\n');
+    `curl -kI https://127.0.0.1:${redirPort}${probePath.startsWith('/') ? probePath : '/' + probePath}`,
+  ];
+  if (extraPorts.length) {
+    cmds.push(`# also listening on: ${extraPorts.join(', ')}`);
+  }
+  const cmdText = cmds.join('\n');
   box.classList.remove('hidden');
   box.innerHTML = `
     <h3 class="post-migrate-title">${t('step6.redirectVerifyTitle')}</h3>
     <p class="desc-sm">${t('step6.redirectVerifyHint')}</p>
-    <div class="install-cmd-box"><code id="redirectVerifyCmds">${escapeHtmlApp(cmds)}</code></div>
+    <div class="install-cmd-box"><code id="redirectVerifyCmds">${escapeHtmlApp(cmdText)}</code></div>
     <button type="button" class="btn btn-copy redirect-verify-copy" id="btnCopyRedirectVerify">${t('step6.redirectVerifyCopyAll')}</button>`;
   document.getElementById('btnCopyRedirectVerify')?.addEventListener('click', () => {
     if (typeof copyText === 'function') copyText('redirectVerifyCmds');
-    else copyTextToClipboard(cmds);
+    else copyTextToClipboard(cmdText);
   });
 }
 
