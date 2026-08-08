@@ -48,6 +48,11 @@ def load_path_index(mapping_path: str | Path, redirect_base: str = "") -> dict[s
 
     ``redirect_base`` is accepted for API compatibility but not baked into
     values — the server resolves the live PasarGuard base on each request.
+
+    Each mapping entry may provide:
+    - ``old_subscription_url`` (required for legacy entries)
+    - ``old_paths`` (optional list — used by Hiddify migrator so every client
+      suffix is indexed even when flat ``#i`` keys are absent)
     """
     data = json.loads(Path(mapping_path).read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -59,17 +64,30 @@ def load_path_index(mapping_path: str | Path, redirect_base: str = "") -> dict[s
         raise ValueError("mappings must be an object")
 
     index: dict[str, str] = {}
+
+    def _put(old_raw: str, new_path: str) -> None:
+        old_path = path_only(old_raw)
+        if not old_path or not new_path:
+            return
+        index[old_path] = new_path
+        if old_path != "/" and not old_path.endswith("/"):
+            index[old_path + "/"] = new_path
+
     for _key, entry in mappings.items():
         if not isinstance(entry, dict):
             continue
-        old = entry.get("old_subscription_url") or ""
         new = entry.get("new_subscription_url") or ""
-        old_path = path_only(old)
         new_path = path_only(new)
-        if old_path and new_path:
-            index[old_path] = new_path
-            if old_path != "/" and not old_path.endswith("/"):
-                index[old_path + "/"] = new_path
+        if not new_path:
+            continue
+        old = entry.get("old_subscription_url") or ""
+        if old:
+            _put(old, new_path)
+        extra = entry.get("old_paths")
+        if isinstance(extra, (list, tuple)):
+            for item in extra:
+                if item:
+                    _put(str(item), new_path)
     return index
 
 

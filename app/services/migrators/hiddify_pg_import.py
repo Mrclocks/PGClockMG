@@ -74,6 +74,89 @@ except Exception as e:
 users = payload.get("users") or []
 
 
+async def find_user_by_uuid(db, uid: UUID, uuid_index=None):
+    """Return existing user whose VLESS/VMess proxy id matches ``uid``."""
+    target = str(uid).lower()
+    if isinstance(uuid_index, dict) and target in uuid_index:
+        return uuid_index[target]
+
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    from app.db.models import User
+
+    try:
+        rows = await db.execute(
+            select(User).options(selectinload(User.groups)).limit(5000)
+        )
+        users = list(rows.unique().scalars().all())
+    except Exception:
+        try:
+            rows = await db.execute(select(User).limit(5000))
+            users = list(rows.scalars().all())
+        except Exception:
+            return None
+
+    for user in users:
+        settings = getattr(user, "proxy_settings", None) or {}
+        candidates = []
+        if isinstance(settings, dict):
+            for key in ("vless", "vmess"):
+                block = settings.get(key) or {}
+                if isinstance(block, dict):
+                    candidates.append(str(block.get("id") or "").strip().lower())
+            for block in settings.values():
+                if isinstance(block, dict):
+                    candidates.append(str(block.get("id") or "").strip().lower())
+        for attr in ("vless", "vmess"):
+            block = getattr(settings, attr, None)
+            if block is None:
+                continue
+            got = str(getattr(block, "id", "") or "").strip().lower()
+            if not got and isinstance(block, dict):
+                got = str(block.get("id") or "").strip().lower()
+            candidates.append(got)
+        if target in candidates:
+            return user
+    return None
+
+
+async def build_uuid_index(db):
+    """Map lowercase proxy UUID → user for fast re-import dedup."""
+    from sqlalchemy import select
+
+    from app.db.models import User
+
+    index = {}
+    try:
+        rows = await db.execute(select(User).limit(10000))
+        users = list(rows.scalars().all())
+    except Exception:
+        return index
+    for user in users:
+        settings = getattr(user, "proxy_settings", None) or {}
+        ids = []
+        if isinstance(settings, dict):
+            for key in ("vless", "vmess"):
+                block = settings.get(key) or {}
+                if isinstance(block, dict) and block.get("id"):
+                    ids.append(str(block.get("id")).strip().lower())
+        for attr in ("vless", "vmess"):
+            block = getattr(settings, attr, None)
+            if block is None:
+                continue
+            got = getattr(block, "id", None)
+            if got is None and isinstance(block, dict):
+                got = block.get("id")
+            if got:
+                ids.append(str(got).strip().lower())
+        for got in ids:
+            if got and got not in index:
+                index[got] = user
+    return index
+
+
+
 async def make_sub_token(db, user_id: int) -> str:
     from app.db.crud.general import get_jwt_secret_key
 
@@ -195,6 +278,11 @@ async def main():
         group_name = str(getattr(group, "name", GROUP_NAME) or GROUP_NAME)
         group_ids = [group_id]
 
+        try:
+            uuid_index = await build_uuid_index(db)
+        except Exception:
+            uuid_index = {}
+
         for row in users:
             username = (row.get("username") or "").strip()
             uuid_s = (row.get("uuid") or "").strip()
@@ -207,27 +295,44 @@ async def main():
                 errors.append({"username": username, "error": f"bad uuid: {e}"})
                 continue
 
+            existing = None
+            # Prefer UUID match so re-runs keep the same PasarGuard user + old links
             try:
-                existing = await get_user(
-                    db, username,
-                    load_admin=False, load_next_plan=False,
-                    load_usage_logs=False, load_groups=False,
-                )
-            except TypeError:
-                existing = await get_user(db, username)
-            except Exception as e:
-                errors.append({"username": username, "error": f"get_user: {e}"})
+                existing = await find_user_by_uuid(db, uid, uuid_index)
+            except Exception:
+                existing = None
+
+            if existing is None:
                 try:
-                    await db.rollback()
-                except Exception:
-                    pass
-                continue
+                    existing = await get_user(
+                        db, username,
+                        load_admin=False, load_next_plan=False,
+                        load_usage_logs=False, load_groups=False,
+                    )
+                except TypeError:
+                    try:
+                        existing = await get_user(db, username)
+                    except Exception as e:
+                        errors.append({"username": username, "error": f"get_user: {e}"})
+                        try:
+                            await db.rollback()
+                        except Exception:
+                            pass
+                        continue
+                except Exception as e:
+                    errors.append({"username": username, "error": f"get_user: {e}"})
+                    try:
+                        await db.rollback()
+                    except Exception:
+                        pass
+                    continue
 
             if existing is not None:
                 skipped.append({
                     "username": username,
                     "reason": "already_exists",
                     "user_id": int(existing.id),
+                    "matched_username": getattr(existing, "username", None),
                 })
                 try:
                     token = await make_sub_token(db, int(existing.id))
@@ -331,6 +436,7 @@ async def main():
                     "subscription_url": f"/sub/{token}",
                     "reused": False,
                 })
+                uuid_index[str(uid).lower()] = user
             except Exception as e:
                 try:
                     await db.rollback()

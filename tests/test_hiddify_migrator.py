@@ -19,7 +19,9 @@ from app.panels import PANELS  # noqa: E402
 from app.services.backup_analyzer import analyze_upload_directory  # noqa: E402
 from app.services.migrators.hiddify_lib import (  # noqa: E402
     build_subscription_mapping,
+    extract_listen_ports,
     extract_proxy_paths,
+    extract_subscription_domains,
     find_hiddify_json_in_dir,
     is_hiddify_json_backup,
     load_hiddify_json_file,
@@ -35,9 +37,20 @@ from pg_redirect.server import RedirectApp  # noqa: E402
 from pg_redirect.config import ServerConfig  # noqa: E402
 
 FIXTURE = ROOT / "tests" / "fixtures" / "hiddify_sample_backup.json"
-REAL_UPLOAD = Path(
-    "/home/ubuntu/.cursor/projects/workspace/uploads/2026_08_04__15_30_00_e58f.json"
-)
+REAL_UPLOAD_CANDIDATES = [
+    Path("/home/ubuntu/.cursor/projects/workspace/uploads/2026_08_04__15_30_00_5f1a.json"),
+    Path("/home/ubuntu/.cursor/projects/workspace/uploads/2026_08_04__15_30_00_e58f.json"),
+]
+
+
+def _first_existing(paths):
+    for p in paths:
+        if p.is_file():
+            return p
+    return None
+
+
+REAL_UPLOAD = _first_existing(REAL_UPLOAD_CANDIDATES) or REAL_UPLOAD_CANDIDATES[0]
 
 
 @pytest.fixture(scope="module")
@@ -222,6 +235,9 @@ def test_real_backup_summary_and_uuid_integrity(real_data):
     summary = summarize_backup(real_data)
     assert summary["users_total"] == 237
     assert summary["proxy_path_client"] == "DmPnY3A1UQ9tm58e97"
+    assert "sab.vodka-vip.com" in (summary.get("subscription_domains") or [])
+    assert 443 in (summary.get("listen_ports") or {}).get("https", [])
+    assert 2083 in (summary.get("listen_ports") or {}).get("https", [])
     users, paths = parse_users_from_backup(real_data)
     assert len(users) == 237
     uuids = [u["uuid"] for u in users]
@@ -237,19 +253,51 @@ def test_real_backup_summary_and_uuid_integrity(real_data):
         migrated,
         proxy_path_client=paths["proxy_path_client"],
         proxy_path=paths["proxy_path"],
+        subscription_domains=summary["subscription_domains"],
+        listen_ports=summary["listen_ports"],
     )
+    assert mapping["version"] == 2
+    assert mapping["subscription_domains"]
     # At least one mapping key per user
     assert len([k for k in mapping["mappings"] if "#" not in k]) == 237
 
     with tempfile.TemporaryDirectory() as tmp:
         map_path = Path(tmp) / "m.json"
-        map_path.write_text(json.dumps(mapping), encoding="utf-8")
+        # Compact mapping (primary + old_paths only) must still index all suffixes
+        compact = {
+            "version": 2,
+            "panel": "hiddify",
+            "mappings": {
+                u["username"]: {
+                    "uuid": u["uuid"],
+                    "old_subscription_url": f"/{paths['proxy_path_client']}/{u['uuid']}",
+                    "new_subscription_url": f"/sub/tok{i}",
+                    "old_paths": old_hiddify_paths(
+                        paths["proxy_path_client"], u["uuid"], proxy_path=paths["proxy_path"]
+                    ),
+                }
+                for i, u in enumerate(users, start=1)
+            },
+        }
+        map_path.write_text(json.dumps(compact), encoding="utf-8")
         index = load_path_index(map_path)
-        # Spot-check first 20 users resolve
+        # Spot-check first 20 users resolve including clashmeta + uppercase UUID
         for u in users[:20]:
             old = f"/{paths['proxy_path_client']}/{u['uuid']}"
             assert old in index, old
             assert index[old].startswith("/sub/")
+            assert index.get(old + "/clashmeta/") == index[old] or index.get(old + "/clashmeta") == index[old]
+            upper = f"/{paths['proxy_path_client']}/{u['uuid'].upper()}"
+            assert upper in index or upper.lower() in index
+
+
+def test_real_backup_domains_and_ports(real_data):
+    domains = extract_subscription_domains(real_data["domains"])
+    ports = extract_listen_ports(real_data["hconfigs"])
+    assert domains[0] == "sab.vodka-vip.com" or "sab.vodka-vip.com" in domains
+    assert "play.google.com" not in domains  # Reality decoy skipped
+    assert ports["https"][:2] == [443, 2083] or 443 in ports["https"]
+    assert 80 in ports["http"]
 
 
 def test_real_backup_redirect_e2e_sample(real_data):
@@ -279,6 +327,37 @@ def test_real_backup_redirect_e2e_sample(real_data):
         assert app.lookup(old + "/") == "/sub/e2e-token-demo"
         assert app.lookup(old + "/sub/") == "/sub/e2e-token-demo"
         assert app.lookup(old + "/all.txt") == "/sub/e2e-token-demo"
+        assert app.lookup(old + "/full-singbox.json") == "/sub/e2e-token-demo"
+        assert app.resolve_location(app.lookup(old)) == "https://example.com:8000/sub/e2e-token-demo"
+
+
+def test_find_hiddify_ssl_pair_prefers_domain(tmp_path):
+    from app.services.redirect_ops import find_hiddify_ssl_pair
+
+    ssl = tmp_path / "ssl"
+    ssl.mkdir()
+    (ssl / "sab.vodka-vip.com.crt").write_text(
+        "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+        encoding="utf-8",
+    )
+    (ssl / "sab.vodka-vip.com.crt.key").write_text(
+        "-----BEGIN PRIVATE KEY-----\nMIIB\n-----END PRIVATE KEY-----\n",
+        encoding="utf-8",
+    )
+    (ssl / "other.example.com.crt").write_text(
+        "-----BEGIN CERTIFICATE-----\nOTHER\n-----END CERTIFICATE-----\n",
+        encoding="utf-8",
+    )
+    (ssl / "other.example.com.crt.key").write_text(
+        "-----BEGIN PRIVATE KEY-----\nOTHER\n-----END PRIVATE KEY-----\n",
+        encoding="utf-8",
+    )
+    found = find_hiddify_ssl_pair(["sab.vodka-vip.com", "204.10.194.194"], hiddify_dir=tmp_path)
+    assert found is not None
+    cert, key, label = found
+    assert "sab.vodka-vip.com" in label
+    assert "BEGIN CERTIFICATE" in cert
+    assert "BEGIN PRIVATE KEY" in key
 
 
 def test_on_hold_when_no_start_date(fixture_data):
@@ -316,6 +395,8 @@ def test_import_script_is_valid_python_and_hardened():
         "traceback.format_exc()",
         "UserStatus.disabled",
         "datetime.fromtimestamp",
+        "find_user_by_uuid",
+        "build_uuid_index",
     ):
         assert needle in imp.IMPORT_SCRIPT, needle
 
