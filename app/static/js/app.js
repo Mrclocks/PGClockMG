@@ -1268,7 +1268,13 @@ function showSuccess(result) {
   document.getElementById('panelLink').href = panelUrl;
 
   const mode = result?.subscription_mode || state.selectedPanel?.subscription_mode;
-  const msgKey = mode === 'native' ? 'successLinks' : mode === 'redirect' ? 'successRedirect' : 'successChanged';
+  // Redirect mode only claims "old links work" when pg-redirect actually installed.
+  let msgKey = 'successChanged';
+  if (mode === 'native') {
+    msgKey = 'successLinks';
+  } else if (mode === 'redirect' && result?.redirect_installed !== false) {
+    msgKey = 'successRedirect';
+  }
   document.getElementById('resultMessage').textContent = t(`step6.${msgKey}`);
 
   let details = '';

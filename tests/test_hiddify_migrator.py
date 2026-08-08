@@ -419,3 +419,36 @@ def test_normalized_users_ready_for_pasarguard_create(real_data):
             assert int(u["on_hold_expire_duration"] or 0) > 0
         if u["expire"] is not None:
             assert int(u["expire"]) > 0
+
+
+def test_needs_privileged_bind_for_hiddify_ports():
+    from app.services.redirect_ops import needs_privileged_bind, _systemd_unit
+
+    assert needs_privileged_bind([443]) is True
+    assert needs_privileged_bind([443, 2083]) is True
+    assert needs_privileged_bind([80, 3443]) is True
+    # Typical 3x-ui subscription port — must NOT force root
+    assert needs_privileged_bind([2096]) is False
+    assert needs_privileged_bind([2096, 2083]) is False
+    assert needs_privileged_bind([]) is False
+
+    priv = _systemd_unit(need_privileged_bind=True)
+    assert "User=root" in priv
+    assert "Group=root" in priv
+    assert "AmbientCapabilities=CAP_NET_BIND_SERVICE" in priv
+    assert "CapabilityBoundingSet=CAP_NET_BIND_SERVICE" in priv
+
+    unpriv = _systemd_unit("__USER__", "__GROUP__", need_privileged_bind=False)
+    assert "User=__USER__" in unpriv
+    assert "AmbientCapabilities=" not in unpriv
+    assert "User=root" not in unpriv
+
+
+def test_install_script_forces_root_only_for_privileged_ports():
+    """Generate install path pieces: Hiddify :443 → root; XUI 2096 → pgredirect."""
+    src = Path("app/services/redirect_ops.py").read_text(encoding="utf-8")
+    assert "needs_privileged_bind" in src
+    assert "forcing runtime user=root for privileged listen port" in src
+    assert "masked Hiddify web units" in src
+    # Ensure we did not hardcode root for every install
+    assert 'SVC_USER="{SERVICE_USER}"' in src

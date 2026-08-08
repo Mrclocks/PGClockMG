@@ -365,8 +365,41 @@ def build_runtime_config(
         }
 
 
-def _systemd_unit(user: str = SERVICE_USER, group: str | None = None) -> str:
-    grp = group or user
+def needs_privileged_bind(ports: list[int] | tuple[int, ...] | None) -> bool:
+    """True when any listen port is in the privileged range (<1024), e.g. Hiddify :443."""
+    for raw in ports or []:
+        try:
+            port = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= port < 1024:
+            return True
+    return False
+
+
+def _systemd_unit(
+    user: str = SERVICE_USER,
+    group: str | None = None,
+    *,
+    need_privileged_bind: bool = False,
+) -> str:
+    """Build systemd unit text.
+
+    Hiddify listens on :443. An unprivileged ``User=pgredirect`` cannot bind
+    ports <1024 (EACCES), so privileged installs run as root and also declare
+    CAP_NET_BIND_SERVICE. Unprivileged ports (typical 3x-ui ~2096) keep the
+    dedicated ``pgredirect`` user unchanged.
+    """
+    if need_privileged_bind:
+        user = "root"
+        grp = "root"
+        caps = (
+            "AmbientCapabilities=CAP_NET_BIND_SERVICE\n"
+            "CapabilityBoundingSet=CAP_NET_BIND_SERVICE\n"
+        )
+    else:
+        grp = group or user
+        caps = ""
     return f"""[Unit]
 Description=PGClockMG subscription URL redirect (pg-redirect)
 After=network.target
@@ -375,7 +408,7 @@ After=network.target
 Type=simple
 User={user}
 Group={grp}
-WorkingDirectory={INSTALL_ROOT}
+{caps}WorkingDirectory={INSTALL_ROOT}
 Environment=PYTHONPATH={INSTALL_ROOT}
 ExecStart=/usr/bin/python3 -m pg_redirect --config {CONFIG_DIR}/config.json --map {CONFIG_DIR}/mapping.json
 Restart=on-failure
@@ -617,16 +650,34 @@ async def install_pg_redirect(
     for ep in extras:
         await free_listen_port(migrator, ep, panel=panel)
 
+    all_ports = [int(listen_port), *extras]
+    privileged = needs_privileged_bind(all_ports)
+    if privileged:
+        migrator.job.log(
+            "pg-redirect: privileged listen port detected "
+            f"({[p for p in all_ports if p < 1024]}) — service will run as root "
+            "so bind on :443 succeeds (3x-ui unprivileged ports unchanged)"
+        )
+
     unit_path = mapping.parent / "pg-redirect.service"
-    # Unit is finalized on the server after resolving the runtime user.
-    unit_path.write_text(_systemd_unit("__USER__", "__GROUP__"), encoding="utf-8")
+    # Placeholders replaced on the server after resolving the runtime user.
+    # For privileged ports the unit is already rooted; sed still no-ops harmlessly.
+    unit_path.write_text(
+        _systemd_unit(
+            "__USER__",
+            "__GROUP__",
+            need_privileged_bind=privileged,
+        ),
+        encoding="utf-8",
+    )
 
     ssl_py = "True" if ssl_on else "False"
     user_snippet = _install_user_snippet()
-    all_ports = [int(listen_port), *extras]
     ports_kill = " ".join(str(p) for p in all_ports)
+    is_hiddify = (panel or "").lower() == "hiddify" or int(listen_port) == 443
     hiddify_pre = ""
-    if (panel or "").lower() == "hiddify" or int(listen_port) == 443:
+    hiddify_post = ""
+    if is_hiddify:
         hiddify_pre = f'''
 # Hiddify keeps panel + client subs on :{int(listen_port)} — free it before bind.
 systemctl disable --now hiddify-panel hiddify-nginx hiddify-haproxy hiddify-gateway nginx haproxy apache2 caddy 2>/dev/null || true
@@ -646,6 +697,21 @@ for _p in {ports_kill}; do
   fi
 done
 '''
+        # Prevent Hiddify web stack from racing back onto :443 after install.
+        hiddify_post = '''
+systemctl mask hiddify-nginx hiddify-haproxy hiddify-gateway hiddify-panel 2>/dev/null || true
+systemctl disable --now nginx haproxy 2>/dev/null || true
+echo "pg-redirect: masked Hiddify web units so they cannot reclaim :443"
+'''
+
+    priv_override = ""
+    if privileged:
+        priv_override = '''
+# Ports <1024 cannot be bound by User=pgredirect (EACCES). Force root.
+SVC_USER=root
+SVC_GROUP=root
+echo "pg-redirect: forcing runtime user=root for privileged listen port"
+'''
 
     health_port = int(listen_port)
     script = f'''set -euo pipefail
@@ -663,6 +729,7 @@ cp -a "$SRC" "{INSTALL_ROOT}/pg_redirect"
 test -f "{INSTALL_ROOT}/pg_redirect/__main__.py"
 
 {user_snippet}
+{priv_override}
 
 install -d -m 0750 "{CONFIG_DIR}"
 cp -f "{mapping}" "{CONFIG_DIR}/mapping.json"
@@ -673,6 +740,8 @@ chmod 0640 "{CONFIG_DIR}/mapping.json" "{CONFIG_DIR}/config.json"
 sed -e "s/__USER__/${{SVC_USER}}/g" -e "s/__GROUP__/${{SVC_GROUP}}/g" \\
   "{unit_path}" > "{SERVICE_FILE}"
 chmod 0644 "{SERVICE_FILE}"
+echo "pg-redirect unit file identity:"
+grep -E '^(User|Group|AmbientCapabilities|CapabilityBoundingSet)=' "{SERVICE_FILE}" || true
 
 systemctl disable --now redirect-server 2>/dev/null || true
 {hiddify_pre}
@@ -687,11 +756,12 @@ sleep 1
 if ! systemctl is-active --quiet {SERVICE_NAME}; then
   echo "pg-redirect failed to start:" >&2
   systemctl status {SERVICE_NAME} --no-pager -l || true
-  journalctl -u {SERVICE_NAME} -n 80 --no-pager || true
+  journalctl -u {SERVICE_NAME} -n 100 --no-pager || true
   echo "Processes still listening on :{int(listen_port)}:" >&2
   ss -lntp "sport = :{int(listen_port)}" 2>/dev/null || ss -lntp | grep -E ":{int(listen_port)}\\b" || true
   exit 1
 fi
+echo "pg-redirect runtime User=$(systemctl show -p User --value {SERVICE_NAME} 2>/dev/null || true)"
 
 python3 - <<PY
 import socket, ssl, sys
@@ -699,7 +769,7 @@ port = {health_port}
 ssl_on = {ssl_py}
 req = b"GET /healthz HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n"
 try:
-    raw = socket.create_connection(("127.0.0.1", port), timeout=3)
+    raw = socket.create_connection(("127.0.0.1", port), timeout=5)
     sock = raw
     if ssl_on:
         ctx = ssl.create_default_context()
@@ -712,12 +782,13 @@ try:
     if "200" not in data.split("\\r\\n", 1)[0]:
         print("healthz bad response:", data[:120], file=sys.stderr)
         sys.exit(1)
-    print("pg-redirect healthz ok")
+    print("pg-redirect healthz ok on port", port, "ssl=", ssl_on)
 except Exception as e:
     print("healthz failed:", e, file=sys.stderr)
     sys.exit(1)
 PY
 
+{hiddify_post}
 echo "pg-redirect active on port {int(listen_port)} as $SVC_USER"
 '''
 
@@ -727,7 +798,14 @@ echo "pg-redirect active on port {int(listen_port)} as $SVC_USER"
             "pg-redirect installed — old subscription paths → PasarGuard /sub/{token}"
         )
         return True, ""
-    detail = (out or "")[-800:]
+    detail = (out or "")[-1200:]
+    # Surface the real bind failure clearly for Hiddify operators
+    low = detail.lower()
+    if "permission denied" in low or "errno 13" in low or "eacces" in low:
+        detail += (
+            " — cannot bind privileged port as unprivileged user; "
+            "pg-redirect must run as root (or with CAP_NET_BIND_SERVICE) on :443."
+        )
     migrator.job.log(f"pg-redirect install failed: {detail}")
     return False, detail
 
@@ -738,3 +816,41 @@ async def pg_redirect_is_active(migrator) -> bool:
         timeout=15,
     )
     return "active" in (out or "").split()
+
+
+async def pg_redirect_healthz_ok(
+    migrator,
+    *,
+    listen_port: int,
+    ssl: bool,
+) -> bool:
+    """Probe /healthz on the live redirect port (do not trust systemctl alone)."""
+    port = int(listen_port)
+    ssl_py = "True" if ssl else "False"
+    script = f'''
+python3 - <<'PY'
+import socket, ssl, sys
+port = {port}
+ssl_on = {ssl_py}
+req = b"GET /healthz HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n"
+try:
+    raw = socket.create_connection(("127.0.0.1", port), timeout=5)
+    sock = raw
+    if ssl_on:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        sock = ctx.wrap_socket(raw, server_hostname="127.0.0.1")
+    sock.sendall(req)
+    data = sock.recv(256).decode("iso-8859-1", "replace")
+    sock.close()
+    sys.exit(0 if "200" in data.split("\\r\\n", 1)[0] else 1)
+except Exception as e:
+    print(e, file=sys.stderr)
+    sys.exit(1)
+PY
+'''
+    ok, out = await migrator._run_cmd(["bash", "-c", script], timeout=20)
+    if not ok:
+        migrator.job.log(f"pg-redirect healthz probe failed: {(out or '')[-200:]}")
+    return ok
