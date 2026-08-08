@@ -141,9 +141,14 @@ class MarzbanMigrator(BaseMigrator):
         if extra_data_dir:
             await self._copy_marzban_assets(extra_data_dir)
 
-        self.job.set_progress(50, "Upgrading Marzban schema via PasarGuard panel boot...")
+        self.job.set_progress(48, "Healing duplicate node/template names before panel boot...")
+        from app.services.unique_name_heal import heal_duplicate_unique_names
+
+        # Marzban dumps may contain duplicate nodes.name; PasarGuard unique index rejects them.
         orig_target = self.params.get("target_db")
         self.params["target_db"] = "sqlite"
+        await heal_duplicate_unique_names(self)
+        self.job.set_progress(50, "Upgrading Marzban schema via PasarGuard panel boot...")
         await safe_start_pasarguard(self)
         self.params["target_db"] = orig_target or target_db
         await self._stop_panel()
@@ -185,6 +190,10 @@ class MarzbanMigrator(BaseMigrator):
             tconn = dict(get_target_connection(self.params))
             tconn["_allow_live_alembic_heal"] = True
             await _heal_staging_alembic_if_unknown(self, source_db, tconn)
+            self.job.set_progress(68, "Healing duplicate node/template names before panel boot...")
+            from app.services.unique_name_heal import heal_duplicate_unique_names
+
+            await heal_duplicate_unique_names(self)
             self.job.set_progress(70, "Upgrading Marzban MySQL schema via panel boot...")
             await safe_start_pasarguard(self)
             return

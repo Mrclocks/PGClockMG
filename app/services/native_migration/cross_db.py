@@ -350,6 +350,23 @@ async def _panel_boot_upgrade_intermediate(
         migrator.job.log(f"Panel-boot upgrade on intermediate {inter_db}...")
         orig = migrator.params.get("target_db")
         migrator.params["target_db"] = inter_db
+        # Marzban dumps can have duplicate nodes.name; PasarGuard unique index rejects them.
+        try:
+            from app.services.unique_name_heal import (
+                dedupe_unique_names_on_conn,
+                heal_duplicate_unique_names,
+            )
+
+            if staging_conn:
+                renamed = dedupe_unique_names_on_conn(inter_db, staging_conn)
+                if renamed:
+                    migrator.job.log(
+                        f"Renamed {renamed} duplicate unique-name row(s) on intermediate DB"
+                    )
+            else:
+                await heal_duplicate_unique_names(migrator)
+        except Exception as e:
+            migrator.job.log(f"Unique-name heal note (intermediate): {e}")
         # Custom/large Marzban schemas can take well over the default 180s.
         await safe_start_pasarguard(migrator, health_max_wait=900)
         migrator.params["target_db"] = orig
