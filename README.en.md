@@ -1,4 +1,4 @@
-> ⚠️ **`v2.2.10`** — Always take a full backup before restore or migration.
+> ⚠️ **`v2.2.11`** — Always take a full backup before restore or migration.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <b>English</b> · <a href="README.ru.md">Русский</a>

@@ -181,17 +181,17 @@ class HiddifyMigrator(BaseMigrator):
                 detail = "…" + detail[-280:]
             warn_en.append(
                 "pg-redirect did NOT install — old Hiddify links will not work until fixed. "
-                "Hiddify usually owns port 443; it must stay stopped so pg-redirect can bind it. "
+                "Needs free :443 and a service that can bind privileged ports (runs as root). "
                 + (f"Cause: {detail}" if detail else "")
             )
             warn_fa.append(
                 "pg-redirect نصب نشد — لینک‌های قدیمی کار نمی‌کنند. "
-                "هیدیفای معمولاً پورت ۴۴۳ را گرفته؛ باید خاموش بماند تا pg-redirect بالا بیاید. "
+                "پورت ۴۴۳ باید آزاد باشد و سرویس باید بتواند پورت privileged را bind کند (به‌صورت root). "
                 + (f"علت: {detail}" if detail else "")
             )
             warn_ru.append(
                 "pg-redirect не установился — старые ссылки не работают. "
-                "Hiddify обычно занимает порт 443; его веб нужно остановить. "
+                "Нужен свободный :443 и сервис с правом bind privileged ports (root). "
                 + (f"Причина: {detail}" if detail else "")
             )
         elif redirect_installed:
@@ -408,15 +408,22 @@ class HiddifyMigrator(BaseMigrator):
         from app.services.redirect_ops import (
             free_listen_port,
             install_pg_redirect,
-            pg_redirect_is_active,
+            needs_privileged_bind,
+            pg_redirect_healthz_ok,
             resolve_redirect_tls,
         )
 
+        ports = [int(listen_port), *[int(p) for p in extra_ports]]
         # Hiddify multiplexes panel + client subscription paths on :443 (+ tls_ports).
         self.job.log(
-            f"Freeing Hiddify HTTPS ports {[listen_port, *extra_ports]} for pg-redirect "
+            f"Freeing Hiddify HTTPS ports {ports} for pg-redirect "
             "(old client links hit these ports)…"
         )
+        if needs_privileged_bind(ports):
+            self.job.log(
+                "Hiddify redirect needs privileged bind (:443) — "
+                "pg-redirect will run as root (not pgredirect) so listen succeeds"
+            )
         await free_listen_port(self, listen_port, panel="hiddify")
         for ep in extra_ports:
             await free_listen_port(self, ep, panel="hiddify")
@@ -432,6 +439,15 @@ class HiddifyMigrator(BaseMigrator):
         )
         if tls_src:
             self.job.log(f"pg-redirect TLS: {tls_src}")
+        want_ssl = bool(cert_pem and key_pem)
+
+        async def _ok_after(install_ok: bool) -> bool:
+            if install_ok:
+                return True
+            # Never trust systemctl "active" alone — require a live /healthz.
+            return await pg_redirect_healthz_ok(
+                self, listen_port=listen_port, ssl=want_ssl,
+            )
 
         ok, err = await install_pg_redirect(
             self,
@@ -443,7 +459,7 @@ class HiddifyMigrator(BaseMigrator):
             ssl_key=key_pem,
             extra_ports=extra_ports,
         )
-        if ok or await pg_redirect_is_active(self):
+        if await _ok_after(ok):
             return True, ""
 
         # Retry once after another aggressive free (services may have raced back)
@@ -461,6 +477,7 @@ class HiddifyMigrator(BaseMigrator):
             )
             if tls_src:
                 self.job.log(f"pg-redirect retry TLS: {tls_src}")
+            want_ssl = bool(cert_pem and key_pem)
         ok2, err2 = await install_pg_redirect(
             self,
             mapping_file,
@@ -471,13 +488,18 @@ class HiddifyMigrator(BaseMigrator):
             ssl_key=key_pem,
             extra_ports=extra_ports,
         )
-        if ok2 or await pg_redirect_is_active(self):
+        if await _ok_after(ok2):
             return True, ""
         detail = err2 or err or "pg-redirect install failed"
-        if "address already in use" in detail.lower() or "errno 98" in detail.lower():
+        low = detail.lower()
+        if "address already in use" in low or "errno 98" in low:
             detail += (
                 f" — port {listen_port} still busy (Hiddify/nginx/haproxy/docker). "
                 f"Stop Hiddify web on that port, then retry."
+            )
+        if "permission denied" in low or "errno 13" in low or "eacces" in low:
+            detail += (
+                " — privileged port bind denied; pg-redirect must run as root on :443."
             )
         return False, detail
 
