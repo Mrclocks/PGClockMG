@@ -62,7 +62,9 @@ def test_migration_strategy_matrix():
         for tgt in engines:
             s = migration_strategy(src, tgt)
             if src == tgt:
-                assert s == "same_db"
+                assert s == "same_db", f"{src}→{tgt}"
+            elif tgt == "sqlite" and src != "sqlite":
+                assert s == "unsupported", f"{src}→{tgt}"
             else:
                 assert s == "two_phase", f"{src}→{tgt}"
     assert migration_strategy("sqlite", "sqlite") == "same_db"
