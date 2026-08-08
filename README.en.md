@@ -1,4 +1,4 @@
-> ⚠️ **`v2.2.6`** — Always take a full backup before restore or migration.
+> ⚠️ **`v2.2.7`** — Always take a full backup before restore or migration.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <b>English</b> · <a href="README.ru.md">Русский</a>
@@ -56,6 +56,7 @@ Requirements: Ubuntu/Debian · root · Docker
 
 | Version | Key changes |
 |---------|-------------|
+| v2.2.7 | Stable Hiddify migrate: durable old-link redirect (TLS/ports) + UUID import (other panels unchanged) |
 | v2.2.6 | Fix MySQL root@127.0.0.1 created without privileges (alembic 1044) + soft settings row-count verify |
 | v2.2.5 | Fix MySQL restore heal when root password in the volume no longer matches .env (try all candidates, then safe skip-grant recovery on the same volume) |
 | v2.2.4 | Fix Marzban cross-DB migrate NameError: missing PASARGUARD_ENV import in panel-boot |

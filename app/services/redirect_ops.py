@@ -268,8 +268,8 @@ def resolve_redirect_tls(
     if pair:
         return pair[0], pair[1], "x-ui-cert-files"
 
-    # Last chance: Hiddify certs even when not preferred (better than random CN)
-    if not prefer_hiddify_ssl:
+    # Hiddify SSL only when explicitly requested — never steal TLS for 3x-ui/other panels.
+    if prefer_hiddify_ssl:
         found = find_hiddify_ssl_pair(san_hosts)
         if found:
             return found
