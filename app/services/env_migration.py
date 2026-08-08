@@ -1099,11 +1099,54 @@ def transform_xray_config(text: str) -> str:
     return text.replace("/var/lib/marzban", "/var/lib/pasarguard").replace("/opt/marzban", "/opt/pasarguard")
 
 
+def fix_mysql_dump_line_for_pasarguard(line: str) -> str:
+    """Rewrite one dump line: CREATE/USE db name, then safe marzban→pasarguard."""
+    line = re.sub(r"(?i)^(CREATE DATABASE.*)\bmarzban\b", r"\1pasarguard", line)
+    line = re.sub(r"(?i)^(USE )\bmarzban\b", r"\1pasarguard", line)
+    return line.replace("marzban", "pasarguard")
+
+
 def fix_mysql_dump_for_pasarguard(sql_text: str) -> str:
-    """Official sed: CREATE DATABASE and USE lines only, then safe rename."""
-    sql_text = re.sub(r"(?m)^(CREATE DATABASE.*)\bmarzban\b", r"\1pasarguard", sql_text, flags=re.I)
-    sql_text = re.sub(r"(?m)^(USE )\bmarzban\b", r"\1pasarguard", sql_text, flags=re.I)
-    return sql_text.replace("marzban", "pasarguard")
+    """Rewrite Marzban MySQL dump text for PasarGuard (line-oriented)."""
+    if not sql_text:
+        return sql_text
+    return "".join(
+        fix_mysql_dump_line_for_pasarguard(line)
+        for line in sql_text.splitlines(keepends=True)
+    )
+
+
+def rewrite_mysql_dump_file_for_pasarguard(src: Path, dest: Path) -> int:
+    """Stream-rewrite a dump file without loading the whole SQL into memory.
+
+    Returns the number of lines that changed. Safe for multi-hundred-MB dumps.
+    """
+    src = Path(src)
+    dest = Path(dest)
+    if not src.exists():
+        raise RuntimeError(f"MySQL dump not found: {src}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    changed = 0
+    # Write via temp when dest == src so a crash cannot truncate the dump.
+    tmp = dest if dest.resolve() != src.resolve() else dest.with_suffix(dest.suffix + ".rewriting")
+    try:
+        with src.open("r", encoding="utf-8", errors="ignore") as fin, tmp.open(
+            "w", encoding="utf-8", newline=""
+        ) as fout:
+            for line in fin:
+                new_line = fix_mysql_dump_line_for_pasarguard(line)
+                if new_line != line:
+                    changed += 1
+                fout.write(new_line)
+        if tmp != dest:
+            tmp.replace(dest)
+    finally:
+        if tmp != dest and tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+    return changed
 
 
 MIGRATE_ENV_KEYS = {

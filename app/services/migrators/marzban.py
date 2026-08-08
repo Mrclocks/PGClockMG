@@ -4,6 +4,7 @@ import asyncio
 import re
 import shutil
 import sqlite3
+import time
 from pathlib import Path
 
 from app.config import (
@@ -16,7 +17,7 @@ from app.services.env_migration import (
     transform_marzban_env,
     transform_compose_marzban_to_pasarguard,
     transform_xray_config,
-    fix_mysql_dump_for_pasarguard,
+    rewrite_mysql_dump_file_for_pasarguard,
     read_env_var,
     merge_marzban_env_into_pasarguard,
     get_panel_url_from_env,
@@ -617,9 +618,62 @@ class MarzbanMigrator(BaseMigrator):
             await proc.wait()
         if not dump_path.exists():
             raise RuntimeError("Failed to dump Marzban MySQL — check password and docker")
-        text = fix_mysql_dump_for_pasarguard(dump_path.read_text(encoding="utf-8", errors="ignore"))
-        dump_path.write_text(text, encoding="utf-8")
+        changed = rewrite_mysql_dump_file_for_pasarguard(dump_path, dump_path)
+        size_mb = dump_path.stat().st_size / (1024 * 1024)
+        self.job.log(
+            f"Prepared Marzban MySQL dump ({size_mb:.1f} MB, {changed} lines rewritten)"
+        )
         return dump_path
+
+    async def _wait_compose_mysql_ready(
+        self,
+        svc: str,
+        user: str,
+        pwd: str,
+        host: str,
+        *,
+        attempts: int = 90,
+    ) -> None:
+        """Wait until compose MySQL/MariaDB accepts queries (not just container start)."""
+        self.job.log(f"Waiting for {svc} to accept connections...")
+        last = ""
+        clients = ("mysql", "mariadb")
+        admins = ("mysqladmin", "mariadb-admin")
+        for attempt in range(max(1, attempts)):
+            ping_ok = False
+            for admin in admins:
+                proc = await asyncio.create_subprocess_exec(
+                    "docker", "compose", "exec", "-T", svc,
+                    admin, "ping", "-h", host, f"-u{user}", f"-p{pwd}", "--silent",
+                    cwd=str(PASARGUARD_DIR),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                out_b, _ = await proc.communicate()
+                last = (out_b or b"").decode("utf-8", errors="replace")
+                if proc.returncode == 0:
+                    ping_ok = True
+                    break
+            if ping_ok:
+                for client in clients:
+                    proc = await asyncio.create_subprocess_exec(
+                        "docker", "compose", "exec", "-T", svc,
+                        client, "-u", user, f"-p{pwd}", "-h", host, "-e", "SELECT 1;",
+                        cwd=str(PASARGUARD_DIR),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT,
+                    )
+                    out_b, _ = await proc.communicate()
+                    last = (out_b or b"").decode("utf-8", errors="replace")
+                    if proc.returncode == 0:
+                        self.job.log(f"{svc} is ready")
+                        return
+            if attempt == 0 or (attempt + 1) % 5 == 0:
+                self.job.log(f"Still waiting for {svc}... ({attempt + 1}/{attempts})")
+            await asyncio.sleep(2)
+        raise RuntimeError(
+            f"{svc} did not become ready in time. Last output:\n{(last or '')[-400:]}"
+        )
 
     async def _import_mysql_dump(self, dump_file: Path):
         conn = get_target_connection(self.params)
@@ -627,12 +681,20 @@ class MarzbanMigrator(BaseMigrator):
         pwd = conn.get("password") or ""
         db = conn.get("database") or "pasarguard"
         host = conn.get("host") or "127.0.0.1"
+        dump_file = Path(dump_file)
+        if not dump_file.exists():
+            raise RuntimeError(f"Marzban MySQL dump not found: {dump_file}")
+
+        size_mb = dump_file.stat().st_size / (1024 * 1024)
         fixed = dump_file.parent / "fixed_import.sql"
-        text = fix_mysql_dump_for_pasarguard(dump_file.read_text(encoding="utf-8", errors="ignore"))
-        fixed.write_text(text, encoding="utf-8")
+        self.job.log(f"Rewriting MySQL dump for PasarGuard ({size_mb:.1f} MB, streaming)...")
+        changed = rewrite_mysql_dump_file_for_pasarguard(dump_file, fixed)
+        self.job.log(f"Dump rewrite complete ({changed} lines changed)")
+
         svc = resolve_db_service("mysql") or resolve_db_service("mariadb") or "mysql"
         await self._run_cmd(["docker", "compose", "up", "-d", svc], cwd=str(PASARGUARD_DIR))
-        await asyncio.sleep(6)
+        await self._wait_compose_mysql_ready(svc, user, pwd, host)
+
         from app.services.native_migration.sql_staging import (
             mysql_create_db_sql,
             mysql_shell_e_arg,
@@ -640,21 +702,89 @@ class MarzbanMigrator(BaseMigrator):
 
         # Single-quote -e SQL: double quotes expand backticks via command substitution
         e_sql = mysql_shell_e_arg(mysql_create_db_sql(db, drop_first=True))
+        self.job.log(f"Recreating target database `{db}`...")
         wipe = await asyncio.create_subprocess_shell(
             f'cd "{PASARGUARD_DIR}" && docker compose exec -T {svc} '
-            f'mysql -u {user} -p"{pwd}" -h {host} -e {e_sql}'
+            f'mysql -u {user} -p"{pwd}" -h {host} -e {e_sql}',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
         )
-        await wipe.wait()
-        proc = await asyncio.create_subprocess_shell(
-            f'cd "{PASARGUARD_DIR}" && docker compose exec -T {svc} '
-            f'mysql -u {user} -p"{pwd}" -h {host} {db} < "{fixed}"',
+        wipe_out_b, _ = await wipe.communicate()
+        if wipe.returncode != 0:
+            wipe_out = (wipe_out_b or b"").decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"Failed to recreate target database `{db}` "
+                f"(exit {wipe.returncode}): {wipe_out[-400:]}"
+            )
+
+        self.job.set_progress(
+            45,
+            f"Importing Marzban dump into PasarGuard mysql ({size_mb:.0f} MB)...",
         )
-        await proc.wait()
+        self.job.log(
+            f"Importing MySQL dump into `{db}` via docker compose exec stdin "
+            f"({size_mb:.1f} MB — large dumps can take a long time)..."
+        )
+
+        # Prefer exec+stdin over shell redirect so host paths outside mounts work
+        # and passwords/special chars are not re-parsed by a shell.
+        with fixed.open("rb") as fh:
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "compose", "exec", "-T", svc,
+                "mysql", "-u", user, f"-p{pwd}", "-h", host, db,
+                cwd=str(PASARGUARD_DIR),
+                stdin=fh,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+
+            output_lines: list[str] = []
+
+            async def _drain_stdout() -> None:
+                assert proc.stdout is not None
+                while True:
+                    line = await proc.stdout.readline()
+                    if not line:
+                        break
+                    text = line.decode("utf-8", errors="replace").rstrip()
+                    if text:
+                        output_lines.append(text)
+
+            drain_task = asyncio.create_task(_drain_stdout())
+            started = time.monotonic()
+            # No short timeout: 400MB+ imports are legitimate and must finish.
+            while True:
+                try:
+                    await asyncio.wait_for(asyncio.shield(drain_task), timeout=20)
+                    break
+                except (TimeoutError, asyncio.TimeoutError):
+                    elapsed = int(time.monotonic() - started)
+                    # Keep UI moving between 45% and 65% while import runs.
+                    pct = min(65, 45 + (elapsed // 30))
+                    self.job.set_progress(
+                        pct,
+                        f"Importing Marzban dump into PasarGuard mysql "
+                        f"({size_mb:.0f} MB, {elapsed}s)...",
+                    )
+                    self.job.log(f"Still importing MySQL dump... ({elapsed}s elapsed)")
+            await proc.wait()
+            if not drain_task.done():
+                await drain_task
+            elapsed = int(time.monotonic() - started)
+
         if proc.returncode != 0:
+            tail = "\n".join(output_lines[-40:])
             raise RuntimeError(
                 f"Failed to import Marzban MySQL dump into PasarGuard "
                 f"(exit {proc.returncode}). Check DB credentials and container logs."
+                + (f"\n{tail}" if tail else "")
             )
+        self.job.log(f"MySQL dump import finished ({elapsed}s)")
+        try:
+            if fixed.exists() and fixed.resolve() != dump_file.resolve():
+                fixed.unlink()
+        except OSError:
+            pass
 
     async def _update_env_paths(self, source_db: str, target_db: str):
         env_path = PASARGUARD_DIR / ".env"

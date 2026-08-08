@@ -10,6 +10,7 @@ from app.services.env_migration import (
     transform_marzban_env,
     transform_compose_marzban_to_pasarguard,
     fix_mysql_dump_for_pasarguard,
+    rewrite_mysql_dump_file_for_pasarguard,
     read_env_var,
     extract_env_password_candidates,
     pick_primary_env_password,
@@ -55,8 +56,36 @@ def test_compose_transform():
 def test_mysql_dump_fix():
     sql = "CREATE DATABASE marzban;\nUSE marzban;\nINSERT INTO users VALUES (1);"
     out = fix_mysql_dump_for_pasarguard(sql)
-    assert "CREATE DATABASE pasarguard" in out or "pasarguard" in out
+    assert "CREATE DATABASE pasarguard" in out
+    assert "USE pasarguard" in out
+    assert "marzban" not in out.lower()
     print("OK: mysql dump fix")
+
+
+def test_mysql_dump_file_rewrite_streams(tmp_path=None):
+    """File rewrite must match in-memory fix and support in-place rewrite."""
+    import tempfile
+
+    sql = (
+        "CREATE DATABASE /*!32312 IF NOT EXISTS*/ `marzban`;\n"
+        "USE `marzban`;\n"
+        "INSERT INTO users VALUES (1, 'hello');\n"
+    )
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "marzban.sql"
+        dest = Path(td) / "fixed_import.sql"
+        src.write_text(sql, encoding="utf-8")
+        changed = rewrite_mysql_dump_file_for_pasarguard(src, dest)
+        assert changed >= 2
+        out = dest.read_text(encoding="utf-8")
+        assert out == fix_mysql_dump_for_pasarguard(sql)
+        assert "pasarguard" in out
+        assert "marzban" not in out.lower()
+        # in-place
+        changed_inplace = rewrite_mysql_dump_file_for_pasarguard(dest, dest)
+        assert changed_inplace == 0
+        assert dest.read_text(encoding="utf-8") == out
+    print("OK: mysql dump file rewrite streams")
 
 
 def test_read_env_var():
@@ -115,6 +144,7 @@ if __name__ == "__main__":
     test_mysql_env_uses_root_password()
     test_compose_transform()
     test_mysql_dump_fix()
+    test_mysql_dump_file_rewrite_streams()
     test_read_env_var()
     test_extract_env_password_candidates()
     test_url_replacement_survives_backslashes()
