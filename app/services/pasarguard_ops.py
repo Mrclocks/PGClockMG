@@ -259,19 +259,23 @@ async def _ensure_pasarguard_up(migrator) -> None:
 
 
 async def _try_heal_duplicate_unique_names(migrator, logs: str) -> bool:
-    """If alembic failed on duplicate nodes.name / templates.name, rename extras."""
-    from app.services.unique_name_heal import (
-        heal_duplicate_unique_names,
-        logs_indicate_duplicate_unique_name,
+    """If alembic failed on duplicate names or orphan FKs, run Marzban pre-boot heal."""
+    from app.services.marzban_preboot_heal import (
+        heal_marzban_preboot,
+        logs_indicate_marzban_preboot_issue,
     )
 
-    if not logs_indicate_duplicate_unique_name(logs or ""):
+    if not logs_indicate_marzban_preboot_issue(logs or ""):
         return False
     try:
-        renamed = await heal_duplicate_unique_names(migrator)
-        return renamed > 0
+        stats = await heal_marzban_preboot(migrator)
+        return bool(
+            (stats.get("renamed") or 0)
+            or (stats.get("orphans_deleted") or 0)
+            or (stats.get("orphans_nulled") or 0)
+        )
     except Exception as e:
-        migrator.job.log(f"Unique-name heal note: {e}")
+        migrator.job.log(f"Marzban pre-boot heal note: {e}")
         return False
 
 
@@ -537,11 +541,11 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                     migrator.job.log(
                         f"Panel error detected ({hit}) — DB auth healed, recreating panel…"
                     )
-                # Marzban dumps may violate PasarGuard unique nodes.name / templates.name
+                # Marzban dumps: unique names / orphan FKs that block alembic
                 if await _try_heal_duplicate_unique_names(migrator, out):
                     healed = True
                     migrator.job.log(
-                        f"Panel error detected ({hit}) — duplicate unique names healed, "
+                        f"Panel error detected ({hit}) — Marzban pre-boot heal applied, "
                         "recreating panel…"
                     )
                 if not healed:

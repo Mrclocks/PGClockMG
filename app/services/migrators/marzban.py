@@ -141,13 +141,13 @@ class MarzbanMigrator(BaseMigrator):
         if extra_data_dir:
             await self._copy_marzban_assets(extra_data_dir)
 
-        self.job.set_progress(48, "Healing duplicate node/template names before panel boot...")
-        from app.services.unique_name_heal import heal_duplicate_unique_names
+        self.job.set_progress(48, "Healing Marzban dump for PasarGuard constraints...")
+        from app.services.marzban_preboot_heal import heal_marzban_preboot
 
-        # Marzban dumps may contain duplicate nodes.name; PasarGuard unique index rejects them.
+        # Safe no-op on clean dumps; fixes case-dup names + orphan FKs on dirty/large ones.
         orig_target = self.params.get("target_db")
         self.params["target_db"] = "sqlite"
-        await heal_duplicate_unique_names(self)
+        await heal_marzban_preboot(self)
         self.job.set_progress(50, "Upgrading Marzban schema via PasarGuard panel boot...")
         # Long Marzban→PG alembic chains (bigint id, etc.) need a large health budget.
         await safe_start_pasarguard(self, health_max_wait=1800)
@@ -191,10 +191,10 @@ class MarzbanMigrator(BaseMigrator):
             tconn = dict(get_target_connection(self.params))
             tconn["_allow_live_alembic_heal"] = True
             await _heal_staging_alembic_if_unknown(self, source_db, tconn)
-            self.job.set_progress(68, "Healing duplicate node/template names before panel boot...")
-            from app.services.unique_name_heal import heal_duplicate_unique_names
+            self.job.set_progress(68, "Healing Marzban dump for PasarGuard constraints...")
+            from app.services.marzban_preboot_heal import heal_marzban_preboot
 
-            await heal_duplicate_unique_names(self)
+            await heal_marzban_preboot(self)
             self.job.set_progress(70, "Upgrading Marzban MySQL schema via panel boot...")
             # Large dumps: alembic may spend a long time on "use bigint for id column".
             await safe_start_pasarguard(self, health_max_wait=1800)
