@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> ⚠️ **`v2.2.6`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
+> ⚠️ **`v2.2.7`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
   <b>فارسی</b> · <a href="README.en.md">English</a> · <a href="README.ru.md">Русский</a>
@@ -58,6 +58,7 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 | نسخه | تغییرات اصلی |
 |------|--------------|
+| v2.2.7 | فیکس هنگ مهاجرت Marzban روی دامپ بزرگ MySQL (استریم ری‌رایت + انتظار آماده بودن + heartbeat پیشرفت) |
 | v2.2.6 | فیکس ساخت root@127.0.0.1 بدون privilege (alembic 1044) + soft کردن verify تعداد settings |
 | v2.2.5 | فیکس heal ریستور MySQL وقتی رمز root داخل volume با .env یکی نیست (امتحان همهٔ کاندیداها، بعد recovery امن skip-grant روی همان volume) |
 | v2.2.4 | فیکس NameError مهاجرت Marzban cross-DB: import جاافتاده PASARGUARD_ENV در panel-boot |
