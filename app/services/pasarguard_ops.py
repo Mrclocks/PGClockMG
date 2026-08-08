@@ -258,6 +258,23 @@ async def _ensure_pasarguard_up(migrator) -> None:
     )
 
 
+async def _try_heal_duplicate_unique_names(migrator, logs: str) -> bool:
+    """If alembic failed on duplicate nodes.name / templates.name, rename extras."""
+    from app.services.unique_name_heal import (
+        heal_duplicate_unique_names,
+        logs_indicate_duplicate_unique_name,
+    )
+
+    if not logs_indicate_duplicate_unique_name(logs or ""):
+        return False
+    try:
+        renamed = await heal_duplicate_unique_names(migrator)
+        return renamed > 0
+    except Exception as e:
+        migrator.job.log(f"Unique-name heal note: {e}")
+        return False
+
+
 async def _try_heal_db_auth_mismatch(migrator, logs: str) -> bool:
     """If panel logs show Access denied / SASL fail, re-sync DB users to .env password."""
     low = (logs or "").lower()
@@ -462,12 +479,21 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
             # Give crash-loop a moment and one recreate before hard-fail
             if not healed_once:
                 healed_once = True
+                healed = False
                 # Auto-heal MySQL/PG password drift after cross-DB (Access denied / SASL)
                 if await _try_heal_db_auth_mismatch(migrator, out):
+                    healed = True
                     migrator.job.log(
                         f"Panel error detected ({hit}) — DB auth healed, recreating panel…"
                     )
-                else:
+                # Marzban dumps may violate PasarGuard unique nodes.name / templates.name
+                if await _try_heal_duplicate_unique_names(migrator, out):
+                    healed = True
+                    migrator.job.log(
+                        f"Panel error detected ({hit}) — duplicate unique names healed, "
+                        "recreating panel…"
+                    )
+                if not healed:
                     migrator.job.log(
                         f"Panel error detected ({hit}) — recreating pasarguard once…"
                     )
