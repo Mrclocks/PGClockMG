@@ -54,54 +54,6 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 
 ---
 
-## تاریخچه نسخه‌ها
-
-| نسخه | تغییرات اصلی |
-|------|--------------|
-| v2.2.7 | فیکس هنگ مهاجرت Marzban روی دامپ بزرگ MySQL (استریم ری‌رایت + انتظار آماده بودن + heartbeat پیشرفت) |
-| v2.2.6 | فیکس ساخت root@127.0.0.1 بدون privilege (alembic 1044) + soft کردن verify تعداد settings |
-| v2.2.5 | فیکس heal ریستور MySQL وقتی رمز root داخل volume با .env یکی نیست (امتحان همهٔ کاندیداها، بعد recovery امن skip-grant روی همان volume) |
-| v2.2.4 | فیکس NameError مهاجرت Marzban cross-DB: import جاافتاده PASARGUARD_ENV در panel-boot |
-| v2.2.3 | فیکس کرش مهاجرت 3x-ui مدرن: uuid خالی + clients.id عددی |
-| v2.2.2 | آزادسازی پورت ۴۴۳ هیدیفای برای pg-redirect |
-| v2.2.1 | راهنمای ساخت Owner + توضیح پیام مهاجرت ناقص هیدیفای |
-| v2.2.0 | بازنویسی مهاجرت هیدیفای: گروه hiddify-test + PYTHONPATH=/code + ریدایرکت مثل 3x-ui |
-| v2.1.2 | فیکس کرش import کاربران هیدیفای (گروه خودکار + خطای کامل) |
-| v2.1.1 | فیکس آپلود JSON هیدیفای + حذف انتخاب DB/رمز؛ مهاجرت تمام‌اتوماتیک |
-| v2.1 | مهاجرت ناقص Hiddify: کاربران با همان UUID، ریدایرکت لینک‌های قدیمی، آپلود فقط JSON |
-| v2.0.6 | افزایش انتظار panel-boot وقتی Alembic هنوز در حال اجراست (جلوگیری از حذف زودهنگام MySQL موقت) |
-| v2.0.5 | فیکس خطای JSON خالی هنگام شروع مهاجرت + جلوگیری از اجرای هم‌زمان (پورت staging) |
-| v2.0.4 | فیکس مهاجرت Marzban MySQL→Timescale وقتی alembic_version مرزبان در PasarGuard نیست (heal فقط روی staging) |
-| v2.0.3 | فیکس ریستور Timescale: تشخیص کاتالوگ قدیمی chunk.schema_name و پین ایمیج به 2.28.3 روی سرورهای 2.29+ |
-| v2.0.2 | فیکس مهاجرت MariaDB→Timescale (ساخت DB موقت + staging با mariadb:11) |
-| v2.0.1 | ریدایرکت/لینک پنل: اولویت دامنه پاسارگارد، در غیر این‌صورت IP؛ دنبال‌کردن تغییر دامنه/.env |
-| v2.0 | مهاجرت کامل 3X-UI قدیم/جدید (تشخیص خودکار، Host/Admin/Group، ریدایرکت path/port) |
-| v1.16.3 | فیکس Internal Server Error روی /sub (پسورد shadowsocks کوتاه از 3x-ui) |
-| v1.16.2 | تشخیص خودکار اسکیما 3x-ui + ساخت Host/Admin و فیکس /sub برای نسخه جدید |
-| v1.16.1 | مهاجرت کامل 3x-ui مدرن (multi-inbound) + ریدایرکت با path/port واقعی |
-| v1.16 | UI مهاجرت 3X-UI: آپلود فقط DB، تگ کامل، دستورات چک ریدایرکت |
-| v1.15.5 | فیکس Errno 36 وقتی PEM پاسارگارد به‌اشتباه به‌عنوان مسیر فایل خوانده می‌شد |
-| v1.15.4 | سرت ریدایرکت از پاسارگارد؛ HTTP اگر ساب قدیمی TLS نداشت |
-| v1.15.3 | ریدایرکت HTTPS برای لینک‌های قدیمی 3x-ui (سرت PG / self-signed) |
-| v1.15.2 | نصب pg-redirect بدون useradd (fallback به nobody) |
-| v1.15 | ریدایرکت بومی pg-redirect (بدون دانلود GitHub) |
-| v1.14 | ریدایرکت: آینه دانلود GitHub + نمایش علت واقعی در هشدار |
-| v1.13 | حذف گزینه تغییر DB PasarGuard از بخش مهاجرت پنل |
-| v1.12 | هشدار سرتیفیکیت 3x-ui + غیرفعال‌سازی موقت Hiddify/Remnawave |
-| v1.11 | نصب مستقیم redirect-server (بدون اسکریپت شکنندهٔ رسمی) |
-| v1.10 | لینک‌های قدیمی 3x-ui: نرمال‌سازی mapping + پورت/دامنه redirect واقعی |
-| v1.9 | رفع Access denied بعد مهاجرت 3x-ui→MySQL + نصب صحیح redirect سابسکریپشن |
-| v1.8 | رفع مهاجرت 3x-ui به MySQL (پروب DB + core_configs) |
-| v1.7 | رفع خطای مهاجرت 3x-ui هنگام آپلود bundle (IsADirectoryError) |
-| v1.6beta | بهبود UI کارت DB، سوییچ iOS برای نودها، لوگو جدید |
-| v1.5beta | گزینه غیرفعال‌سازی نودها، نمایش مشخصات DB بعد آپلود |
-| v1.4beta | رفع restart loop ساکت پنل بعد ریستور TimescaleDB |
-| v1.3beta | pull تصویر Docker، readiness probe، auth fallback بعد wipe |
-| v1.2beta | رفع خطای «role already exists» هنگام ریستور globals.sql |
-| v1.1beta | انتشار اولیه |
-
----
-
 ## دستورات
 
 ```bash

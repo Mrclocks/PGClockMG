@@ -52,54 +52,6 @@ Requirements: Ubuntu/Debian · root · Docker
 
 ---
 
-## Changelog
-
-| Version | Key changes |
-|---------|-------------|
-| v2.2.7 | Fix Marzban migrate hang on large MySQL dumps (stream rewrite + ready wait + progress heartbeats) |
-| v2.2.6 | Fix MySQL root@127.0.0.1 created without privileges (alembic 1044) + soft settings row-count verify |
-| v2.2.5 | Fix MySQL restore heal when root password in the volume no longer matches .env (try all candidates, then safe skip-grant recovery on the same volume) |
-| v2.2.4 | Fix Marzban cross-DB migrate NameError: missing PASARGUARD_ENV import in panel-boot |
-| v2.2.3 | Fix modern 3x-ui migrate crash on empty uuid + integer clients.id |
-| v2.2.2 | Free Hiddify port 443 so pg-redirect can bind |
-| v2.2.1 | Post-migrate owner guide + clearer Hiddify partial warning |
-| v2.2.0 | Rewrite Hiddify migrate: hiddify-test group + PYTHONPATH=/code + redirect like 3x-ui |
-| v2.1.2 | Fix Hiddify user-import crash (auto group + full error capture) |
-| v2.1.1 | Fix Hiddify JSON upload + skip DB/password UI; fully automatic migrate |
-| v2.1 | Partial Hiddify migrate: same UUID users, old link redirect, JSON-only upload |
-| v2.0.6 | Extend panel-boot health wait while Alembic is still running (avoid early ephemeral MySQL deletion) |
-| v2.0.5 | Fix empty-JSON error on migrate start + block concurrent migrations (staging port races) |
-| v2.0.4 | Fix Marzban MySQL→Timescale when source alembic_version is missing from PasarGuard (staging-only heal) |
-| v2.0.3 | Fix Timescale restore: detect old chunk.schema_name catalog and pin image to 2.28.3 on 2.29+ hosts |
-| v2.0.2 | Fix MariaDB→Timescale migrate (ephemeral CREATE DATABASE + stage on mariadb:11) |
-| v2.0.1 | Panel/sub redirect prefers PasarGuard domain, else IP; tracks later .env/domain changes |
-| v2.0 | Full 3X-UI migrate (auto old/new schema, Host/Admin/Group, redirect path/port) |
-| v1.16.3 | Fix /sub Internal Server Error (short 3x-ui shadowsocks passwords) |
-| v1.16.2 | Auto-detect 3x-ui schema + seed Hosts/Admin so /sub works for modern panels |
-| v1.16.1 | Full modern 3x-ui (multi-inbound) migrate + redirect with real path/port |
-| v1.16 | 3X-UI migrate UI: DB-only upload, Full badge, redirect verify commands |
-| v1.15.5 | Fix Errno 36 when PasarGuard PEM in .env was treated as a file path |
-| v1.15.4 | Redirect TLS from PasarGuard certs; HTTP when old sub had no TLS |
-| v1.15.3 | HTTPS pg-redirect for old 3x-ui links (PG certs / self-signed) |
-| v1.15.2 | pg-redirect install without useradd (fallback to nobody) |
-| v1.15 | Native pg-redirect service (no GitHub binary download) |
-| v1.14 | Redirect: GitHub download mirrors + show real failure cause |
-| v1.13 | Remove PasarGuard DB-change option from panel migrate |
-| v1.12 | 3x-ui cert upload warning + disable Hiddify/Remnawave (coming soon) |
-| v1.11 | Direct redirect-server install (skip fragile upstream installer) |
-| v1.10 | Old 3x-ui links: normalize mapping paths + real redirect port/domain |
-| v1.9 | Fix Access denied after 3x-ui→MySQL + correct subscription redirect install |
-| v1.8 | Fix 3x-ui → MySQL migration (DB credential probe + core_configs) |
-| v1.7 | Fix 3x-ui migration crash on bundle workspace uploads (IsADirectoryError) |
-| v1.6beta | Redesigned DB info card, iOS toggle for nodes, new logo |
-| v1.5beta | Disable nodes after restore option, DB info card on upload |
-| v1.4beta | Fix silent panel restart loop after TimescaleDB restore |
-| v1.3beta | Docker image pull, readiness probe, auth fallback after wipe |
-| v1.2beta | Fix "role already exists" error during globals.sql restore |
-| v1.1beta | Initial public release |
-
----
-
 ## Commands
 
 ```bash
