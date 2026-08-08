@@ -1,4 +1,4 @@
-> ⚠️ **`v2.2.13`** — Always take a full backup before restore or migration.
+> ⚠️ **`v3.0.0`** — Always take a full backup before restore or migration.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <b>English</b> · <a href="README.ru.md">Русский</a>
@@ -22,7 +22,7 @@ Web wizard for restore and migration to PasarGuard
 - Automatic TimescaleDB version mismatch resolution (image pull, readiness probe, auth fallback)
 - DB info card after backup upload — compares backup DB vs installed DB, shows compatibility
 - Option to keep nodes disabled after restore (avoids conflicts with a still-active previous panel)
-- Migrate from Marzban, 3x-ui, Remnawave, and Hiddify
+- Migrate from Marzban, 3x-ui, Hiddify, and Remnawave
 - Panel status guide and official install command
 
 > This wizard does not install PasarGuard. Install the panel yourself first.
@@ -47,8 +47,8 @@ Requirements: Ubuntu/Debian · root · Docker
 | Marzban | Full |
 | PasarGuard | Restore / Change DB (not in panel migrate) |
 | 3X-UI | Full |
-| Remnawave | Coming soon |
 | Hiddify | Incomplete (users + link redirect) |
+| Remnawave | Coming soon |
 
 ---
 

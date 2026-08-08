@@ -140,6 +140,7 @@ PANELS: dict[str, PanelInfo] = {
         ),
         supported_source_dbs=["sqlite", "mysql", "mariadb"],
     ),
+
     "3x-ui": PanelInfo(
         id="3x-ui",
         name={"en": "3X-UI", "fa": "3X-UI", "ru": "3X-UI"},
@@ -181,52 +182,7 @@ PANELS: dict[str, PanelInfo] = {
         ),
         supported_source_dbs=["sqlite"],
     ),
-    "remnawave": PanelInfo(
-        id="remnawave",
-        name={"en": "Remnawave", "fa": "Remnawave", "ru": "Remnawave"},
-        icon="🌊",
-        support_level="experimental",
-        subscription_mode="changed",
-        enabled=False,
-        coming_soon=True,
-        description={
-            "en": "Experimental API-based user migration. Nodes, squads and inbounds must be reconfigured manually.",
-            "fa": "مهاجرت آزمایشی از طریق API. نودها و inbound باید دستی تنظیم شوند.",
-            "ru": "Экспериментальная миграция через API. Ноды и inbound настраиваются вручную.",
-        },
-        warnings={
-            "en": [
-                "No official PasarGuard migration tool for Remnawave.",
-                "PasarGuard MUST be installed before migration.",
-                "Requires Remnawave API URL and token.",
-                "Subscription links will change.",
-            ],
-            "fa": [
-                "ابزار رسمی مهاجرت Remnawave وجود ندارد.",
-                "PasarGuard باید قبل از مهاجرت نصب باشد.",
-                "نیاز به URL و API Token رمناوی.",
-                "لینک اشتراک تغییر می‌کند.",
-            ],
-            "ru": [
-                "Официального инструмента миграции Remnawave нет.",
-                "PasarGuard должен быть установлен заранее.",
-                "Нужны URL и API Token Remnawave.",
-                "Ссылки подписки изменятся.",
-            ],
-        },
-        prerequisites=PanelPrerequisites(
-            pasarguard_required=True,
-            pasarguard_required_before=True,
-            source_panel_required=False,
-            source_panel_required_before=False,
-            install_notes={
-                "en": "Install PasarGuard first. Remnawave can run on same or remote server — provide API URL + token in wizard.",
-                "fa": "ابتدا PasarGuard را نصب کنید. Remnawave می‌تواند روی همین یا سرور دیگر باشد.",
-                "ru": "Сначала установите PasarGuard. Remnawave может быть на этом или другом сервере.",
-            },
-        ),
-        supported_source_dbs=["postgresql"],
-    ),
+
     "hiddify": PanelInfo(
         id="hiddify",
         name={"en": "Hiddify Manager", "fa": "Hiddify Manager", "ru": "Hiddify Manager"},
@@ -279,6 +235,54 @@ PANELS: dict[str, PanelInfo] = {
         ),
         supported_source_dbs=["mysql", "mariadb"],
     ),
+
+    "remnawave": PanelInfo(
+        id="remnawave",
+        name={"en": "Remnawave", "fa": "Remnawave", "ru": "Remnawave"},
+        icon="🌊",
+        support_level="experimental",
+        subscription_mode="changed",
+        enabled=False,
+        coming_soon=True,
+        description={
+            "en": "Experimental API-based user migration. Nodes, squads and inbounds must be reconfigured manually.",
+            "fa": "مهاجرت آزمایشی از طریق API. نودها و inbound باید دستی تنظیم شوند.",
+            "ru": "Экспериментальная миграция через API. Ноды и inbound настраиваются вручную.",
+        },
+        warnings={
+            "en": [
+                "No official PasarGuard migration tool for Remnawave.",
+                "PasarGuard MUST be installed before migration.",
+                "Requires Remnawave API URL and token.",
+                "Subscription links will change.",
+            ],
+            "fa": [
+                "ابزار رسمی مهاجرت Remnawave وجود ندارد.",
+                "PasarGuard باید قبل از مهاجرت نصب باشد.",
+                "نیاز به URL و API Token رمناوی.",
+                "لینک اشتراک تغییر می‌کند.",
+            ],
+            "ru": [
+                "Официального инструмента миграции Remnawave нет.",
+                "PasarGuard должен быть установлен заранее.",
+                "Нужны URL и API Token Remnawave.",
+                "Ссылки подписки изменятся.",
+            ],
+        },
+        prerequisites=PanelPrerequisites(
+            pasarguard_required=True,
+            pasarguard_required_before=True,
+            source_panel_required=False,
+            source_panel_required_before=False,
+            install_notes={
+                "en": "Install PasarGuard first. Remnawave can run on same or remote server — provide API URL + token in wizard.",
+                "fa": "ابتدا PasarGuard را نصب کنید. Remnawave می‌تواند روی همین یا سرور دیگر باشد.",
+                "ru": "Сначала установите PasarGuard. Remnawave может быть на этом или другом сервере.",
+            },
+        ),
+        supported_source_dbs=["postgresql"],
+    ),
+
     "pasarguard": PanelInfo(
         id="pasarguard",
         name={"en": "PasarGuard (DB only)", "fa": "PasarGuard (DB only)", "ru": "PasarGuard (DB only)"},

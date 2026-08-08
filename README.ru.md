@@ -1,4 +1,4 @@
-> ⚠️ **`v2.2.13`** — Перед restore или миграцией сделайте полный бэкап.
+> ⚠️ **`v3.0.0`** — Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <a href="README.en.md">English</a> · <b>Русский</b>
@@ -22,7 +22,7 @@
 - Автоматическое устранение несоответствия версий TimescaleDB (pull образа, readiness probe, auth fallback)
 - Карточка с информацией о БД после загрузки бэкапа — сравнивает СУБД бэкапа и установленную
 - Опция отключения узлов после восстановления (избегает конфликтов с ещё активной предыдущей панелью)
-- Миграция с Marzban, 3x-ui, Remnawave и Hiddify
+- Миграция с Marzban, 3x-ui, Hiddify и Remnawave
 - Статус панели и официальная команда установки
 
 > Мастер не устанавливает PasarGuard. Сначала установите панель сами.
@@ -47,8 +47,8 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 | Marzban | Полная |
 | PasarGuard | Restore / смена БД (не в миграции панелей) |
 | 3X-UI | Полная |
-| Remnawave | Скоро |
 | Hiddify | Частично (пользователи + redirect ссылок) |
+| Remnawave | Скоро |
 
 ---
 

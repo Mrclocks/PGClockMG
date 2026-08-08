@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> ⚠️ **`v2.2.13`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
+> ⚠️ **`v3.0.0`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
   <b>فارسی</b> · <a href="README.en.md">English</a> · <a href="README.ru.md">Русский</a>
@@ -24,7 +24,7 @@
 - رفع خودکار مشکلات نسخه TimescaleDB هنگام ریستور (pull تصویر، readiness probe، auth fallback)
 - نمایش اطلاعات دیتابیس بعد از آپلود بکاپ — مقایسه DB بکاپ با DB نصب‌شده
 - گزینه غیرفعال‌سازی نودها بعد از ریستور (برای جلوگیری از تداخل با پنل قبلی)
-- مهاجرت از Marzban، 3x-ui، Remnawave و Hiddify
+- مهاجرت از Marzban، 3x-ui، Hiddify و Remnawave
 - راهنمای وضعیت پنل و دستور نصب رسمی
 
 > این ویزارد خودش PasarGuard را نصب نمی‌کند. اول پنل را نصب کنید، بعد برگردید.
@@ -49,8 +49,8 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 | Marzban | کامل |
 | PasarGuard | ریستور / تغییر DB (نه در مهاجرت پنل) |
 | 3X-UI | کامل |
-| Remnawave | به‌زودی |
 | Hiddify | ناقص (کاربران + ریدایرکت لینک) |
+| Remnawave | به‌زودی |
 
 ---
 
