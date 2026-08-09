@@ -317,6 +317,31 @@ def test_alembic_still_running_helpers():
     print("OK: alembic still-running helpers")
 
 
+def test_run_cmd_quiet_does_not_echo_stdout():
+    import asyncio
+    from app.services.migrators.base import BaseMigrator, MigrationJob
+
+    class _T(BaseMigrator):
+        async def run(self, params):
+            return {}
+
+    async def _go():
+        job = MigrationJob(job_id="quiet-test")
+        m = _T(job)
+        ok, out = await m._run_cmd(["echo", "secret-line-xyz"], timeout=10, quiet=True)
+        assert ok is True
+        assert "secret-line-xyz" in out
+        joined = "\n".join(job.logs)
+        assert "secret-line-xyz" not in joined
+        assert "$ echo" not in joined
+        ok2, out2 = await m._run_cmd(["echo", "loud-line"], timeout=10, quiet=False)
+        assert ok2 is True
+        assert "loud-line" in "\n".join(job.logs)
+
+    asyncio.run(_go())
+    print("OK: run_cmd quiet mode")
+
+
 def test_write_alembic_version_on_sqlite_conn(tmp_path=None):
     import tempfile
     from pathlib import Path

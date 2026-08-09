@@ -1,6 +1,8 @@
 """Base migration runner with logging."""
 
 import asyncio
+import os
+import signal
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -58,28 +60,37 @@ class BaseMigrator(ABC):
         cmd: list[str] | str,
         cwd: str | None = None,
         timeout: int = 600,
+        *,
+        quiet: bool = False,
     ) -> tuple[bool, str]:
         """Run a command as argv list (exec) or shell string.
 
         ``db_auth`` probes pass shell strings (``cd ... && docker compose exec...``).
         Passing those to ``create_subprocess_exec`` iterates the string character-by-
         character and fails with FileNotFoundError — same shell support as restore.
+
+        quiet=True: capture stdout without echoing every line / ``$ cmd`` into the
+        job log (required for health-check polls during heavy MySQL DDL).
         """
         if isinstance(cmd, str):
-            self.job.log(f"$ {cmd}")
+            if not quiet:
+                self.job.log(f"$ {cmd}")
             proc = await asyncio.create_subprocess_shell(
                 cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
+                start_new_session=True,
             )
         else:
-            self.job.log(f"$ {' '.join(cmd)}")
+            if not quiet:
+                self.job.log(f"$ {' '.join(cmd)}")
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
+                start_new_session=True,
             )
         output_lines = []
 
@@ -90,13 +101,23 @@ class BaseMigrator(ABC):
                     break
                 text = line.decode("utf-8", errors="replace").rstrip()
                 output_lines.append(text)
-                self.job.log(text)
+                if not quiet:
+                    self.job.log(text)
+
+        def _kill_tree() -> None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
         try:
             # wait_for works on Python 3.9+; asyncio.timeout needs 3.11+
             await asyncio.wait_for(_drain_stdout(), timeout=timeout)
         except (TimeoutError, asyncio.TimeoutError):
-            proc.kill()
+            _kill_tree()
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5)
             except Exception:
@@ -106,12 +127,13 @@ class BaseMigrator(ABC):
         try:
             await asyncio.wait_for(proc.wait(), timeout=5)
         except (TimeoutError, asyncio.TimeoutError):
-            proc.kill()
+            _kill_tree()
             try:
                 await asyncio.wait_for(proc.wait(), timeout=3)
             except Exception:
                 pass
-            self.job.log("command hung after stdout closed — killed")
+            if not quiet:
+                self.job.log("command hung after stdout closed — killed")
             return False, "Timeout"
         return proc.returncode == 0, "\n".join(output_lines)
 

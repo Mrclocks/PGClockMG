@@ -176,25 +176,41 @@ def _extract_failure_snippet(output: str) -> str:
     return "\n".join(non_banner[-20:]) if non_banner else clean[-1500:]
 
 
-async def fetch_compose_logs(migrator, services: list[str], tail: int = 200) -> str:
+async def fetch_compose_logs(
+    migrator,
+    services: list[str],
+    tail: int = 200,
+    *,
+    timeout: int = 30,
+) -> str:
+    """Fetch compose logs quietly — do not echo every line into the job UI."""
     cwd = str(PASARGUARD_DIR)
     ok, out = await migrator._run_cmd(
         ["docker", "compose", "logs", "--no-color", "--tail", str(tail), *services],
         cwd=cwd,
-        timeout=30,
+        timeout=timeout,
+        quiet=True,
     )
     return out if ok else ""
 
 
-async def fetch_pasarguard_logs(migrator, tail: int = 150, *, include_db: bool = False) -> str:
+async def fetch_pasarguard_logs(
+    migrator,
+    tail: int = 150,
+    *,
+    include_db: bool = False,
+    timeout: int = 30,
+) -> str:
     """Panel logs only by default — DB restart FATAL lines are not panel failures."""
-    pg = await fetch_compose_logs(migrator, ["pasarguard"], tail=tail)
+    pg = await fetch_compose_logs(migrator, ["pasarguard"], tail=tail, timeout=timeout)
     if not include_db:
         return pg
     target_db = migrator.params.get("target_db")
     db_svc = resolve_db_service(target_db) if target_db else None
     if db_svc:
-        db_logs = await fetch_compose_logs(migrator, [db_svc], tail=min(tail, 80))
+        db_logs = await fetch_compose_logs(
+            migrator, [db_svc], tail=min(tail, 80), timeout=min(timeout, 20)
+        )
         return f"{pg}\n{db_logs}"
     return pg
 
@@ -211,10 +227,12 @@ def _check_logs_for_failure(output: str) -> str | None:
 async def _pasarguard_container_state(migrator) -> str:
     """Return running | restarting | exited | unknown for the panel service."""
     cwd = str(PASARGUARD_DIR)
+    # Quiet + short timeouts: during MySQL bigint ALTER, docker can stall.
     ok, out = await migrator._run_cmd(
         ["docker", "compose", "ps", "--format", "{{.Name}} {{.Status}}", "pasarguard"],
         cwd=cwd,
-        timeout=20,
+        timeout=12,
+        quiet=True,
     )
     text = (out or "").lower()
     if ok and text.strip():
@@ -228,14 +246,16 @@ async def _pasarguard_container_state(migrator) -> str:
     ok2, ids = await migrator._run_cmd(
         ["docker", "compose", "ps", "-q", "pasarguard"],
         cwd=cwd,
-        timeout=15,
+        timeout=10,
+        quiet=True,
     )
     if ok2 and (ids or "").strip():
         cid = (ids or "").strip().splitlines()[0].strip()
         ok3, st = await migrator._run_cmd(
             ["docker", "inspect", "-f", "{{.State.Status}}", cid],
             cwd=cwd,
-            timeout=15,
+            timeout=10,
+            quiet=True,
         )
         status = (st or "").strip().lower()
         if status in ("running", "restarting", "exited", "dead", "created"):
@@ -243,6 +263,60 @@ async def _pasarguard_container_state(migrator) -> str:
         if status:
             return status
     return "unknown"
+
+
+_MYSQL_DDL_STATE_HINTS = (
+    "alter table",
+    "copy to tmp table",
+    "copying to",
+    "rename result table",
+    "adding indexes",
+    "repair by",
+    "waiting for table metadata lock",
+    "waiting for table level lock",
+)
+
+
+async def _mysql_ddl_status(migrator) -> str | None:
+    """If MySQL/MariaDB is mid-DDL (e.g. bigint ALTER), return a short status.
+
+    Fail-soft: never raises. Used only to heartbeats / progress refresh during
+    heavy alembic — does not change restore or light-migrate paths.
+    """
+    target_db = (migrator.params or {}).get("target_db")
+    if target_db not in ("mysql", "mariadb"):
+        return None
+    service = resolve_db_service(target_db)
+    if not service:
+        return None
+    try:
+        conn = _target_conn(migrator)
+        user = conn.get("user") or "root"
+        pwd = conn.get("password") or ""
+        host = conn.get("host") or "127.0.0.1"
+        if not pwd:
+            return None
+        pwd_q = (pwd or "").replace('"', '\\"')
+        cwd = str(PASARGUARD_DIR)
+        for bin_name in mysql_client_bins(target_db, service):
+            cmd = (
+                f'cd "{cwd}" && docker compose exec -T {service} '
+                f'{bin_name} -u {user} -p"{pwd_q}" -h {host} -N -e '
+                f'"SHOW FULL PROCESSLIST"'
+            )
+            ok, out = await migrator._run_cmd(cmd, timeout=10, quiet=True)
+            if not ok or not (out or "").strip() or out == "Timeout":
+                continue
+            for line in (out or "").splitlines():
+                low = line.lower()
+                if any(h in low for h in _MYSQL_DDL_STATE_HINTS):
+                    # Keep it short for the job log
+                    snippet = " ".join(line.split())
+                    return snippet[:160]
+            return None
+    except Exception:
+        return None
+    return None
 
 
 async def _pasarguard_container_running(migrator) -> bool:
@@ -596,27 +670,33 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
     soft_up_during_alembic = False
     prev_restart_count = 0
     alembic_extensions = 0
+    probe_i = 0
     last_upgrade_sig: str | None = None
+    last_known_state = "unknown"
+    last_ddl_status: str | None = None
     last_progress_at = asyncio.get_event_loop().time()
+    last_heartbeat_at = 0.0
+    revision_started_at = asyncio.get_event_loop().time()
     started_at = asyncio.get_event_loop().time()
     deadline = started_at + soft_budget
     while True:
         now = asyncio.get_event_loop().time()
+        heavy_mode = _is_heavy_alembic_upgrade(last_upgrade_sig)
         stuck_limit = (
-            stuck_same_upgrade_heavy
-            if _is_heavy_alembic_upgrade(last_upgrade_sig)
-            else stuck_same_upgrade_default
+            stuck_same_upgrade_heavy if heavy_mode else stuck_same_upgrade_default
         )
         # Heavy bigint chains on large dumps may exceed the default absolute cap.
-        effective_cap = (
-            max(absolute_cap, 7200)
-            if _is_heavy_alembic_upgrade(last_upgrade_sig)
-            else absolute_cap
-        )
+        effective_cap = max(absolute_cap, 7200) if heavy_mode else absolute_cap
+        # Under heavy MySQL DDL, docker is slow — short quiet probes + longer sleeps.
+        log_tail = 80 if heavy_mode else 200
+        log_timeout = 12 if heavy_mode else 25
+        sleep_for = 20 if heavy_mode else 5
 
         if now >= deadline:
             # Final chance: if alembic is still active under the absolute cap, keep going.
-            out_end = await fetch_pasarguard_logs(migrator, tail=400)
+            out_end = await fetch_pasarguard_logs(
+                migrator, tail=log_tail, timeout=log_timeout
+            )
             if _alembic_wait_active(
                 out_end,
                 last_upgrade_sig=last_upgrade_sig,
@@ -636,9 +716,19 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
             else:
                 break
 
-        out = await fetch_pasarguard_logs(migrator, tail=400)
+        out = await fetch_pasarguard_logs(
+            migrator, tail=log_tail, timeout=log_timeout
+        )
+        # Only surface real failures into the job log (not 200× docker log spam).
         _log_failures_from_output(migrator, out)
-        state = await _pasarguard_container_state(migrator)
+
+        probe_i += 1
+        # Heavy mode: skip docker ps every other cycle (daemon often stalls on ALTER).
+        if heavy_mode and last_upgrade_sig and (probe_i % 2 == 0):
+            state = last_known_state
+        else:
+            state = await _pasarguard_container_state(migrator)
+            last_known_state = state
 
         # Refresh alembic progress from logs when the panel still looks alive.
         if _alembic_still_running(out):
@@ -646,7 +736,13 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
             if sig != last_upgrade_sig:
                 last_upgrade_sig = sig
                 last_progress_at = now
+                revision_started_at = now
                 migrator.job.log(f"Alembic progress: {sig[:160]}")
+                if _is_heavy_alembic_upgrade(sig):
+                    migrator.job.set_progress(
+                        max(getattr(migrator.job, "progress", 0) or 0, 70),
+                        "MySQL heavy schema upgrade (bigint) — please wait…",
+                    )
             elif _should_refresh_alembic_progress(state, out):
                 # Same revision, container alive / probe flaky — DDL may still run.
                 last_progress_at = now
@@ -659,6 +755,13 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
         ):
             # Log fetch timed out under load — keep memory progress alive.
             last_progress_at = now
+
+        # Confirm MySQL is still rewriting tables (real progress under silent logs).
+        if heavy_mode and (probe_i % 2 == 1):
+            ddl = await _mysql_ddl_status(migrator)
+            if ddl:
+                last_ddl_status = ddl
+                last_progress_at = now
 
         alembic_active = _alembic_wait_active(
             out,
@@ -680,6 +783,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
             )
             elapsed = int(now - started_at)
             same_for = int(now - last_progress_at)
+            on_rev = int(now - revision_started_at)
             if same_for >= stuck_limit:
                 raise RuntimeError(
                     "PasarGuard alembic appears stuck on the same revision "
@@ -717,17 +821,25 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                 extra = 180
                 deadline = now + extra
                 alembic_extensions += 1
+            # Heartbeat so the UI does not look frozen during multi-minute ALTER.
+            if (now - last_heartbeat_at) >= 30:
+                last_heartbeat_at = now
                 heavy = " [heavy DDL]" if _is_heavy_alembic_upgrade(sig) else ""
+                ddl_bit = f", mysql={last_ddl_status}" if last_ddl_status else ""
+                migrator.job.set_progress(
+                    max(getattr(migrator.job, "progress", 0) or 0, 70),
+                    f"Schema upgrade in progress ({on_rev}s on current revision)…",
+                )
                 migrator.job.log(
-                    f"Alembic still running{heavy} — extending health wait "
-                    f"(+{extra}s, #{alembic_extensions}, elapsed {elapsed}s, "
-                    f"same-rev {same_for}s, state={state}); not restarting panel..."
+                    f"Alembic still running{heavy} — waiting "
+                    f"(elapsed {elapsed}s, on-rev {on_rev}s, state={state}"
+                    f"{ddl_bit}); not restarting panel..."
                 )
             # Transient unknown/exited probe noise is ignored during alembic.
             not_running_streak = 0
             unknown_streak = 0
             restarting_streak = 0
-            await asyncio.sleep(5)
+            await asyncio.sleep(sleep_for)
             continue
 
         hit = _check_logs_for_failure(out)

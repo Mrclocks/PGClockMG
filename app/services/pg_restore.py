@@ -814,20 +814,30 @@ async def _run_restore(job: MigrationJob, params: dict, analysis: dict) -> None:
         job.result = {"error": str(e), "error_explain": explain}
 
 
-async def _run(job: MigrationJob, cmd: list[str], cwd: str | None = None, timeout: int = 600) -> tuple[bool, str]:
-    job.log(f"$ {' '.join(cmd)}")
+async def _run(
+    job: MigrationJob,
+    cmd: list[str],
+    cwd: str | None = None,
+    timeout: int = 600,
+    *,
+    quiet: bool = False,
+) -> tuple[bool, str]:
+    if not quiet:
+        job.log(f"$ {' '.join(cmd)}")
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
         )
         out_b, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         out = (out_b or b"").decode("utf-8", errors="replace")
-        for line in out.splitlines()[-40:]:
-            if line.strip():
-                job.log(line)
+        if not quiet:
+            for line in out.splitlines()[-40:]:
+                if line.strip():
+                    job.log(line)
         return proc.returncode == 0, out
     except Exception as e:
         return False, str(e)
@@ -840,8 +850,8 @@ class _RestoreMini:
         self.job = job
         self.params = params
 
-    async def _run_cmd(self, cmd, cwd=None, timeout=600):
-        return await _run(self.job, cmd, cwd=cwd, timeout=timeout)
+    async def _run_cmd(self, cmd, cwd=None, timeout=600, *, quiet: bool = False):
+        return await _run(self.job, cmd, cwd=cwd, timeout=timeout, quiet=quiet)
 
 
 def _read_current_env() -> str:
@@ -1328,18 +1338,21 @@ async def _maybe_cross_db_after_restore(
                 self.copy_stats = {}
                 self.copy_report = {}
 
-            async def _run_cmd(self, cmd, cwd=None, timeout=600):
+            async def _run_cmd(self, cmd, cwd=None, timeout=600, *, quiet: bool = False):
                 if isinstance(cmd, str):
                     proc = await asyncio.create_subprocess_shell(
                         cmd,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.STDOUT,
                         cwd=cwd,
+                        start_new_session=True,
                     )
                     out_b, _ = await proc.communicate()
                     out = (out_b or b"").decode("utf-8", errors="replace")
                     return proc.returncode == 0, out
-                ok, out = await _run(self.job, cmd, cwd=cwd, timeout=timeout)
+                ok, out = await _run(
+                    self.job, cmd, cwd=cwd, timeout=timeout, quiet=quiet
+                )
                 return ok, out or ""
 
         # Prefer install .env for target auth — merged backup .env often still has
