@@ -69,7 +69,7 @@ def _job():
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 async def _exercise_sqlite_land(target_db: str) -> dict:

@@ -227,10 +227,12 @@ def test_alembic_duplicate_heal_helpers():
 
 def test_alembic_still_running_helpers():
     from app.services.pasarguard_ops import (
+        _alembic_bootstrap_active,
         _alembic_still_running,
         _alembic_wait_active,
         _is_heavy_alembic_upgrade,
         _last_alembic_upgrade_line,
+        _should_refresh_alembic_progress,
     )
 
     active = (
@@ -263,6 +265,7 @@ def test_alembic_still_running_helpers():
     assert "bigint" in last
     assert _is_heavy_alembic_upgrade(last) is True
     assert _is_heavy_alembic_upgrade("Running upgrade a -> b, add note") is False
+    assert _is_heavy_alembic_upgrade("Running upgrade a -> b, migrate_to_groups") is True
 
     # Empty/timeout logs still count as active when we recently saw an upgrade
     now = 1_000_000.0
@@ -289,6 +292,28 @@ def test_alembic_still_running_helpers():
         now=now,
         stuck_limit=900,
     ) is False
+
+    # Context-only bootstrap: active briefly, not forever, not on hard fail
+    ctx = "INFO [alembic.runtime.migration] Context impl MySQLImpl.\n"
+    assert _alembic_bootstrap_active(ctx, started_at=now - 10, now=now) is True
+    assert _alembic_wait_active(
+        ctx,
+        last_upgrade_sig=None,
+        last_progress_at=now - 10,
+        now=now,
+        stuck_limit=300,
+        started_at=now - 10,
+    ) is True
+    assert _alembic_bootstrap_active(ctx, started_at=now - 500, now=now) is False
+    assert _alembic_bootstrap_active(missing, started_at=now - 10, now=now) is False
+    # Clean light boot with no alembic markers — bootstrap inactive
+    assert _alembic_bootstrap_active("Starting backend...\n", started_at=now - 10, now=now) is False
+
+    # Exited container must not keep refreshing progress from stale upgrade lines
+    assert _should_refresh_alembic_progress("running", chain) is True
+    assert _should_refresh_alembic_progress("unknown", chain) is True
+    assert _should_refresh_alembic_progress("exited", chain) is False
+    assert _should_refresh_alembic_progress("unknown", "") is True
     print("OK: alembic still-running helpers")
 
 

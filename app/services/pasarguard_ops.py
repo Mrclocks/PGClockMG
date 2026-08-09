@@ -408,27 +408,72 @@ _ALEMBIC_ACTIVITY_MARKERS = (
     "alembic.runtime.migration",
 )
 
+_ALEMBIC_HARD_FAIL_MARKERS = (
+    "Can't locate revision",
+    "Database migrations failed",
+    "ERROR: Database migrations failed",
+)
+
+# Early alembic lines before the first "Running upgrade" (must not stamp/recreate yet)
+_ALEMBIC_BOOTSTRAP_MARKERS = (
+    "Context impl",
+    "Will assume transactional DDL",
+    "Will assume non-transactional DDL",
+)
+
+# Soft bring-up once if panel truly exited while we still remember an upgrade
+_ALEMBIC_EXITED_SOFT_UP_AFTER = 90.0
+# How long Context-only counts as active before first Running upgrade (light DBs stay short)
+_ALEMBIC_BOOTSTRAP_WINDOW = 180.0
+
+
+def _alembic_hard_fail(output: str) -> bool:
+    text = output or ""
+    return any(h in text for h in _ALEMBIC_HARD_FAIL_MARKERS)
+
 
 def _alembic_still_running(output: str) -> bool:
     """True if logs show alembic mid-upgrade without a completed startup.
 
     Only recent 'Running upgrade' lines count as active work. Context/impl lines
     also appear on hard failures (e.g. Can't locate revision), so they must not
-    extend the wait. Stale upgrade lines outside the trailing window are ignored.
+    alone extend forever — see `_alembic_bootstrap_active`. Stale upgrade lines
+    outside the trailing window are ignored.
     """
     text = output or ""
     if any(m in text for m in STARTUP_MARKERS):
         return False
-    hard_fails = (
-        "Can't locate revision",
-        "Database migrations failed",
-        "ERROR: Database migrations failed",
-    )
-    if any(h in text for h in hard_fails):
+    if _alembic_hard_fail(text):
         return False
     lines = text.splitlines()
     tail = "\n".join(lines[-40:])
     return "Running upgrade" in tail
+
+
+def _alembic_bootstrap_active(
+    output: str,
+    *,
+    started_at: float,
+    now: float,
+    window: float = _ALEMBIC_BOOTSTRAP_WINDOW,
+) -> bool:
+    """True briefly while alembic printed Context/DDL assume but not Running upgrade yet.
+
+    Prevents a soft recreate / silent stamp-heal from firing in the gap before the
+    first revision line. Hard failures and startups clear this. Light installs that
+    never touch alembic are unaffected (no bootstrap markers).
+    """
+    text = output or ""
+    if any(m in text for m in STARTUP_MARKERS):
+        return False
+    if _alembic_hard_fail(text):
+        return False
+    if "Running upgrade" in text:
+        return False
+    if (now - started_at) > window:
+        return False
+    tail = "\n".join(text.splitlines()[-40:])
+    return any(m in tail for m in _ALEMBIC_BOOTSTRAP_MARKERS)
 
 
 def _last_alembic_upgrade_line(output: str) -> str | None:
@@ -449,13 +494,36 @@ def _is_heavy_alembic_upgrade(upgrade_line: str | None) -> bool:
             "bigint",
             "use bigint for id",
             "alter column",
+            "alter table",
             "change column",
             "modify column",
             "convert.",
             "migrate data",
+            "migrate_to_groups",
             "rebuild",
+            "drop proxies",
+            "create index",
         )
     )
+
+
+def _should_refresh_alembic_progress(container_state: str | None, logs: str) -> bool:
+    """Whether same-revision log lines should bump last_progress_at.
+
+    - running / restarting: DDL may still be active with no new alembic lines
+    - unknown / empty logs: docker probe timed out under load — keep waiting
+    - exited: stale 'Running upgrade' in docker logs must NOT reset the stuck timer
+      (otherwise a light failed migrate waits until the absolute cap)
+    """
+    state = (container_state or "").lower()
+    if state in ("running", "restarting", "unknown"):
+        return True
+    if state in ("exited", "dead", "created"):
+        return False
+    # Empty / timed-out log fetch while state probe also failed
+    if not (logs or "").strip():
+        return True
+    return False
 
 
 def _alembic_wait_active(
@@ -465,22 +533,24 @@ def _alembic_wait_active(
     last_progress_at: float,
     now: float,
     stuck_limit: float,
+    started_at: float | None = None,
+    bootstrap_window: float = _ALEMBIC_BOOTSTRAP_WINDOW,
 ) -> bool:
     """True while alembic should be treated as in-progress.
 
     Remembers the last seen 'Running upgrade' so a temporary docker logs/ps
     timeout (common during heavy MySQL ALTER) does not look like a dead panel.
+    Also covers the short Context-only bootstrap window before the first upgrade.
     """
     if any(m in (output or "") for m in STARTUP_MARKERS):
         return False
-    hard_fails = (
-        "Can't locate revision",
-        "Database migrations failed",
-        "ERROR: Database migrations failed",
-    )
-    if any(h in (output or "") for h in hard_fails):
+    if _alembic_hard_fail(output or ""):
         return False
     if _alembic_still_running(output):
+        return True
+    if started_at is not None and _alembic_bootstrap_active(
+        output, started_at=started_at, now=now, window=bootstrap_window
+    ):
         return True
     # Log fetch may have timed out / been empty while DDL still runs.
     if last_upgrade_sig and (now - last_progress_at) < stuck_limit:
@@ -497,14 +567,19 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
 
     Critical: never recreate / force-up the panel while alembic is mid-upgrade —
     that interrupts MySQL ALTER TABLE and leaves the migrate stuck at ~70%.
+
+    Light / clean DBs still finish on normal startup markers within soft_budget;
+    long waits only engage when alembic activity is observed.
     """
     soft_budget = max(60, int(max_wait))
     # Hard ceiling: large Marzban→PG chains (esp. bigint id) can take a long time.
     absolute_cap = max(soft_budget * 4, 3600)
     # Same revision with no new upgrade line for this long ⇒ treat as stuck.
     # Heavy DDL (bigint on large dumps) gets a longer same-revision budget.
-    stuck_same_upgrade_default = max(900, soft_budget)
-    stuck_same_upgrade_heavy = max(3600, soft_budget * 2, stuck_same_upgrade_default)
+    # Light non-heavy stuck budget stays close to soft_budget so failed small
+    # migrates do not sit until the absolute cap.
+    stuck_same_upgrade_default = max(300, min(900, soft_budget))
+    stuck_same_upgrade_heavy = max(3600, soft_budget * 2, 900)
 
     migrator.job.log(
         f"Verifying PasarGuard started without errors "
@@ -515,8 +590,10 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
     stable_ready = 0
     not_running_streak = 0
     unknown_streak = 0
+    restarting_streak = 0
     healed_once = False
     silent_loop_healed = False
+    soft_up_during_alembic = False
     prev_restart_count = 0
     alembic_extensions = 0
     last_upgrade_sig: str | None = None
@@ -546,6 +623,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                 last_progress_at=last_progress_at,
                 now=now,
                 stuck_limit=stuck_limit,
+                started_at=started_at,
             ) and (now - started_at) < effective_cap:
                 extra = 180
                 deadline = now + extra
@@ -560,17 +638,27 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
 
         out = await fetch_pasarguard_logs(migrator, tail=400)
         _log_failures_from_output(migrator, out)
+        state = await _pasarguard_container_state(migrator)
 
-        # Refresh alembic progress from logs when available
+        # Refresh alembic progress from logs when the panel still looks alive.
         if _alembic_still_running(out):
             sig = _last_alembic_upgrade_line(out) or "Running upgrade"
             if sig != last_upgrade_sig:
                 last_upgrade_sig = sig
                 last_progress_at = now
                 migrator.job.log(f"Alembic progress: {sig[:160]}")
-            else:
-                # Same revision still printing / visible — DDL still running.
+            elif _should_refresh_alembic_progress(state, out):
+                # Same revision, container alive / probe flaky — DDL may still run.
                 last_progress_at = now
+            # exited + stale upgrade line: do not bump last_progress_at
+        elif not (out or "").strip() and last_upgrade_sig and state in (
+            "running",
+            "restarting",
+            "unknown",
+            "",
+        ):
+            # Log fetch timed out under load — keep memory progress alive.
+            last_progress_at = now
 
         alembic_active = _alembic_wait_active(
             out,
@@ -578,11 +666,18 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
             last_progress_at=last_progress_at,
             now=now,
             stuck_limit=stuck_limit,
+            started_at=started_at,
         )
 
-        # Alembic still applying — never recreate panel; only wait / extend.
+        # Alembic still applying — never force-recreate; only wait / soft-up if dead.
         if alembic_active:
-            sig = last_upgrade_sig or _last_alembic_upgrade_line(out) or "Running upgrade"
+            sig = (
+                last_upgrade_sig
+                or _last_alembic_upgrade_line(out)
+                or ("bootstrap" if _alembic_bootstrap_active(
+                    out, started_at=started_at, now=now
+                ) else "Running upgrade")
+            )
             elapsed = int(now - started_at)
             same_for = int(now - last_progress_at)
             if same_for >= stuck_limit:
@@ -599,6 +694,24 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                     f"Last upgrade: {sig}\n"
                     + _extract_failure_snippet(out)
                 )
+            # Panel truly exited while we still remember an upgrade: soft bring-up
+            # once (no --force-recreate) so a crashed runner can resume. Skip while
+            # state is unknown — that usually means the host is busy with DDL.
+            if (
+                state == "exited"
+                and last_upgrade_sig
+                and not soft_up_during_alembic
+                and same_for >= _ALEMBIC_EXITED_SOFT_UP_AFTER
+            ):
+                soft_up_during_alembic = True
+                migrator.job.log(
+                    "PasarGuard exited during remembered alembic — "
+                    "soft bring-up once (not force-recreate)…"
+                )
+                await _ensure_pasarguard_up(migrator)
+                last_progress_at = now
+                await asyncio.sleep(8)
+                continue
             # Keep soft deadline ahead while work continues
             if deadline - now < 90:
                 extra = 180
@@ -608,11 +721,12 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                 migrator.job.log(
                     f"Alembic still running{heavy} — extending health wait "
                     f"(+{extra}s, #{alembic_extensions}, elapsed {elapsed}s, "
-                    f"same-rev {same_for}s); not restarting panel..."
+                    f"same-rev {same_for}s, state={state}); not restarting panel..."
                 )
             # Transient unknown/exited probe noise is ignored during alembic.
             not_running_streak = 0
             unknown_streak = 0
+            restarting_streak = 0
             await asyncio.sleep(5)
             continue
 
@@ -658,13 +772,17 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
 
         # Detect silent restart loop: panel exits without any error log
         # (alembic context prints but uvicorn never starts)
-        # Skip if we recently saw an alembic upgrade — restart loop heal stamps
-        # head and would skip remaining revisions.
+        # Skip if we saw an upgrade OR are still in Context bootstrap —
+        # stamp-head heal would skip remaining Marzban→PG revisions.
         restart_count = _count_restarts_in_logs(out)
+        bootstrap_now = _alembic_bootstrap_active(
+            out, started_at=started_at, now=now
+        )
         if (
             restart_count >= 2
             and not silent_loop_healed
             and not last_upgrade_sig
+            and not bootstrap_now
         ):
             has_startup = any(marker in (out or "") for marker in STARTUP_MARKERS)
             if not has_startup:
@@ -675,13 +793,17 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                 continue
         prev_restart_count = restart_count
 
-        state = await _pasarguard_container_state(migrator)
         if state != "running":
             not_running_streak += 1
             if state == "unknown":
                 unknown_streak += 1
+                restarting_streak = 0
+            elif state == "restarting":
+                restarting_streak += 1
+                unknown_streak = 0
             else:
                 unknown_streak = 0
+                restarting_streak = 0
             migrator.job.log(f"PasarGuard container state={state} (wait {not_running_streak})")
             # docker compose ps often returns unknown/timeout while MySQL DDL
             # saturates the host — never recreate on unknown alone.
@@ -689,6 +811,15 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                 if unknown_streak >= 12:
                     raise RuntimeError(
                         "PasarGuard container state stayed unknown too long.\n"
+                        + _extract_failure_snippet(out)
+                    )
+                await asyncio.sleep(5)
+                continue
+            # Docker healthcheck thrash — wait, do not recreate.
+            if state == "restarting":
+                if restarting_streak >= 24:
+                    raise RuntimeError(
+                        "PasarGuard container kept restarting without becoming ready.\n"
                         + _extract_failure_snippet(out)
                     )
                 await asyncio.sleep(5)
@@ -706,6 +837,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
 
         not_running_streak = 0
         unknown_streak = 0
+        restarting_streak = 0
         if any(marker in (out or "") for marker in STARTUP_MARKERS):
             stable_ready += 1
             if stable_ready >= 2:
