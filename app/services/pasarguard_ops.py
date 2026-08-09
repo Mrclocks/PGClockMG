@@ -347,6 +347,7 @@ async def _try_heal_duplicate_unique_names(migrator, logs: str) -> bool:
             (stats.get("renamed") or 0)
             or (stats.get("orphans_deleted") or 0)
             or (stats.get("orphans_nulled") or 0)
+            or (stats.get("usage_tables_truncated") or 0)
         )
     except Exception as e:
         migrator.job.log(f"Marzban pre-boot heal note: {e}")

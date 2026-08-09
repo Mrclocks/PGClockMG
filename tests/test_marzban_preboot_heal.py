@@ -103,9 +103,76 @@ def test_cleanup_orphans_noop_on_clean_db():
     print("OK: clean db noop")
 
 
+def test_shrink_heavy_usage_sqlite_threshold():
+    from app.services.marzban_preboot_heal import shrink_heavy_usage_tables_sqlite
+
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "db.sqlite3"
+        db = sqlite3.connect(str(path))
+        db.execute(
+            "CREATE TABLE node_user_usages (id INTEGER PRIMARY KEY, node_id INT, user_id INT)"
+        )
+        db.execute("CREATE TABLE node_usages (id INTEGER PRIMARY KEY, node_id INT)")
+        # Below threshold — no-op
+        db.executemany(
+            "INSERT INTO node_user_usages VALUES (?, 1, 1)",
+            [(i,) for i in range(1, 21)],
+        )
+        db.commit()
+        db.close()
+        assert shrink_heavy_usage_tables_sqlite(path, row_threshold=50) == []
+
+        db = sqlite3.connect(str(path))
+        db.executemany(
+            "INSERT INTO node_user_usages VALUES (?, 1, 1)",
+            [(i,) for i in range(21, 81)],
+        )
+        db.commit()
+        n = db.execute("SELECT COUNT(*) FROM node_user_usages").fetchone()[0]
+        db.close()
+        assert n == 80
+        got = shrink_heavy_usage_tables_sqlite(path, row_threshold=50)
+        assert got == [("node_user_usages", 80)]
+        db = sqlite3.connect(str(path))
+        assert db.execute("SELECT COUNT(*) FROM node_user_usages").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM node_usages").fetchone()[0] == 0
+        db.close()
+    print("OK: shrink heavy usage sqlite threshold")
+
+
+def test_orphan_null_falls_back_to_delete_when_not_null():
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "db.sqlite3"
+        db = sqlite3.connect(str(path))
+        db.executescript(
+            """
+            CREATE TABLE inbounds (id INTEGER PRIMARY KEY, tag TEXT);
+            CREATE TABLE hosts (
+                id INTEGER PRIMARY KEY,
+                inbound_tag TEXT NOT NULL
+            );
+            INSERT INTO inbounds VALUES (1, 'vless');
+            INSERT INTO hosts VALUES (1, 'vless');
+            INSERT INTO hosts VALUES (2, 'missing-tag');
+            """
+        )
+        db.commit()
+        db.close()
+        deleted, nulled = cleanup_orphans_sqlite(path)
+        assert deleted == 1
+        assert nulled == 0
+        db = sqlite3.connect(str(path))
+        tags = [r[0] for r in db.execute("SELECT inbound_tag FROM hosts").fetchall()]
+        db.close()
+        assert tags == ["vless"]
+    print("OK: NOT NULL orphan uses delete")
+
+
 if __name__ == "__main__":
     test_orphan_delete_sql_shape()
     test_logs_indicate_orphan_fk()
     test_cleanup_orphans_sqlite_removes_only_orphans()
     test_cleanup_orphans_noop_on_clean_db()
+    test_shrink_heavy_usage_sqlite_threshold()
+    test_orphan_null_falls_back_to_delete_when_not_null()
     print("\nAll marzban_preboot_heal tests passed.")

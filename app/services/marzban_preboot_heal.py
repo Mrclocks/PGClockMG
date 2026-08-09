@@ -39,10 +39,25 @@ ORPHAN_DELETE_SPECS: tuple[tuple[str, str, str, str], ...] = (
 )
 
 # SET NULL style refs (parent missing → null child column).
+# If the column is NOT NULL (common for hosts.inbound_tag on MySQL), we DELETE
+# the orphan row instead — SET NULL raises 1048 and used to abort the whole heal.
 ORPHAN_NULL_SPECS: tuple[tuple[str, str, str, str], ...] = (
     ("hosts", "inbound_tag", "inbounds", "tag"),
     ("next_plans", "user_template_id", "user_templates", "id"),
 )
+
+# High-churn usage/history tables. PasarGuard's "use bigint for id" alembic rebuilds
+# these with copy-to-tmp + re-add FK — on large Marzban MySQL dumps that can run for
+# hours and look "stuck" at 70%. Truncating large ones before panel boot is safe:
+# the panel refills usage from live traffic; users/nodes/inbounds are untouched.
+HEAVY_USAGE_TABLES: tuple[str, ...] = (
+    "node_user_usages",
+    "node_usages",
+    "node_usage_reset_logs",
+)
+# Only truncate when clearly large — small/clean dumps stay untouched.
+HEAVY_USAGE_ROW_THRESHOLD = 50_000
+HEAVY_USAGE_SIZE_THRESHOLD = 16 * 1024 * 1024  # 16 MiB data+index
 
 
 def orphan_delete_sql(child: str, child_col: str, parent: str, parent_col: str = "id") -> str:
@@ -107,6 +122,14 @@ def _sqlite_column_exists(db: sqlite3.Connection, table: str, column: str) -> bo
     return column in cols
 
 
+def _sqlite_column_nullable(db: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = db.execute(f'PRAGMA table_info("{_ident(table)}")').fetchall()
+    for r in rows:
+        if r[1] == column:
+            return int(r[3] or 0) == 0  # notnull flag
+    return True
+
+
 def cleanup_orphans_sqlite(sqlite_path: str | Path) -> tuple[int, int]:
     """Delete/null orphan FK rows in SQLite. Returns (deleted, nulled)."""
     path = Path(sqlite_path)
@@ -131,8 +154,12 @@ def cleanup_orphans_sqlite(sqlite_path: str | Path) -> tuple[int, int]:
                 and _sqlite_column_exists(db, parent, parent_col)
             ):
                 continue
-            cur = db.execute(orphan_null_sql(child, child_col, parent, parent_col))
-            nulled += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            if _sqlite_column_nullable(db, child, child_col):
+                cur = db.execute(orphan_null_sql(child, child_col, parent, parent_col))
+                nulled += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            else:
+                cur = db.execute(orphan_delete_sql(child, child_col, parent, parent_col))
+                deleted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
         if deleted or nulled:
             db.commit()
     finally:
@@ -156,6 +183,18 @@ def _mysql_column_exists(cur, database: str, table: str, column: str) -> bool:
         (database, table, column),
     )
     return bool(cur.fetchone())
+
+
+def _mysql_column_nullable(cur, database: str, table: str, column: str) -> bool:
+    cur.execute(
+        "SELECT IS_NULLABLE FROM information_schema.columns "
+        "WHERE table_schema=%s AND table_name=%s AND column_name=%s LIMIT 1",
+        (database, table, column),
+    )
+    row = cur.fetchone()
+    if not row:
+        return True
+    return str(row[0] or "").upper() == "YES"
 
 
 def cleanup_orphans_mysql_conn(
@@ -197,9 +236,126 @@ def cleanup_orphans_mysql_conn(
                     and _mysql_column_exists(cur, database, parent, parent_col)
                 ):
                     continue
-                cur.execute(orphan_null_sql(child, child_col, parent, parent_col))
-                nulled += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+                if _mysql_column_nullable(cur, database, child, child_col):
+                    cur.execute(orphan_null_sql(child, child_col, parent, parent_col))
+                    nulled += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+                else:
+                    # NOT NULL (e.g. hosts.inbound_tag) — delete orphan rows instead.
+                    cur.execute(orphan_delete_sql(child, child_col, parent, parent_col))
+                    deleted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
     return deleted, nulled
+
+
+def _mysql_table_bulk_stats(cur, database: str, table: str) -> tuple[int, int]:
+    """Return (approx_rows, data+index bytes) from information_schema."""
+    cur.execute(
+        "SELECT TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH FROM information_schema.tables "
+        "WHERE table_schema=%s AND table_name=%s LIMIT 1",
+        (database, table),
+    )
+    row = cur.fetchone()
+    if not row:
+        return 0, 0
+    try:
+        approx = int(row[0] or 0)
+    except (TypeError, ValueError):
+        approx = 0
+    try:
+        size = int(row[1] or 0) + int(row[2] or 0)
+    except (TypeError, ValueError):
+        size = 0
+    return approx, size
+
+
+def shrink_heavy_usage_tables_mysql_conn(
+    *,
+    host: str,
+    port: int | str,
+    user: str,
+    password: str,
+    database: str,
+    row_threshold: int = HEAVY_USAGE_ROW_THRESHOLD,
+    size_threshold: int = HEAVY_USAGE_SIZE_THRESHOLD,
+) -> list[tuple[str, int]]:
+    """TRUNCATE large usage/history tables so bigint alembic finishes quickly.
+
+    Returns list of (table, approx_rows_before). Empty when nothing was large.
+    """
+    import pymysql
+
+    truncated: list[tuple[str, int]] = []
+    with pymysql.connect(
+        host=host,
+        port=int(port),
+        user=user,
+        password=password or "",
+        database=database,
+        charset="utf8mb4",
+        autocommit=True,
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SET FOREIGN_KEY_CHECKS=0")
+            try:
+                for table in HEAVY_USAGE_TABLES:
+                    if not _mysql_table_exists(cur, database, table):
+                        continue
+                    approx, size = _mysql_table_bulk_stats(cur, database, table)
+                    if approx < int(row_threshold) and size < int(size_threshold):
+                        continue
+                    cur.execute(f"TRUNCATE TABLE `{_ident(table)}`")
+                    truncated.append((table, approx if approx > 0 else size))
+            finally:
+                cur.execute("SET FOREIGN_KEY_CHECKS=1")
+    return truncated
+
+
+def shrink_heavy_usage_tables_sqlite(
+    sqlite_path: str | Path,
+    row_threshold: int = HEAVY_USAGE_ROW_THRESHOLD,
+) -> list[tuple[str, int]]:
+    path = Path(sqlite_path)
+    if not path.exists():
+        return []
+    truncated: list[tuple[str, int]] = []
+    db = sqlite3.connect(str(path))
+    try:
+        for table in HEAVY_USAGE_TABLES:
+            if not _sqlite_table_exists(db, table):
+                continue
+            row = db.execute(f"SELECT COUNT(*) FROM {_ident(table)}").fetchone()
+            n = int(row[0] or 0) if row else 0
+            if n < int(row_threshold):
+                continue
+            db.execute(f"DELETE FROM {_ident(table)}")
+            truncated.append((table, n))
+        if truncated:
+            db.commit()
+    finally:
+        db.close()
+    return truncated
+
+
+def shrink_heavy_usage_tables_on_conn(
+    db_type: str,
+    conn: dict,
+    row_threshold: int = HEAVY_USAGE_ROW_THRESHOLD,
+) -> list[tuple[str, int]]:
+    db_type = (db_type or "").lower()
+    if db_type == "sqlite":
+        path = conn.get("sqlite_path") or str(PASARGUARD_DATA / "db.sqlite3")
+        return shrink_heavy_usage_tables_sqlite(path, row_threshold=row_threshold)
+    if db_type not in ("mysql", "mariadb"):
+        return []
+    host = conn.get("host") or "127.0.0.1"
+    port = migration_port(conn, db_type)
+    return shrink_heavy_usage_tables_mysql_conn(
+        host=host,
+        port=port,
+        user=conn.get("user") or "root",
+        password=conn.get("password") or "",
+        database=conn.get("database") or "pasarguard",
+        row_threshold=row_threshold,
+    )
 
 
 def cleanup_orphans_postgres_conn(
@@ -360,12 +516,36 @@ async def _cleanup_orphans_mysql_via_compose(migrator, conn: dict) -> tuple[int,
         n = await _count_orphans(child_i, child_col_i, parent_i, parent_col_i)
         if n == 0:
             continue
-        rc, _ = await _mysql_compose_query(
+        # Prefer SET NULL when column is nullable; otherwise DELETE (avoids 1048).
+        rc_null, out_null = await _mysql_compose_query(
             svc=svc, user=user, pwd=pwd, host=host, db=db, cwd=cwd,
-            sql=orphan_null_sql(child_i, child_col_i, parent_i, parent_col_i),
+            sql=(
+                "SELECT IS_NULLABLE FROM information_schema.columns "
+                f"WHERE table_schema='{db}' AND table_name='{child_i}' "
+                f"AND column_name='{child_col_i}' LIMIT 1"
+            ),
+            tabular=True,
         )
-        if rc == 0:
-            nulled += n
+        nullable = True
+        if rc_null == 0:
+            for line in out_null.splitlines():
+                if line.strip().upper() in ("YES", "NO"):
+                    nullable = line.strip().upper() == "YES"
+                    break
+        if nullable:
+            rc, _ = await _mysql_compose_query(
+                svc=svc, user=user, pwd=pwd, host=host, db=db, cwd=cwd,
+                sql=orphan_null_sql(child_i, child_col_i, parent_i, parent_col_i),
+            )
+            if rc == 0:
+                nulled += n
+        else:
+            rc, _ = await _mysql_compose_query(
+                svc=svc, user=user, pwd=pwd, host=host, db=db, cwd=cwd,
+                sql=orphan_delete_sql(child_i, child_col_i, parent_i, parent_col_i),
+            )
+            if rc == 0:
+                deleted += n
 
     return deleted, nulled
 
@@ -405,14 +585,45 @@ async def heal_orphan_fk_refs(migrator) -> tuple[int, int]:
     return deleted, nulled
 
 
+async def heal_heavy_usage_tables(migrator) -> list[tuple[str, int]]:
+    """Truncate large usage tables before panel alembic (no-op when small/clean)."""
+    params = migrator.params or {}
+    target_db = (params.get("target_db") or "").lower()
+    if target_db not in ("mysql", "mariadb", "sqlite"):
+        return []
+    conn = dict(get_target_connection(params))
+    if target_db == "sqlite":
+        conn["sqlite_path"] = conn.get("sqlite_path") or str(PASARGUARD_DATA / "db.sqlite3")
+    try:
+        truncated = shrink_heavy_usage_tables_on_conn(target_db, conn)
+    except Exception as e:
+        migrator.job.log(f"Heavy-usage shrink note: {e}")
+        return []
+    for table, rows in truncated:
+        migrator.job.log(
+            f"Truncated large usage table `{table}` (~{rows} rows) before panel "
+            "alembic — avoids multi-hour MySQL copy-to-tmp on bigint/FK rebuild; "
+            "usage history refills from live traffic"
+        )
+    if truncated:
+        migrator.job.set_progress(
+            max(getattr(migrator.job, "progress", 0) or 0, 68),
+            "Cleared large usage tables for faster schema upgrade…",
+        )
+    return truncated
+
+
 async def heal_marzban_preboot(migrator) -> dict[str, int]:
     """Run all safe Marzban pre-boot heals. No-op on clean small dumps."""
     renamed = await heal_duplicate_unique_names(migrator)
     deleted, nulled = await heal_orphan_fk_refs(migrator)
+    truncated = await heal_heavy_usage_tables(migrator)
     return {
         "renamed": int(renamed or 0),
         "orphans_deleted": int(deleted or 0),
         "orphans_nulled": int(nulled or 0),
+        "usage_tables_truncated": int(len(truncated or [])),
+        "usage_rows_cleared": int(sum(n for _, n in (truncated or []))),
     }
 
 
