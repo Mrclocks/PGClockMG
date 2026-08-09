@@ -440,18 +440,71 @@ def _last_alembic_upgrade_line(output: str) -> str | None:
     return last
 
 
+def _is_heavy_alembic_upgrade(upgrade_line: str | None) -> bool:
+    """Revisions that rewrite large tables — must not be interrupted by recreate."""
+    low = (upgrade_line or "").lower()
+    return any(
+        s in low
+        for s in (
+            "bigint",
+            "use bigint for id",
+            "alter column",
+            "change column",
+            "modify column",
+            "convert.",
+            "migrate data",
+            "rebuild",
+        )
+    )
+
+
+def _alembic_wait_active(
+    output: str,
+    *,
+    last_upgrade_sig: str | None,
+    last_progress_at: float,
+    now: float,
+    stuck_limit: float,
+) -> bool:
+    """True while alembic should be treated as in-progress.
+
+    Remembers the last seen 'Running upgrade' so a temporary docker logs/ps
+    timeout (common during heavy MySQL ALTER) does not look like a dead panel.
+    """
+    if any(m in (output or "") for m in STARTUP_MARKERS):
+        return False
+    hard_fails = (
+        "Can't locate revision",
+        "Database migrations failed",
+        "ERROR: Database migrations failed",
+    )
+    if any(h in (output or "") for h in hard_fails):
+        return False
+    if _alembic_still_running(output):
+        return True
+    # Log fetch may have timed out / been empty while DDL still runs.
+    if last_upgrade_sig and (now - last_progress_at) < stuck_limit:
+        return True
+    return False
+
+
 async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
     """Fail unless PasarGuard logs show a clean startup (no migration errors).
 
     max_wait is a soft budget. While alembic is clearly still applying revisions,
     the wait is extended so long schema upgrades (e.g. custom Marzban → PasarGuard
     on large MySQL dumps — bigint id alters, etc.) are not aborted early.
+
+    Critical: never recreate / force-up the panel while alembic is mid-upgrade —
+    that interrupts MySQL ALTER TABLE and leaves the migrate stuck at ~70%.
     """
     soft_budget = max(60, int(max_wait))
     # Hard ceiling: large Marzban→PG chains (esp. bigint id) can take a long time.
     absolute_cap = max(soft_budget * 4, 3600)
     # Same revision with no new upgrade line for this long ⇒ treat as stuck.
-    stuck_same_upgrade = max(900, soft_budget)
+    # Heavy DDL (bigint on large dumps) gets a longer same-revision budget.
+    stuck_same_upgrade_default = max(900, soft_budget)
+    stuck_same_upgrade_heavy = max(3600, soft_budget * 2, stuck_same_upgrade_default)
 
     migrator.job.log(
         f"Verifying PasarGuard started without errors "
@@ -461,6 +514,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
 
     stable_ready = 0
     not_running_streak = 0
+    unknown_streak = 0
     healed_once = False
     silent_loop_healed = False
     prev_restart_count = 0
@@ -471,21 +525,35 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
     deadline = started_at + soft_budget
     while True:
         now = asyncio.get_event_loop().time()
+        stuck_limit = (
+            stuck_same_upgrade_heavy
+            if _is_heavy_alembic_upgrade(last_upgrade_sig)
+            else stuck_same_upgrade_default
+        )
+        # Heavy bigint chains on large dumps may exceed the default absolute cap.
+        effective_cap = (
+            max(absolute_cap, 7200)
+            if _is_heavy_alembic_upgrade(last_upgrade_sig)
+            else absolute_cap
+        )
+
         if now >= deadline:
             # Final chance: if alembic is still active under the absolute cap, keep going.
             out_end = await fetch_pasarguard_logs(migrator, tail=400)
-            if (
-                _alembic_still_running(out_end)
-                and (now - started_at) < absolute_cap
-                and (now - last_progress_at) < stuck_same_upgrade
-            ):
+            if _alembic_wait_active(
+                out_end,
+                last_upgrade_sig=last_upgrade_sig,
+                last_progress_at=last_progress_at,
+                now=now,
+                stuck_limit=stuck_limit,
+            ) and (now - started_at) < effective_cap:
                 extra = 180
                 deadline = now + extra
                 alembic_extensions += 1
                 migrator.job.log(
                     f"Alembic still active at soft deadline — extending "
                     f"(+{extra}s, total {int(now - started_at)}s, "
-                    f"last: {(_last_alembic_upgrade_line(out_end) or '?')[:120]})"
+                    f"last: {(last_upgrade_sig or _last_alembic_upgrade_line(out_end) or '?')[:120]})"
                 )
             else:
                 break
@@ -493,26 +561,41 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
         out = await fetch_pasarguard_logs(migrator, tail=400)
         _log_failures_from_output(migrator, out)
 
-        # Alembic still applying — do not fail yet; extend while progress is observed
+        # Refresh alembic progress from logs when available
         if _alembic_still_running(out):
             sig = _last_alembic_upgrade_line(out) or "Running upgrade"
             if sig != last_upgrade_sig:
                 last_upgrade_sig = sig
                 last_progress_at = now
                 migrator.job.log(f"Alembic progress: {sig[:160]}")
+            else:
+                # Same revision still printing / visible — DDL still running.
+                last_progress_at = now
+
+        alembic_active = _alembic_wait_active(
+            out,
+            last_upgrade_sig=last_upgrade_sig,
+            last_progress_at=last_progress_at,
+            now=now,
+            stuck_limit=stuck_limit,
+        )
+
+        # Alembic still applying — never recreate panel; only wait / extend.
+        if alembic_active:
+            sig = last_upgrade_sig or _last_alembic_upgrade_line(out) or "Running upgrade"
             elapsed = int(now - started_at)
             same_for = int(now - last_progress_at)
-            if same_for >= stuck_same_upgrade:
+            if same_for >= stuck_limit:
                 raise RuntimeError(
                     "PasarGuard alembic appears stuck on the same revision "
                     f"for {same_for}s.\n"
                     f"Last upgrade: {sig}\n"
                     + _extract_failure_snippet(out)
                 )
-            if (now - started_at) >= absolute_cap:
+            if elapsed >= effective_cap:
                 raise RuntimeError(
                     "PasarGuard alembic exceeded maximum wait "
-                    f"({absolute_cap}s) without reaching ready state.\n"
+                    f"({effective_cap}s) without reaching ready state.\n"
                     f"Last upgrade: {sig}\n"
                     + _extract_failure_snippet(out)
                 )
@@ -521,11 +604,15 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                 extra = 180
                 deadline = now + extra
                 alembic_extensions += 1
+                heavy = " [heavy DDL]" if _is_heavy_alembic_upgrade(sig) else ""
                 migrator.job.log(
-                    f"Alembic still running — extending health wait "
+                    f"Alembic still running{heavy} — extending health wait "
                     f"(+{extra}s, #{alembic_extensions}, elapsed {elapsed}s, "
-                    f"same-rev {same_for}s)..."
+                    f"same-rev {same_for}s); not restarting panel..."
                 )
+            # Transient unknown/exited probe noise is ignored during alembic.
+            not_running_streak = 0
+            unknown_streak = 0
             await asyncio.sleep(5)
             continue
 
@@ -571,9 +658,14 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
 
         # Detect silent restart loop: panel exits without any error log
         # (alembic context prints but uvicorn never starts)
+        # Skip if we recently saw an alembic upgrade — restart loop heal stamps
+        # head and would skip remaining revisions.
         restart_count = _count_restarts_in_logs(out)
-        if restart_count >= 2 and not silent_loop_healed:
-            # Only heal if we see multiple restarts without a startup marker
+        if (
+            restart_count >= 2
+            and not silent_loop_healed
+            and not last_upgrade_sig
+        ):
             has_startup = any(marker in (out or "") for marker in STARTUP_MARKERS)
             if not has_startup:
                 silent_loop_healed = True
@@ -586,8 +678,22 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
         state = await _pasarguard_container_state(migrator)
         if state != "running":
             not_running_streak += 1
+            if state == "unknown":
+                unknown_streak += 1
+            else:
+                unknown_streak = 0
             migrator.job.log(f"PasarGuard container state={state} (wait {not_running_streak})")
-            if not_running_streak >= 2 and not healed_once:
+            # docker compose ps often returns unknown/timeout while MySQL DDL
+            # saturates the host — never recreate on unknown alone.
+            if state == "unknown":
+                if unknown_streak >= 12:
+                    raise RuntimeError(
+                        "PasarGuard container state stayed unknown too long.\n"
+                        + _extract_failure_snippet(out)
+                    )
+                await asyncio.sleep(5)
+                continue
+            if not_running_streak >= 2 and not healed_once and state == "exited":
                 healed_once = True
                 migrator.job.log("Bringing pasarguard back up…")
                 await _ensure_pasarguard_up(migrator)
@@ -599,6 +705,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
             continue
 
         not_running_streak = 0
+        unknown_streak = 0
         if any(marker in (out or "") for marker in STARTUP_MARKERS):
             stable_ready += 1
             if stable_ready >= 2:
@@ -615,7 +722,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
         raise RuntimeError(
             "PasarGuard startup failed.\n" + _extract_failure_snippet(out)
         )
-    last_up = _last_alembic_upgrade_line(out)
+    last_up = last_upgrade_sig or _last_alembic_upgrade_line(out)
     if last_up and not any(m in (out or "") for m in STARTUP_MARKERS):
         raise RuntimeError(
             "PasarGuard did not finish alembic / reach ready state in time.\n"

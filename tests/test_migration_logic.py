@@ -228,6 +228,8 @@ def test_alembic_duplicate_heal_helpers():
 def test_alembic_still_running_helpers():
     from app.services.pasarguard_ops import (
         _alembic_still_running,
+        _alembic_wait_active,
+        _is_heavy_alembic_upgrade,
         _last_alembic_upgrade_line,
     )
 
@@ -259,6 +261,34 @@ def test_alembic_still_running_helpers():
     assert last is not None
     assert "4f15c0789493" in last
     assert "bigint" in last
+    assert _is_heavy_alembic_upgrade(last) is True
+    assert _is_heavy_alembic_upgrade("Running upgrade a -> b, add note") is False
+
+    # Empty/timeout logs still count as active when we recently saw an upgrade
+    now = 1_000_000.0
+    assert _alembic_wait_active(
+        "Timeout",
+        last_upgrade_sig=last,
+        last_progress_at=now - 30,
+        now=now,
+        stuck_limit=900,
+    ) is True
+    # After startup marker — stop waiting
+    assert _alembic_wait_active(
+        "Application startup complete\n",
+        last_upgrade_sig=last,
+        last_progress_at=now - 30,
+        now=now,
+        stuck_limit=900,
+    ) is False
+    # Hard fail stops memory wait
+    assert _alembic_wait_active(
+        "ERROR: Database migrations failed\n",
+        last_upgrade_sig=last,
+        last_progress_at=now - 30,
+        now=now,
+        stuck_limit=900,
+    ) is False
     print("OK: alembic still-running helpers")
 
 
