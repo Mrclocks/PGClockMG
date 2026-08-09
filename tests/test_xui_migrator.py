@@ -655,7 +655,7 @@ def test_convert_landed_sqlite_for_all_server_engines():
         asyncio.run(_assert_convert_for_target(engine))
 
 
-async def _assert_convert_for_target(target_db: str):
+async def _assert_convert_for_target(target_db: str, *, diverge_pg_secrets: bool = False):
     with tempfile.TemporaryDirectory() as tmp:
         pg_dir = Path(tmp) / "opt" / "pasarguard"
         data = Path(tmp) / "var" / "lib" / "pasarguard"
@@ -678,17 +678,21 @@ async def _assert_convert_for_target(target_db: str):
             port = "3306"
             admin_user = "root"
         else:
+            # When POSTGRES_PASSWORD != DB_PASSWORD, sync + finalize must both
+            # use POSTGRES_PASSWORD (was a restart-loop bug if sync used DB_PASSWORD).
+            db_pwd = "appsecret" if diverge_pg_secrets else "pgsecret"
+            pg_pwd = "rootsecret" if diverge_pg_secrets else "pgsecret"
             install_env = (
                 f"SQLALCHEMY_DATABASE_URL="
-                f'"postgresql+asyncpg://pasarguard:pgsecret@127.0.0.1:5432/pasarguard"\n'
+                f'"postgresql+asyncpg://pasarguard:{db_pwd}@127.0.0.1:5432/pasarguard"\n'
                 "DB_USER=pasarguard\n"
-                "DB_PASSWORD=pgsecret\n"
+                f"DB_PASSWORD={db_pwd}\n"
                 "DB_NAME=pasarguard\n"
                 "POSTGRES_USER=postgres\n"
-                "POSTGRES_PASSWORD=pgsecret\n"
+                f"POSTGRES_PASSWORD={pg_pwd}\n"
             )
             url_needle = "postgresql+asyncpg://"
-            secret = "pgsecret"
+            secret = pg_pwd
             port = "5432"
             admin_user = "postgres"
 
@@ -696,7 +700,13 @@ async def _assert_convert_for_target(target_db: str):
 
         job = MigrationJob(job_id=f"conv-{target_db}")
         migrator = XuiMigrator(job, {"target_db": target_db})
-        calls = {"mysql_sync": 0, "pg_sync": 0, "cross": 0, "cross_tgt": None}
+        calls = {
+            "mysql_sync": 0,
+            "pg_sync": 0,
+            "cross": 0,
+            "cross_tgt": None,
+            "pg_sync_password": None,
+        }
 
         async def _fake_cross(migrator, path, src, tgt):
             calls["cross"] += 1
@@ -719,9 +729,14 @@ async def _assert_convert_for_target(target_db: str):
             assert kw.get("app_user") == "pasarguard"
             assert kw.get("password") == secret
 
-        async def _fake_pg_sync(migrator, db_type, admin, env_text=None):
+        async def _fake_pg_sync(migrator, db_type, admin, env_text=None, **kw):
             calls["pg_sync"] += 1
             assert db_type == target_db
+            calls["pg_sync_password"] = kw.get("password")
+            assert kw.get("password") == secret, (
+                "PG role sync must use the same password finalize writes "
+                f"(got {kw.get('password')!r}, want {secret!r})"
+            )
 
         async def _fake_resolve(migrator, db_type, env_text=None):
             return {
@@ -759,12 +774,19 @@ async def _assert_convert_for_target(target_db: str):
         else:
             assert calls["pg_sync"] == 1
             assert calls["mysql_sync"] == 0
+            assert calls["pg_sync_password"] == secret
         env_now = (pg_dir / ".env").read_text(encoding="utf-8")
         assert url_needle in env_now
         assert "pasarguard" in env_now
         assert secret in env_now
         assert not land.exists()
         assert list(data.glob("db.sqlite3.pre-convert-*.bak"))
+
+
+def test_convert_landed_sqlite_pg_diverged_secrets_align():
+    """POSTGRES_PASSWORD != DB_PASSWORD must not desync role vs panel URL."""
+    asyncio.run(_assert_convert_for_target("postgresql", diverge_pg_secrets=True))
+    asyncio.run(_assert_convert_for_target("timescaledb", diverge_pg_secrets=True))
 
 
 def test_patch_xui_converter_tag_bug_moves_assignment():
@@ -902,6 +924,7 @@ if __name__ == "__main__":
     test_normalize_target_db_aliases()
     test_convert_landed_sqlite_syncs_mysql_and_finalizes_env()
     test_convert_landed_sqlite_for_all_server_engines()
+    test_convert_landed_sqlite_pg_diverged_secrets_align()
     test_patch_xui_converter_tag_bug_moves_assignment()
     test_assert_migrated_core_config_rejects_empty()
     test_run_cmd_shell_string_uses_subprocess_shell()
