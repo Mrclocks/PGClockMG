@@ -1875,6 +1875,8 @@ class XuiMigrator(BaseMigrator):
             or "pasarguard"
         )
         # Prefer engine-native root/admin secret for sync; URL keeps app user.
+        # CRITICAL: the same sync_pwd must be used for role ALTER and .env
+        # finalize — otherwise panel URL and live SCRAM secrets diverge.
         if target_db in ("mysql", "mariadb"):
             sync_pwd = (
                 read_env_var(env, "MYSQL_ROOT_PASSWORD")
@@ -1912,9 +1914,23 @@ class XuiMigrator(BaseMigrator):
             self.job.log(
                 f"MySQL app user '{app_user}' aligned for panel SQLAlchemy URL"
             )
-        elif target_db in ("postgresql", "timescaledb") and admin:
+        elif target_db in ("postgresql", "timescaledb") and sync_pwd:
+            try:
+                live = await resolve_live_admin_connection(
+                    self, target_db, env_text=env,
+                )
+            except Exception:
+                live = {**admin, "db_type": target_db, "password": sync_pwd}
             await sync_postgres_roles_to_app_password(
-                self, target_db, admin, env_text=env,
+                self,
+                target_db,
+                live,
+                env_text=env,
+                password=sync_pwd,
+            )
+            self.job.log(
+                f"PostgreSQL roles aligned to finalize password "
+                f"(user={app_user})"
             )
 
         if not PASARGUARD_ENV.exists():

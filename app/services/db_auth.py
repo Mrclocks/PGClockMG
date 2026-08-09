@@ -540,38 +540,59 @@ async def sync_postgres_roles_to_app_password(
     db_type: str,
     admin_conn: dict,
     env_text: str | None = None,
-) -> None:
-    """Align app + superuser SCRAM secrets and refresh PgBouncer auth cache."""
+    *,
+    password: str | None = None,
+) -> bool:
+    """Align app + superuser SCRAM secrets and refresh PgBouncer auth cache.
+
+    Password priority must match ``finalize_pasarguard_env_after_restore`` /
+    x-ui convert (``POSTGRES_PASSWORD`` then ``DB_PASSWORD``). If sync used
+    ``DB_PASSWORD`` while finalize wrote ``POSTGRES_PASSWORD`` into the panel
+    URL, PostgreSQL auth fails after sqlite→PG migration when those differ.
+    """
     import asyncio
 
+    from app.services.env_migration import parse_sqlalchemy_url
+
     text = env_text if env_text is not None else read_env_text()
+    url_pwd = parse_sqlalchemy_url(
+        read_env_var(text, "SQLALCHEMY_DATABASE_URL") or "", text,
+    ).get("password")
+    # Prefer explicit password from caller (convert/finalize sync_pwd), then
+    # POSTGRES_PASSWORD before DB_PASSWORD — same order as x-ui sync_pwd.
     app_pwd = (
-        read_env_var(text, "DB_PASSWORD")
+        password
+        or read_env_var(text, "POSTGRES_PASSWORD")
+        or read_env_var(text, "DB_PASSWORD")
         or read_compose_db_credentials(text).get("password")
-        or admin_conn.get("password")
+        or url_pwd
+        or (admin_conn or {}).get("password")
         or ""
     )
     if not app_pwd:
-        return
+        return False
 
     service = resolve_db_service(db_type) or "timescaledb"
     db_name = target_database_name(text, db_type)
-    admin_user = admin_conn.get("user") or "postgres"
-    admin_pwd = admin_conn.get("password") or app_pwd
+    admin_user = (admin_conn or {}).get("user") or "postgres"
+    admin_pwd = (admin_conn or {}).get("password") or app_pwd
 
     def _lit(v: str) -> str:
         return "'" + (v or "").replace("'", "''") + "'"
 
+    url_user = parse_sqlalchemy_url(
+        read_env_var(text, "SQLALCHEMY_DATABASE_URL") or "", text,
+    ).get("user")
     roles = _unique_strings(
+        read_env_var(text, "POSTGRES_USER") or "postgres",
         read_env_var(text, "DB_USER"),
+        url_user,
         db_name,
     )
-    pg_user = read_env_var(text, "POSTGRES_USER")
-    if pg_user:
-        roles.insert(0, pg_user)
     migrator.job.log(f"Syncing PostgreSQL role passwords ({len(roles)} roles)...")
     lit = _lit(app_pwd)
     cwd = str(PASARGUARD_DIR)
+    any_ok = False
     for role in roles:
         sql = f'ALTER ROLE "{role}" WITH PASSWORD {lit};'
         cmd = (
@@ -579,9 +600,18 @@ async def sync_postgres_roles_to_app_password(
             f'env PGPASSWORD="{admin_pwd.replace(chr(34), "")}" '
             f'psql -U {admin_user} -d postgres -v ON_ERROR_STOP=0 -c "{sql}"'
         )
-        await migrator._run_cmd(cmd, timeout=30)
+        ok, out = await migrator._run_cmd(cmd, timeout=30)
+        if ok:
+            any_ok = True
+        else:
+            migrator.job.log(
+                f"PostgreSQL ALTER ROLE {role} note: {(out or '')[-200:]}"
+            )
 
-    if "pgbouncer" in (PASARGUARD_DIR / "docker-compose.yml").read_text(encoding="utf-8", errors="ignore"):
+    compose_path = PASARGUARD_DIR / "docker-compose.yml"
+    if compose_path.is_file() and "pgbouncer" in compose_path.read_text(
+        encoding="utf-8", errors="ignore",
+    ):
         migrator.job.log("Restarting pgbouncer after role password sync...")
         await migrator._run_cmd(
             ["docker", "compose", "restart", "pgbouncer"],
@@ -589,3 +619,4 @@ async def sync_postgres_roles_to_app_password(
             timeout=90,
         )
         await asyncio.sleep(4)
+    return any_ok

@@ -944,12 +944,16 @@ def env_points_to_db(text: str, target_db: str) -> bool:
 def _replace_sqlalchemy_password(url: str, password: str) -> str:
     if not url or not password:
         return url
+    # URL-encode so passwords with @ : / # etc. do not break SQLAlchemy parsing.
+    from urllib.parse import quote
+
+    enc = quote(password, safe="")
     m = re.search(r"^(.*://[^:/@]+:)([^@]+)(@.*)$", url)
     if m:
-        return m.group(1) + password + m.group(3)
+        return m.group(1) + enc + m.group(3)
     m2 = re.search(r"^(.*://[^:/@]+)(@.*)$", url)
     if m2:
-        return m2.group(1) + ":" + password + m2.group(2)
+        return m2.group(1) + ":" + enc + m2.group(2)
     return url
 
 
