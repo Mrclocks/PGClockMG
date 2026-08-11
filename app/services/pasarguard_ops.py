@@ -525,18 +525,40 @@ def _alembic_still_running(output: str) -> bool:
     return "Running upgrade" in tail
 
 
+def _log_fetch_unusable(output: str) -> bool:
+    """True when docker logs probe timed out / returned nothing useful."""
+    text = (output or "").strip()
+    if not text:
+        return True
+    # migrator._run_cmd / fetch helpers often surface bare "Timeout"
+    return text.lower() in {"timeout", "timed out", "time out"}
+
+
+def _has_alembic_bootstrap_markers(output: str) -> bool:
+    """True if recent log lines show Context/DDL assume (before Running upgrade)."""
+    text = output or ""
+    if "Running upgrade" in text:
+        return False
+    tail = "\n".join(text.splitlines()[-40:])
+    return any(m in tail for m in _ALEMBIC_BOOTSTRAP_MARKERS)
+
+
 def _alembic_bootstrap_active(
     output: str,
     *,
     started_at: float,
     now: float,
     window: float = _ALEMBIC_BOOTSTRAP_WINDOW,
+    saw_bootstrap: bool = False,
 ) -> bool:
     """True briefly while alembic printed Context/DDL assume but not Running upgrade yet.
 
     Prevents a soft recreate / silent stamp-heal from firing in the gap before the
     first revision line. Hard failures and startups clear this. Light installs that
     never touch alembic are unaffected (no bootstrap markers).
+
+    ``saw_bootstrap`` remembers a prior Context sighting so an empty/timeout log
+    fetch under Docker load does not drop the bootstrap wait early.
     """
     text = output or ""
     if any(m in text for m in STARTUP_MARKERS):
@@ -547,8 +569,9 @@ def _alembic_bootstrap_active(
         return False
     if (now - started_at) > window:
         return False
-    tail = "\n".join(text.splitlines()[-40:])
-    return any(m in tail for m in _ALEMBIC_BOOTSTRAP_MARKERS)
+    if saw_bootstrap and _log_fetch_unusable(text):
+        return True
+    return _has_alembic_bootstrap_markers(text)
 
 
 def _last_alembic_upgrade_line(output: str) -> str | None:
@@ -601,6 +624,16 @@ def _should_refresh_alembic_progress(container_state: str | None, logs: str) -> 
     return False
 
 
+def _panel_logs_show_startup_activity(output: str) -> bool:
+    """Evidence the panel started all-in-one / alembic (not a dead/empty probe)."""
+    text = output or ""
+    if not text.strip():
+        return False
+    if "Starting all-in-one" in text:
+        return True
+    return any(m in text for m in _ALEMBIC_ACTIVITY_MARKERS)
+
+
 def _alembic_wait_active(
     output: str,
     *,
@@ -610,12 +643,14 @@ def _alembic_wait_active(
     stuck_limit: float,
     started_at: float | None = None,
     bootstrap_window: float = _ALEMBIC_BOOTSTRAP_WINDOW,
+    saw_bootstrap: bool = False,
 ) -> bool:
     """True while alembic should be treated as in-progress.
 
     Remembers the last seen 'Running upgrade' so a temporary docker logs/ps
     timeout (common during heavy MySQL ALTER) does not look like a dead panel.
-    Also covers the short Context-only bootstrap window before the first upgrade.
+    Also covers the short Context-only bootstrap window before the first upgrade,
+    including remembered bootstrap when log fetch times out.
     """
     if any(m in (output or "") for m in STARTUP_MARKERS):
         return False
@@ -624,7 +659,11 @@ def _alembic_wait_active(
     if _alembic_still_running(output):
         return True
     if started_at is not None and _alembic_bootstrap_active(
-        output, started_at=started_at, now=now, window=bootstrap_window
+        output,
+        started_at=started_at,
+        now=now,
+        window=bootstrap_window,
+        saw_bootstrap=saw_bootstrap,
     ):
         return True
     # Log fetch may have timed out / been empty while DDL still runs.
@@ -675,6 +714,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
     last_upgrade_sig: str | None = None
     last_known_state = "unknown"
     last_ddl_status: str | None = None
+    saw_alembic_bootstrap = False
     last_progress_at = asyncio.get_event_loop().time()
     last_heartbeat_at = 0.0
     revision_started_at = asyncio.get_event_loop().time()
@@ -698,6 +738,8 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
             out_end = await fetch_pasarguard_logs(
                 migrator, tail=log_tail, timeout=log_timeout
             )
+            if _has_alembic_bootstrap_markers(out_end):
+                saw_alembic_bootstrap = True
             if _alembic_wait_active(
                 out_end,
                 last_upgrade_sig=last_upgrade_sig,
@@ -705,6 +747,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                 now=now,
                 stuck_limit=stuck_limit,
                 started_at=started_at,
+                saw_bootstrap=saw_alembic_bootstrap,
             ) and (now - started_at) < effective_cap:
                 extra = 180
                 deadline = now + extra
@@ -722,6 +765,9 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
         )
         # Only surface real failures into the job log (not 200× docker log spam).
         _log_failures_from_output(migrator, out)
+
+        if _has_alembic_bootstrap_markers(out):
+            saw_alembic_bootstrap = True
 
         probe_i += 1
         # Heavy mode: skip docker ps every other cycle (daemon often stalls on ALTER).
@@ -756,6 +802,15 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
         ):
             # Log fetch timed out under load — keep memory progress alive.
             last_progress_at = now
+        elif (
+            _log_fetch_unusable(out)
+            and saw_alembic_bootstrap
+            and not last_upgrade_sig
+            and state in ("running", "restarting", "unknown", "")
+            and (now - started_at) <= _ALEMBIC_BOOTSTRAP_WINDOW
+        ):
+            # Bootstrap Context was seen, then docker logs timed out — keep waiting.
+            last_progress_at = now
 
         # Confirm MySQL is still rewriting tables (real progress under silent logs).
         if heavy_mode and (probe_i % 2 == 1):
@@ -771,6 +826,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
             now=now,
             stuck_limit=stuck_limit,
             started_at=started_at,
+            saw_bootstrap=saw_alembic_bootstrap,
         )
 
         # Alembic still applying — never force-recreate; only wait / soft-up if dead.
@@ -779,7 +835,10 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                 last_upgrade_sig
                 or _last_alembic_upgrade_line(out)
                 or ("bootstrap" if _alembic_bootstrap_active(
-                    out, started_at=started_at, now=now
+                    out,
+                    started_at=started_at,
+                    now=now,
+                    saw_bootstrap=saw_alembic_bootstrap,
                 ) else "Running upgrade")
             )
             elapsed = int(now - started_at)
@@ -889,7 +948,10 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
         # stamp-head heal would skip remaining Marzban→PG revisions.
         restart_count = _count_restarts_in_logs(out)
         bootstrap_now = _alembic_bootstrap_active(
-            out, started_at=started_at, now=now
+            out,
+            started_at=started_at,
+            now=now,
+            saw_bootstrap=saw_alembic_bootstrap,
         )
         if (
             restart_count >= 2
@@ -922,6 +984,30 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
             # saturates the host — never recreate on unknown alone.
             if state == "unknown":
                 if unknown_streak >= 12:
+                    # Panel/alembic evidence + flaky docker ps: keep waiting under cap.
+                    # Do not false-fail "unknown too long" while Context/all-in-one
+                    # logs prove the panel is still starting (common on PG/host load).
+                    alive = (
+                        _panel_logs_show_startup_activity(out)
+                        or saw_alembic_bootstrap
+                        or bool(last_upgrade_sig)
+                    )
+                    if (
+                        alive
+                        and not _alembic_hard_fail(out)
+                        and (now - started_at) < effective_cap
+                    ):
+                        unknown_streak = 0
+                        if deadline - now < 90:
+                            deadline = now + 180
+                        if (now - last_heartbeat_at) >= 30:
+                            last_heartbeat_at = now
+                            migrator.job.log(
+                                "Docker state still unknown — continuing wait "
+                                "(panel logs show startup/alembic activity)…"
+                            )
+                        await asyncio.sleep(5)
+                        continue
                     raise RuntimeError(
                         "PasarGuard container state stayed unknown too long.\n"
                         + _extract_failure_snippet(out)
