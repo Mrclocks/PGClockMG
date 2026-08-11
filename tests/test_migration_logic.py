@@ -309,6 +309,41 @@ def test_alembic_still_running_helpers():
     # Clean light boot with no alembic markers — bootstrap inactive
     assert _alembic_bootstrap_active("Starting backend...\n", started_at=now - 10, now=now) is False
 
+    # Remembered bootstrap survives empty/timeout log fetch (Docker under load)
+    assert _alembic_bootstrap_active(
+        "",
+        started_at=now - 10,
+        now=now,
+        saw_bootstrap=True,
+    ) is True
+    assert _alembic_wait_active(
+        "Timeout",
+        last_upgrade_sig=None,
+        last_progress_at=now - 10,
+        now=now,
+        stuck_limit=300,
+        started_at=now - 10,
+        saw_bootstrap=True,
+    ) is True
+    # Remembered bootstrap still expires after the window
+    assert _alembic_bootstrap_active(
+        "",
+        started_at=now - 500,
+        now=now,
+        saw_bootstrap=True,
+    ) is False
+    # Without memory, empty logs are not bootstrap-active
+    assert _alembic_bootstrap_active("", started_at=now - 10, now=now) is False
+
+    from app.services.pasarguard_ops import _panel_logs_show_startup_activity
+
+    assert _panel_logs_show_startup_activity(ctx) is True
+    assert _panel_logs_show_startup_activity(
+        "pasarguard-1 | [2026-08-11] Starting all-in-one...\n"
+    ) is True
+    assert _panel_logs_show_startup_activity("") is False
+    assert _panel_logs_show_startup_activity("unrelated noise\n") is False
+
     # Exited container must not keep refreshing progress from stale upgrade lines
     assert _should_refresh_alembic_progress("running", chain) is True
     assert _should_refresh_alembic_progress("unknown", chain) is True
