@@ -57,6 +57,16 @@ def soft_db_family(a: str | None, b: str | None) -> bool:
     return False
 
 
+def should_sync_alembic_before_panel_boot(needs_convert: bool) -> bool:
+    """Same-engine / soft-family restores must sync alembic while panel is down.
+
+    Convert path already landed schema at head; starting the panel first and then
+    running one-shot alembic caused dual migrate on Timescale/PG (panel dies after
+    Context, wizard hangs at ~90%).
+    """
+    return not bool(needs_convert)
+
+
 def extract_psql_errors(text: str, limit: int = 12) -> str:
     """Pull ERROR/FATAL lines out of noisy psql dump output for user-facing messages."""
     if not text:
@@ -1207,50 +1217,88 @@ async def _ensure_timescaledb_not_in_restore_mode(
     If timescaledb_pre_restore() was called but post_restore() was never
     confirmed, the extension keeps the DB in maintenance mode and PasarGuard
     silently crashes on every connect attempt — producing a restart loop with
-    no visible error in panel logs.
+    no visible error in panel logs (often stops right after alembic Context).
 
-    This function checks the timescaledb.restoring GUC and, if it is 'on',
-    calls timescaledb_post_restore() to release maintenance mode.
+    If the GUC check itself fails (auth/role), still attempt post_restore —
+    leaving restoring=on is worse than a no-op post_restore when already off.
     """
     svc = await _detect_db_container(job, "timescaledb") or await _detect_db_container(job, "postgresql")
     if not svc:
         return
-    # Query the restoring flag — available since TimescaleDB 2.x
-    check_sql = (
-        "SELECT current_setting('timescaledb.restoring', true);"
-    )
-    ok, out = await _run(
-        job,
-        [
-            "docker", "compose", "exec", "-T",
-            "-e", f"PGPASSWORD={password}",
-            svc, "psql", "-U", user, "-d", db_name,
-            "-v", "ON_ERROR_STOP=0", "-At", "-c", check_sql,
-        ],
-        cwd=str(PASARGUARD_DIR),
-        timeout=20,
-    )
-    val = (out or "").strip().splitlines()
-    restoring = val[-1].strip().lower() if val else ""
-    if restoring == "on":
-        job.log("TimescaleDB is still in restore mode — calling timescaledb_post_restore() now")
-        ok2, out2 = await _run(
+
+    check_sql = "SELECT current_setting('timescaledb.restoring', true);"
+    post_sql = "SELECT timescaledb_post_restore();"
+    users: list[str] = []
+    for cand in ((user or "").strip(), "postgres"):
+        if cand and cand not in users:
+            users.append(cand)
+    if not users:
+        users = ["postgres"]
+    dbn = (db_name or "").strip() or "pasarguard"
+
+    async def _psql(u: str, sql: str, *, timeout: int = 20) -> tuple[bool, str]:
+        return await _run(
             job,
             [
                 "docker", "compose", "exec", "-T",
                 "-e", f"PGPASSWORD={password}",
-                svc, "psql", "-U", user, "-d", db_name,
-                "-v", "ON_ERROR_STOP=0", "-c", "SELECT timescaledb_post_restore();",
+                svc, "psql", "-U", u, "-d", dbn,
+                "-v", "ON_ERROR_STOP=0", "-At", "-c", sql,
             ],
             cwd=str(PASARGUARD_DIR),
-            timeout=30,
+            timeout=timeout,
         )
-        if ok2:
-            job.log("TimescaleDB restore mode cleared successfully")
-        else:
-            job.log(f"timescaledb_post_restore warning: {extract_psql_errors(out2 or '')[:300]}")
-    else:
+
+    restoring = ""
+    check_ok = False
+    for u in users:
+        ok, out = await _psql(u, check_sql, timeout=20)
+        if not ok:
+            continue
+        val = (out or "").strip().splitlines()
+        restoring = val[-1].strip().lower() if val else ""
+        # Empty/off/n/a all count as a successful read of the GUC.
+        check_ok = True
+        break
+
+    need_post = restoring == "on" or not check_ok
+    if not need_post:
         job.log(f"TimescaleDB restore mode check: {restoring or 'off/n/a'} — OK")
+        return
+
+    if restoring == "on":
+        job.log("TimescaleDB is still in restore mode — calling timescaledb_post_restore() now")
+    else:
+        job.log(
+            "TimescaleDB restore-mode check inconclusive — "
+            "forcing timescaledb_post_restore() before panel start"
+        )
+
+    cleared = False
+    last_err = ""
+    for u in users:
+        ok2, out2 = await _psql(u, post_sql, timeout=30)
+        if ok2:
+            job.log(f"TimescaleDB restore mode cleared successfully (as {u})")
+            cleared = True
+            break
+        last_err = extract_psql_errors(out2 or "")[:300] or (out2 or "")[-300:]
+    if not cleared:
+        job.log(f"timescaledb_post_restore warning: {last_err}")
+        return
+
+    # Confirm when possible (best-effort).
+    for u in users:
+        ok3, out3 = await _psql(u, check_sql, timeout=20)
+        if not ok3:
+            continue
+        val3 = (out3 or "").strip().splitlines()
+        after = val3[-1].strip().lower() if val3 else ""
+        if after == "on":
+            job.log("WARNING: timescaledb.restoring is still on after post_restore")
+        else:
+            job.log(f"TimescaleDB restore mode confirmed clear ({after or 'off/n/a'})")
+        return
 
 
 async def _heal_panel_auth_if_needed(job: MigrationJob, password: str, user: str, db_name: str, db_type: str) -> None:
@@ -2440,11 +2488,52 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             _relocate_sqlite_after_convert(job)
 
         job.set_progress(90, "Starting PasarGuard...")
-        # Ensure TimescaleDB is not stuck in restore mode before panel starts
+        final_engine = final_db or installed_db or backup_db
+        mini_params: dict = {
+            "target_db": final_engine,
+            "target_db_password": verify_pass,
+            "target_db_user": verify_user,
+            "target_db_name": verify_db,
+            "target_db_host": "127.0.0.1",
+            "_auto_db_credentials": True,
+        }
+        if final_engine in ("postgresql", "timescaledb"):
+            mini_params["_resolved_target_conn"] = {
+                "user": verify_user,
+                "password": verify_pass,
+                "database": verify_db,
+                "host": "127.0.0.1",
+                "port": "5432",
+                "db_type": final_engine,
+            }
+        mini = _RestoreMini(job, mini_params)
+
+        # Timescale stuck in restoring=on → panel dies after alembic Context with
+        # almost no error (seen on timescaledb→timescaledb same-engine restores).
         if (final_db or restore_engine or "") in ("timescaledb", "postgresql"):
             await _ensure_timescaledb_not_in_restore_mode(
                 job, verify_pass, verify_user, verify_db,
             )
+
+        # Same-engine / soft-family: run one-shot alembic WHILE the panel is down.
+        # Starting the panel first caused dual alembic (all-in-one + one-shot) on
+        # the same DB — Timescale/PG restores hung or the panel vanished mid-Context.
+        # Convert path already aligned schema to head — skip re-sync there.
+        if should_sync_alembic_before_panel_boot(needs_convert):
+            job.log("Stopping pasarguard before one-shot alembic sync (avoid dual migrate)…")
+            await _compose(job, "stop", "pasarguard", timeout=120)
+            try:
+                from app.services.pasarguard_ops import sync_alembic_for_startup
+
+                await sync_alembic_for_startup(mini, final_engine)
+            except Exception as e:
+                job.log(f"Alembic sync note: {e}")
+            if final_engine in ("timescaledb", "postgresql"):
+                await _ensure_timescaledb_not_in_restore_mode(
+                    job, verify_pass, verify_user, verify_db,
+                )
+        else:
+            job.log("Skipping full alembic re-sync after convert (schema already at head)")
 
         # Force recreate so panel picks up finalized .env (DB URL / SSL)
         ok, out = await _compose(job, "up", "-d", "--force-recreate", "pasarguard", timeout=300)
@@ -2473,37 +2562,6 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             verify_db,
             final_db or restore_engine or "",
         )
-
-        # Best-effort schema align — use live credentials, never blind postgres/default
-        final_engine = final_db or installed_db or backup_db
-        mini_params: dict = {
-            "target_db": final_engine,
-            "target_db_password": verify_pass,
-            "target_db_user": verify_user,
-            "target_db_name": verify_db,
-            "target_db_host": "127.0.0.1",
-            "_auto_db_credentials": True,
-        }
-        if final_engine in ("postgresql", "timescaledb"):
-            mini_params["_resolved_target_conn"] = {
-                "user": verify_user,
-                "password": verify_pass,
-                "database": verify_db,
-                "host": "127.0.0.1",
-                "port": "5432",
-                "db_type": final_engine,
-            }
-        mini = _RestoreMini(job, mini_params)
-        # Convert already upgraded to head + pinned alembic_version — only heal if needed
-        if not needs_convert:
-            try:
-                from app.services.pasarguard_ops import sync_alembic_for_startup
-
-                await sync_alembic_for_startup(mini, final_engine)
-            except Exception as e:
-                job.log(f"Alembic sync note: {e}")
-        else:
-            job.log("Skipping full alembic re-sync after convert (schema already at head)")
 
         # Re-read password from finalized .env in case finalize adjusted it
         env_now = _read_current_env()
