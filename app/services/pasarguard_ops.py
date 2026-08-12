@@ -225,7 +225,12 @@ def _check_logs_for_failure(output: str) -> str | None:
 
 
 async def _pasarguard_container_state(migrator) -> str:
-    """Return running | restarting | exited | unknown for the panel service."""
+    """Return running | restarting | exited | unknown for the panel service.
+
+    ``unknown`` is reserved for probe timeout/failure under load.
+    A successful empty ``compose ps`` means the panel is not running → ``exited``
+    (do not confuse a dead/missing panel with a flaky docker daemon).
+    """
     cwd = str(PASARGUARD_DIR)
     # Quiet + short timeouts: during MySQL bigint ALTER, docker can stall.
     ok, out = await migrator._run_cmd(
@@ -262,6 +267,29 @@ async def _pasarguard_container_state(migrator) -> str:
             return status if status != "dead" else "exited"
         if status:
             return status
+        return "unknown"
+
+    # Successful empty probe: no running container. Check exited via ps -a.
+    if ok2 and not (ids or "").strip():
+        ok_a, out_a = await migrator._run_cmd(
+            [
+                "docker", "compose", "ps", "-a",
+                "--format", "{{.Status}}", "pasarguard",
+            ],
+            cwd=cwd,
+            timeout=10,
+            quiet=True,
+        )
+        if ok_a:
+            text_a = (out_a or "").lower()
+            if text_a.strip():
+                if "restarting" in text_a:
+                    return "restarting"
+                if "up " in text_a or "(healthy)" in text_a or "running" in text_a:
+                    return "running"
+                return "exited"
+            # Service has no containers at all
+            return "exited"
     return "unknown"
 
 
@@ -634,6 +662,11 @@ def _panel_logs_show_startup_activity(output: str) -> bool:
     return any(m in text for m in _ALEMBIC_ACTIVITY_MARKERS)
 
 
+def _container_confirmed_dead(container_state: str | None) -> bool:
+    """True when docker successfully reported the panel is not running."""
+    return (container_state or "").lower() in ("exited", "dead", "created")
+
+
 def _alembic_wait_active(
     output: str,
     *,
@@ -644,6 +677,7 @@ def _alembic_wait_active(
     started_at: float | None = None,
     bootstrap_window: float = _ALEMBIC_BOOTSTRAP_WINDOW,
     saw_bootstrap: bool = False,
+    container_state: str | None = None,
 ) -> bool:
     """True while alembic should be treated as in-progress.
 
@@ -651,19 +685,30 @@ def _alembic_wait_active(
     timeout (common during heavy MySQL ALTER) does not look like a dead panel.
     Also covers the short Context-only bootstrap window before the first upgrade,
     including remembered bootstrap when log fetch times out.
+
+    Context-only bootstrap is NOT treated as active when the panel container is
+    confirmed exited/missing — stale Context lines must not freeze restore at 90%.
     """
     if any(m in (output or "") for m in STARTUP_MARKERS):
         return False
     if _alembic_hard_fail(output or ""):
         return False
+    dead = _container_confirmed_dead(container_state)
     if _alembic_still_running(output):
-        return True
-    if started_at is not None and _alembic_bootstrap_active(
-        output,
-        started_at=started_at,
-        now=now,
-        window=bootstrap_window,
-        saw_bootstrap=saw_bootstrap,
+        # Stale upgrade lines while panel is dead: rely on remembered sig + stuck timer
+        # (last_progress_at is not refreshed for exited — see verify loop).
+        if not dead:
+            return True
+    if (
+        not dead
+        and started_at is not None
+        and _alembic_bootstrap_active(
+            output,
+            started_at=started_at,
+            now=now,
+            window=bootstrap_window,
+            saw_bootstrap=saw_bootstrap,
+        )
     ):
         return True
     # Log fetch may have timed out / been empty while DDL still runs.
@@ -748,6 +793,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                 stuck_limit=stuck_limit,
                 started_at=started_at,
                 saw_bootstrap=saw_alembic_bootstrap,
+                container_state=last_known_state,
             ) and (now - started_at) < effective_cap:
                 extra = 180
                 deadline = now + extra
@@ -827,6 +873,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
             stuck_limit=stuck_limit,
             started_at=started_at,
             saw_bootstrap=saw_alembic_bootstrap,
+            container_state=state,
         )
 
         # Alembic still applying — never force-recreate; only wait / soft-up if dead.
@@ -900,6 +947,23 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
             unknown_streak = 0
             restarting_streak = 0
             await asyncio.sleep(sleep_for)
+            continue
+
+        # Context-only + confirmed dead panel: soft bring-up once (data may already
+        # be restored; do not freeze at 90% treating stale Context as live DDL).
+        if (
+            state == "exited"
+            and saw_alembic_bootstrap
+            and not last_upgrade_sig
+            and not soft_up_during_alembic
+        ):
+            soft_up_during_alembic = True
+            migrator.job.log(
+                "PasarGuard exited after alembic Context (no Running upgrade) — "
+                "soft bring-up once…"
+            )
+            await _ensure_pasarguard_up(migrator)
+            await asyncio.sleep(8)
             continue
 
         hit = _check_logs_for_failure(out)
@@ -984,13 +1048,16 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
             # saturates the host — never recreate on unknown alone.
             if state == "unknown":
                 if unknown_streak >= 12:
-                    # Panel/alembic evidence + flaky docker ps: keep waiting under cap.
-                    # Do not false-fail "unknown too long" while Context/all-in-one
-                    # logs prove the panel is still starting (common on PG/host load).
-                    alive = (
-                        _panel_logs_show_startup_activity(out)
-                        or saw_alembic_bootstrap
-                        or bool(last_upgrade_sig)
+                    # Flaky docker ps under load: keep waiting only while there is
+                    # evidence of *live* work — remembered Running upgrade, or
+                    # Context bootstrap still inside its short window.
+                    # Stale Context after a dead panel must NOT extend forever.
+                    alive = bool(last_upgrade_sig) or (
+                        (now - started_at) <= _ALEMBIC_BOOTSTRAP_WINDOW
+                        and (
+                            saw_alembic_bootstrap
+                            or _panel_logs_show_startup_activity(out)
+                        )
                     )
                     if (
                         alive

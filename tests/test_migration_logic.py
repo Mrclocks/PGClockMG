@@ -325,6 +325,46 @@ def test_alembic_still_running_helpers():
         started_at=now - 10,
         saw_bootstrap=True,
     ) is True
+    # Dead/missing panel + Context-only must NOT freeze wait (restore 90% hang)
+    assert _alembic_wait_active(
+        ctx,
+        last_upgrade_sig=None,
+        last_progress_at=now - 10,
+        now=now,
+        stuck_limit=300,
+        started_at=now - 10,
+        saw_bootstrap=True,
+        container_state="exited",
+    ) is False
+    assert _alembic_wait_active(
+        "Timeout",
+        last_upgrade_sig=None,
+        last_progress_at=now - 10,
+        now=now,
+        stuck_limit=300,
+        started_at=now - 10,
+        saw_bootstrap=True,
+        container_state="exited",
+    ) is False
+    # Dead panel can still use remembered Running upgrade within stuck window
+    assert _alembic_wait_active(
+        "Timeout",
+        last_upgrade_sig=last,
+        last_progress_at=now - 30,
+        now=now,
+        stuck_limit=900,
+        container_state="exited",
+    ) is True
+    # Alive/unknown still keep bootstrap wait
+    assert _alembic_wait_active(
+        ctx,
+        last_upgrade_sig=None,
+        last_progress_at=now - 10,
+        now=now,
+        stuck_limit=300,
+        started_at=now - 10,
+        container_state="unknown",
+    ) is True
     # Remembered bootstrap still expires after the window
     assert _alembic_bootstrap_active(
         "",
