@@ -47,6 +47,90 @@ def test_soft_db_family_matrix():
     print("OK: soft_db_family matrix")
 
 
+def test_ts_to_ts_syncs_alembic_before_panel():
+    from app.services.pg_restore import should_sync_alembic_before_panel_boot
+
+    # timescaledb → timescaledb (same engine): needs_convert is False
+    backup_db, final_db = "timescaledb", "timescaledb"
+    needs_convert = bool(
+        backup_db and final_db and backup_db != final_db and not soft_db_family(backup_db, final_db)
+    )
+    assert needs_convert is False
+    assert should_sync_alembic_before_panel_boot(needs_convert) is True
+
+    # convert path skips pre-panel sync
+    assert should_sync_alembic_before_panel_boot(True) is False
+    print("OK: ts→ts syncs alembic before panel boot")
+
+
+def test_ensure_timescaledb_forces_post_restore_when_on():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from app.services import pg_restore as mod
+
+    job = MagicMock()
+    job.log = MagicMock()
+    calls: list[str] = []
+
+    async def fake_run(_job, cmd, **_kwargs):
+        joined = " ".join(str(c) for c in cmd)
+        calls.append(joined)
+        if "current_setting" in joined:
+            return True, "on\n"
+        if "timescaledb_post_restore" in joined:
+            return True, "t\n"
+        return True, ""
+
+    async def _go():
+        with (
+            patch.object(mod, "_detect_db_container", AsyncMock(return_value="timescaledb")),
+            patch.object(mod, "_run", side_effect=fake_run),
+        ):
+            await mod._ensure_timescaledb_not_in_restore_mode(
+                job, "secret", "pasarguard", "pasarguard",
+            )
+
+    asyncio.run(_go())
+    assert any("timescaledb_post_restore" in c for c in calls)
+    log_text = " ".join(str(c.args[0]) for c in job.log.call_args_list if c.args)
+    assert "restore mode" in log_text.lower()
+    print("OK: ensure post_restore when restoring=on")
+
+
+def test_ensure_timescaledb_forces_post_restore_when_check_fails():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from app.services import pg_restore as mod
+
+    job = MagicMock()
+    job.log = MagicMock()
+    posts = {"n": 0}
+
+    async def fake_run(_job, cmd, **_kwargs):
+        joined = " ".join(str(c) for c in cmd)
+        if "current_setting" in joined:
+            return False, "Timeout"
+        if "timescaledb_post_restore" in joined:
+            posts["n"] += 1
+            return True, "t\n"
+        return True, ""
+
+    async def _go():
+        with (
+            patch.object(mod, "_detect_db_container", AsyncMock(return_value="timescaledb")),
+            patch.object(mod, "_run", side_effect=fake_run),
+        ):
+            await mod._ensure_timescaledb_not_in_restore_mode(
+                job, "secret", "pasarguard", "pasarguard",
+            )
+
+    asyncio.run(_go())
+    assert posts["n"] >= 1, "must force post_restore when GUC check fails"
+    log_text = " ".join(str(c.args[0]) for c in job.log.call_args_list if c.args)
+    assert "inconclusive" in log_text.lower()
+    print("OK: ensure post_restore when check inconclusive")
+
+
 def test_filter_timescaledb_extension_sql():
     sql = "\n".join([
         "CREATE TABLE t(id int);",
@@ -425,6 +509,9 @@ def test_verify_users_gap_still_hard_fails():
 
 if __name__ == "__main__":
     test_soft_db_family_matrix()
+    test_ts_to_ts_syncs_alembic_before_panel()
+    test_ensure_timescaledb_forces_post_restore_when_on()
+    test_ensure_timescaledb_forces_post_restore_when_check_fails()
     test_filter_timescaledb_extension_sql()
     test_filter_timescaledb_strip_all_for_plain_pg()
     test_parse_timescale_wanted()
