@@ -4,10 +4,11 @@ import socket
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect, Form
+from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
 
-from app.models import MigrationRequest, PasarguardRestoreRequest
+from app.models import BackupCleanupRequest, MigrationRequest, PasarguardRestoreRequest
 from app.panels import (
     PANELS, DATABASE_TYPES, SUBSCRIPTION_LABELS, PASARGUARD_INSTALL_DBS,
     PASARGUARD_INSTALL_COMMANDS, DOCS_INSTALL_URL, DOCS_NODE_URL, PANEL_GITHUB_URL,
@@ -102,6 +103,37 @@ async def api_pasarguard_restore_analyze(upload_id: str):
         raise HTTPException(404, str(e))
     except Exception as e:
         raise HTTPException(400, str(e))
+
+
+@app.get("/api/pasarguard/cleanup/analyze/{upload_id}")
+async def api_backup_cleanup_analyze(upload_id: str):
+    """What a cleanup would remove from this backup. Never blocks the restore."""
+    from app.services.backup_cleanup import analyze_cleanup, cleanup_enabled
+    from app.services.upload import get_upload_path
+
+    if not cleanup_enabled():
+        return {"available": False, "reason": "disabled", "rules": [], "default_rule_ids": []}
+
+    path = get_upload_path(upload_id)
+    if not path:
+        raise HTTPException(404, "Upload not found")
+    try:
+        return analyze_cleanup(path)
+    except Exception as e:
+        # The wizard treats this as "no cleanup offered" and carries on.
+        return {"available": False, "reason": str(e), "rules": [], "default_rule_ids": []}
+
+
+@app.post("/api/pasarguard/cleanup")
+async def api_backup_cleanup(req: BackupCleanupRequest):
+    """Write a cleaned copy of an upload and return it as a new upload_id.
+
+    On any problem the original upload_id comes back with applied=False, so the
+    caller can always go straight to restore.
+    """
+    from app.services.backup_cleanup import clean_upload
+
+    return await run_in_threadpool(clean_upload, req.upload_id, req.rule_ids)
 
 
 @app.post("/api/pasarguard/restore")

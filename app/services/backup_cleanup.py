@@ -111,6 +111,16 @@ RULES_BY_ID: dict[str, CleanupRule] = {r.id: r for r in CLEANUP_RULES}
 CLEANABLE_TABLES: frozenset[str] = frozenset(t for r in CLEANUP_RULES for t in r.tables)
 
 
+def cleanup_enabled() -> bool:
+    """Kill switch, so the feature can be turned off without a release."""
+    return os.environ.get("PG_CLEANUP_ENABLED", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
 def default_rule_ids() -> list[str]:
     return [r.id for r in CLEANUP_RULES if r.default_enabled]
 
@@ -528,6 +538,8 @@ def analyze_cleanup(zip_path: str | Path) -> dict:
     zip_path = Path(zip_path)
     if not zip_path.is_file():
         raise FileNotFoundError(str(zip_path))
+    if not cleanup_enabled():
+        return {"available": False, "reason": "disabled", "rules": [], "default_rule_ids": []}
 
     all_ids = [r.id for r in CLEANUP_RULES]
     tmp = Path(tempfile.mkdtemp(prefix="pg-cleanup-analyze-"))
@@ -616,6 +628,9 @@ def clean_upload(upload_id: str, rule_ids: list[str]) -> dict:
 
     def _decline(reason: str) -> dict:
         return {"applied": False, "upload_id": upload_id, "reason": reason}
+
+    if not cleanup_enabled():
+        return _decline("disabled")
 
     src = get_upload_path(upload_id)
     if not src:
