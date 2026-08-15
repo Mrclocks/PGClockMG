@@ -9,6 +9,8 @@ Object.assign(state, {
   restoreAnalysis: null,
   restoreStage: 'form', // form | running | error | done
   pendingLoginUrl: null,
+  cleanupPlan: null,
+  cleanupSelected: null,
 });
 
 let _restorePollTimer = null;
@@ -492,6 +494,7 @@ function applyPhaseI18n() {
   if (state.restoreAnalysis) {
     renderRestoreOptions(state.restoreAnalysis);
     renderRestoreDbInfoCard(state.restoreAnalysis);
+    renderRestoreCleanup(state.restoreAnalysis);
   }
   set('restoreUninstallTitle', 'uninstall.title');
   set('restoreUninstallTip', 'uninstall.tip');
@@ -825,6 +828,7 @@ async function uploadRestoreZip(file) {
     const analysis = await ares.json();
     if (!ares.ok) throw new Error(analysis.detail || 'analyze failed');
     state.restoreAnalysis = analysis;
+    await loadCleanupPlan(data.upload_id);
     renderRestoreAnalysis(analysis);
     if (btn) btn.disabled = !analysis.ok;
 
@@ -962,6 +966,100 @@ function renderRestoreOptions(a) {
   opts.classList.remove('hidden');
 }
 
+function formatBytesShort(n) {
+  const bytes = Number(n) || 0;
+  if (bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  let v = bytes;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
+function formatCountShort(n) {
+  return (Number(n) || 0).toLocaleString(state.lang === 'fa' ? 'fa-IR' : 'en-US');
+}
+
+// Cleanup is a bonus: any failure here must leave the restore exactly as it was
+// without it, so every path ends with the plan simply not being offered.
+async function loadCleanupPlan(uploadId) {
+  state.cleanupPlan = null;
+  state.cleanupSelected = null;
+  try {
+    const res = await fetch(`/api/pasarguard/cleanup/analyze/${uploadId}`);
+    if (!res.ok) return;
+    const plan = await res.json();
+    if (!plan || plan.available !== true) return;
+    if (!(plan.removable_rows > 0)) return;
+    state.cleanupPlan = plan;
+    state.cleanupSelected = new Set(plan.default_rule_ids || []);
+  } catch (e) {
+    state.cleanupPlan = null;
+  }
+}
+
+function renderRestoreCleanup(a) {
+  const card = document.getElementById('restoreCleanup');
+  if (!card) return;
+  const plan = state.cleanupPlan;
+  const offer = !!plan && !!a && !!a.ok && !a.convert_blocked;
+  if (!offer) {
+    card.classList.add('hidden');
+    return;
+  }
+
+  const lang = state.lang || 'fa';
+  const s = (I18N[lang] || I18N.fa).restore.cleanup;
+  const selected = state.cleanupSelected || new Set();
+
+  const setText = (id, value) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+  };
+  setText('restoreCleanupTitle', s.title);
+  setText('restoreCleanupDesc', s.desc);
+  setText('restoreCleanupNote', s.note);
+  setText('restoreCleanupBadge', fmtMsg(s.badge, { size: formatBytesShort(plan.removable_bytes) }));
+
+  const rows = (plan.rules || [])
+    .filter((r) => r.rows > 0)
+    .map((r) => {
+      const id = `cleanupRule_${r.id}`;
+      const checked = selected.has(r.id) ? ' checked' : '';
+      const size = r.bytes > 0 ? ` · ${formatBytesShort(r.bytes)}` : '';
+      const amount = fmtMsg(s.rows, { rows: formatCountShort(r.rows) }) + size;
+      return `
+        <div class="toggle-row">
+          <label class="ios-toggle" for="${id}">
+            <input type="checkbox" id="${id}" role="switch" data-cleanup-rule="${escapeHtml(r.id)}"${checked}>
+            <span class="ios-toggle-track"><span class="ios-toggle-thumb"></span></span>
+          </label>
+          <div class="toggle-text">
+            <span class="toggle-label">${escapeHtml(tr(r.label, lang))} <span class="cleanup-amount">${escapeHtml(amount)}</span></span>
+            <span class="toggle-hint">${escapeHtml(tr(r.description, lang))}</span>
+          </div>
+        </div>`;
+    })
+    .join('');
+
+  const list = document.getElementById('restoreCleanupRules');
+  if (list) {
+    list.innerHTML = rows;
+    list.querySelectorAll('input[data-cleanup-rule]').forEach((input) => {
+      input.addEventListener('change', () => {
+        const rid = input.getAttribute('data-cleanup-rule');
+        if (!state.cleanupSelected) state.cleanupSelected = new Set();
+        if (input.checked) state.cleanupSelected.add(rid);
+        else state.cleanupSelected.delete(rid);
+      });
+    });
+  }
+  card.classList.remove('hidden');
+}
+
 function renderRestoreAnalysis(a) {
   const card = document.getElementById('restoreAnalysis');
   const warn = document.getElementById('restoreWarnings');
@@ -978,6 +1076,7 @@ function renderRestoreAnalysis(a) {
 
   renderRestoreDbInfoCard(a);
   renderRestoreOptions(a);
+  renderRestoreCleanup(a);
 
   const block = document.getElementById('restoreBlock');
   const lang = state.lang || 'fa';
@@ -1006,6 +1105,47 @@ function updateRestoreConfirmEnabled() {
   btn.disabled = !a.ok || !!a.convert_blocked;
 }
 
+// Returns the upload_id the restore should use. Falls back to the uploaded one
+// whenever slimming is not offered, not selected, or does not succeed.
+async function applyCleanupBeforeRestore(term) {
+  const original = state.restoreUploadId;
+  const selected = Array.from(state.cleanupSelected || []);
+  if (!state.cleanupPlan || !selected.length) return original;
+
+  const lang = state.lang || 'fa';
+  const s = (I18N[lang] || I18N.fa).restore.cleanup;
+  const note = (msg) => {
+    if (term) term.textContent += `${msg}\n`;
+  };
+
+  const status = document.getElementById('restoreStatusMsg');
+  if (status) status.textContent = s.working;
+  note(s.working);
+
+  try {
+    const res = await fetch('/api/pasarguard/cleanup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ upload_id: original, rule_ids: selected }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data?.applied || !data.upload_id) {
+      note(s.skipped);
+      return original;
+    }
+    note(fmtMsg(s.applied, {
+      rows: formatCountShort(data.removed_rows),
+      size: formatBytesShort(Math.max((data.size_before || 0) - (data.size_after || 0), 0)),
+    }));
+    return data.upload_id;
+  } catch (e) {
+    note(s.skipped);
+    return original;
+  } finally {
+    if (status) status.textContent = t('restore.restoring');
+  }
+}
+
 async function startRestore() {
   if (!state.restoreUploadId || !state.restoreAnalysis?.ok) {
     const el = document.getElementById('restoreBlock');
@@ -1030,13 +1170,14 @@ async function startRestore() {
   if (term) term.textContent = '';
 
   const disableNodes = document.getElementById('chkDisableNodes')?.checked || false;
+  const uploadId = await applyCleanupBeforeRestore(term);
 
   try {
     const res = await fetch('/api/pasarguard/restore', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        upload_id: state.restoreUploadId,
+        upload_id: uploadId,
         confirmed: true,
         force: false,
         // Destination is always the installed PasarGuard DB
