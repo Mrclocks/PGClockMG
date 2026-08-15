@@ -69,9 +69,9 @@ CLEANUP_RULES: tuple[CleanupRule, ...] = (
             "ru": "Таблицы журналов использования",
         },
         description={
-            "en": "Historical usage log rows, including legacy Marzban tables the panel no longer reads.",
-            "fa": "ردیف‌های لاگ مصرف قدیمی، شامل جدول‌های به‌جامانده از Marzban که پنل دیگر نمی‌خواندشان.",
-            "ru": "Старые записи журналов использования, включая устаревшие таблицы Marzban.",
+            "en": "Historical usage log rows, including legacy tables the panel no longer reads.",
+            "fa": "ردیف‌های لاگ مصرف قدیمی، شامل جدول‌های به‌جامانده که پنل دیگر نمی‌خواندشان.",
+            "ru": "Старые записи журналов использования, включая устаревшие таблицы, которые панель больше не читает.",
         },
     ),
     CleanupRule(
