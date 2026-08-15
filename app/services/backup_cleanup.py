@@ -548,6 +548,117 @@ def analyze_cleanup(zip_path: str | Path) -> dict:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _analysis_signature(analysis: dict) -> dict:
+    """The parts of a backup analysis a cleanup must leave alone."""
+    return {
+        "ok": analysis.get("ok"),
+        "backup_db": analysis.get("backup_db"),
+        "layout": analysis.get("layout"),
+        "has_env": analysis.get("has_env"),
+        "timescaledb_versions": list(analysis.get("timescaledb_versions") or []),
+        "timescaledb_chunk_catalog": analysis.get("timescaledb_chunk_catalog"),
+        # table_counts only tracks copy_core.VERIFY_TABLES, and no rule may target
+        # those, so a cleanup that changed any of these did something unintended.
+        "table_counts": dict(analysis.get("table_counts") or {}),
+    }
+
+
+def verify_cleaned_archive(original_zip: Path, cleaned_zip: Path) -> tuple[bool, str]:
+    """Re-analyze the cleaned archive with the restore analyzer and compare.
+
+    The output is validated by the same code the restore itself trusts, so a
+    cleanup that changed anything load-bearing is caught here and discarded.
+    """
+    from app.services.pg_restore import analyze_pasarguard_backup
+
+    try:
+        before = _analysis_signature(analyze_pasarguard_backup(path=original_zip))
+        after = _analysis_signature(analyze_pasarguard_backup(path=cleaned_zip))
+    except Exception as e:
+        return False, f"cleaned archive could not be analyzed: {e}"
+
+    if before != after:
+        changed = sorted(k for k in before if before[k] != after.get(k))
+        return False, f"cleanup changed backup identity: {', '.join(changed)}"
+
+    if cleaned_zip.stat().st_size > original_zip.stat().st_size:
+        return False, "cleaned archive is larger than the original"
+
+    return True, ""
+
+
+def _has_room_for_cleanup(zip_path: Path, workdir: Path) -> bool:
+    """Cleanup extracts the archive and writes a new one — refuse if disk is tight."""
+    try:
+        free = shutil.disk_usage(str(workdir)).free
+    except OSError:
+        return True
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        uncompressed = sum(i.file_size for i in zf.infolist())
+    # extracted tree + the new archive, with headroom
+    return free > int(uncompressed * 1.5) + zip_path.stat().st_size * 2
+
+
+def clean_upload(upload_id: str, rule_ids: list[str]) -> dict:
+    """Produce a cleaned copy of an upload, returned as a new upload_id.
+
+    The caller hands the returned upload_id to the existing restore endpoint;
+    the restore path is unchanged and re-analyzes the archive from scratch.
+
+    Never raises for cleanup problems. If anything at all goes wrong the
+    original upload_id comes back with ``applied: False`` and the restore
+    proceeds exactly as it would have without this feature.
+    """
+    import uuid
+
+    from app.config import UPLOAD_DIR
+    from app.services.upload import get_upload_path
+
+    def _decline(reason: str) -> dict:
+        return {"applied": False, "upload_id": upload_id, "reason": reason}
+
+    src = get_upload_path(upload_id)
+    if not src:
+        return _decline("upload not found")
+    src_zip = Path(src)
+    if src_zip.is_dir():
+        zips = sorted(src_zip.rglob("*.zip"))
+        if not zips:
+            return _decline("no zip in upload")
+        src_zip = zips[0]
+    if not src_zip.is_file():
+        return _decline("upload file missing")
+
+    tables = resolve_tables(rule_ids)
+    if not tables:
+        return _decline("no cleanup rules selected")
+
+    if not _has_room_for_cleanup(src_zip, UPLOAD_DIR):
+        return _decline("not enough free disk space to clean this backup")
+
+    new_id = str(uuid.uuid4())[:12]
+    dest_dir = UPLOAD_DIR / new_id
+    dest_zip = dest_dir / src_zip.name
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        result = apply_cleanup(src_zip, rule_ids, dest_zip)
+
+        ok, reason = verify_cleaned_archive(src_zip, dest_zip)
+        if not ok:
+            shutil.rmtree(dest_dir, ignore_errors=True)
+            return _decline(reason)
+    except Exception as e:
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        return _decline(f"cleanup failed: {e}")
+
+    return {
+        "applied": True,
+        "upload_id": new_id,
+        "source_upload_id": upload_id,
+        **result,
+    }
+
+
 def apply_cleanup(
     zip_path: str | Path,
     rule_ids: list[str],

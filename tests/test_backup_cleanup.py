@@ -624,6 +624,175 @@ def test_rejects_unsafe_zip_entries(tmp_path):
     raise AssertionError("expected ValueError for path traversal entry")
 
 
+# -------------------------------------------------- verification and fallback
+
+
+def _pg_backup_zip(tmp_path: Path, name: str = "backup.zip") -> Path:
+    return _make_zip(tmp_path, name, {".env": ENV_TEXT, "db_backup.sql": MYSQL_DUMP})
+
+
+def test_verify_accepts_a_correct_cleanup(tmp_path):
+    from app.services.backup_cleanup import verify_cleaned_archive
+
+    src = _pg_backup_zip(tmp_path)
+    out = tmp_path / "cleaned.zip"
+    apply_cleanup(src, ["node_traffic_history"], out)
+
+    ok, reason = verify_cleaned_archive(src, out)
+    assert ok, reason
+    print("OK: verification accepts a correct cleanup")
+
+
+def test_verify_rejects_archive_that_lost_critical_rows(tmp_path):
+    """Simulate a filter bug that eats users rows — verification must catch it."""
+    from app.services.backup_cleanup import verify_cleaned_archive
+
+    src = _pg_backup_zip(tmp_path)
+    broken = tmp_path / "broken.zip"
+    damaged_sql = MYSQL_DUMP.replace("INSERT INTO `users` VALUES (1,'alice'),(2,'bob');\n", "")
+    with zipfile.ZipFile(broken, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(".env", ENV_TEXT)
+        zf.writestr("db_backup.sql", damaged_sql)
+
+    ok, reason = verify_cleaned_archive(src, broken)
+    assert not ok
+    assert "table_counts" in reason
+    print(f"OK: verification rejects lost critical rows ({reason})")
+
+
+def test_verify_rejects_archive_that_lost_env(tmp_path):
+    from app.services.backup_cleanup import verify_cleaned_archive
+
+    src = _pg_backup_zip(tmp_path)
+    broken = tmp_path / "broken.zip"
+    with zipfile.ZipFile(broken, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("db_backup.sql", MYSQL_DUMP)
+
+    ok, reason = verify_cleaned_archive(src, broken)
+    assert not ok
+    print(f"OK: verification rejects a dropped .env ({reason})")
+
+
+def _stage_upload(tmp_path, monkeypatch, zip_path: Path) -> str:
+    """Put a zip where get_upload_path/UPLOAD_DIR will find it."""
+    import app.config as config
+    import app.services.upload as upload_mod
+
+    uploads = tmp_path / "uploads"
+    uploads.mkdir(exist_ok=True)
+    monkeypatch.setattr(config, "UPLOAD_DIR", uploads, raising=False)
+    monkeypatch.setattr(upload_mod, "UPLOAD_DIR", uploads, raising=False)
+
+    upload_id = "src000000001"
+    d = uploads / upload_id
+    d.mkdir(parents=True, exist_ok=True)
+    (d / zip_path.name).write_bytes(zip_path.read_bytes())
+    return upload_id
+
+
+def test_clean_upload_returns_new_id_and_keeps_original(tmp_path, monkeypatch):
+    from app.services.backup_cleanup import clean_upload
+
+    src_zip = _pg_backup_zip(tmp_path)
+    upload_id = _stage_upload(tmp_path, monkeypatch, src_zip)
+    original_bytes = (tmp_path / "uploads" / upload_id / src_zip.name).read_bytes()
+
+    result = clean_upload(upload_id, ["node_traffic_history"])
+
+    assert result["applied"] is True, result
+    assert result["upload_id"] != upload_id
+    assert result["source_upload_id"] == upload_id
+    assert result["removed_rows"] == 4
+
+    # original upload untouched and still restorable
+    assert (tmp_path / "uploads" / upload_id / src_zip.name).read_bytes() == original_bytes
+
+    # the new id resolves like any other upload
+    from app.services.upload import get_upload_path
+
+    new_path = get_upload_path(result["upload_id"])
+    assert new_path and Path(new_path).is_file() and new_path.endswith(".zip")
+    print("OK: clean_upload yields a usable new upload id, original intact")
+
+
+def test_clean_upload_declines_instead_of_raising(tmp_path, monkeypatch):
+    from app.services.backup_cleanup import clean_upload
+
+    src_zip = _pg_backup_zip(tmp_path)
+    upload_id = _stage_upload(tmp_path, monkeypatch, src_zip)
+
+    # unknown upload
+    missing = clean_upload("nope", ["node_traffic_history"])
+    assert missing["applied"] is False and missing["upload_id"] == "nope"
+
+    # no rules selected
+    none_selected = clean_upload(upload_id, [])
+    assert none_selected["applied"] is False
+    assert none_selected["upload_id"] == upload_id
+
+    # unknown rule ids resolve to no tables
+    unknown = clean_upload(upload_id, ["not_a_rule"])
+    assert unknown["applied"] is False
+    assert unknown["upload_id"] == upload_id
+    print("OK: clean_upload declines rather than raising")
+
+
+def test_clean_upload_falls_back_when_verification_fails(tmp_path, monkeypatch):
+    """A cleanup that damages the archive must never be handed to the restore."""
+    import app.services.backup_cleanup as bc
+
+    src_zip = _pg_backup_zip(tmp_path)
+    upload_id = _stage_upload(tmp_path, monkeypatch, src_zip)
+
+    monkeypatch.setattr(
+        bc, "verify_cleaned_archive", lambda a, b: (False, "simulated corruption")
+    )
+    result = bc.clean_upload(upload_id, ["node_traffic_history"])
+
+    assert result["applied"] is False
+    assert result["upload_id"] == upload_id, "must fall back to the original upload"
+    assert "simulated corruption" in result["reason"]
+
+    uploads = tmp_path / "uploads"
+    assert [p.name for p in uploads.iterdir()] == [upload_id], "rejected output must be deleted"
+    print("OK: failed verification falls back to the original upload")
+
+
+def test_clean_upload_falls_back_when_apply_raises(tmp_path, monkeypatch):
+    import app.services.backup_cleanup as bc
+
+    src_zip = _pg_backup_zip(tmp_path)
+    upload_id = _stage_upload(tmp_path, monkeypatch, src_zip)
+
+    def boom(*a, **k):
+        raise RuntimeError("disk exploded")
+
+    monkeypatch.setattr(bc, "apply_cleanup", boom)
+    result = bc.clean_upload(upload_id, ["node_traffic_history"])
+
+    assert result["applied"] is False
+    assert result["upload_id"] == upload_id
+    assert "disk exploded" in result["reason"]
+    uploads = tmp_path / "uploads"
+    assert [p.name for p in uploads.iterdir()] == [upload_id]
+    print("OK: an exception during apply falls back to the original upload")
+
+
+def test_clean_upload_declines_when_disk_is_tight(tmp_path, monkeypatch):
+    import app.services.backup_cleanup as bc
+
+    src_zip = _pg_backup_zip(tmp_path)
+    upload_id = _stage_upload(tmp_path, monkeypatch, src_zip)
+
+    monkeypatch.setattr(bc, "_has_room_for_cleanup", lambda z, w: False)
+    result = bc.clean_upload(upload_id, ["node_traffic_history"])
+
+    assert result["applied"] is False
+    assert result["upload_id"] == upload_id
+    assert "disk" in result["reason"]
+    print("OK: cleanup declines when free disk space is tight")
+
+
 if __name__ == "__main__":
     import pytest
 
