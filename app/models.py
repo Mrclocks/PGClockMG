@@ -56,6 +56,11 @@ class MigrationStatus(BaseModel):
     result: Optional[dict] = None
 
 
+class BackupCleanupRequest(BaseModel):
+    upload_id: str
+    rule_ids: List[str] = []
+
+
 class PasarguardRestoreRequest(BaseModel):
     upload_id: str
     force: bool = False

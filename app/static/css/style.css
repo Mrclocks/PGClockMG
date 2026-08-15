@@ -2769,6 +2769,63 @@ html[dir="rtl"] .ios-toggle input:checked ~ .ios-toggle-track .ios-toggle-thumb 
   line-height: 1.55;
 }
 
+/* ── Optional backup slimming ──────────────────────────────────── */
+.cleanup-card {
+  margin-top: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.cleanup-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.cleanup-title {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.cleanup-badge {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: hsl(160, 84%, 32%);
+  background: hsla(160, 84%, 39%, 0.12);
+  border: 1px solid hsla(160, 84%, 39%, 0.28);
+}
+.cleanup-desc {
+  margin: 8px 0 14px;
+  font-size: 0.8rem;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+#restoreCleanupRules .toggle-row + .toggle-row {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.cleanup-amount {
+  margin-inline-start: 6px;
+  font-size: 0.74rem;
+  font-weight: 500;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.cleanup-note {
+  margin: 14px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 0.75rem;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
 /* ── Restore done: info note ───────────────────────────────────── */
 .info-note {
   margin: 10px 0;
