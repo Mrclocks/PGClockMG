@@ -148,7 +148,7 @@ const I18N = {
       cleanup: {
         title: 'Slim down this backup (optional)',
         desc: 'Traffic history is usually most of a backup and makes the restore far slower. You can leave it out — the panel rebuilds it from live traffic.',
-        badge: '{size} removable',
+        badge: '{size} can be removed',
         note: 'Users, admins, nodes, hosts, inbounds, groups and settings are never touched. Your uploaded file stays as it is; a slimmed copy is made for the restore.',
         rows: '{rows} rows',
         working: 'Preparing a slimmer backup…',
@@ -561,7 +561,7 @@ const I18N = {
         rows: '{rows} ردیف',
         working: 'در حال ساخت بکاپ سبک‌شده…',
         skipped: 'سبک کردن بکاپ انجام نشد — همان فایل اصلی ریستور می‌شود.',
-        applied: 'بکاپ سبک شد: {rows} ردیف حذف شد، {size} کم شد.',
+        applied: 'بکاپ سبک شد: {rows} ردیف حذف شد، {size} صرفه‌جویی شد.',
       },
       nodesDisabledNote: 'نودها طبق درخواست غیرفعال ماندند. از پنل فعالشان کنید.',
     },

@@ -980,7 +980,8 @@ function formatBytesShort(n) {
 }
 
 function formatCountShort(n) {
-  return (Number(n) || 0).toLocaleString(state.lang === 'fa' ? 'fa-IR' : 'en-US');
+  const locales = { fa: 'fa-IR', ru: 'ru-RU', en: 'en-US' };
+  return (Number(n) || 0).toLocaleString(locales[state.lang] || 'en-US');
 }
 
 // Cleanup is a bonus: any failure here must leave the restore exactly as it was
