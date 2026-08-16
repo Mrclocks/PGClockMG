@@ -101,14 +101,87 @@ def prepare_mysql_dump_for_staging(sql_text: str, staging_db: str) -> tuple[str,
 
 
 def write_mysql_dump_for_staging(dump_path: Path, staging_db: str) -> tuple[Path, int]:
-    """Write a staging-safe dump next to the original; return (path, stripped_count)."""
-    raw = dump_path.read_text(encoding="utf-8", errors="ignore")
-    prepared, stripped = prepare_mysql_dump_for_staging(raw, staging_db)
-    if stripped == 0 and prepared == raw:
-        return dump_path, 0
+    """Write a staging-safe dump next to the original; return (path, stripped_count).
+
+    Streams line-by-line — large Marzban dumps (hundreds of MB) must not be
+    loaded entirely into memory via ``read_text()``.
+    """
+    dump_path = Path(dump_path)
+    _safe_mysql_ident(staging_db)  # validate only
+    if not dump_path.exists():
+        raise RuntimeError(f"MySQL dump not found: {dump_path}")
+
     out = dump_path.with_suffix(dump_path.suffix + f".stage-{staging_db}")
-    out.write_text(prepared, encoding="utf-8")
+    stripped = 0
+    with dump_path.open("r", encoding="utf-8", errors="ignore") as fin, out.open(
+        "w", encoding="utf-8", newline=""
+    ) as fout:
+        for line in fin:
+            body = line.strip()
+            if not body or body.startswith("--") or body.startswith("#"):
+                fout.write(line)
+                continue
+            if (
+                _MYSQL_USE_DB_RE.match(body)
+                or _MYSQL_CREATE_DB_RE.match(body)
+                or _MYSQL_DROP_DB_RE.match(body)
+            ):
+                stripped += 1
+                continue
+            fout.write(line)
+
+    if stripped == 0:
+        # No redirects stripped — reuse original and drop the identical copy.
+        try:
+            out.unlink()
+        except OSError:
+            pass
+        return dump_path, 0
     return out, stripped
+
+
+async def _await_proc_with_heartbeat(
+    migrator,
+    proc: asyncio.subprocess.Process,
+    *,
+    label: str,
+    size_mb: float | None = None,
+) -> bytes:
+    """Wait for a long dump import without going silent on large Marzban dumps."""
+    import time
+
+    assert proc.stdout is not None
+    chunks: list[bytes] = []
+
+    async def _drain() -> None:
+        assert proc.stdout is not None
+        while True:
+            block = await proc.stdout.read(65_536)
+            if not block:
+                break
+            chunks.append(block)
+
+    drain_task = asyncio.create_task(_drain())
+    started = time.monotonic()
+    while True:
+        try:
+            await asyncio.wait_for(asyncio.shield(drain_task), timeout=20)
+            break
+        except (TimeoutError, asyncio.TimeoutError):
+            elapsed = int(time.monotonic() - started)
+            size_bit = f", {size_mb:.0f} MB" if size_mb else ""
+            migrator.job.log(f"Still {label}{size_bit}... ({elapsed}s elapsed)")
+            try:
+                migrator.job.set_progress(
+                    max(getattr(migrator.job, "progress", 0) or 0, 50),
+                    f"{label} ({elapsed}s)...",
+                )
+            except Exception:
+                pass
+    await proc.wait()
+    if not drain_task.done():
+        await drain_task
+    return b"".join(chunks)
 
 
 async def _import_via_compose_service(
@@ -128,6 +201,10 @@ async def _import_via_compose_service(
             f'mysql -u {user} -p"{pwd}" -e {e_sql}'
         )
         safe_db = _safe_mysql_ident(staging_db)
+        size_mb = dump_path.stat().st_size / (1024 * 1024) if dump_path.exists() else 0.0
+        migrator.job.log(
+            f"Preparing MySQL dump for staging `{safe_db}` ({size_mb:.1f} MB, streaming)..."
+        )
         import_path, stripped = write_mysql_dump_for_staging(dump_path, safe_db)
         if stripped:
             migrator.job.log(
@@ -139,18 +216,39 @@ async def _import_via_compose_service(
             f'mysql -u {user} -p"{pwd}" {safe_db} < "{import_path}"'
         )
         try:
-            for cmd in (create_cmd, import_cmd):
-                proc = await asyncio.create_subprocess_shell(
-                    cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
+            # CREATE DATABASE is fast — communicate is fine.
+            proc = await asyncio.create_subprocess_shell(
+                create_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out_b, _ = await proc.communicate()
+            if proc.returncode != 0:
+                out = (out_b or b"").decode("utf-8", errors="replace")
+                raise RuntimeError(
+                    f"SQL staging failed (db={staging_db}): {out[-400:]}"
                 )
-                out_b, _ = await proc.communicate()
-                if proc.returncode != 0:
-                    out = (out_b or b"").decode("utf-8", errors="replace")
-                    raise RuntimeError(
-                        f"SQL staging failed (db={staging_db}): {out[-400:]}"
-                    )
+
+            migrator.job.log(
+                f"Importing dump into staging `{safe_db}` "
+                f"({size_mb:.1f} MB — large dumps can take a long time)..."
+            )
+            proc = await asyncio.create_subprocess_shell(
+                import_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out_b = await _await_proc_with_heartbeat(
+                migrator,
+                proc,
+                label=f"importing Marzban dump into staging `{safe_db}`",
+                size_mb=size_mb,
+            )
+            if proc.returncode != 0:
+                out = (out_b or b"").decode("utf-8", errors="replace")
+                raise RuntimeError(
+                    f"SQL staging failed (db={staging_db}): {out[-400:]}"
+                )
         finally:
             if import_path != dump_path and import_path.exists():
                 try:

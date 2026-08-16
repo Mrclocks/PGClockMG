@@ -276,6 +276,47 @@ def test_prepare_mysql_dump_strips_use_and_create_database():
     print("OK: prepare_mysql_dump strips USE/CREATE/DROP DATABASE")
 
 
+def test_write_mysql_dump_for_staging_streams_without_read_text():
+    """Large Marzban dumps must be rewritten line-by-line (no full read_text)."""
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+    from app.services.native_migration import sql_staging as mod
+
+    raw = "\n".join([
+        "CREATE DATABASE `pasarguard`;",
+        "USE `pasarguard`;",
+        "CREATE TABLE users (id INT);",
+        "INSERT INTO users VALUES (1);",
+        "",
+    ])
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "big.sql"
+        src.write_text(raw, encoding="utf-8")
+
+        def _boom(*_a, **_k):
+            raise AssertionError("read_text must not be used for staging rewrite")
+
+        with patch.object(Path, "read_text", _boom):
+            out, stripped = mod.write_mysql_dump_for_staging(src, "pgmig_abc")
+        assert stripped >= 2
+        assert out != src
+        text = out.read_text(encoding="utf-8")
+        assert "USE `pasarguard`" not in text
+        assert "CREATE DATABASE" not in text
+        assert "INSERT INTO users VALUES (1);" in text
+        out.unlink()
+
+        # No redirects → reuse original path (no duplicate file left behind)
+        clean = Path(td) / "clean.sql"
+        clean.write_text("CREATE TABLE users (id INT);\n", encoding="utf-8")
+        out2, stripped2 = mod.write_mysql_dump_for_staging(clean, "pgmig_abc")
+        assert stripped2 == 0
+        assert out2 == clean
+        assert not list(Path(td).glob("*.stage-*"))
+    print("OK: write_mysql_dump_for_staging streams")
+
+
 def test_mysql_ephemeral_create_uses_exec_not_shell():
     """CREATE DATABASE must go through docker exec argv, never shell -e."""
     import asyncio
@@ -512,6 +553,7 @@ if __name__ == "__main__":
     test_mysql_shell_e_arg_preserves_backticks()
     test_mysql_create_db_sql_drop_first()
     test_prepare_mysql_dump_strips_use_and_create_database()
+    test_write_mysql_dump_for_staging_streams_without_read_text()
     test_mysql_ephemeral_create_uses_exec_not_shell()
     test_ephemeral_mariadb_uses_mariadb_image()
     test_import_mysql_dump_routes_to_ephemeral_when_target_is_timescale()
