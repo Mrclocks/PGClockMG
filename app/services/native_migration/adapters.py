@@ -55,6 +55,17 @@ class TableReader(ABC):
     def fetch_rows(self, table: str, columns: list[str]) -> Iterable[tuple]:
         pass
 
+    def count_rows(self, table: str) -> int:
+        """Row count without loading the table into memory. -1 on failure."""
+        try:
+            cols = self.source_columns(table)
+            if not cols:
+                return 0
+            key_col = "id" if "id" in cols else cols[0]
+            return sum(1 for _ in self.fetch_rows(table, [key_col]))
+        except Exception:
+            return -1
+
     @abstractmethod
     def close(self) -> None:
         pass
@@ -121,6 +132,16 @@ class SqliteReader(TableReader):
     def source_columns(self, table: str) -> list[str]:
         return sqlite_columns(self._conn, table)
 
+    def count_rows(self, table: str) -> int:
+        safe = "".join(c for c in table if c.isalnum() or c == "_")
+        if safe != table:
+            return -1
+        try:
+            cur = self._conn.execute(f'SELECT COUNT(*) FROM "{safe}"')
+            return int(cur.fetchone()[0])
+        except Exception:
+            return -1
+
     def fetch_rows(self, table: str, columns: list[str]) -> Iterable[tuple]:
         cols = ", ".join(columns)
         for row in self._conn.execute(f"SELECT {cols} FROM {table}"):
@@ -164,12 +185,32 @@ class MysqlReader(TableReader):
         )
         return [r[0] for r in cur.fetchall()]
 
+    def count_rows(self, table: str) -> int:
+        safe = "".join(c for c in table if c.isalnum() or c == "_")
+        if safe != table:
+            return -1
+        try:
+            cur = self._conn.cursor()
+            cur.execute(f"SELECT COUNT(*) FROM `{safe}`")
+            return int(cur.fetchone()[0])
+        except Exception:
+            return -1
+
     def fetch_rows(self, table: str, columns: list[str]) -> Iterable[tuple]:
-        cur = self._conn.cursor()
+        # SSCursor streams rows — fetchall() OOM'd large Marzban `users` tables.
+        import pymysql.cursors
+
+        cur = self._conn.cursor(pymysql.cursors.SSCursor)
         cols = ", ".join(f"`{c}`" for c in columns)
         cur.execute(f"SELECT {cols} FROM `{table}`")
-        for row in cur.fetchall():
-            yield row
+        try:
+            while True:
+                row = cur.fetchone()
+                if row is None:
+                    break
+                yield row
+        finally:
+            cur.close()
 
     def close(self) -> None:
         self._conn.close()
@@ -209,12 +250,38 @@ class PostgresReader(TableReader):
         )
         return [r[0] for r in cur.fetchall()]
 
+    def count_rows(self, table: str) -> int:
+        safe = "".join(c for c in table if c.isalnum() or c == "_")
+        if safe != table:
+            return -1
+        try:
+            cur = self._conn.cursor()
+            cur.execute(f'SELECT COUNT(*) FROM "{safe}"')
+            return int(cur.fetchone()[0])
+        except Exception:
+            return -1
+
     def fetch_rows(self, table: str, columns: list[str]) -> Iterable[tuple]:
-        cur = self._conn.cursor()
+        # Named server-side cursor — fetchall() OOM'd large tables on convert.
         cols = ", ".join(f'"{c}"' for c in columns)
-        cur.execute(f'SELECT {cols} FROM "{table}"')
-        for row in cur.fetchall():
-            yield row
+        # Named cursors require an open transaction; commit any idle work first.
+        self._conn.commit()
+        cur = self._conn.cursor(name=f"pgmig_{table}")
+        cur.itersize = 2_000
+        try:
+            cur.execute(f'SELECT {cols} FROM "{table}"')
+            while True:
+                rows = cur.fetchmany(2_000)
+                if not rows:
+                    break
+                for row in rows:
+                    yield row
+        finally:
+            cur.close()
+            try:
+                self._conn.commit()
+            except Exception:
+                pass
 
     def close(self) -> None:
         self._conn.close()
@@ -504,8 +571,13 @@ class MysqlWriter(TableWriter):
             pass
 
     def insert(self, table: str, columns: list[str], values: tuple) -> None:
-        cur = self._conn.cursor()
         values = self._coerce_row(table, columns, values)
+        # InnoDB keeps the txn usable after a failed INSERT — SAVEPOINT per row
+        # is pure overhead and dominates wall time on large Marzban `users` tables.
+        if getattr(self, "_bulk_load_active", False):
+            self._insert_plain(table, columns, values)
+            return
+        cur = self._conn.cursor()
         try:
             cur.execute("SAVEPOINT pgmig_row")
             cols = ", ".join(f"`{c}`" for c in columns)
@@ -1164,13 +1236,13 @@ def _count_source_rows(reader: TableReader, table: str) -> int:
     if table not in reader.source_tables():
         return 0
     try:
-        cols = reader.source_columns(table)
-        if not cols:
-            return 0
-        key_col = "id" if "id" in cols else cols[0]
-        return sum(1 for _ in reader.fetch_rows(table, [key_col]))
+        return int(reader.count_rows(table))
     except Exception:
         return -1
+
+
+# Mid-table commits keep undo logs bounded on large Marzban user tables.
+_COPY_COMMIT_EVERY = 2_500
 
 
 def build_copy_report(
@@ -1363,6 +1435,7 @@ def _copy_tables_universal_body(
         count = 0
         errors = 0
         first_error = None
+        src_total = source_counts.get(table, 0)
         for row in reader.fetch_rows(table, fetch_src):
             values = []
             for ins_col, sel_col in zip(insert_cols, select_cols):
@@ -1389,6 +1462,14 @@ def _copy_tables_universal_body(
                 )
             if ok:
                 count += 1
+                if count % _COPY_COMMIT_EVERY == 0:
+                    try:
+                        writer.commit()
+                        if src_total > _COPY_COMMIT_EVERY:
+                            log(f"… {table}: {count}/{src_total} rows committed")
+                    except Exception as exc:
+                        writer.recover()
+                        log(f"Mid-copy commit note {table}@{count}: {str(exc)[:120]}")
             else:
                 errors += 1
                 if first_error is None:

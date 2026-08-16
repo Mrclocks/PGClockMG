@@ -359,12 +359,27 @@ async def _panel_boot_upgrade_intermediate(
             from app.services.unique_name_heal import dedupe_unique_names_on_conn
 
             if staging_conn:
+                # Same hygiene as heal_marzban_preboot, but on pgmig_* / ephemeral.
+                # Shrink heavy usage FIRST — large Marzban dumps often have millions of
+                # node_user_usages rows (scales with user count); orphan DELETE on those
+                # before truncate can hang for hours, and bigint alembic rebuilds them.
+                from app.services.marzban_preboot_heal import (
+                    shrink_heavy_usage_tables_on_conn,
+                )
+
+                truncated = shrink_heavy_usage_tables_on_conn(inter_db, staging_conn)
+                for table, rows in truncated:
+                    migrator.job.log(
+                        f"Intermediate: truncated large `{table}` (~{rows} rows) "
+                        "before panel alembic (avoids multi-hour bigint rebuild)"
+                    )
                 renamed = dedupe_unique_names_on_conn(inter_db, staging_conn)
                 deleted, nulled = cleanup_orphans_on_conn(inter_db, staging_conn)
-                if renamed or deleted or nulled:
+                if renamed or deleted or nulled or truncated:
                     migrator.job.log(
                         f"Intermediate pre-boot heal: renamed={renamed} "
-                        f"orphans_deleted={deleted} orphans_nulled={nulled}"
+                        f"orphans_deleted={deleted} orphans_nulled={nulled} "
+                        f"usage_tables_truncated={len(truncated)}"
                     )
             else:
                 await heal_marzban_preboot(migrator)

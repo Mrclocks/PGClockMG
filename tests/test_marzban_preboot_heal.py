@@ -168,6 +168,61 @@ def test_orphan_null_falls_back_to_delete_when_not_null():
     print("OK: NOT NULL orphan uses delete")
 
 
+def test_heal_marzban_preboot_shrinks_before_orphan_cleanup():
+    """Large installs: truncate usage tables before orphan NOT EXISTS scans."""
+    import asyncio
+    from unittest.mock import MagicMock, patch
+    from app.services import marzban_preboot_heal as mod
+
+    order: list[str] = []
+
+    async def fake_shrink(migrator):
+        order.append("shrink")
+        return [("node_user_usages", 90_000)]
+
+    async def fake_names(migrator):
+        order.append("names")
+        return 0
+
+    async def fake_orphans(migrator):
+        order.append("orphans")
+        return (0, 0)
+
+    migrator = MagicMock()
+    migrator.params = {"target_db": "sqlite"}
+    migrator.job = MagicMock()
+
+    with (
+        patch.object(mod, "heal_heavy_usage_tables", side_effect=fake_shrink),
+        patch.object(mod, "heal_duplicate_unique_names", side_effect=fake_names),
+        patch.object(mod, "heal_orphan_fk_refs", side_effect=fake_orphans),
+    ):
+        stats = asyncio.run(mod.heal_marzban_preboot(migrator))
+    assert order == ["shrink", "names", "orphans"]
+    assert stats["usage_tables_truncated"] == 1
+    assert stats["usage_rows_cleared"] == 90_000
+    print("OK: preboot heal order shrink→names→orphans")
+
+
+def test_sqlite_reader_count_rows_uses_count_star():
+    from app.services.native_migration.adapters import SqliteReader
+
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "db.sqlite3"
+        db = sqlite3.connect(str(path))
+        db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT)")
+        db.executemany("INSERT INTO users VALUES (?, ?)", [(i, f"u{i}") for i in range(5)])
+        db.commit()
+        db.close()
+        reader = SqliteReader(str(path))
+        try:
+            assert reader.count_rows("users") == 5
+            assert reader.count_rows("no_such_table") == -1
+        finally:
+            reader.close()
+    print("OK: sqlite reader COUNT(*)")
+
+
 if __name__ == "__main__":
     test_orphan_delete_sql_shape()
     test_logs_indicate_orphan_fk()
@@ -175,4 +230,6 @@ if __name__ == "__main__":
     test_cleanup_orphans_noop_on_clean_db()
     test_shrink_heavy_usage_sqlite_threshold()
     test_orphan_null_falls_back_to_delete_when_not_null()
+    test_heal_marzban_preboot_shrinks_before_orphan_cleanup()
+    test_sqlite_reader_count_rows_uses_count_star()
     print("\nAll marzban_preboot_heal tests passed.")

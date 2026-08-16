@@ -614,10 +614,15 @@ async def heal_heavy_usage_tables(migrator) -> list[tuple[str, int]]:
 
 
 async def heal_marzban_preboot(migrator) -> dict[str, int]:
-    """Run all safe Marzban pre-boot heals. No-op on clean small dumps."""
+    """Run all safe Marzban pre-boot heals. No-op on clean small dumps.
+
+    Order matters for large installs: truncate heavy usage tables *before*
+    orphan FK cleanup. Otherwise NOT EXISTS deletes scan millions of
+    node_user_usages rows that we were about to drop anyway.
+    """
+    truncated = await heal_heavy_usage_tables(migrator)
     renamed = await heal_duplicate_unique_names(migrator)
     deleted, nulled = await heal_orphan_fk_refs(migrator)
-    truncated = await heal_heavy_usage_tables(migrator)
     return {
         "renamed": int(renamed or 0),
         "orphans_deleted": int(deleted or 0),
