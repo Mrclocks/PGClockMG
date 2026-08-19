@@ -549,6 +549,19 @@ def test_system_status():
     print("OK: system status")
 
 
+def test_upload_limit_override():
+    from app.services.archive_guard import (
+        MAX_OVERRIDE_UPLOAD_BYTES,
+        MAX_UPLOAD_BYTES,
+        allowed_upload_bytes,
+    )
+
+    assert allowed_upload_bytes(False) == MAX_UPLOAD_BYTES
+    expected = MAX_OVERRIDE_UPLOAD_BYTES if MAX_OVERRIDE_UPLOAD_BYTES > MAX_UPLOAD_BYTES else MAX_UPLOAD_BYTES
+    assert allowed_upload_bytes(True) == expected
+    print("OK: upload limit override")
+
+
 if __name__ == "__main__":
     test_marzban_panel_exists()
     test_sqlite_to_timescaledb_config()

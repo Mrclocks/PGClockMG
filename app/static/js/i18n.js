@@ -228,6 +228,8 @@ const I18N = {
       resourceExtractLimit: 'Safe extracted size: {size}',
       resourceZipPolicy: 'Zip guard',
       resourceZipPolicyDetail: 'Largest file in zip: {size}',
+      resourceOverrideTitle: 'Upload a larger file at my own risk',
+      resourceOverrideHint: 'If you enable this, server strength detection becomes informational only and uploads can go up to {size} when the server allows it.',
       resourceReason: {
         low_ram: 'Low free RAM',
         low_upload_disk: 'Low upload disk space',
@@ -661,6 +663,8 @@ const I18N = {
       resourceExtractLimit: 'سقف امن بعد از استخراج: {size}',
       resourceZipPolicy: 'گارد zip',
       resourceZipPolicyDetail: 'بزرگ‌ترین فایل داخل zip: {size}',
+      resourceOverrideTitle: 'آپلود فایل بزرگ‌تر با مسئولیت خودم',
+      resourceOverrideHint: 'اگر این گزینه را فعال کنید، تشخیص ضعیف یا قوی بودن سرور فقط جنبه اطلاع‌رسانی دارد و در صورت اجازه تنظیمات سرور، آپلود تا {size} مجاز می‌شود.',
       resourceReason: {
         low_ram: 'RAM آزاد کم است',
         low_upload_disk: 'فضای آپلود کم است',
@@ -1091,6 +1095,8 @@ const I18N = {
       resourceExtractLimit: 'Безопасный лимит после распаковки: {size}',
       resourceZipPolicy: 'Защита zip',
       resourceZipPolicyDetail: 'Максимальный файл внутри zip: {size}',
+      resourceOverrideTitle: 'Загрузить более крупный файл на свой риск',
+      resourceOverrideHint: 'Если включить этот режим, оценка мощности сервера останется только подсказкой, а upload сможет доходить до {size}, если это разрешено настройками сервера.',
       resourceReason: {
         low_ram: 'Мало свободной RAM',
         low_upload_disk: 'Мало места для upload',

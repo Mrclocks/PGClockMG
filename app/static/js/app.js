@@ -431,6 +431,10 @@ function resourceProfileHint(profile, limits) {
   return fmtMsg(t('step2.resourceHintNormal'), { maxUpload });
 }
 
+function largeUploadOverrideEnabled() {
+  return !!document.getElementById('allowLargeUploadOverride')?.checked;
+}
+
 function renderUploadResourceCard() {
   const card = document.getElementById('uploadResourceCard');
   if (!card) return;
@@ -451,6 +455,8 @@ function renderUploadResourceCard() {
   const loadRatio = Number.isFinite(resources.load_ratio_1m) ? resources.load_ratio_1m.toFixed(2) : '—';
   const cpuCount = resources.cpu_count || '—';
   const reasons = Array.isArray(resources.profile_reasons) ? resources.profile_reasons : [];
+  const overrideEnabled = largeUploadOverrideEnabled();
+  const overrideLimit = fmtBytes(limits.max_override_upload_bytes);
   const reasonText = reasons.length
     ? `<p class="upload-resource-reasons">${reasons.map((r) => t(`step2.resourceReason.${r}`)).join(' · ')}</p>`
     : '';
@@ -487,7 +493,7 @@ function renderUploadResourceCard() {
       </div>
       <div class="upload-resource-item">
         <span class="upload-resource-label">${t('step2.resourceUploadLimit')}</span>
-        <strong>${fmtBytes(limits.max_upload_bytes)}</strong>
+        <strong>${overrideEnabled ? overrideLimit : fmtBytes(limits.max_upload_bytes)}</strong>
         <small>${fmtMsg(t('step2.resourceExtractLimit'), { size: fmtBytes(limits.max_zip_total_bytes) })}</small>
       </div>
       <div class="upload-resource-item">
@@ -495,7 +501,16 @@ function renderUploadResourceCard() {
         <strong>${limits.max_zip_files?.toLocaleString?.() || limits.max_zip_files} / ${limits.max_zip_ratio}:1</strong>
         <small>${fmtMsg(t('step2.resourceZipPolicyDetail'), { size: fmtBytes(limits.max_zip_entry_bytes) })}</small>
       </div>
-    </div>`;
+    </div>
+    <label class="upload-resource-override">
+      <input type="checkbox" id="allowLargeUploadOverride" ${overrideEnabled ? 'checked' : ''}>
+      <span>
+        <strong>${t('step2.resourceOverrideTitle')}</strong>
+        <small>${fmtMsg(t('step2.resourceOverrideHint'), { size: overrideLimit })}</small>
+      </span>
+    </label>`;
+  const checkbox = card.querySelector('#allowLargeUploadOverride');
+  if (checkbox) checkbox.addEventListener('change', () => renderUploadResourceCard());
   card.classList.remove('hidden');
 }
 
@@ -1841,6 +1856,7 @@ async function uploadSlotFile(slot, file) {
   if (state.selectedPanel) form.append('panel_id', state.selectedPanel.id);
   if (state.sourceDb) form.append('source_db', state.sourceDb);
   form.append('marzban_mode', 'fresh');
+  if (largeUploadOverrideEnabled()) form.append('allow_large_upload', '1');
 
   try {
     const data = await uploadFormWithProgress('/api/upload', form, (pct) => {

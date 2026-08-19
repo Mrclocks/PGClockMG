@@ -1170,6 +1170,37 @@ button.db-card {
   gap: 12px;
 }
 
+.upload-resource-override {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.upload-resource-override input {
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+  accent-color: var(--warning);
+  flex: 0 0 auto;
+}
+
+.upload-resource-override strong {
+  display: block;
+  font-size: 0.9rem;
+  color: var(--text);
+}
+
+.upload-resource-override small {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
 .upload-resource-item {
   padding: 12px 14px;
   border: 1px solid var(--border-soft);
