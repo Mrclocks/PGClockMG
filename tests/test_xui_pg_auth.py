@@ -23,6 +23,7 @@ from app.services.migrators.xui import (
     parse_pg_auth_context,
     parse_published_port,
     password_storage_mismatch,
+    pg_fingerprint_value,
     pg_endpoint_candidates,
     pg_probe_result,
     pgbouncer_env_mismatch,
@@ -361,8 +362,10 @@ class _FakePgStack(XuiMigrator):
         host_error="",
         alter_ok=True,
         impostor_on=(),
+        noise=False,
     ):
         super().__init__(job, params)
+        self.noise = noise
         self.password = password
         self.verifier = verifier
         self.encryption = encryption
@@ -409,16 +412,24 @@ class _FakePgStack(XuiMigrator):
                 return arg.split("=", 1)[1]
         return ""
 
-    def _answer(self, sql):
+    # stdout and stderr share one pipe, and the two paths emit different chatter
+    NOISE = {
+        "exec": 'WARN[0000] The "PG_WORK_MEM" variable is not set. Defaulting to ""',
+        "run": "Unable to find image 'postgres:latest' locally",
+    }
+
+    def _answer(self, sql, source):
         if sql == PG_FINGERPRINT_SQL:
-            return self.FINGERPRINT
-        if "password_encryption" in sql:
-            return f"{self.encryption}|{self.verifier}|{self.hba}"
-        return "1"
+            value = self.FINGERPRINT
+        elif "password_encryption" in sql:
+            value = f"{self.encryption}|{self.verifier}|{self.hba}"
+        else:
+            value = "1"
+        return f"{self.NOISE[source]}\n{value}" if self.noise else value
 
     def _in_container(self, argv):
         if "-tAc" in argv:  # local socket is trusted: the password is irrelevant
-            return True, self._answer(self._arg(argv, "-tAc")) + "\n"
+            return True, self._answer(self._arg(argv, "-tAc"), "exec") + "\n"
         for index, arg in enumerate(argv):
             if arg != "-c":
                 continue
@@ -456,7 +467,7 @@ class _FakePgStack(XuiMigrator):
                 "psql: error: connection to server failed: FATAL:  "
                 f'password authentication failed for user "{user}"'
             )
-        return True, self._answer(self._arg(argv, "-tAc")) + "\n"
+        return True, self._answer(self._arg(argv, "-tAc"), "run") + "\n"
 
     def altered_roles(self) -> int:
         return sum(1 for c in self.commands if "ALTER ROLE" in " ".join(c))
@@ -554,6 +565,48 @@ def test_precheck_picks_the_password_that_survives_tcp_auth():
     assert 'POSTGRES_PASSWORD="realpwd"' in on_disk
 
 
+def test_precheck_survives_docker_warnings_on_the_output_pipe():
+    """Healthy stack, noisy docker: nothing may be altered or refused."""
+    with tempfile.TemporaryDirectory() as tmp:
+        env_path = Path(tmp) / ".env"
+        env_text = _env("realpwd")
+        env_path.write_text(env_text, encoding="utf-8")
+        migrator = _FakePgStack(
+            MigrationJob(job_id="noise"), {"target_db": "timescaledb"}, noise=True,
+        )
+        result = _align(migrator, env_text, env_path)
+        on_disk = env_path.read_text(encoding="utf-8")
+
+    assert result == env_text
+    assert on_disk == env_text
+    assert migrator.altered_roles() == 0
+    assert migrator.set_cluster_encryption_calls() == 0
+    assert migrator.params["_resolved_target_conn"]["password"] == "realpwd"
+    assert not any("different postmaster" in line for line in migrator.job.logs)
+
+
+def test_precheck_tries_the_credentials_the_copy_would_have_used_first():
+    """Whatever worked before this pre-check existed must still work untouched."""
+    with tempfile.TemporaryDirectory() as tmp:
+        env_path = Path(tmp) / ".env"
+        env_text = _env("env-secret")
+        env_path.write_text(env_text, encoding="utf-8")
+        migrator = _FakePgStack(
+            MigrationJob(job_id="prev"),
+            {"target_db": "timescaledb"},
+            password="wizard-secret",
+        )
+        with patch(
+            "app.services.db_credentials.get_target_connection",
+            lambda _params: {"user": "pasarguard", "password": "wizard-secret"},
+        ):
+            result = _align(migrator, env_text, env_path)
+
+    assert migrator.altered_roles() == 0
+    assert migrator.params["_resolved_target_conn"]["password"] == "wizard-secret"
+    assert 'DB_PASSWORD="wizard-secret"' in result
+
+
 def test_precheck_does_not_trust_the_containers_own_loopback():
     """The password is right, but stored md5 against a scram-sha-256 host rule.
 
@@ -637,7 +690,7 @@ def test_precheck_uses_the_port_docker_actually_publishes():
 
 
 def test_precheck_refuses_a_foreign_postgres_on_the_assumed_port():
-    """A stranger on 5432 must never be migrated into — the copy drops its schema."""
+    """A stranger on 5432 must never be handed to the copy — it drops the schema."""
     with tempfile.TemporaryDirectory() as tmp:
         env_path = Path(tmp) / ".env"
         env_text = _env("realpwd")
@@ -648,18 +701,15 @@ def test_precheck_refuses_a_foreign_postgres_on_the_assumed_port():
             published=None,
             impostor_on=("5432",),
         )
-        try:
-            _align(migrator, env_text, env_path)
-        except RuntimeError as e:
-            assert "5432" in str(e)
-        else:
-            raise AssertionError("must refuse an unrelated PostgreSQL server")
+        result = _align(migrator, env_text, env_path)
 
+    assert result == env_text
     assert "_resolved_target_conn" not in migrator.params
     assert any("different postmaster" in line for line in migrator.job.logs)
 
 
-def test_precheck_stops_with_a_diagnosis_when_alter_role_fails():
+def test_precheck_explains_the_failure_without_causing_one():
+    """A hopeless case is described in the log; the migration still runs its course."""
     with tempfile.TemporaryDirectory() as tmp:
         env_path = Path(tmp) / ".env"
         env_text = _env("newpwd")
@@ -670,18 +720,17 @@ def test_precheck_stops_with_a_diagnosis_when_alter_role_fails():
             password="forgotten",
             alter_ok=False,
         )
-        try:
-            _align(migrator, env_text, env_path)
-        except RuntimeError as e:
-            assert "127.0.0.1:5432" in str(e)
-            assert "some-other-stack-db" in str(e)
-        else:
-            raise AssertionError("a conclusive auth failure must stop the migration")
+        result = _align(migrator, env_text, env_path)
         on_disk = env_path.read_text(encoding="utf-8")
 
+    assert result == env_text
     assert "_resolved_target_conn" not in migrator.params
     assert on_disk == env_text
     assert any("ALTER ROLE pasarguard failed" in line for line in migrator.job.logs)
+    assert any(
+        "some-other-stack-db" in line and "127.0.0.1:5432" in line
+        for line in migrator.job.logs
+    )
 
 
 def test_precheck_skipped_for_mysql_and_by_kill_switch():
@@ -797,6 +846,21 @@ def test_containers_publishing_port():
     assert containers_publishing_port("", "5432") == []
 
 
+def test_query_answers_are_read_out_of_docker_noise():
+    noisy = (
+        'WARN[0000] The "PG_WORK_MEM" variable is not set. Defaulting to ""\n'
+        "Unable to find image 'postgres:latest' locally\n"
+        "1755590000\n"
+    )
+    assert pg_fingerprint_value(noisy) == "1755590000"
+    assert pg_fingerprint_value("WARN[0000] nothing here") == ""
+    assert pg_fingerprint_value("") == ""
+    assert parse_pg_auth_context(
+        "time=\"2026-08-19\" level=warning msg=\"a|b|c warning\"\n"
+        "md5|md5|scram-sha-256\n"
+    ) == {"encryption": "md5", "verifier": "md5", "hba": "scram-sha-256"}
+
+
 def test_password_storage_rules():
     scram = parse_pg_auth_context("md5|md5|scram-sha-256\n")
     assert scram == {
@@ -860,12 +924,14 @@ if __name__ == "__main__":
     test_repair_fixes_password_encryption_before_syncing_roles()
     test_precheck_accepts_working_credentials_untouched()
     test_precheck_picks_the_password_that_survives_tcp_auth()
+    test_precheck_survives_docker_warnings_on_the_output_pipe()
+    test_precheck_tries_the_credentials_the_copy_would_have_used_first()
     test_precheck_does_not_trust_the_containers_own_loopback()
     test_precheck_fixes_the_cluster_default_even_when_login_works()
     test_precheck_repairs_role_when_no_password_authenticates()
     test_precheck_uses_the_port_docker_actually_publishes()
     test_precheck_refuses_a_foreign_postgres_on_the_assumed_port()
-    test_precheck_stops_with_a_diagnosis_when_alter_role_fails()
+    test_precheck_explains_the_failure_without_causing_one()
     test_precheck_skipped_for_mysql_and_by_kill_switch()
     test_probe_result_classification()
     test_precheck_never_rewrites_roles_when_the_probe_cannot_reach_postgres()
@@ -873,6 +939,7 @@ if __name__ == "__main__":
     test_endpoint_candidates_prefer_loopback_and_the_published_port()
     test_parse_published_port_prefers_loopback()
     test_containers_publishing_port()
+    test_query_answers_are_read_out_of_docker_noise()
     test_password_storage_rules()
     test_describe_password_source()
     test_normalize_pg_env_passwords_only_touches_existing_keys()
