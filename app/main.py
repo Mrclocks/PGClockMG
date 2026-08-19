@@ -1,6 +1,7 @@
 """PG-Migrator FastAPI application."""
 
 import socket
+import tempfile
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect, Form
@@ -22,6 +23,7 @@ from app.services.upload_bundle import (
     init_bundle, save_bundle_slot, get_bundle_status, prepare_bundle_workspace, bundle_has_upload,
 )
 from app.services.upload_requirements import get_upload_requirements
+from app.services.archive_guard import MAX_UPLOAD_BYTES, safe_upload_name
 from app.services.pg_access import get_panel_access_info
 from app.services.pg_restore import (
     analyze_pasarguard_backup, start_pasarguard_restore, get_restore_job,
@@ -238,24 +240,45 @@ async def api_upload(
     source_db: str | None = Form(None),
     marzban_mode: str | None = Form(None),
 ):
-    content = await file.read()
-    if len(content) > 500 * 1024 * 1024:
-        raise HTTPException(400, "حداکثر حجم فایل ۵۰۰ مگابایت")
+    filename = safe_upload_name(file.filename)
+    tmp_dir = Path(tempfile.mkdtemp(prefix="pg-upload-"))
+    tmp_path = tmp_dir / filename
+    size = 0
+    try:
+        with open(tmp_path, "wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    raise HTTPException(400, "حداکثر حجم فایل ۵۰۰ مگابایت")
+                out.write(chunk)
 
-    filename = file.filename or "upload.bin"
+        if slot or bundle_id:
+            bid = bundle_id or init_bundle()
+            result = save_bundle_slot(
+                bid, slot or "bundle_zip", tmp_path, filename,
+                panel_id=panel_id, source_db=source_db, marzban_mode=marzban_mode,
+            )
+            if result.get("error"):
+                raise HTTPException(400, result["error"])
+            return result
 
-    if slot or bundle_id:
-        bid = bundle_id or init_bundle()
-        result = save_bundle_slot(
-            bid, slot or "bundle_zip", content, filename,
-            panel_id=panel_id, source_db=source_db, marzban_mode=marzban_mode,
-        )
+        result = save_upload(tmp_path, filename)
         if result.get("error"):
             raise HTTPException(400, result["error"])
         return result
-
-    result = save_upload(content, filename)
-    return result
+    finally:
+        await file.close()
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            tmp_dir.rmdir()
+        except Exception:
+            pass
 
 
 def _resolve_upload_params(params: dict) -> dict:
