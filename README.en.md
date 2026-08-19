@@ -35,7 +35,7 @@ PGClockMG is a web wizard for **backup restore** and **migration to PasarGuard**
 
 ## Requirements
 
-- Ubuntu / Debian
+- Ubuntu 22.04+
 - `root` access
 - Docker
 - PasarGuard already installed on the new server
