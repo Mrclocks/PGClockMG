@@ -29,7 +29,7 @@ from app.services.pg_restore import (
 from app.services.self_uninstall import uninstall_preview, schedule_self_uninstall
 from app.config import WEB_PORT
 
-APP_VERSION = "3.1.3"
+APP_VERSION = "3.1.4"
 app = FastAPI(title="PGClockMG", version=APP_VERSION)
 
 STATIC_DIR = Path(__file__).parent / "static"
