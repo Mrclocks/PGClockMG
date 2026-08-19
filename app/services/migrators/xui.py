@@ -82,6 +82,21 @@ def pgbouncer_env_mismatch(
     return stale
 
 
+def pg_probe_result(ok: bool, output: str) -> str:
+    """Classify a TCP login probe as ``ok``, ``auth-failed`` or ``unusable``.
+
+    A probe that cannot reach PostgreSQL at all (port not published, image
+    without psql, docker error) must never be read as a wrong password —
+    otherwise the wizard would rewrite role passwords over a broken probe.
+    """
+    if ok:
+        return "ok"
+    low = (output or "").lower()
+    if "password authentication failed" in low or "no password supplied" in low:
+        return "auth-failed"
+    return "unusable"
+
+
 def logs_show_pg_auth_failure(text: str) -> bool:
     """True when panel logs died on PostgreSQL credentials (not schema/data)."""
     low = (text or "").lower()
@@ -1923,13 +1938,20 @@ class XuiMigrator(BaseMigrator):
         )
         from app.services.db_credentials import get_target_connection
 
-        await run_cross_db_migration(self, str(land_db), "sqlite", target_db)
-
         env = install_env_snapshot or (
             PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
             if PASARGUARD_ENV.exists()
             else ""
         )
+        try:
+            env = await self._align_pg_credentials_before_cross_db(
+                normalize_target_db(target_db), env,
+            )
+        except Exception as e:
+            self.job.log(f"Credential pre-check note: {e}")
+
+        await run_cross_db_migration(self, str(land_db), "sqlite", target_db)
+
         target_db = normalize_target_db(target_db)
         app_user = (
             read_env_var(env, "DB_USER")
@@ -2030,10 +2052,7 @@ class XuiMigrator(BaseMigrator):
                 f".env SQLALCHEMY_DATABASE_URL با موتور هدف {target_db} هم‌خوان نیست"
             )
         # Restore point: keep the pre-migration .env next to the DB backups.
-        try:
-            self._backup_file(PASARGUARD_ENV, BACKUP_DIR)
-        except OSError as e:
-            self.job.log(f".env backup note: {e}")
+        self._backup_env_once()
         PASARGUARD_ENV.write_text(finalized, encoding="utf-8")
         self.job.log(f".env finalized for {target_db} (user={app_user})")
 
@@ -2055,6 +2074,219 @@ class XuiMigrator(BaseMigrator):
                 bak.unlink()
             shutil.move(str(land_db), str(bak))
             self.job.log(f"Moved SQLite aside → {bak.name}")
+
+    def _backup_env_once(self) -> None:
+        """Keep the first .env of this job; later rewrites must not clobber it."""
+        dest = BACKUP_DIR / f"{PASARGUARD_ENV.name}.bak.{self.job.job_id}"
+        if dest.exists():
+            return
+        try:
+            self._backup_file(PASARGUARD_ENV, BACKUP_DIR)
+        except OSError as e:
+            self.job.log(f".env backup note: {e}")
+
+    async def _wait_pg_ready(self, service: str, attempts: int = 12) -> bool:
+        await self._run_cmd(
+            ["docker", "compose", "up", "-d", service],
+            cwd=str(PASARGUARD_DIR),
+            timeout=180,
+        )
+        for _ in range(attempts):
+            ok, _out = await self._run_cmd(
+                ["docker", "compose", "exec", "-T", service, "pg_isready", "-q"],
+                cwd=str(PASARGUARD_DIR),
+                timeout=30,
+                quiet=True,
+            )
+            if ok:
+                return True
+            await asyncio.sleep(5)
+        return False
+
+    async def _service_image(self, service: str) -> str:
+        container = await self._compose_container_id(service)
+        if not container:
+            return ""
+        ok, out = await self._run_cmd(
+            ["docker", "inspect", "--format", "{{.Config.Image}}", container],
+            timeout=30,
+            quiet=True,
+        )
+        if not ok:
+            return ""
+        for line in reversed((out or "").splitlines()):
+            if line.strip():
+                return line.strip()
+        return ""
+
+    async def _pg_tcp_login(
+        self, image: str, *, user: str, password: str, database: str = "postgres",
+    ) -> tuple[str, str]:
+        """Probe credentials the way alembic and the data copy use them.
+
+        ``docker compose exec … psql -U x`` goes through the container's local
+        socket, which official images trust, so it accepts *any* password. Only a
+        TCP connection to the published port hits ``scram-sha-256`` — that gap is
+        why a migration can pass the credential probe and then die on
+        ``password authentication failed`` during alembic.
+        """
+        ok, out = await self._run_cmd(
+            [
+                "docker", "run", "--rm", "--network", "host",
+                "-e", f"PGPASSWORD={password}",
+                image,
+                "psql", "-h", "127.0.0.1", "-p", "5432", "-U", user,
+                "-d", database, "-tAc", "SELECT 1",
+            ],
+            timeout=60,
+            quiet=True,
+        )
+        return pg_probe_result(ok and "1" in (out or ""), out or ""), (out or "")
+
+    async def _pg_force_role_password(
+        self, service: str, *, admin_user: str, admin_password: str, role: str, password: str,
+    ) -> tuple[bool, str]:
+        """ALTER ROLE through the trusted socket, without a shell in between.
+
+        The shared sync builds one long ``sh -c`` string and runs psql with
+        ``ON_ERROR_STOP=0``, so a password containing shell metacharacters — or a
+        permission error — is applied wrong or reported as success.
+        """
+        role_ident = (role or "").replace('"', '""')
+        pwd_literal = (password or "").replace("'", "''")
+        sql = f"ALTER ROLE \"{role_ident}\" WITH LOGIN PASSWORD '{pwd_literal}';"
+        ok, out = await self._run_cmd(
+            [
+                "docker", "compose", "exec", "-T",
+                "-e", f"PGPASSWORD={admin_password}",
+                service, "psql", "-U", admin_user, "-d", "postgres",
+                "-v", "ON_ERROR_STOP=1", "-c", sql,
+            ],
+            cwd=str(PASARGUARD_DIR),
+            timeout=60,
+            quiet=True,
+        )
+        return ok, (out or "")
+
+    def _normalize_pg_env_passwords(self, env_text: str, password: str) -> str:
+        """Point existing POSTGRES_PASSWORD / DB_PASSWORD at the working password.
+
+        Role sync, `.env` finalize and PgBouncer all read these keys; while they
+        disagree the panel ends up with a URL no role accepts.
+        """
+        from app.services.env_migration import _set_env_var_simple
+
+        updated = env_text
+        changed: list[str] = []
+        for key in ("POSTGRES_PASSWORD", "DB_PASSWORD"):
+            current = read_env_var(updated, key)
+            if not current or current == password:
+                continue
+            updated = _set_env_var_simple(updated, key, password)
+            changed.append(key)
+        if not changed:
+            return env_text
+        self._backup_env_once()
+        PASARGUARD_ENV.write_text(updated, encoding="utf-8")
+        self.job.log(
+            f"Aligned {', '.join(changed)} in .env with the password the database actually accepts"
+        )
+        return updated
+
+    async def _align_pg_credentials_before_cross_db(
+        self, target_db: str, env_text: str,
+    ) -> str:
+        """Verify — and if needed repair — the credentials the copy will use.
+
+        Returns the effective .env text so finalize writes the panel URL with the
+        same password the roles and PgBouncer end up on.
+        """
+        if target_db not in ("postgresql", "timescaledb") or not xui_auth_heal_enabled():
+            return env_text
+        from app.services.db_auth import (
+            postgres_admin_users,
+            postgres_password_candidates,
+            target_database_name,
+        )
+        from app.services.pasarguard_ops import resolve_db_service
+
+        service = resolve_db_service(target_db)
+        if not service:
+            return env_text
+        if not await self._wait_pg_ready(service):
+            self.job.log(f"{service} is not accepting connections — skipping credential pre-check")
+            return env_text
+        image = await self._service_image(service)
+        if not image:
+            self.job.log("Could not resolve the database image — skipping credential pre-check")
+            return env_text
+
+        users = postgres_admin_users(env_text)
+        passwords = [p for p in postgres_password_candidates(env_text) if p]
+        if not users or not passwords:
+            return env_text
+        database = target_database_name(env_text, target_db)
+
+        working: tuple[str, str] | None = None
+        inconclusive = ""
+        last_error = ""
+        for user in users:
+            for pwd in passwords:
+                result, out = await self._pg_tcp_login(image, user=user, password=pwd)
+                if result == "ok":
+                    working = (user, pwd)
+                    break
+                if result == "unusable":
+                    inconclusive = out or inconclusive
+                last_error = out or last_error
+            if working:
+                break
+
+        if working is None and inconclusive:
+            # Probe could not reach PostgreSQL — never treat that as a bad password.
+            self.job.log(
+                "Could not verify PostgreSQL credentials over 127.0.0.1:5432 — "
+                f"continuing without changes ({inconclusive.strip()[-300:]})"
+            )
+            return env_text
+
+        if working is None:
+            user, pwd = users[0], passwords[0]
+            self.job.log(
+                f"No .env password authenticates as {user} over 127.0.0.1:5432 — "
+                f"aligning the role password before the copy ({last_error.strip()[-200:]})"
+            )
+            ok, out = await self._pg_force_role_password(
+                service, admin_user=user, admin_password=pwd, role=user, password=pwd,
+            )
+            if not ok:
+                self.job.log(f"ALTER ROLE {user} failed: {out.strip()[-300:]}")
+                return env_text
+            result_after, out_after = await self._pg_tcp_login(image, user=user, password=pwd)
+            if result_after != "ok":
+                self.job.log(
+                    f"{user} still cannot authenticate over TCP after ALTER ROLE — "
+                    f"{out_after.strip()[-300:]}"
+                )
+                return env_text
+            self.job.log(f"Role {user} aligned — TCP authentication now succeeds")
+            working = (user, pwd)
+        else:
+            self.job.log(
+                f"PostgreSQL TCP auth verified as {working[0]} "
+                "(the exact path alembic and the data copy use)"
+            )
+
+        user, pwd = working
+        self.params["_resolved_target_conn"] = {
+            "db_type": target_db,
+            "user": user,
+            "password": pwd,
+            "database": database,
+            "host": "127.0.0.1",
+            "port": "5432",
+        }
+        return self._normalize_pg_env_passwords(env_text, pwd)
 
     async def _compose_container_id(self, service: str) -> str:
         ok, out = await self._run_cmd(

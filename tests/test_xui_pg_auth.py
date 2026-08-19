@@ -15,6 +15,7 @@ from app.services.migrators.xui import (
     XuiMigrator,
     logs_show_pg_auth_failure,
     parse_container_env,
+    pg_probe_result,
     pgbouncer_env_mismatch,
     xui_auth_heal_enabled,
 )
@@ -325,6 +326,234 @@ def test_repair_uses_panel_url_password_for_roles():
     assert seen["password"] == "url-secret"
 
 
+class _FakePgStack(XuiMigrator):
+    """XuiMigrator wired to a scripted PostgreSQL stack (TCP auth + ALTER ROLE)."""
+
+    def __init__(
+        self,
+        job,
+        params,
+        *,
+        accepted=("realpwd",),
+        roles=("pasarguard",),
+        alter_ok=True,
+        probe_error="",
+    ):
+        super().__init__(job, params)
+        self.accepted = set(accepted)
+        self.roles = set(roles)
+        self.alter_ok = alter_ok
+        self.probe_error = probe_error
+        self.commands: list[list[str]] = []
+
+    async def _run_cmd(self, cmd, cwd=None, timeout=600, *, quiet=False):
+        argv = list(cmd) if isinstance(cmd, list) else [cmd]
+        self.commands.append(argv)
+        joined = " ".join(argv)
+        if "pg_isready" in joined:
+            return True, ""
+        if "{{.Config.Image}}" in joined:
+            return True, "timescale/timescaledb-ha:pg17\n"
+        if "ps" in argv and "-q" in argv:
+            return True, "db-container-id\n"
+        if "run" in argv and "psql" in argv:
+            if self.probe_error:
+                return False, self.probe_error
+            password = next(
+                (a.split("=", 1)[1] for a in argv if a.startswith("PGPASSWORD=")), "",
+            )
+            user = argv[argv.index("-U") + 1]
+            if user in self.roles and password in self.accepted:
+                return True, "1\n"
+            return False, (
+                "psql: error: connection to server failed: FATAL:  "
+                f'password authentication failed for user "{user}"'
+            )
+        if "exec" in argv and "ALTER ROLE" in joined:
+            if not self.alter_ok:
+                return False, "ERROR:  permission denied to alter role"
+            import re
+
+            m = re.search(r"PASSWORD '(.*)';", argv[-1])
+            if m:
+                self.accepted = {m.group(1).replace("''", "'")}
+            return True, "ALTER ROLE"
+        return True, ""
+
+    def altered_roles(self) -> int:
+        return sum(1 for c in self.commands if "ALTER ROLE" in " ".join(c))
+
+
+def _env(db_password: str, postgres_password: str | None = None) -> str:
+    text = (
+        'SQLALCHEMY_DATABASE_URL="postgresql+asyncpg://'
+        f'pasarguard:{db_password}@127.0.0.1:6432/pasarguard"\n'
+        "DB_USER=pasarguard\n"
+        f"DB_PASSWORD={db_password}\n"
+        "DB_NAME=pasarguard\n"
+    )
+    if postgres_password is not None:
+        text += f"POSTGRES_PASSWORD={postgres_password}\n"
+    return text
+
+
+def _align(migrator, env_text, env_path):
+    with patch("app.services.migrators.xui.PASARGUARD_ENV", env_path), \
+         patch("app.services.migrators.xui.BACKUP_DIR", env_path.parent), \
+         patch("app.services.pasarguard_ops.resolve_db_service", lambda _db: "timescaledb"), \
+         patch("app.services.migrators.xui.asyncio.sleep", _no_sleep):
+        return asyncio.run(
+            migrator._align_pg_credentials_before_cross_db("timescaledb", env_text)
+        )
+
+
+def test_precheck_accepts_working_credentials_untouched():
+    with tempfile.TemporaryDirectory() as tmp:
+        env_path = Path(tmp) / ".env"
+        env_text = _env("realpwd")
+        env_path.write_text(env_text, encoding="utf-8")
+        migrator = _FakePgStack(MigrationJob(job_id="pre1"), {"target_db": "timescaledb"})
+        result = _align(migrator, env_text, env_path)
+
+    assert result == env_text
+    assert migrator.altered_roles() == 0
+    conn = migrator.params["_resolved_target_conn"]
+    assert conn["user"] == "pasarguard"
+    assert conn["password"] == "realpwd"
+    assert conn["port"] == "5432"
+
+
+def test_precheck_picks_the_password_that_survives_tcp_auth():
+    """POSTGRES_PASSWORD is tried first but is stale; DB_PASSWORD is the live one."""
+    with tempfile.TemporaryDirectory() as tmp:
+        env_path = Path(tmp) / ".env"
+        env_text = _env("realpwd", postgres_password="stale")
+        env_path.write_text(env_text, encoding="utf-8")
+        migrator = _FakePgStack(MigrationJob(job_id="pre2"), {"target_db": "timescaledb"})
+        result = _align(migrator, env_text, env_path)
+        on_disk = env_path.read_text(encoding="utf-8")
+
+    assert migrator.altered_roles() == 0
+    assert migrator.params["_resolved_target_conn"]["password"] == "realpwd"
+    # .env must stop advertising the stale secret, or role sync re-applies it
+    assert 'POSTGRES_PASSWORD="realpwd"' in result
+    assert "POSTGRES_PASSWORD=stale" not in result
+    assert 'POSTGRES_PASSWORD="realpwd"' in on_disk
+
+
+def test_precheck_repairs_role_when_no_password_authenticates():
+    with tempfile.TemporaryDirectory() as tmp:
+        env_path = Path(tmp) / ".env"
+        env_text = _env("newpwd")
+        env_path.write_text(env_text, encoding="utf-8")
+        migrator = _FakePgStack(
+            MigrationJob(job_id="pre3"), {"target_db": "timescaledb"}, accepted=("forgotten",),
+        )
+        result = _align(migrator, env_text, env_path)
+
+    assert migrator.altered_roles() == 1
+    assert migrator.accepted == {"newpwd"}
+    assert migrator.params["_resolved_target_conn"]["password"] == "newpwd"
+    assert result == env_text
+
+
+def test_precheck_leaves_everything_alone_when_alter_role_fails():
+    with tempfile.TemporaryDirectory() as tmp:
+        env_path = Path(tmp) / ".env"
+        env_text = _env("newpwd")
+        env_path.write_text(env_text, encoding="utf-8")
+        migrator = _FakePgStack(
+            MigrationJob(job_id="pre4"),
+            {"target_db": "timescaledb"},
+            accepted=("forgotten",),
+            alter_ok=False,
+        )
+        result = _align(migrator, env_text, env_path)
+        on_disk = env_path.read_text(encoding="utf-8")
+
+    assert result == env_text
+    assert "_resolved_target_conn" not in migrator.params
+    assert on_disk == env_text
+    assert any("ALTER ROLE pasarguard failed" in line for line in migrator.job.logs)
+
+
+def test_precheck_skipped_for_mysql_and_by_kill_switch():
+    import os
+
+    with tempfile.TemporaryDirectory() as tmp:
+        env_path = Path(tmp) / ".env"
+        env_text = _env("realpwd")
+        env_path.write_text(env_text, encoding="utf-8")
+
+        migrator = _FakePgStack(MigrationJob(job_id="pre5"), {"target_db": "mariadb"})
+        with patch("app.services.migrators.xui.PASARGUARD_ENV", env_path):
+            assert asyncio.run(
+                migrator._align_pg_credentials_before_cross_db("mariadb", env_text)
+            ) == env_text
+        assert migrator.commands == []
+
+        migrator = _FakePgStack(MigrationJob(job_id="pre6"), {"target_db": "timescaledb"})
+        os.environ[XUI_AUTH_HEAL_ENV] = "0"
+        try:
+            assert _align(migrator, env_text, env_path) == env_text
+        finally:
+            os.environ.pop(XUI_AUTH_HEAL_ENV, None)
+        assert migrator.commands == []
+
+
+def test_probe_result_classification():
+    assert pg_probe_result(True, "1") == "ok"
+    assert pg_probe_result(
+        False, 'FATAL:  password authentication failed for user "pasarguard"'
+    ) == "auth-failed"
+    assert pg_probe_result(False, "fe_sendauth: no password supplied") == "auth-failed"
+    assert pg_probe_result(
+        False, "psql: error: connection to server at 127.0.0.1, port 5432 failed: Connection refused"
+    ) == "unusable"
+    assert pg_probe_result(False, 'docker: Error response from daemon: exec: "psql"') == "unusable"
+
+
+def test_precheck_never_rewrites_roles_when_the_probe_cannot_reach_postgres():
+    """Connection refused is not a wrong password — leave the database alone."""
+    with tempfile.TemporaryDirectory() as tmp:
+        env_path = Path(tmp) / ".env"
+        env_text = _env("realpwd", postgres_password="stale")
+        env_path.write_text(env_text, encoding="utf-8")
+        migrator = _FakePgStack(
+            MigrationJob(job_id="pre7"),
+            {"target_db": "timescaledb"},
+            probe_error=(
+                "psql: error: connection to server at 127.0.0.1, port 5432 failed: "
+                "Connection refused"
+            ),
+        )
+        result = _align(migrator, env_text, env_path)
+        on_disk = env_path.read_text(encoding="utf-8")
+
+    assert result == env_text
+    assert on_disk == env_text
+    assert migrator.altered_roles() == 0
+    assert "_resolved_target_conn" not in migrator.params
+    assert any("Connection refused" in line for line in migrator.job.logs)
+
+
+def test_normalize_pg_env_passwords_only_touches_existing_keys():
+    with tempfile.TemporaryDirectory() as tmp:
+        env_path = Path(tmp) / ".env"
+        env_text = _env("old", postgres_password="old")
+        env_path.write_text(env_text, encoding="utf-8")
+        migrator = _FakePgStack(MigrationJob(job_id="norm"), {})
+        with patch("app.services.migrators.xui.PASARGUARD_ENV", env_path), \
+             patch("app.services.migrators.xui.BACKUP_DIR", env_path.parent):
+            updated = migrator._normalize_pg_env_passwords(env_text, "new")
+            unchanged = migrator._normalize_pg_env_passwords(updated, "new")
+
+    assert 'DB_PASSWORD="new"' in updated
+    assert 'POSTGRES_PASSWORD="new"' in updated
+    assert "MYSQL_ROOT_PASSWORD" not in updated
+    assert unchanged == updated
+
+
 if __name__ == "__main__":
     test_parse_container_env_keeps_last_value()
     test_parse_container_env_keeps_equals_in_value()
@@ -343,4 +572,12 @@ if __name__ == "__main__":
     test_start_panel_reraises_when_failure_is_not_auth()
     test_start_panel_keeps_original_error_when_repair_finds_nothing()
     test_repair_uses_panel_url_password_for_roles()
+    test_precheck_accepts_working_credentials_untouched()
+    test_precheck_picks_the_password_that_survives_tcp_auth()
+    test_precheck_repairs_role_when_no_password_authenticates()
+    test_precheck_leaves_everything_alone_when_alter_role_fails()
+    test_precheck_skipped_for_mysql_and_by_kill_switch()
+    test_probe_result_classification()
+    test_precheck_never_rewrites_roles_when_the_probe_cannot_reach_postgres()
+    test_normalize_pg_env_passwords_only_touches_existing_keys()
     print("OK: x-ui PostgreSQL auth repair")
