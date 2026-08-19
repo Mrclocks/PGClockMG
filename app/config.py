@@ -23,7 +23,18 @@ XUI_DB_PATHS = [
 HIDDIFY_DIR = Path("/opt/hiddify-manager")
 HIDDIFY_MYSQL_PASS = HIDDIFY_DIR / "other/mysql/mysql_pass"
 
-WEB_PORT = 7000
+DEFAULT_WEB_PORT = 7000
+
+
+def _web_port() -> int:
+    """Port the installer chose for the wizard (systemd passes it in)."""
+    raw = os.environ.get("PG_MIGRATOR_PORT", "").strip()
+    if raw.isdigit() and 1 <= int(raw) <= 65535:
+        return int(raw)
+    return DEFAULT_WEB_PORT
+
+
+WEB_PORT = _web_port()
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 BACKUP_DIR.mkdir(parents=True, exist_ok=True)
