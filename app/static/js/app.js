@@ -737,6 +737,7 @@ function canProceedStep2() {
     return t('block.sourceCredsIncomplete');
   }
   if (!uploadSatisfied()) {
+    if (panel?.id === '3x-ui') return t('block.xuiDb');
     return t('block.uploadsIncomplete');
   }
   if (

@@ -51,6 +51,32 @@ says so — install the panel first, this wizard only migrates data into it.
 URL: `http://SERVER_IP:PORT` (default `http://SERVER_IP:7000`)  
 Requirements: Ubuntu/Debian · root · Docker · PasarGuard already installed
 
+## How to use
+
+1. Take a backup from your current panel.  
+2. Install PasarGuard with the database engine you want on the **new server**. The
+   old panel's database type does not matter; if it is different, the wizard runs
+   the required conversion/migration automatically.  
+3. Make sure the new panel is up and reachable, then temporarily disable the old panel.  
+4. Install the PGClockMG script on the new server.  
+5. At the end of installation the script prints the web panel address. Open it and follow the steps in the wizard.  
+
+### What does the script menu do?
+
+| Option | What it does |
+|--------|--------------|
+| 1 · Install / update | Installs or updates the web wizard and prints the login URL at the end |
+| 2 · Uninstall | Removes the wizard service and files |
+| 3 · Redirect server | Shows status and management for `pg-redirect` used by 3x-ui / Hiddify migrations |
+| 4 · Exit | Leaves the menu |
+
+### Recommended order
+
+- First, back up the old panel  
+- Then install and test PasarGuard on the new server  
+- Temporarily disable the old panel so links, ports, or nodes do not conflict  
+- Finally, run restore or migration from the PGClockMG web panel  
+
 ### Old subscription links broken after a 3x-ui / Hiddify migration?
 
 `pg-redirect` has to bind the port the old panel used. If that panel is still
