@@ -97,6 +97,29 @@ def pg_probe_result(ok: bool, output: str) -> str:
     return "unusable"
 
 
+def app_version() -> str:
+    """Wizard version, so a job log alone shows which build produced it."""
+    try:
+        from app.main import APP_VERSION
+
+        return f"PGClockMG v{APP_VERSION}"
+    except Exception:
+        return "PGClockMG (version unknown)"
+
+
+def describe_password_source(env_text: str, password: str) -> str:
+    """Name the .env key a password came from (never log the secret itself)."""
+    for key in ("POSTGRES_PASSWORD", "DB_PASSWORD"):
+        if password and read_env_var(env_text, key) == password:
+            return key
+    url_pwd = parse_sqlalchemy_url(
+        read_env_var(env_text, "SQLALCHEMY_DATABASE_URL") or "", env_text,
+    ).get("password")
+    if password and password == url_pwd:
+        return "SQLALCHEMY_DATABASE_URL"
+    return "docker-compose"
+
+
 def logs_show_pg_auth_failure(text: str) -> bool:
     """True when panel logs died on PostgreSQL credentials (not schema/data)."""
     low = (text or "").lower()
@@ -1516,6 +1539,7 @@ class XuiMigrator(BaseMigrator):
         target_db = normalize_target_db(params.get("target_db") or "sqlite")
         params["target_db"] = target_db
         self.params["target_db"] = target_db
+        self.job.log(f"x-ui → PasarGuard ({target_db}) on {app_version()}")
 
         self.job.set_progress(5, "یافتن دیتابیس 3x-ui...")
 
@@ -2120,28 +2144,57 @@ class XuiMigrator(BaseMigrator):
         return ""
 
     async def _pg_tcp_login(
-        self, image: str, *, user: str, password: str, database: str = "postgres",
+        self,
+        image: str,
+        *,
+        service: str,
+        user: str,
+        password: str,
+        database: str = "postgres",
     ) -> tuple[str, str]:
         """Probe credentials the way alembic and the data copy use them.
 
         ``docker compose exec … psql -U x`` goes through the container's local
         socket, which official images trust, so it accepts *any* password. Only a
-        TCP connection to the published port hits ``scram-sha-256`` — that gap is
-        why a migration can pass the credential probe and then die on
-        ``password authentication failed`` during alembic.
+        TCP connection hits ``scram-sha-256`` — that gap is why a migration can
+        pass the credential probe and then die on ``password authentication
+        failed`` during alembic.
+
+        Probing over TCP *inside* the container needs no published port and no
+        cooperation from the image entrypoint; the host-network run is kept as a
+        fallback because it is byte-for-byte what alembic does.
         """
+        args = [
+            "psql", "-h", "127.0.0.1", "-p", "5432", "-U", user,
+            "-d", database, "-tAc", "SELECT 1",
+        ]
         ok, out = await self._run_cmd(
             [
+                "docker", "compose", "exec", "-T",
+                "-e", f"PGPASSWORD={password}", service, *args,
+            ],
+            cwd=str(PASARGUARD_DIR),
+            timeout=60,
+            quiet=True,
+        )
+        result = pg_probe_result(ok and "1" in (out or ""), out or "")
+        if result != "unusable" or not image:
+            return result, (out or "")
+
+        ok_host, out_host = await self._run_cmd(
+            [
                 "docker", "run", "--rm", "--network", "host",
+                "--entrypoint", "psql",
                 "-e", f"PGPASSWORD={password}",
-                image,
-                "psql", "-h", "127.0.0.1", "-p", "5432", "-U", user,
-                "-d", database, "-tAc", "SELECT 1",
+                image, *args[1:],
             ],
             timeout=60,
             quiet=True,
         )
-        return pg_probe_result(ok and "1" in (out or ""), out or ""), (out or "")
+        return (
+            pg_probe_result(ok_host and "1" in (out_host or ""), out_host or ""),
+            (out_host or out or ""),
+        )
 
     async def _pg_force_role_password(
         self, service: str, *, admin_user: str, admin_password: str, role: str, password: str,
@@ -2210,29 +2263,40 @@ class XuiMigrator(BaseMigrator):
         )
         from app.services.pasarguard_ops import resolve_db_service
 
+        self.job.log("Verifying PostgreSQL credentials over TCP (the path alembic uses)...")
         service = resolve_db_service(target_db)
         if not service:
+            self.job.log(
+                f"docker-compose has no {target_db} service — skipping credential pre-check"
+            )
             return env_text
         if not await self._wait_pg_ready(service):
             self.job.log(f"{service} is not accepting connections — skipping credential pre-check")
             return env_text
         image = await self._service_image(service)
-        if not image:
-            self.job.log("Could not resolve the database image — skipping credential pre-check")
-            return env_text
 
         users = postgres_admin_users(env_text)
         passwords = [p for p in postgres_password_candidates(env_text) if p]
         if not users or not passwords:
+            self.job.log("No PostgreSQL credentials found in .env — skipping credential pre-check")
             return env_text
         database = target_database_name(env_text, target_db)
+        self.job.log(
+            f"Credential pre-check on {service}: {len(users)} user(s) × "
+            f"{len(passwords)} password(s) from .env"
+        )
 
         working: tuple[str, str] | None = None
         inconclusive = ""
         last_error = ""
         for user in users:
             for pwd in passwords:
-                result, out = await self._pg_tcp_login(image, user=user, password=pwd)
+                result, out = await self._pg_tcp_login(
+                    image, service=service, user=user, password=pwd,
+                )
+                self.job.log(
+                    f"  {user} / {describe_password_source(env_text, pwd)} → {result}"
+                )
                 if result == "ok":
                     working = (user, pwd)
                     break
@@ -2262,7 +2326,9 @@ class XuiMigrator(BaseMigrator):
             if not ok:
                 self.job.log(f"ALTER ROLE {user} failed: {out.strip()[-300:]}")
                 return env_text
-            result_after, out_after = await self._pg_tcp_login(image, user=user, password=pwd)
+            result_after, out_after = await self._pg_tcp_login(
+                image, service=service, user=user, password=pwd,
+            )
             if result_after != "ok":
                 self.job.log(
                     f"{user} still cannot authenticate over TCP after ALTER ROLE — "
@@ -2273,8 +2339,8 @@ class XuiMigrator(BaseMigrator):
             working = (user, pwd)
         else:
             self.job.log(
-                f"PostgreSQL TCP auth verified as {working[0]} "
-                "(the exact path alembic and the data copy use)"
+                f"PostgreSQL TCP auth verified as {working[0]} using "
+                f"{describe_password_source(env_text, working[1])}"
             )
 
         user, pwd = working

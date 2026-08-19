@@ -13,6 +13,7 @@ from app.services.migrators.base import MigrationJob
 from app.services.migrators.xui import (
     XUI_AUTH_HEAL_ENV,
     XuiMigrator,
+    describe_password_source,
     logs_show_pg_auth_failure,
     parse_container_env,
     pg_probe_result,
@@ -338,12 +339,14 @@ class _FakePgStack(XuiMigrator):
         roles=("pasarguard",),
         alter_ok=True,
         probe_error="",
+        exec_probe_error="",
     ):
         super().__init__(job, params)
         self.accepted = set(accepted)
         self.roles = set(roles)
         self.alter_ok = alter_ok
         self.probe_error = probe_error
+        self.exec_probe_error = exec_probe_error
         self.commands: list[list[str]] = []
 
     async def _run_cmd(self, cmd, cwd=None, timeout=600, *, quiet=False):
@@ -356,9 +359,11 @@ class _FakePgStack(XuiMigrator):
             return True, "timescale/timescaledb-ha:pg17\n"
         if "ps" in argv and "-q" in argv:
             return True, "db-container-id\n"
-        if "run" in argv and "psql" in argv:
+        if "-tAc" in argv:
             if self.probe_error:
                 return False, self.probe_error
+            if self.exec_probe_error and "exec" in argv:
+                return False, self.exec_probe_error
             password = next(
                 (a.split("=", 1)[1] for a in argv if a.startswith("PGPASSWORD=")), "",
             )
@@ -537,6 +542,35 @@ def test_precheck_never_rewrites_roles_when_the_probe_cannot_reach_postgres():
     assert any("Connection refused" in line for line in migrator.job.logs)
 
 
+def test_precheck_falls_back_to_the_host_network_probe():
+    """If psql cannot run inside the container, use the path alembic itself uses."""
+    with tempfile.TemporaryDirectory() as tmp:
+        env_path = Path(tmp) / ".env"
+        env_text = _env("realpwd")
+        env_path.write_text(env_text, encoding="utf-8")
+        migrator = _FakePgStack(
+            MigrationJob(job_id="pre8"),
+            {"target_db": "timescaledb"},
+            exec_probe_error='OCI runtime exec failed: exec: "psql": not found',
+        )
+        result = _align(migrator, env_text, env_path)
+
+    assert result == env_text
+    assert migrator.altered_roles() == 0
+    assert migrator.params["_resolved_target_conn"]["password"] == "realpwd"
+    assert any(
+        "run" in cmd and "--entrypoint" in cmd for cmd in migrator.commands
+    ), "host-network probe must be attempted when the container probe is unusable"
+
+
+def test_describe_password_source():
+    env_text = _env("live", postgres_password="stale")
+    assert describe_password_source(env_text, "stale") == "POSTGRES_PASSWORD"
+    assert describe_password_source(env_text, "live") == "DB_PASSWORD"
+    assert describe_password_source(_env("live"), "live") == "DB_PASSWORD"
+    assert describe_password_source("", "anything") == "docker-compose"
+
+
 def test_normalize_pg_env_passwords_only_touches_existing_keys():
     with tempfile.TemporaryDirectory() as tmp:
         env_path = Path(tmp) / ".env"
@@ -579,5 +613,7 @@ if __name__ == "__main__":
     test_precheck_skipped_for_mysql_and_by_kill_switch()
     test_probe_result_classification()
     test_precheck_never_rewrites_roles_when_the_probe_cannot_reach_postgres()
+    test_precheck_falls_back_to_the_host_network_probe()
+    test_describe_password_source()
     test_normalize_pg_env_passwords_only_touches_existing_keys()
     print("OK: x-ui PostgreSQL auth repair")
