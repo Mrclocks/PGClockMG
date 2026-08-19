@@ -97,6 +97,116 @@ def pg_probe_result(ok: bool, output: str) -> str:
     return "unusable"
 
 
+# Postmaster start time is readable by any role and identical for every session
+# of one server, so it tells two PostgreSQL instances apart; epoch keeps the text
+# free of DateStyle/TimeZone differences between the two clients we compare.
+PG_FINGERPRINT_SQL = "SELECT extract(epoch from pg_postmaster_start_time())::bigint"
+
+
+def pg_auth_context_sql(role: str) -> str:
+    """One line of ``password_encryption|stored verifier|host hba method``."""
+    literal = (role or "").replace("'", "''")
+    return (
+        "SELECT current_setting('password_encryption') || '|' || "
+        "coalesce((SELECT CASE WHEN rolpassword LIKE 'SCRAM-SHA-256%' THEN 'scram-sha-256' "
+        "WHEN rolpassword LIKE 'md5%' THEN 'md5' ELSE 'other' END "
+        f"FROM pg_authid WHERE rolname = '{literal}'), 'unknown') || '|' || "
+        "coalesce((SELECT auth_method FROM pg_hba_file_rules WHERE type = 'host' "
+        "AND address = 'all' ORDER BY line_number DESC LIMIT 1), 'unknown')"
+    )
+
+
+def parse_pg_auth_context(text: str) -> dict[str, str]:
+    """Parse the auth-context line; empty dict when PostgreSQL answered nothing."""
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if line.count("|") >= 2:
+            encryption, verifier, hba = (line.split("|") + ["", "", ""])[:3]
+            return {
+                "encryption": encryption.strip().lower(),
+                "verifier": verifier.strip().lower(),
+                "hba": hba.strip().lower(),
+            }
+    return {}
+
+
+def required_password_encryption(ctx: dict[str, str]) -> str:
+    """Encoding a role password must be stored in to satisfy the host hba rule."""
+    hba = (ctx.get("hba") or "").lower()
+    return hba if hba in ("scram-sha-256", "md5") else ""
+
+
+def password_storage_mismatch(ctx: dict[str, str]) -> bool:
+    """True when the stored verifier can never satisfy the host hba rule.
+
+    A password stored as md5 cannot answer a ``scram-sha-256`` challenge (and
+    vice versa), so PostgreSQL replies ``password authentication failed`` even
+    though the password is correct. Nothing inside the container reveals this:
+    the image's own ``host all all 127.0.0.1/32 trust`` line accepts everything.
+    """
+    required = required_password_encryption(ctx)
+    verifier = (ctx.get("verifier") or "").lower()
+    if not required or verifier in ("", "unknown"):
+        return False
+    return verifier != required
+
+
+def parse_published_port(text: str, container_port: str = "5432/tcp") -> tuple[str, str]:
+    """Host address docker actually publishes for a container port.
+
+    The wizard must not assume 127.0.0.1:5432 is the panel's database: on a host
+    where that port belongs to someone else, alembic authenticates against a
+    stranger — and the schema reset would wipe it.
+    """
+    try:
+        ports = json.loads(text or "{}") or {}
+    except (ValueError, TypeError):
+        return "", ""
+    fallback = ("", "")
+    for binding in ports.get(container_port) or []:
+        if not isinstance(binding, dict):
+            continue
+        host_ip = str(binding.get("HostIp") or "").strip()
+        host_port = str(binding.get("HostPort") or "").strip()
+        if not host_port:
+            continue
+        if host_ip in ("", "0.0.0.0", "::", "[::]"):
+            host_ip = "127.0.0.1"
+        if host_ip == "127.0.0.1":
+            return host_ip, host_port
+        if not fallback[1]:
+            fallback = (host_ip, host_port)
+    return fallback
+
+
+def _first_value(text: str) -> str:
+    """First non-empty line of psql -tA output."""
+    for line in (text or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def pg_endpoint_candidates(host: str, port: str) -> list[tuple[str, str]]:
+    """Addresses to try, loopback first because that is what alembic connects to."""
+    endpoints: list[tuple[str, str]] = []
+    for candidate in (("127.0.0.1", port), (host, port), ("127.0.0.1", "5432")):
+        if candidate[0] and candidate[1] and candidate not in endpoints:
+            endpoints.append(candidate)
+    return endpoints
+
+
+def containers_publishing_port(ps_output: str, port: str) -> list[str]:
+    """Container names that publish ``port`` on the host, per ``docker ps``."""
+    names: list[str] = []
+    needle = f":{port}->"
+    for line in (ps_output or "").splitlines():
+        name, _, ports = line.partition("\t")
+        if needle in ports and name.strip():
+            names.append(name.strip())
+    return names
+
+
 def app_version() -> str:
     """Wizard version, so a job log alone shows which build produced it."""
     try:
@@ -2143,71 +2253,142 @@ class XuiMigrator(BaseMigrator):
                 return line.strip()
         return ""
 
-    async def _pg_tcp_login(
+    async def _pg_published_endpoint(self, service: str) -> tuple[str, str]:
+        """Host address docker publishes for the database container's 5432."""
+        container = await self._compose_container_id(service)
+        if not container:
+            return "", ""
+        ok, out = await self._run_cmd(
+            [
+                "docker", "inspect", "--format", "{{json .NetworkSettings.Ports}}",
+                container,
+            ],
+            timeout=30,
+            quiet=True,
+        )
+        return parse_published_port(out or "") if ok else ("", "")
+
+    async def _port_publishers(self, port: str) -> list[str]:
+        ok, out = await self._run_cmd(
+            ["docker", "ps", "--format", "{{.Names}}\t{{.Ports}}"],
+            timeout=30,
+            quiet=True,
+        )
+        return containers_publishing_port(out or "", port) if ok else []
+
+    async def _pg_query_in_container(
         self,
-        image: str,
-        *,
         service: str,
+        *,
         user: str,
         password: str,
+        sql: str,
         database: str = "postgres",
-    ) -> tuple[str, str]:
-        """Probe credentials the way alembic and the data copy use them.
-
-        ``docker compose exec … psql -U x`` goes through the container's local
-        socket, which official images trust, so it accepts *any* password. Only a
-        TCP connection hits ``scram-sha-256`` — that gap is why a migration can
-        pass the credential probe and then die on ``password authentication
-        failed`` during alembic.
-
-        Probing over TCP *inside* the container needs no published port and no
-        cooperation from the image entrypoint; the host-network run is kept as a
-        fallback because it is byte-for-byte what alembic does.
-        """
-        args = [
-            "psql", "-h", "127.0.0.1", "-p", "5432", "-U", user,
-            "-d", database, "-tAc", "SELECT 1",
-        ]
+    ) -> tuple[bool, str]:
+        """Run one query through the container's local socket (always trusted)."""
         ok, out = await self._run_cmd(
             [
                 "docker", "compose", "exec", "-T",
-                "-e", f"PGPASSWORD={password}", service, *args,
+                "-e", f"PGPASSWORD={password}",
+                service, "psql", "-U", user, "-d", database, "-tAc", sql,
             ],
             cwd=str(PASARGUARD_DIR),
             timeout=60,
             quiet=True,
         )
-        result = pg_probe_result(ok and "1" in (out or ""), out or "")
-        if result != "unusable" or not image:
-            return result, (out or "")
+        return ok, (out or "")
 
-        ok_host, out_host = await self._run_cmd(
+    async def _pg_host_login(
+        self,
+        image: str,
+        *,
+        host: str,
+        port: str,
+        user: str,
+        password: str,
+        database: str = "postgres",
+        sql: str = PG_FINGERPRINT_SQL,
+    ) -> tuple[str, str]:
+        """Log in exactly the way alembic and the data copy do: host → TCP.
+
+        Every probe that runs *inside* the container is worthless for this
+        question. Official PostgreSQL images ship a pg_hba whose first host rule
+        is ``host all all 127.0.0.1/32 trust``, so a loopback connection there
+        accepts any password, while the wizard's connections arrive through
+        docker's NAT from the bridge gateway and must pass scram-sha-256.
+        """
+        if not image:
+            return "unusable", "no image resolved for the database service"
+        ok, out = await self._run_cmd(
             [
                 "docker", "run", "--rm", "--network", "host",
                 "--entrypoint", "psql",
                 "-e", f"PGPASSWORD={password}",
-                image, *args[1:],
+                image,
+                "-h", host, "-p", port, "-U", user, "-d", database, "-tAc", sql,
             ],
+            timeout=90,
+            quiet=True,
+        )
+        text = out or ""
+        return pg_probe_result(ok and bool(_first_value(text)), text), text
+
+    async def _pg_auth_context(
+        self, service: str, *, user: str, password: str,
+    ) -> dict[str, str]:
+        """What PostgreSQL stores for a role and what its host rule demands."""
+        ok, out = await self._pg_query_in_container(
+            service, user=user, password=password, sql=pg_auth_context_sql(user),
+        )
+        return parse_pg_auth_context(out) if ok else {}
+
+    async def _pg_set_cluster_password_encryption(
+        self, service: str, *, user: str, password: str, encryption: str,
+    ) -> tuple[bool, str]:
+        """Make the cluster store *future* passwords the way its hba rule reads them.
+
+        Session-level ``SET`` would only protect this one statement: PasarGuard's
+        own role sync runs its ``ALTER ROLE`` again right before alembic, so a
+        wrong cluster default silently re-breaks the password we just repaired.
+        """
+        ok, out = await self._run_cmd(
+            [
+                "docker", "compose", "exec", "-T",
+                "-e", f"PGPASSWORD={password}",
+                service, "psql", "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1",
+                "-c", f"ALTER SYSTEM SET password_encryption = '{encryption}'",
+                "-c", "SELECT pg_reload_conf()",
+            ],
+            cwd=str(PASARGUARD_DIR),
             timeout=60,
             quiet=True,
         )
-        return (
-            pg_probe_result(ok_host and "1" in (out_host or ""), out_host or ""),
-            (out_host or out or ""),
-        )
+        return ok, (out or "")
 
     async def _pg_force_role_password(
-        self, service: str, *, admin_user: str, admin_password: str, role: str, password: str,
+        self,
+        service: str,
+        *,
+        admin_user: str,
+        admin_password: str,
+        role: str,
+        password: str,
+        encryption: str = "",
     ) -> tuple[bool, str]:
         """ALTER ROLE through the trusted socket, without a shell in between.
 
         The shared sync builds one long ``sh -c`` string and runs psql with
         ``ON_ERROR_STOP=0``, so a password containing shell metacharacters — or a
-        permission error — is applied wrong or reported as success.
+        permission error — is applied wrong or reported as success. ``encryption``
+        pins how the verifier is stored, because a password re-applied in the
+        wrong encoding still fails every TCP login.
         """
         role_ident = (role or "").replace('"', '""')
         pwd_literal = (password or "").replace("'", "''")
-        sql = f"ALTER ROLE \"{role_ident}\" WITH LOGIN PASSWORD '{pwd_literal}';"
+        sql = ""
+        if encryption:
+            sql += f"SET password_encryption = '{encryption}'; "
+        sql += f"ALTER ROLE \"{role_ident}\" WITH LOGIN PASSWORD '{pwd_literal}';"
         ok, out = await self._run_cmd(
             [
                 "docker", "compose", "exec", "-T",
@@ -2246,6 +2427,77 @@ class XuiMigrator(BaseMigrator):
         )
         return updated
 
+    async def _align_cluster_password_encryption(
+        self, service: str, *, user: str, password: str,
+    ) -> dict[str, str]:
+        """Report the server's password rules and fix a default that cannot work.
+
+        Returns the parsed auth context so callers can also decide whether the
+        role's stored verifier itself has to be re-applied.
+        """
+        ctx = await self._pg_auth_context(service, user=user, password=password)
+        if not ctx:
+            return {}
+        self.job.log(
+            f"PostgreSQL auth setup: password_encryption={ctx.get('encryption')}, "
+            f"{user} stored as {ctx.get('verifier')}, host rule requires "
+            f"{ctx.get('hba')}"
+        )
+        encryption = required_password_encryption(ctx)
+        if not encryption or ctx.get("encryption") == encryption:
+            return ctx
+        self.job.log(
+            f"New passwords would be stored as {ctx.get('encryption')} while "
+            f"connections must pass {encryption} — every later ALTER ROLE, "
+            "including PasarGuard's own role sync, would write a password that "
+            f"cannot authenticate. Switching the cluster default to {encryption}..."
+        )
+        ok, out = await self._pg_set_cluster_password_encryption(
+            service, user=user, password=password, encryption=encryption,
+        )
+        if not ok:
+            self.job.log(f"Could not set password_encryption: {out.strip()[-300:]}")
+        return ctx
+
+    async def _probe_pg_candidates(
+        self,
+        image: str,
+        env_text: str,
+        *,
+        host: str,
+        port: str,
+        users: list[str],
+        passwords: list[str],
+        fingerprint: str,
+    ) -> tuple[tuple[str, str] | None, str, str]:
+        """Try every .env credential from the host; return (working, unusable, error)."""
+        unusable = ""
+        last_error = ""
+        for user in users:
+            for pwd in passwords:
+                result, out = await self._pg_host_login(
+                    image, host=host, port=port, user=user, password=pwd,
+                )
+                source = describe_password_source(env_text, pwd)
+                if result == "ok" and fingerprint and _first_value(out) != fingerprint:
+                    self.job.log(
+                        f"  {user} / {source} → accepted by {host}:{port}, but that "
+                        "server is not the PasarGuard database container (different "
+                        "postmaster) — refusing to migrate into it"
+                    )
+                    last_error = (
+                        f"{host}:{port} is a different PostgreSQL server than the "
+                        "PasarGuard database container"
+                    )
+                    continue
+                self.job.log(f"  {user} / {source} → {result}")
+                if result == "ok":
+                    return (user, pwd), "", ""
+                if result == "unusable":
+                    unusable = out or unusable
+                last_error = out or last_error
+        return None, unusable, last_error
+
     async def _align_pg_credentials_before_cross_db(
         self, target_db: str, env_text: str,
     ) -> str:
@@ -2263,7 +2515,10 @@ class XuiMigrator(BaseMigrator):
         )
         from app.services.pasarguard_ops import resolve_db_service
 
-        self.job.log("Verifying PostgreSQL credentials over TCP (the path alembic uses)...")
+        self.job.log(
+            "Verifying PostgreSQL credentials from the host over TCP "
+            "(the exact path alembic and the data copy use)..."
+        )
         service = resolve_db_service(target_db)
         if not service:
             self.job.log(
@@ -2281,78 +2536,140 @@ class XuiMigrator(BaseMigrator):
             self.job.log("No PostgreSQL credentials found in .env — skipping credential pre-check")
             return env_text
         database = target_database_name(env_text, target_db)
-        self.job.log(
-            f"Credential pre-check on {service}: {len(users)} user(s) × "
-            f"{len(passwords)} password(s) from .env"
+
+        published_host, published_port = await self._pg_published_endpoint(service)
+        if published_port:
+            self.job.log(
+                f"{service} publishes PostgreSQL on {published_host}:{published_port}"
+            )
+        else:
+            self.job.log(
+                f"{service} publishes no host port for 5432 — falling back to 127.0.0.1:5432"
+            )
+        endpoints = pg_endpoint_candidates(published_host, published_port)
+
+        ok_fp, fp_out = await self._pg_query_in_container(
+            service, user=users[0], password=passwords[0], sql=PG_FINGERPRINT_SQL,
         )
+        fingerprint = _first_value(fp_out) if ok_fp else ""
+
+        ctx = await self._align_cluster_password_encryption(
+            service, user=users[0], password=passwords[0],
+        )
+        encryption = required_password_encryption(ctx)
 
         working: tuple[str, str] | None = None
-        inconclusive = ""
+        unusable = ""
         last_error = ""
-        for user in users:
-            for pwd in passwords:
-                result, out = await self._pg_tcp_login(
-                    image, service=service, user=user, password=pwd,
-                )
-                self.job.log(
-                    f"  {user} / {describe_password_source(env_text, pwd)} → {result}"
-                )
-                if result == "ok":
-                    working = (user, pwd)
-                    break
-                if result == "unusable":
-                    inconclusive = out or inconclusive
-                last_error = out or last_error
-            if working:
+        host, port = "127.0.0.1", "5432"
+        for host, port in endpoints:
+            self.job.log(
+                f"Credential pre-check on {host}:{port}: {len(users)} user(s) × "
+                f"{len(passwords)} password(s) from .env"
+            )
+            working, unusable, last_error = await self._probe_pg_candidates(
+                image, env_text,
+                host=host, port=port, users=users, passwords=passwords,
+                fingerprint=fingerprint,
+            )
+            # An unreachable endpoint says nothing about the password; a rejected
+            # one is the answer, and trying further addresses would only risk
+            # landing on some other machine's PostgreSQL.
+            if working or not unusable:
                 break
 
-        if working is None and inconclusive:
+        if working is None and unusable:
             # Probe could not reach PostgreSQL — never treat that as a bad password.
             self.job.log(
-                "Could not verify PostgreSQL credentials over 127.0.0.1:5432 — "
-                f"continuing without changes ({inconclusive.strip()[-300:]})"
+                f"Could not verify PostgreSQL credentials over {host}:{port} — "
+                f"continuing without changes ({unusable.strip()[-300:]})"
             )
             return env_text
 
         if working is None:
             user, pwd = users[0], passwords[0]
-            self.job.log(
-                f"No .env password authenticates as {user} over 127.0.0.1:5432 — "
-                f"aligning the role password before the copy ({last_error.strip()[-200:]})"
-            )
+            if password_storage_mismatch(ctx):
+                self.job.log(
+                    f"That combination can never authenticate: a {ctx.get('verifier')} "
+                    f"verifier cannot answer a {encryption} challenge, which is why "
+                    "the password looks correct inside the container and is rejected "
+                    f"from the host — re-applying it as {encryption}..."
+                )
+            else:
+                self.job.log(
+                    f"No .env password authenticates as {user} over {host}:{port} — "
+                    f"aligning the role password before the copy ({last_error.strip()[-200:]})"
+                )
             ok, out = await self._pg_force_role_password(
-                service, admin_user=user, admin_password=pwd, role=user, password=pwd,
+                service,
+                admin_user=user,
+                admin_password=pwd,
+                role=user,
+                password=pwd,
+                encryption=encryption,
             )
             if not ok:
                 self.job.log(f"ALTER ROLE {user} failed: {out.strip()[-300:]}")
-                return env_text
-            result_after, out_after = await self._pg_tcp_login(
-                image, service=service, user=user, password=pwd,
-            )
-            if result_after != "ok":
-                self.job.log(
-                    f"{user} still cannot authenticate over TCP after ALTER ROLE — "
-                    f"{out_after.strip()[-300:]}"
+            else:
+                # Re-verify through the same guard: a server that answers on this
+                # port but is not our container must not pass on the second try.
+                working, unusable_after, error_after = await self._probe_pg_candidates(
+                    image, env_text,
+                    host=host, port=port, users=[user], passwords=[pwd],
+                    fingerprint=fingerprint,
                 )
-                return env_text
-            self.job.log(f"Role {user} aligned — TCP authentication now succeeds")
-            working = (user, pwd)
-        else:
-            self.job.log(
-                f"PostgreSQL TCP auth verified as {working[0]} using "
-                f"{describe_password_source(env_text, working[1])}"
+                if working:
+                    self.job.log(f"Role {user} aligned — TCP authentication now succeeds")
+                else:
+                    last_error = error_after or unusable_after or last_error
+
+        if working is None:
+            await self._raise_pg_auth_diagnosis(
+                service, host=host, port=port, user=users[0], detail=last_error,
             )
 
         user, pwd = working
+        self.job.log(
+            f"PostgreSQL TCP auth verified as {user} using "
+            f"{describe_password_source(env_text, pwd)} on {host}:{port}"
+        )
         self.params["_resolved_target_conn"] = {
             "db_type": target_db,
             "user": user,
             "password": pwd,
             "database": database,
-            "host": "127.0.0.1",
-            "port": "5432",
+            "host": host,
+            "port": port,
         }
         return self._normalize_pg_env_passwords(env_text, pwd)
+
+    async def _raise_pg_auth_diagnosis(
+        self, service: str, *, host: str, port: str, user: str, detail: str,
+    ) -> None:
+        """Stop with the reason, instead of an asyncpg traceback ten seconds later.
+
+        Everything alembic needs has already been tried here with the same
+        credentials, so continuing can only reproduce the same failure without
+        saying why.
+        """
+        publishers = await self._port_publishers(port)
+        lines = [
+            f"PostgreSQL at {host}:{port} rejects every credential in "
+            f"{PASARGUARD_ENV} for role {user}, so alembic and the data copy "
+            "cannot connect either."
+        ]
+        if publishers:
+            lines.append(f"Host port {port} is published by: {', '.join(publishers)}.")
+        else:
+            lines.append(
+                f"No container publishes host port {port}; the {service} service "
+                'needs ports: ["127.0.0.1:5432:5432"] for the wizard to reach it.'
+            )
+        if detail.strip():
+            lines.append(detail.strip()[-400:])
+        message = " ".join(lines)
+        self.job.log(f"Error: {message}")
+        raise RuntimeError(message)
 
     async def _compose_container_id(self, service: str) -> str:
         ok, out = await self._run_cmd(
@@ -2463,6 +2780,7 @@ class XuiMigrator(BaseMigrator):
             resolve_live_admin_connection,
             sync_postgres_roles_to_app_password,
         )
+        from app.services.pasarguard_ops import resolve_db_service
 
         env = (
             PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
@@ -2496,6 +2814,13 @@ class XuiMigrator(BaseMigrator):
                 "port": "5432",
             }
 
+        service = resolve_db_service(target_db)
+        if service:
+            # Without this the role sync below re-stores the password in an
+            # encoding the server's own host rule cannot accept.
+            await self._align_cluster_password_encryption(
+                service, user=user, password=password,
+            )
         synced = await sync_postgres_roles_to_app_password(
             self, target_db, admin, env_text=env, password=password,
         )
