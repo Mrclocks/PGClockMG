@@ -1,4 +1,4 @@
-> ⚠️ **`v3.1.9`** — Перед restore или миграцией сделайте полный бэкап.
+> ⚠️ **`v3.2.0`** — Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <a href="README.en.md">English</a> · <b>Русский</b>
@@ -35,17 +35,38 @@
 sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
 ```
 
-Установщик спрашивает порт веб-панели — Enter оставит порт по умолчанию `7000`.
-При повторном запуске сохраняется порт текущей установки.
+Скрипт очищает экран и показывает меню:
+
+| Пункт | Что делает |
+|-------|------------|
+| 1 · Install / update | Спрашивает порт веб-панели (Enter — `7000`), ставит всё и в конце печатает адрес входа |
+| 2 · Uninstall | Удаляет сервис и `/opt/pg-migrator`, предлагая сохранить бэкапы. PasarGuard, базы и redirect-сервер не трогает |
+| 3 · Redirect server | Статус, перезапуск, принудительный перезапуск и логи `pg-redirect` — только для миграций 3x-ui / Hiddify |
+| 4 · Exit | Выход из меню |
+
+Над меню видно состояние PasarGuard (установлен, версия, движок БД), Docker,
+сервиса мастера и redirect-сервера. Если PasarGuard не найден, скрипт скажет об
+этом: сначала установите панель, мастер только переносит данные в неё.
 
 Адрес: `http://SERVER_IP:PORT` (по умолчанию `http://SERVER_IP:7000`)  
-Требования: Ubuntu/Debian · root · Docker
+Требования: Ubuntu/Debian · root · Docker · установленный PasarGuard
 
-Установка без вопросов, на заданном порту:
+### После миграции 3x-ui / Hiddify не работают старые ссылки?
+
+`pg-redirect` должен занять порт старой панели. Если она всё ещё запущена, порт
+занят и сервис не стартует. Запустите скрипт, выберите `3` (Redirect server), затем
+`2` (Force restart): старая панель останавливается, порты освобождаются, redirect
+поднимается снова с проверкой здоровья.
+
+### Без вопросов
 
 ```bash
 sudo PG_MIGRATOR_PORT=8443 bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
+sudo PG_MIGRATOR_ACTION=redirect-restart bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
 ```
+
+`PG_MIGRATOR_ACTION`: `install`, `uninstall`, `redirect-restart` или `menu`;
+`PG_MIGRATOR_YES=1` подтверждает все вопросы.
 
 ---
 

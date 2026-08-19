@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> ⚠️ **`v3.1.9`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
+> ⚠️ **`v3.2.0`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
   <b>فارسی</b> · <a href="README.en.md">English</a> · <a href="README.ru.md">Русский</a>
@@ -37,17 +37,38 @@
 sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
 ```
 
-نصب‌کننده موقع نصب می‌پرسد وب‌پنل روی چه پورتی بالا بیاید — با زدن Enter همان `7000` پیش‌فرض می‌ماند.
-اگر دوباره نصب/آپدیت کنید، پورت فعلی حفظ می‌شود.
+اسکریپت صفحه را پاک می‌کند و یک منو نشان می‌دهد:
+
+| گزینه | کار |
+|-------|-----|
+| ۱ · Install / update | پورت وب‌پنل را می‌پرسد (Enter یعنی همان `7000`)، نصب را کامل انجام می‌دهد و در آخر آدرس ورود را می‌دهد |
+| ۲ · Uninstall | سرویس و `/opt/pg-migrator` را پاک می‌کند و پیشنهاد می‌دهد بکاپ‌ها را نگه دارد. پاسارگارد، دیتابیس‌ها و ریدایرکت سرور دست‌نخورده می‌مانند |
+| ۳ · Redirect server | وضعیت، ری‌استارت، ری‌استارت اجباری و لاگ سرویس `pg-redirect` — فقط برای مهاجرت 3x-ui و Hiddify |
+| ۴ · Exit | خروج از منو |
+
+بالای منو وضعیت پاسارگارد (نصب بودن، نسخه، نوع دیتابیس)، داکر، سرویس ویزارد و
+ریدایرکت سرور نمایش داده می‌شود. اگر پاسارگارد نصب نباشد پیام می‌دهد که اول باید
+پنل نصب شود؛ این ویزارد فقط داده را به پنل موجود منتقل می‌کند.
 
 آدرس: `http://SERVER_IP:PORT` (پیش‌فرض `http://SERVER_IP:7000`)  
-پیش‌نیاز: Ubuntu/Debian · root · Docker
+پیش‌نیاز: Ubuntu/Debian · root · Docker · پاسارگارد از قبل نصب‌شده
 
-نصب بدون سوال، روی پورت دلخواه:
+### بعد از مهاجرت 3x-ui / Hiddify لینک‌های قدیمی کار نمی‌کنند؟
+
+`pg-redirect` باید روی همان پورت پنل قبلی بالا بیاید. اگر پنل قبلی هنوز روشن باشد
+پورت را نگه می‌دارد و سرویس ریدایرکت بالا نمی‌آید. اسکریپت را اجرا کنید، گزینه `3`
+(Redirect server) و بعد `2` (Force restart): پنل قبلی را می‌خواباند، پورت‌ها را آزاد
+می‌کند و ریدایرکت را با health check دوباره بالا می‌آورد.
+
+### بدون سوال
 
 ```bash
 sudo PG_MIGRATOR_PORT=8443 bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
+sudo PG_MIGRATOR_ACTION=redirect-restart bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
 ```
+
+مقدارهای `PG_MIGRATOR_ACTION`: ‏`install`، `uninstall`، `redirect-restart` یا `menu`.
+با `PG_MIGRATOR_YES=1` همه تاییدها خودکار «بله» می‌شوند.
 
 ---
 
