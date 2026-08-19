@@ -443,11 +443,6 @@ function resourceProfileAction(profile, limits) {
   return fmtMsg(t('step2.resourceActionNormal'), { maxUpload });
 }
 
-async function refreshResourceCard() {
-  // Re-run /api/system-check and redraw the card with the latest classification.
-  await loadSystemCheck();
-}
-
 function renderResourceCardInto(card, kind) {
   if (!card) return;
   const resources = state.systemCheck?.resources;
@@ -476,19 +471,17 @@ function renderResourceCardInto(card, kind) {
     ? `<ul class="upload-resource-reasons-list">${reasons.map((r) => `<li>${t(`step2.resourceReason.${r}`)}</li>`).join('')}</ul>`
     : '';
 
-  const actionLine = resourceProfileAction(profile, limits);
   const overrideStatus = overrideEnabled
     ? t('step2.resourceOverrideEnabledNote')
     : t('step2.resourceOverrideDisabledNote');
   const checkboxId = `allowLargeUploadOverride-${kind}`;
-  const refreshId = `btnRefreshResourceCard-${kind}`;
 
   card.innerHTML = `
     <div class="upload-resource-head">
       <div>
         <h4>${t('step2.resourceTitle')}</h4>
         <p class="upload-resource-desc">${resourceProfileHint(profile, limits)}</p>
-        <p class="upload-resource-action">${actionLine}</p>
+        <p class="upload-resource-action">${resourceProfileAction(profile, limits)}</p>
         ${reasonList}
       </div>
       <span class="upload-resource-badge tone-${tone}">${resourceProfileLabel(profile)}</span>
@@ -528,9 +521,6 @@ function renderResourceCardInto(card, kind) {
         <small>${fmtMsg(t('step2.resourceZipPolicyDetail'), { size: fmtBytes(limits.max_zip_entry_bytes) })}</small>
       </div>
     </div>
-    <div class="upload-resource-actions">
-      <button type="button" class="btn btn-secondary btn-sm" id="${refreshId}">${t('step2.resourceRefresh')}</button>
-    </div>
     <label class="upload-resource-override">
       <input type="checkbox" id="${checkboxId}" ${overrideEnabled ? 'checked' : ''}>
       <span>
@@ -545,9 +535,6 @@ function renderResourceCardInto(card, kind) {
       renderUploadResourceCard();
     });
   }
-
-  const btn = card.querySelector(`#${refreshId}`);
-  if (btn) btn.addEventListener('click', refreshResourceCard);
 
   card.classList.remove('hidden');
 }

@@ -562,6 +562,27 @@ def test_upload_limit_override():
     print("OK: upload limit override")
 
 
+def test_resource_profile_treats_2gb_2cpu_as_normal():
+    from app.services.prerequisites import _classify_resources
+
+    profile, reasons = _classify_resources({
+        "cpu_count": 2,
+        "load_ratio_1m": 0.8,
+        "memory": {
+            "total_bytes": 2 * 1024 * 1024 * 1024,
+            "available_bytes": 1200 * 1024 * 1024,
+        },
+        "storage": {
+            "upload": {"free_bytes": 8 * 1024 * 1024 * 1024},
+            "backup": {"free_bytes": 8 * 1024 * 1024 * 1024},
+        },
+    })
+
+    assert profile == "normal"
+    assert reasons == []
+    print("OK: 2GB RAM and 2 CPU is treated as normal")
+
+
 if __name__ == "__main__":
     test_marzban_panel_exists()
     test_sqlite_to_timescaledb_config()
