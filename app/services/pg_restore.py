@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 from app.config import PASARGUARD_DIR, PASARGUARD_ENV, PASARGUARD_DATA, UPLOAD_DIR
+from app.services.archive_guard import safe_extract as _guarded_zip_extract
 from app.services.env_migration import (
     detect_db_type_from_env,
     env_points_to_db,
@@ -566,18 +567,7 @@ def is_auth_failure_text(text: str) -> bool:
 
 
 def _safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
-    dest.mkdir(parents=True, exist_ok=True)
-    for info in zf.infolist():
-        name = info.filename.replace("\\", "/")
-        if name.startswith("/") or ".." in name.split("/"):
-            raise ValueError(f"Unsafe zip entry: {info.filename}")
-        target = dest / name
-        if info.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(info) as src, open(target, "wb") as out:
-                shutil.copyfileobj(src, out)
+    _guarded_zip_extract(zf, dest)
 
 
 def _find_env(root: Path) -> Path | None:

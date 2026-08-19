@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import shutil
+import tempfile
 import uuid
 import zipfile
 from pathlib import Path
 
 from app.config import UPLOAD_DIR
+from app.services.archive_guard import safe_extract_zip_file, safe_upload_name
 from app.services.backup_analyzer import analyze_upload_directory, resolve_extract_root
 from app.services.upload_requirements import get_upload_requirements
 
@@ -100,7 +102,7 @@ def _validate_slot_file(
 def save_bundle_slot(
     bundle_id: str,
     slot: str,
-    file_content: bytes,
+    src_path: str | Path,
     filename: str,
     panel_id: str | None = None,
     source_db: str | None = None,
@@ -111,66 +113,93 @@ def save_bundle_slot(
         return {"ok": False, "error": err}
 
     init_bundle(bundle_id)
-    sdir = _slot_dir(bundle_id, slot)
-    if sdir.exists():
-        shutil.rmtree(sdir)
-    sdir.mkdir(parents=True, exist_ok=True)
+    cleanup_tmp = False
+    cleanup_path: Path | None = None
+    if isinstance(src_path, (bytes, bytearray)):
+        tmp_dir = Path(tempfile.mkdtemp(prefix="pg-bundle-slot-"))
+        src_tmp = tmp_dir / safe_upload_name(filename)
+        src_tmp.write_bytes(bytes(src_path))
+        src_path = src_tmp
+        cleanup_tmp = True
+        cleanup_path = src_tmp
+    try:
+        src_path = Path(src_path)
+        sdir = _slot_dir(bundle_id, slot)
+        if sdir.exists():
+            shutil.rmtree(sdir)
+        sdir.mkdir(parents=True, exist_ok=True)
 
-    dest = sdir / filename
-    dest.write_bytes(file_content)
+        filename = safe_upload_name(filename)
+        dest = sdir / filename
+        shutil.copy2(src_path, dest)
 
-    slot_meta: dict = {
-        "filename": filename,
-        "size": len(file_content),
-        "path": str(dest),
-        "ok": True,
-    }
+        slot_meta: dict = {
+            "filename": filename,
+            "size": dest.stat().st_size,
+            "path": str(dest),
+            "ok": True,
+        }
 
-    if slot == "bundle_zip" or filename.lower().endswith(".zip"):
-        try:
-            with zipfile.ZipFile(dest, "r") as zf:
-                zf.extractall(sdir / "extracted")
-            if slot != "bundle_zip":
-                slot_meta["extracted"] = True
-        except zipfile.BadZipFile:
-            slot_meta["ok"] = False
-            slot_meta["error"] = "Bad zip file"
+        if slot == "bundle_zip" or filename.lower().endswith(".zip"):
+            try:
+                report = safe_extract_zip_file(dest, sdir / "extracted")
+                slot_meta["zip_preflight"] = {
+                    "files": report.files,
+                    "total_uncompressed": report.total_uncompressed,
+                    "largest_entry": report.largest_entry,
+                    "compression_ratio": report.compression_ratio,
+                }
+                if slot != "bundle_zip":
+                    slot_meta["extracted"] = True
+            except ValueError as e:
+                slot_meta["ok"] = False
+                slot_meta["error"] = str(e)
 
-    if slot in ("bundle_zip", "database", "certs", "templates"):
-        analysis = analyze_upload_directory(sdir)
-        slot_meta["analysis"] = analysis
-        if slot == "bundle_zip":
-            slot_meta["ok"] = analysis.get("backup_ok", False)
-        elif slot == "database":
-            slot_meta["ok"] = _database_slot_ok(
-                dest, analysis, source_db=source_db, panel_id=panel_id,
-            )
+        if slot in ("bundle_zip", "database", "certs", "templates"):
+            analysis = analyze_upload_directory(sdir)
+            slot_meta["analysis"] = analysis
+            if slot == "bundle_zip":
+                slot_meta["ok"] = analysis.get("backup_ok", False)
+            elif slot == "database":
+                slot_meta["ok"] = _database_slot_ok(
+                    dest, analysis, source_db=source_db, panel_id=panel_id,
+                )
+            else:
+                slot_meta["ok"] = dest.exists()
+        elif slot == "env":
+            slot_meta["ok"] = dest.exists()
+            text = dest.read_text(encoding="utf-8", errors="ignore")
+            slot_meta["has_mysql_password"] = "MYSQL_ROOT_PASSWORD" in text or "MYSQL_PASSWORD" in text
+        elif slot == "xray_config":
+            slot_meta["ok"] = dest.exists() and dest.suffix.lower() == ".json"
         else:
             slot_meta["ok"] = dest.exists()
-    elif slot == "env":
-        slot_meta["ok"] = dest.exists()
-        text = dest.read_text(encoding="utf-8", errors="ignore")
-        slot_meta["has_mysql_password"] = "MYSQL_ROOT_PASSWORD" in text or "MYSQL_PASSWORD" in text
-    elif slot == "xray_config":
-        slot_meta["ok"] = dest.exists() and dest.suffix.lower() == ".json"
-    else:
-        slot_meta["ok"] = dest.exists()
 
-    manifest = _load_manifest(bundle_id)
-    manifest["slots"][slot] = slot_meta
-    manifest["panel_id"] = panel_id
-    manifest["source_db"] = source_db
-    manifest["marzban_mode"] = marzban_mode
-    _save_manifest(bundle_id, manifest)
+        manifest = _load_manifest(bundle_id)
+        manifest["slots"][slot] = slot_meta
+        manifest["panel_id"] = panel_id
+        manifest["source_db"] = source_db
+        manifest["marzban_mode"] = marzban_mode
+        _save_manifest(bundle_id, manifest)
 
-    status = validate_bundle(bundle_id, panel_id, source_db, marzban_mode)
-    return {
-        "ok": slot_meta.get("ok", False),
-        "bundle_id": bundle_id,
-        "slot": slot,
-        "slot_meta": slot_meta,
-        "bundle_status": status,
-    }
+        status = validate_bundle(bundle_id, panel_id, source_db, marzban_mode)
+        return {
+            "ok": slot_meta.get("ok", False),
+            "bundle_id": bundle_id,
+            "slot": slot,
+            "slot_meta": slot_meta,
+            "bundle_status": status,
+        }
+    finally:
+        if cleanup_tmp and cleanup_path is not None:
+            try:
+                cleanup_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            try:
+                cleanup_path.parent.rmdir()
+            except Exception:
+                pass
 
 
 def _database_slot_ok(
