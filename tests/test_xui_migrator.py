@@ -32,13 +32,29 @@ from app.services.upload_requirements import get_upload_requirements
 
 
 def _make_xui_db(path: Path, clients: int = 1, inbounds: int = 1) -> Path:
+    """Legacy 3x-ui layout with the columns the migrator actually reads."""
     conn = sqlite3.connect(path)
-    conn.execute("CREATE TABLE inbounds (id INTEGER PRIMARY KEY, remark TEXT)")
+    conn.execute(
+        "CREATE TABLE inbounds ("
+        "id INTEGER PRIMARY KEY, remark TEXT, port INTEGER, protocol TEXT, "
+        "tag TEXT, settings TEXT, stream_settings TEXT)"
+    )
     conn.execute(
         "CREATE TABLE client_traffics (id INTEGER PRIMARY KEY, email TEXT, inbound_id INTEGER)"
     )
     for i in range(inbounds):
-        conn.execute("INSERT INTO inbounds VALUES (?, ?)", (i + 1, f"in{i}"))
+        conn.execute(
+            "INSERT INTO inbounds VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                i + 1,
+                f"in{i}",
+                2000 + i,
+                "vless",
+                f"inbound-{i + 1}",
+                json.dumps({"clients": []}),
+                json.dumps({"network": "tcp", "security": "none"}),
+            ),
+        )
     for i in range(clients):
         conn.execute(
             "INSERT INTO client_traffics VALUES (?, ?, ?)",
@@ -50,15 +66,38 @@ def _make_xui_db(path: Path, clients: int = 1, inbounds: int = 1) -> Path:
 
 
 def _make_pg_sqlite(path: Path, users: int = 1, inbounds: int = 1, core_configs: int = 1) -> Path:
+    """PasarGuard-shaped SQLite with the columns post-migrate steps touch."""
     conn = sqlite3.connect(path)
-    for table in ("users", "admins", "hosts", "inbounds", "nodes", "groups", "core_configs"):
+    conn.execute(
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, proxy_settings TEXT, admin_id INTEGER)"
+    )
+    conn.execute(
+        "CREATE TABLE admins (id INTEGER PRIMARY KEY, username TEXT, hashed_password TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE hosts (id INTEGER PRIMARY KEY, remark TEXT, address TEXT, port INTEGER, "
+        "inbound_tag TEXT, security TEXT, fingerprint TEXT, priority INTEGER, is_disabled INTEGER, "
+        "random_user_agent INTEGER, use_sni_as_host INTEGER, status TEXT, path TEXT, sni TEXT, "
+        "host TEXT, alpn TEXT)"
+    )
+    conn.execute("CREATE TABLE inbounds (id INTEGER PRIMARY KEY, tag TEXT)")
+    conn.execute("CREATE TABLE core_configs (id INTEGER PRIMARY KEY, config TEXT)")
+    for table in ("nodes", "groups"):
         conn.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
     for i in range(users):
-        conn.execute("INSERT INTO users VALUES (?)", (i + 1,))
+        conn.execute(
+            "INSERT INTO users (id, username, proxy_settings) VALUES (?, ?, ?)",
+            (i + 1, f"u{i}@t.com", json.dumps({})),
+        )
     for i in range(inbounds):
-        conn.execute("INSERT INTO inbounds VALUES (?)", (i + 1,))
+        conn.execute(
+            "INSERT INTO inbounds (id, tag) VALUES (?, ?)", (i + 1, f"inbound-{i + 1}")
+        )
     for i in range(core_configs):
-        conn.execute("INSERT INTO core_configs VALUES (?)", (i + 1,))
+        conn.execute(
+            "INSERT INTO core_configs (id, config) VALUES (?, ?)",
+            (i + 1, json.dumps({"inbounds": []})),
+        )
     if users or inbounds:
         conn.execute("INSERT INTO groups VALUES (1)")
     conn.commit()

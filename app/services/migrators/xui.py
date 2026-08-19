@@ -6,8 +6,10 @@ engine to copy head→head into the requested engine.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import os
 import shutil
 import socket
 import sqlite3
@@ -22,8 +24,75 @@ from app.services.native_migration import run_cross_db_migration
 from app.services.env_migration import (
     env_points_to_db,
     finalize_pasarguard_env_after_restore,
+    parse_sqlalchemy_url,
     read_env_var,
 )
+
+XUI_AUTH_HEAL_ENV = "PG_XUI_AUTH_HEAL"
+
+
+def xui_auth_heal_enabled() -> bool:
+    """Kill switch for the x-ui PostgreSQL auth repair (roles + PgBouncer)."""
+    return os.environ.get(XUI_AUTH_HEAL_ENV, "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def parse_container_env(text: str) -> dict[str, str]:
+    """Parse ``docker inspect`` environment output; later values win (runtime order)."""
+    out: dict[str, str] = {}
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        key = key.strip()
+        if key:
+            out[key] = value
+    return out
+
+
+def pgbouncer_env_mismatch(
+    container_env: dict[str, str],
+    *,
+    user: str,
+    password: str,
+    database: str,
+) -> list[str]:
+    """Credential keys where a running PgBouncer disagrees with the panel URL.
+
+    PgBouncer builds its userlist from ``DB_USER``/``DB_PASSWORD`` when the
+    container is *created*, and ``docker compose restart`` never re-reads .env.
+    A stale container then rejects the panel with ``password authentication
+    failed`` on port 6432 even though PostgreSQL itself accepts the password.
+    Keys the image does not define are ignored (custom PgBouncer setups).
+    """
+    expected = {"DB_USER": user, "DB_PASSWORD": password, "DB_NAME": database}
+    stale: list[str] = []
+    for key, want in expected.items():
+        if not want:
+            continue
+        have = container_env.get(key)
+        if have is None or have == want:
+            continue
+        stale.append(key)
+    return stale
+
+
+def logs_show_pg_auth_failure(text: str) -> bool:
+    """True when panel logs died on PostgreSQL credentials (not schema/data)."""
+    low = (text or "").lower()
+    return any(
+        marker in low
+        for marker in (
+            "password authentication failed",
+            "sasl authentication failed",
+            "invalidpassworderror",
+        )
+    )
 
 
 def find_xui_db_in_dir(root: Path) -> Path | None:
@@ -1646,7 +1715,7 @@ class XuiMigrator(BaseMigrator):
             )
 
         self.job.set_progress(92, "راه‌اندازی مجدد PasarGuard...")
-        await safe_start_pasarguard(self)
+        await self._start_panel(target_db)
 
         redirect_installed = False
         redirect_port = xui_listen["port"]
@@ -1896,6 +1965,17 @@ class XuiMigrator(BaseMigrator):
         if not sync_pwd:
             sync_pwd = admin.get("password") or ""
 
+        if target_db in ("postgresql", "timescaledb"):
+            env_pg_pwd = read_env_var(env, "POSTGRES_PASSWORD")
+            env_db_pwd = read_env_var(env, "DB_PASSWORD")
+            if env_pg_pwd and env_db_pwd and env_pg_pwd != env_db_pwd:
+                chosen = "POSTGRES_PASSWORD" if sync_pwd == env_pg_pwd else "DB_PASSWORD"
+                self.job.log(
+                    "Note: POSTGRES_PASSWORD and DB_PASSWORD differ in .env — "
+                    "the official compose only reads DB_PASSWORD; "
+                    f"roles and panel URL will be aligned to {chosen}"
+                )
+
         if target_db in ("mysql", "mariadb") and sync_pwd:
             try:
                 live = await resolve_live_admin_connection(
@@ -1949,8 +2029,24 @@ class XuiMigrator(BaseMigrator):
             raise RuntimeError(
                 f".env SQLALCHEMY_DATABASE_URL با موتور هدف {target_db} هم‌خوان نیست"
             )
+        # Restore point: keep the pre-migration .env next to the DB backups.
+        try:
+            self._backup_file(PASARGUARD_ENV, BACKUP_DIR)
+        except OSError as e:
+            self.job.log(f".env backup note: {e}")
         PASARGUARD_ENV.write_text(finalized, encoding="utf-8")
         self.job.log(f".env finalized for {target_db} (user={app_user})")
+
+        if target_db in ("postgresql", "timescaledb"):
+            panel_conn = parse_sqlalchemy_url(
+                read_env_var(finalized, "SQLALCHEMY_DATABASE_URL") or "", finalized,
+            )
+            await self._refresh_pgbouncer_credentials(
+                target_db,
+                user=panel_conn.get("user") or app_user,
+                password=panel_conn.get("password") or sync_pwd,
+                database=panel_conn.get("database") or db_name,
+            )
 
         # Panel must not keep reading the intermediate SQLite file
         if land_db.exists() and target_db != "sqlite":
@@ -1959,6 +2055,189 @@ class XuiMigrator(BaseMigrator):
                 bak.unlink()
             shutil.move(str(land_db), str(bak))
             self.job.log(f"Moved SQLite aside → {bak.name}")
+
+    async def _compose_container_id(self, service: str) -> str:
+        ok, out = await self._run_cmd(
+            ["docker", "compose", "ps", "-q", service],
+            cwd=str(PASARGUARD_DIR),
+            timeout=30,
+            quiet=True,
+        )
+        if not ok:
+            return ""
+        for line in (out or "").splitlines():
+            container = line.strip()
+            if container:
+                return container
+        return ""
+
+    async def _container_env(self, container: str) -> dict[str, str]:
+        ok, out = await self._run_cmd(
+            [
+                "docker", "inspect", "--format",
+                "{{range .Config.Env}}{{println .}}{{end}}", container,
+            ],
+            timeout=30,
+            quiet=True,
+        )
+        return parse_container_env(out) if ok else {}
+
+    async def _refresh_pgbouncer_credentials(
+        self,
+        target_db: str,
+        *,
+        user: str,
+        password: str,
+        database: str,
+    ) -> bool:
+        """Recreate PgBouncer only when its baked-in credentials went stale.
+
+        Installs where the container already matches .env keep the existing
+        restart-only behaviour — nothing is recreated and nothing is restarted.
+        """
+        from app.services.env_migration import _compose_has_pgbouncer
+
+        if target_db not in ("postgresql", "timescaledb"):
+            return False
+        if not xui_auth_heal_enabled():
+            self.job.log(
+                f"PgBouncer credential refresh disabled ({XUI_AUTH_HEAL_ENV}=0)"
+            )
+            return False
+        if not _compose_has_pgbouncer():
+            return False
+
+        container = await self._compose_container_id("pgbouncer")
+        if not container:
+            self.job.log("PgBouncer container not found — skipping credential refresh")
+            return False
+        container_env = await self._container_env(container)
+        if not container_env:
+            self.job.log("Could not read PgBouncer container env — skipping refresh")
+            return False
+
+        stale = pgbouncer_env_mismatch(
+            container_env, user=user, password=password, database=database,
+        )
+        if not stale:
+            self.job.log("PgBouncer credentials match .env — no recreate needed")
+            return False
+
+        self.job.log(
+            f"PgBouncer still holds pre-migration credentials ({', '.join(stale)}) — "
+            "restart does not re-read .env, recreating it so the panel can authenticate..."
+        )
+        cwd = str(PASARGUARD_DIR)
+        ok_cfg, cfg_out = await self._run_cmd(
+            ["docker", "compose", "config", "-q"], cwd=cwd, timeout=60, quiet=True,
+        )
+        if not ok_cfg:
+            self.job.log(
+                "docker compose config is not valid — keeping restart-only behaviour: "
+                f"{(cfg_out or '')[-200:]}"
+            )
+            await self._run_cmd(
+                ["docker", "compose", "restart", "pgbouncer"], cwd=cwd, timeout=120,
+            )
+            return False
+
+        ok, out = await self._run_cmd(
+            ["docker", "compose", "up", "-d", "--no-deps", "--force-recreate", "pgbouncer"],
+            cwd=cwd,
+            timeout=180,
+        )
+        if not ok:
+            self.job.log(
+                f"PgBouncer recreate failed — falling back to restart: {(out or '')[-200:]}"
+            )
+            await self._run_cmd(
+                ["docker", "compose", "restart", "pgbouncer"], cwd=cwd, timeout=120,
+            )
+            return False
+
+        await asyncio.sleep(5)
+        self.job.log("PgBouncer recreated with the credentials now in .env")
+        return True
+
+    async def _repair_pg_panel_auth(self, target_db: str) -> bool:
+        """Align the PostgreSQL role and PgBouncer with the panel's own URL."""
+        from app.services.db_auth import (
+            resolve_live_admin_connection,
+            sync_postgres_roles_to_app_password,
+        )
+
+        env = (
+            PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+            if PASARGUARD_ENV.exists()
+            else ""
+        )
+        panel_conn = parse_sqlalchemy_url(
+            read_env_var(env, "SQLALCHEMY_DATABASE_URL") or "", env,
+        )
+        password = panel_conn.get("password") or ""
+        user = panel_conn.get("user") or read_env_var(env, "DB_USER") or "pasarguard"
+        database = (
+            panel_conn.get("database") or read_env_var(env, "DB_NAME") or "pasarguard"
+        )
+        if not password:
+            self.job.log("No password in SQLALCHEMY_DATABASE_URL — cannot repair auth")
+            return False
+
+        try:
+            admin = await resolve_live_admin_connection(self, target_db, env_text=env)
+        except Exception as probe_error:
+            self.job.log(
+                f"Live admin probe failed ({probe_error}) — repairing with panel credentials"
+            )
+            admin = {
+                "db_type": target_db,
+                "user": user,
+                "password": password,
+                "database": database,
+                "host": "127.0.0.1",
+                "port": "5432",
+            }
+
+        synced = await sync_postgres_roles_to_app_password(
+            self, target_db, admin, env_text=env, password=password,
+        )
+        refreshed = await self._refresh_pgbouncer_credentials(
+            target_db, user=user, password=password, database=database,
+        )
+        return bool(synced or refreshed)
+
+    async def _start_panel(self, target_db: str) -> None:
+        """Start the panel; repair PostgreSQL auth once if that is what killed it."""
+        try:
+            await safe_start_pasarguard(self)
+            return
+        except Exception as start_error:
+            if target_db not in ("postgresql", "timescaledb"):
+                raise
+            if not xui_auth_heal_enabled():
+                raise
+            from app.services.pasarguard_ops import fetch_pasarguard_logs
+
+            try:
+                logs = await fetch_pasarguard_logs(self, tail=120)
+            except Exception as log_error:
+                self.job.log(f"Could not read panel logs for auth check: {log_error}")
+                raise start_error
+            if not logs_show_pg_auth_failure(logs):
+                raise
+            self.job.log(
+                "Panel could not authenticate to PostgreSQL — aligning role password "
+                "and PgBouncer credentials, then retrying once..."
+            )
+            try:
+                repaired = await self._repair_pg_panel_auth(target_db)
+            except Exception as repair_error:
+                self.job.log(f"Auth repair note: {repair_error}")
+                raise start_error
+            if not repaired:
+                raise start_error
+
+        await safe_start_pasarguard(self)
 
     async def _locate_xui_db(
         self,
