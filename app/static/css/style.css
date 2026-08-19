@@ -1114,6 +1114,20 @@ button.db-card {
   margin-bottom: 16px;
 }
 
+.upload-resource-card.tone-warn {
+  border-color: var(--warning-border);
+  background: linear-gradient(180deg, rgba(38, 92, 55, 0.06), rgba(38, 92, 55, 0.02)), var(--warning-bg);
+}
+
+.upload-resource-card.tone-ok {
+  border-color: var(--success-border);
+  background: linear-gradient(180deg, rgba(152, 62, 48, 0.06), rgba(152, 62, 48, 0.02)), var(--success-bg);
+}
+
+.upload-resource-card.tone-neutral {
+  border-color: var(--border-soft);
+}
+
 .upload-resource-head {
   display: flex;
   align-items: flex-start;
@@ -1137,6 +1151,24 @@ button.db-card {
 .upload-resource-reasons {
   margin-top: 6px;
   color: var(--text-dim);
+}
+
+.upload-resource-reasons-list {
+  margin-top: 10px;
+  padding-inline-start: 18px;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+
+.upload-resource-reasons-list li {
+  margin-bottom: 4px;
+}
+
+.upload-resource-action {
+  margin-top: 10px;
+  font-size: 0.86rem;
+  color: var(--text-muted);
+  line-height: 1.55;
 }
 
 .upload-resource-badge {
@@ -1226,6 +1258,17 @@ button.db-card {
   font-size: 0.76rem;
   color: var(--text-muted);
   overflow-wrap: anywhere;
+}
+
+.upload-resource-override-status {
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.upload-resource-actions {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-start;
 }
 
 .summary-row {

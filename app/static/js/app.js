@@ -435,6 +435,18 @@ function largeUploadOverrideEnabled() {
   return !!document.getElementById('allowLargeUploadOverride')?.checked;
 }
 
+function resourceProfileAction(profile, limits) {
+  const maxUpload = fmtBytes(limits?.max_upload_bytes);
+  if (profile === 'weak') return fmtMsg(t('step2.resourceActionWeak'), { maxUpload });
+  if (profile === 'strong') return fmtMsg(t('step2.resourceActionStrong'), { maxUpload });
+  return fmtMsg(t('step2.resourceActionNormal'), { maxUpload });
+}
+
+async function refreshResourceCard() {
+  // Re-run /api/system-check and redraw the card with the latest classification.
+  await loadSystemCheck();
+}
+
 function renderUploadResourceCard() {
   const card = document.getElementById('uploadResourceCard');
   if (!card) return;
@@ -448,6 +460,9 @@ function renderUploadResourceCard() {
 
   const profile = resources.profile || 'normal';
   const tone = resourceProfileTone(profile);
+  card.classList.remove('tone-warn', 'tone-ok', 'tone-neutral');
+  card.classList.add(`tone-${tone}`);
+
   const memory = resources.memory || {};
   const storage = resources.storage || {};
   const uploadDisk = storage.upload || {};
@@ -457,16 +472,22 @@ function renderUploadResourceCard() {
   const reasons = Array.isArray(resources.profile_reasons) ? resources.profile_reasons : [];
   const overrideEnabled = largeUploadOverrideEnabled();
   const overrideLimit = fmtBytes(limits.max_override_upload_bytes);
-  const reasonText = reasons.length
-    ? `<p class="upload-resource-reasons">${reasons.map((r) => t(`step2.resourceReason.${r}`)).join(' · ')}</p>`
+  const reasonList = reasons.length
+    ? `<ul class="upload-resource-reasons-list">${reasons.map((r) => `<li>${t(`step2.resourceReason.${r}`)}</li>`).join('')}</ul>`
     : '';
+
+  const actionLine = resourceProfileAction(profile, limits);
+  const overrideStatus = overrideEnabled
+    ? t('step2.resourceOverrideEnabledNote')
+    : t('step2.resourceOverrideDisabledNote');
 
   card.innerHTML = `
     <div class="upload-resource-head">
       <div>
         <h4>${t('step2.resourceTitle')}</h4>
         <p class="upload-resource-desc">${resourceProfileHint(profile, limits)}</p>
-        ${reasonText}
+        <p class="upload-resource-action">${actionLine}</p>
+        ${reasonList}
       </div>
       <span class="upload-resource-badge tone-${tone}">${resourceProfileLabel(profile)}</span>
     </div>
@@ -494,13 +515,19 @@ function renderUploadResourceCard() {
       <div class="upload-resource-item">
         <span class="upload-resource-label">${t('step2.resourceUploadLimit')}</span>
         <strong>${overrideEnabled ? overrideLimit : fmtBytes(limits.max_upload_bytes)}</strong>
-        <small>${fmtMsg(t('step2.resourceExtractLimit'), { size: fmtBytes(limits.max_zip_total_bytes) })}</small>
+        <small>
+          ${fmtMsg(t('step2.resourceExtractLimit'), { size: fmtBytes(limits.max_zip_total_bytes) })}
+          <span class="upload-resource-override-status"> • ${overrideStatus}</span>
+        </small>
       </div>
       <div class="upload-resource-item">
         <span class="upload-resource-label">${t('step2.resourceZipPolicy')}</span>
         <strong>${limits.max_zip_files?.toLocaleString?.() || limits.max_zip_files} / ${limits.max_zip_ratio}:1</strong>
         <small>${fmtMsg(t('step2.resourceZipPolicyDetail'), { size: fmtBytes(limits.max_zip_entry_bytes) })}</small>
       </div>
+    </div>
+    <div class="upload-resource-actions">
+      <button type="button" class="btn btn-secondary btn-sm" id="btnRefreshResourceCard">${t('step2.resourceRefresh')}</button>
     </div>
     <label class="upload-resource-override">
       <input type="checkbox" id="allowLargeUploadOverride" ${overrideEnabled ? 'checked' : ''}>
@@ -511,6 +538,10 @@ function renderUploadResourceCard() {
     </label>`;
   const checkbox = card.querySelector('#allowLargeUploadOverride');
   if (checkbox) checkbox.addEventListener('change', () => renderUploadResourceCard());
+
+  const btn = card.querySelector('#btnRefreshResourceCard');
+  if (btn) btn.addEventListener('click', refreshResourceCard);
+
   card.classList.remove('hidden');
 }
 
