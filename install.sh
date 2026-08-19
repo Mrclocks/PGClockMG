@@ -18,7 +18,7 @@
 #
 set -eo pipefail
 
-readonly SCRIPT_VERSION="3.2.2"
+readonly SCRIPT_VERSION="3.2.3"
 readonly INSTALL_DIR="${PG_MIGRATOR_INSTALL_DIR:-/opt/pg-migrator}"
 readonly SERVICE_NAME="pg-migrator"
 readonly SYSTEMD_DIR="${PG_MIGRATOR_SYSTEMD_DIR:-/etc/systemd/system}"

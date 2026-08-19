@@ -54,33 +54,35 @@ def _classify_resources(resources: dict) -> tuple[str, list[str]]:
     backup = storage.get("backup") or {}
 
     mem_avail = memory.get("available_bytes") or 0
+    mem_total = memory.get("total_bytes") or 0
     upload_free = upload.get("free_bytes") or 0
     backup_free = backup.get("free_bytes") or 0
     cpu_count = resources.get("cpu_count") or 0
     load_ratio = resources.get("load_ratio_1m")
 
-    if mem_avail and mem_avail < 2 * 1024 * 1024 * 1024:
+    # 2 GB RAM + 2 CPU is considered a normal baseline for this panel family.
+    if mem_avail and mem_avail < 768 * 1024 * 1024:
         reasons.append("low_ram")
-    if upload_free and upload_free < 6 * 1024 * 1024 * 1024:
+    if upload_free and upload_free < 4 * 1024 * 1024 * 1024:
         reasons.append("low_upload_disk")
-    if backup_free and backup_free < 6 * 1024 * 1024 * 1024:
+    if backup_free and backup_free < 4 * 1024 * 1024 * 1024:
         reasons.append("low_backup_disk")
-    if cpu_count and cpu_count <= 2:
+    if cpu_count and cpu_count <= 1:
         reasons.append("low_cpu")
-    if isinstance(load_ratio, (int, float)) and load_ratio >= 1.2:
+    if isinstance(load_ratio, (int, float)) and load_ratio >= 1.6:
         reasons.append("high_load")
 
     if reasons:
         return "weak", reasons
 
     strong_signals = 0
-    if mem_avail >= 8 * 1024 * 1024 * 1024:
+    if mem_total >= 8 * 1024 * 1024 * 1024 and mem_avail >= 3 * 1024 * 1024 * 1024:
         strong_signals += 1
-    if upload_free >= 20 * 1024 * 1024 * 1024 and backup_free >= 20 * 1024 * 1024 * 1024:
+    if upload_free >= 16 * 1024 * 1024 * 1024 and backup_free >= 16 * 1024 * 1024 * 1024:
         strong_signals += 1
     if cpu_count >= 4:
         strong_signals += 1
-    if isinstance(load_ratio, (int, float)) and load_ratio <= 0.5:
+    if isinstance(load_ratio, (int, float)) and load_ratio <= 0.65:
         strong_signals += 1
 
     if strong_signals >= 3:

@@ -28,6 +28,7 @@ const state = {
   sourcePwdValues: {},
   targetPwdValues: {},
   uploadLimits: null,
+  allowLargeUploadOverride: false,
 };
 
 function panelLatinName(panel) {
@@ -432,7 +433,7 @@ function resourceProfileHint(profile, limits) {
 }
 
 function largeUploadOverrideEnabled() {
-  return !!document.getElementById('allowLargeUploadOverride')?.checked;
+  return !!state.allowLargeUploadOverride;
 }
 
 function resourceProfileAction(profile, limits) {
@@ -442,13 +443,7 @@ function resourceProfileAction(profile, limits) {
   return fmtMsg(t('step2.resourceActionNormal'), { maxUpload });
 }
 
-async function refreshResourceCard() {
-  // Re-run /api/system-check and redraw the card with the latest classification.
-  await loadSystemCheck();
-}
-
-function renderUploadResourceCard() {
-  const card = document.getElementById('uploadResourceCard');
+function renderResourceCardInto(card, kind) {
   if (!card) return;
   const resources = state.systemCheck?.resources;
   const limits = state.uploadLimits;
@@ -476,17 +471,17 @@ function renderUploadResourceCard() {
     ? `<ul class="upload-resource-reasons-list">${reasons.map((r) => `<li>${t(`step2.resourceReason.${r}`)}</li>`).join('')}</ul>`
     : '';
 
-  const actionLine = resourceProfileAction(profile, limits);
   const overrideStatus = overrideEnabled
     ? t('step2.resourceOverrideEnabledNote')
     : t('step2.resourceOverrideDisabledNote');
+  const checkboxId = `allowLargeUploadOverride-${kind}`;
 
   card.innerHTML = `
     <div class="upload-resource-head">
       <div>
         <h4>${t('step2.resourceTitle')}</h4>
         <p class="upload-resource-desc">${resourceProfileHint(profile, limits)}</p>
-        <p class="upload-resource-action">${actionLine}</p>
+        <p class="upload-resource-action">${resourceProfileAction(profile, limits)}</p>
         ${reasonList}
       </div>
       <span class="upload-resource-badge tone-${tone}">${resourceProfileLabel(profile)}</span>
@@ -526,23 +521,27 @@ function renderUploadResourceCard() {
         <small>${fmtMsg(t('step2.resourceZipPolicyDetail'), { size: fmtBytes(limits.max_zip_entry_bytes) })}</small>
       </div>
     </div>
-    <div class="upload-resource-actions">
-      <button type="button" class="btn btn-secondary btn-sm" id="btnRefreshResourceCard">${t('step2.resourceRefresh')}</button>
-    </div>
     <label class="upload-resource-override">
-      <input type="checkbox" id="allowLargeUploadOverride" ${overrideEnabled ? 'checked' : ''}>
+      <input type="checkbox" id="${checkboxId}" ${overrideEnabled ? 'checked' : ''}>
       <span>
         <strong>${t('step2.resourceOverrideTitle')}</strong>
         <small>${fmtMsg(t('step2.resourceOverrideHint'), { size: overrideLimit })}</small>
       </span>
     </label>`;
-  const checkbox = card.querySelector('#allowLargeUploadOverride');
-  if (checkbox) checkbox.addEventListener('change', () => renderUploadResourceCard());
-
-  const btn = card.querySelector('#btnRefreshResourceCard');
-  if (btn) btn.addEventListener('click', refreshResourceCard);
+  const checkbox = card.querySelector(`#${checkboxId}`);
+  if (checkbox) {
+    checkbox.addEventListener('change', () => {
+      state.allowLargeUploadOverride = !!checkbox.checked;
+      renderUploadResourceCard();
+    });
+  }
 
   card.classList.remove('hidden');
+}
+
+function renderUploadResourceCard() {
+  renderResourceCardInto(document.getElementById('uploadResourceCard'), 'migrate');
+  renderResourceCardInto(document.getElementById('restoreUploadResourceCard'), 'restore');
 }
 
 function detectMarzbanSourceDb() {
@@ -738,6 +737,7 @@ function canProceedStep2() {
     return t('block.sourceCredsIncomplete');
   }
   if (!uploadSatisfied()) {
+    if (panel?.id === '3x-ui') return t('block.xuiDb');
     return t('block.uploadsIncomplete');
   }
   if (
