@@ -1,6 +1,8 @@
 """x-ui → PostgreSQL auth repair: PgBouncer credential drift and panel retry."""
 
 import asyncio
+import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -11,13 +13,20 @@ sys.path.insert(0, str(ROOT))
 
 from app.services.migrators.base import MigrationJob
 from app.services.migrators.xui import (
+    PG_FINGERPRINT_SQL,
     XUI_AUTH_HEAL_ENV,
     XuiMigrator,
+    containers_publishing_port,
     describe_password_source,
     logs_show_pg_auth_failure,
     parse_container_env,
+    parse_pg_auth_context,
+    parse_published_port,
+    password_storage_mismatch,
+    pg_endpoint_candidates,
     pg_probe_result,
     pgbouncer_env_mismatch,
+    required_password_encryption,
     xui_auth_heal_enabled,
 )
 
@@ -328,25 +337,40 @@ def test_repair_uses_panel_url_password_for_roles():
 
 
 class _FakePgStack(XuiMigrator):
-    """XuiMigrator wired to a scripted PostgreSQL stack (TCP auth + ALTER ROLE)."""
+    """XuiMigrator wired to a scripted PostgreSQL stack.
+
+    It reproduces what hides this failure on a real server: the container's own
+    loopback is ``trust``, so every password "works" from inside, while a host
+    connection must pass the hba method with a verifier stored in that same
+    encoding.
+    """
+
+    IMAGE = "timescale/timescaledb-ha:pg17"
+    FINGERPRINT = "1755590000"
 
     def __init__(
         self,
         job,
         params,
         *,
-        accepted=("realpwd",),
-        roles=("pasarguard",),
+        password="realpwd",
+        verifier="scram-sha-256",
+        encryption="scram-sha-256",
+        hba="scram-sha-256",
+        published=("127.0.0.1", "5432"),
+        host_error="",
         alter_ok=True,
-        probe_error="",
-        exec_probe_error="",
+        impostor_on=(),
     ):
         super().__init__(job, params)
-        self.accepted = set(accepted)
-        self.roles = set(roles)
+        self.password = password
+        self.verifier = verifier
+        self.encryption = encryption
+        self.hba = hba
+        self.published = published
+        self.host_error = host_error
         self.alter_ok = alter_ok
-        self.probe_error = probe_error
-        self.exec_probe_error = exec_probe_error
+        self.impostor_on = set(impostor_on)
         self.commands: list[list[str]] = []
 
     async def _run_cmd(self, cmd, cwd=None, timeout=600, *, quiet=False):
@@ -356,37 +380,89 @@ class _FakePgStack(XuiMigrator):
         if "pg_isready" in joined:
             return True, ""
         if "{{.Config.Image}}" in joined:
-            return True, "timescale/timescaledb-ha:pg17\n"
-        if "ps" in argv and "-q" in argv:
-            return True, "db-container-id\n"
-        if "-tAc" in argv:
-            if self.probe_error:
-                return False, self.probe_error
-            if self.exec_probe_error and "exec" in argv:
-                return False, self.exec_probe_error
-            password = next(
-                (a.split("=", 1)[1] for a in argv if a.startswith("PGPASSWORD=")), "",
+            return True, f"{self.IMAGE}\n"
+        if "{{json .NetworkSettings.Ports}}" in joined:
+            if not self.published:
+                return True, "{}"
+            host_ip, host_port = self.published
+            return True, json.dumps(
+                {"5432/tcp": [{"HostIp": host_ip, "HostPort": host_port}]}
             )
-            user = argv[argv.index("-U") + 1]
-            if user in self.roles and password in self.accepted:
-                return True, "1\n"
+        if argv[:3] == ["docker", "compose", "ps"]:
+            return True, "db-container-id\n"
+        if argv[:2] == ["docker", "ps"]:
+            return True, "some-other-stack-db\t127.0.0.1:5432->5432/tcp\n"
+        if "run" in argv and "--network" in argv:
+            return self._host_login(argv)
+        if "exec" in argv:
+            return self._in_container(argv)
+        return True, ""
+
+    @staticmethod
+    def _arg(argv, flag):
+        return argv[argv.index(flag) + 1] if flag in argv else ""
+
+    @staticmethod
+    def _pgpassword(argv):
+        for arg in argv:
+            if arg.startswith("PGPASSWORD="):
+                return arg.split("=", 1)[1]
+        return ""
+
+    def _answer(self, sql):
+        if sql == PG_FINGERPRINT_SQL:
+            return self.FINGERPRINT
+        if "password_encryption" in sql:
+            return f"{self.encryption}|{self.verifier}|{self.hba}"
+        return "1"
+
+    def _in_container(self, argv):
+        if "-tAc" in argv:  # local socket is trusted: the password is irrelevant
+            return True, self._answer(self._arg(argv, "-tAc")) + "\n"
+        for index, arg in enumerate(argv):
+            if arg != "-c":
+                continue
+            sql = argv[index + 1]
+            if "ALTER SYSTEM SET password_encryption" in sql:
+                self.encryption = re.search(r"= '([^']+)'", sql).group(1)
+            elif "ALTER ROLE" in sql:
+                if not self.alter_ok:
+                    return False, "ERROR:  permission denied to alter role"
+                encryption = re.search(r"SET password_encryption = '([^']+)'", sql)
+                self.verifier = encryption.group(1) if encryption else self.encryption
+                self.password = (
+                    re.search(r"PASSWORD '(.*)';", sql).group(1).replace("''", "'")
+                )
+        return True, "ALTER ROLE"
+
+    def _host_login(self, argv):
+        if self.host_error:
+            return False, self.host_error
+        port = self._arg(argv, "-p")
+        user = self._arg(argv, "-U")
+        if port in self.impostor_on:
+            return True, "42\n"  # an unrelated PostgreSQL that happens to answer
+        if not self.published or self.published[1] != port:
+            return False, (
+                "psql: error: connection to server at 127.0.0.1, port "
+                f"{port} failed: Connection refused"
+            )
+        if (
+            user != "pasarguard"
+            or self._pgpassword(argv) != self.password
+            or self.verifier != self.hba
+        ):
             return False, (
                 "psql: error: connection to server failed: FATAL:  "
                 f'password authentication failed for user "{user}"'
             )
-        if "exec" in argv and "ALTER ROLE" in joined:
-            if not self.alter_ok:
-                return False, "ERROR:  permission denied to alter role"
-            import re
-
-            m = re.search(r"PASSWORD '(.*)';", argv[-1])
-            if m:
-                self.accepted = {m.group(1).replace("''", "'")}
-            return True, "ALTER ROLE"
-        return True, ""
+        return True, self._answer(self._arg(argv, "-tAc")) + "\n"
 
     def altered_roles(self) -> int:
         return sum(1 for c in self.commands if "ALTER ROLE" in " ".join(c))
+
+    def set_cluster_encryption_calls(self) -> int:
+        return sum(1 for c in self.commands if "ALTER SYSTEM SET" in " ".join(c))
 
 
 def _env(db_password: str, postgres_password: str | None = None) -> str:
@@ -412,6 +488,37 @@ def _align(migrator, env_text, env_path):
         )
 
 
+def test_repair_fixes_password_encryption_before_syncing_roles():
+    """The shared role sync would otherwise store a verifier the hba rejects."""
+    async def _fake_resolve(migrator, db_type, env_text=None):
+        return {"user": "pasarguard", "password": "url-secret", "database": "pasarguard"}
+
+    async def _fake_sync(migrator, db_type, admin, env_text=None, **kw):
+        return True
+
+    async def _run():
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / ".env"
+            env_path.write_text(_env("url-secret"), encoding="utf-8")
+            migrator = _FakePgStack(
+                MigrationJob(job_id="repairenc"),
+                {"target_db": "timescaledb"},
+                encryption="md5",
+                hba="scram-sha-256",
+            )
+            with patch("app.services.migrators.xui.PASARGUARD_ENV", env_path), \
+                 patch("app.services.pasarguard_ops.resolve_db_service", lambda _db: "timescaledb"), \
+                 patch("app.services.db_auth.resolve_live_admin_connection", _fake_resolve), \
+                 patch("app.services.db_auth.sync_postgres_roles_to_app_password", _fake_sync), \
+                 patch("app.services.env_migration._compose_has_pgbouncer", lambda: False):
+                assert await migrator._repair_pg_panel_auth("timescaledb") is True
+            return migrator
+
+    migrator = asyncio.run(_run())
+    assert migrator.set_cluster_encryption_calls() == 1
+    assert migrator.encryption == "scram-sha-256"
+
+
 def test_precheck_accepts_working_credentials_untouched():
     with tempfile.TemporaryDirectory() as tmp:
         env_path = Path(tmp) / ".env"
@@ -422,6 +529,7 @@ def test_precheck_accepts_working_credentials_untouched():
 
     assert result == env_text
     assert migrator.altered_roles() == 0
+    assert migrator.set_cluster_encryption_calls() == 0
     conn = migrator.params["_resolved_target_conn"]
     assert conn["user"] == "pasarguard"
     assert conn["password"] == "realpwd"
@@ -446,37 +554,131 @@ def test_precheck_picks_the_password_that_survives_tcp_auth():
     assert 'POSTGRES_PASSWORD="realpwd"' in on_disk
 
 
+def test_precheck_does_not_trust_the_containers_own_loopback():
+    """The password is right, but stored md5 against a scram-sha-256 host rule.
+
+    This is the shape of the reported failure: everything inside the container
+    accepts the password, alembic connects from the host and is rejected.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        env_path = Path(tmp) / ".env"
+        env_text = _env("realpwd")
+        env_path.write_text(env_text, encoding="utf-8")
+        migrator = _FakePgStack(
+            MigrationJob(job_id="pre3"),
+            {"target_db": "timescaledb"},
+            verifier="md5",
+            encryption="md5",
+            hba="scram-sha-256",
+        )
+        result = _align(migrator, env_text, env_path)
+
+    assert migrator.verifier == "scram-sha-256"
+    assert migrator.password == "realpwd"
+    assert migrator.altered_roles() == 1
+    assert migrator.params["_resolved_target_conn"]["password"] == "realpwd"
+    assert result == env_text
+
+
+def test_precheck_fixes_the_cluster_default_even_when_login_works():
+    """PasarGuard's own role sync runs an ALTER ROLE right before alembic.
+
+    With password_encryption still on md5 that sync would rewrite a working
+    password into a verifier no host connection can use.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        env_path = Path(tmp) / ".env"
+        env_text = _env("realpwd")
+        env_path.write_text(env_text, encoding="utf-8")
+        migrator = _FakePgStack(
+            MigrationJob(job_id="pre4"),
+            {"target_db": "timescaledb"},
+            encryption="md5",
+            verifier="scram-sha-256",
+            hba="scram-sha-256",
+        )
+        _align(migrator, env_text, env_path)
+
+    assert migrator.set_cluster_encryption_calls() == 1
+    assert migrator.encryption == "scram-sha-256"
+    assert migrator.altered_roles() == 0
+    assert migrator.params["_resolved_target_conn"]["password"] == "realpwd"
+
+
 def test_precheck_repairs_role_when_no_password_authenticates():
     with tempfile.TemporaryDirectory() as tmp:
         env_path = Path(tmp) / ".env"
         env_text = _env("newpwd")
         env_path.write_text(env_text, encoding="utf-8")
         migrator = _FakePgStack(
-            MigrationJob(job_id="pre3"), {"target_db": "timescaledb"}, accepted=("forgotten",),
+            MigrationJob(job_id="pre5"), {"target_db": "timescaledb"}, password="forgotten",
         )
         result = _align(migrator, env_text, env_path)
 
     assert migrator.altered_roles() == 1
-    assert migrator.accepted == {"newpwd"}
+    assert migrator.password == "newpwd"
     assert migrator.params["_resolved_target_conn"]["password"] == "newpwd"
     assert result == env_text
 
 
-def test_precheck_leaves_everything_alone_when_alter_role_fails():
+def test_precheck_uses_the_port_docker_actually_publishes():
+    with tempfile.TemporaryDirectory() as tmp:
+        env_path = Path(tmp) / ".env"
+        env_text = _env("realpwd")
+        env_path.write_text(env_text, encoding="utf-8")
+        migrator = _FakePgStack(
+            MigrationJob(job_id="pre6"),
+            {"target_db": "timescaledb"},
+            published=("127.0.0.1", "5433"),
+        )
+        _align(migrator, env_text, env_path)
+
+    assert migrator.params["_resolved_target_conn"]["port"] == "5433"
+
+
+def test_precheck_refuses_a_foreign_postgres_on_the_assumed_port():
+    """A stranger on 5432 must never be migrated into — the copy drops its schema."""
+    with tempfile.TemporaryDirectory() as tmp:
+        env_path = Path(tmp) / ".env"
+        env_text = _env("realpwd")
+        env_path.write_text(env_text, encoding="utf-8")
+        migrator = _FakePgStack(
+            MigrationJob(job_id="pre7"),
+            {"target_db": "timescaledb"},
+            published=None,
+            impostor_on=("5432",),
+        )
+        try:
+            _align(migrator, env_text, env_path)
+        except RuntimeError as e:
+            assert "5432" in str(e)
+        else:
+            raise AssertionError("must refuse an unrelated PostgreSQL server")
+
+    assert "_resolved_target_conn" not in migrator.params
+    assert any("different postmaster" in line for line in migrator.job.logs)
+
+
+def test_precheck_stops_with_a_diagnosis_when_alter_role_fails():
     with tempfile.TemporaryDirectory() as tmp:
         env_path = Path(tmp) / ".env"
         env_text = _env("newpwd")
         env_path.write_text(env_text, encoding="utf-8")
         migrator = _FakePgStack(
-            MigrationJob(job_id="pre4"),
+            MigrationJob(job_id="pre8"),
             {"target_db": "timescaledb"},
-            accepted=("forgotten",),
+            password="forgotten",
             alter_ok=False,
         )
-        result = _align(migrator, env_text, env_path)
+        try:
+            _align(migrator, env_text, env_path)
+        except RuntimeError as e:
+            assert "127.0.0.1:5432" in str(e)
+            assert "some-other-stack-db" in str(e)
+        else:
+            raise AssertionError("a conclusive auth failure must stop the migration")
         on_disk = env_path.read_text(encoding="utf-8")
 
-    assert result == env_text
     assert "_resolved_target_conn" not in migrator.params
     assert on_disk == env_text
     assert any("ALTER ROLE pasarguard failed" in line for line in migrator.job.logs)
@@ -525,11 +727,10 @@ def test_precheck_never_rewrites_roles_when_the_probe_cannot_reach_postgres():
         env_text = _env("realpwd", postgres_password="stale")
         env_path.write_text(env_text, encoding="utf-8")
         migrator = _FakePgStack(
-            MigrationJob(job_id="pre7"),
+            MigrationJob(job_id="pre9"),
             {"target_db": "timescaledb"},
-            probe_error=(
-                "psql: error: connection to server at 127.0.0.1, port 5432 failed: "
-                "Connection refused"
+            host_error=(
+                'docker: Error response from daemon: exec: "psql": executable file not found'
             ),
         )
         result = _align(migrator, env_text, env_path)
@@ -539,28 +740,78 @@ def test_precheck_never_rewrites_roles_when_the_probe_cannot_reach_postgres():
     assert on_disk == env_text
     assert migrator.altered_roles() == 0
     assert "_resolved_target_conn" not in migrator.params
-    assert any("Connection refused" in line for line in migrator.job.logs)
+    assert any("executable file not found" in line for line in migrator.job.logs)
 
 
-def test_precheck_falls_back_to_the_host_network_probe():
-    """If psql cannot run inside the container, use the path alembic itself uses."""
+def test_precheck_probes_the_way_alembic_connects():
+    """Every login attempt must come from the host, never from inside the container."""
     with tempfile.TemporaryDirectory() as tmp:
         env_path = Path(tmp) / ".env"
         env_text = _env("realpwd")
         env_path.write_text(env_text, encoding="utf-8")
-        migrator = _FakePgStack(
-            MigrationJob(job_id="pre8"),
-            {"target_db": "timescaledb"},
-            exec_probe_error='OCI runtime exec failed: exec: "psql": not found',
-        )
-        result = _align(migrator, env_text, env_path)
+        migrator = _FakePgStack(MigrationJob(job_id="pre10"), {"target_db": "timescaledb"})
+        _align(migrator, env_text, env_path)
 
-    assert result == env_text
-    assert migrator.altered_roles() == 0
-    assert migrator.params["_resolved_target_conn"]["password"] == "realpwd"
-    assert any(
-        "run" in cmd and "--entrypoint" in cmd for cmd in migrator.commands
-    ), "host-network probe must be attempted when the container probe is unusable"
+    logins = [c for c in migrator.commands if "PGPASSWORD=realpwd" in " ".join(c)]
+    assert logins, "the pre-check must attempt a login"
+    assert all(
+        "run" in cmd and "--network" in cmd and "host" in cmd
+        for cmd in logins
+        if PG_FINGERPRINT_SQL in " ".join(cmd) and "exec" not in cmd
+    )
+    assert any("--entrypoint" in cmd for cmd in logins)
+
+
+def test_endpoint_candidates_prefer_loopback_and_the_published_port():
+    assert pg_endpoint_candidates("127.0.0.1", "5433") == [
+        ("127.0.0.1", "5433"), ("127.0.0.1", "5432"),
+    ]
+    assert pg_endpoint_candidates("10.0.0.5", "5432") == [
+        ("127.0.0.1", "5432"), ("10.0.0.5", "5432"),
+    ]
+    assert pg_endpoint_candidates("", "") == [("127.0.0.1", "5432")]
+
+
+def test_parse_published_port_prefers_loopback():
+    text = json.dumps({
+        "5432/tcp": [
+            {"HostIp": "10.0.0.5", "HostPort": "5555"},
+            {"HostIp": "127.0.0.1", "HostPort": "5433"},
+        ]
+    })
+    assert parse_published_port(text) == ("127.0.0.1", "5433")
+    assert parse_published_port(
+        json.dumps({"5432/tcp": [{"HostIp": "0.0.0.0", "HostPort": "5432"}]})
+    ) == ("127.0.0.1", "5432")
+    assert parse_published_port(json.dumps({"5432/tcp": None})) == ("", "")
+    assert parse_published_port("not json") == ("", "")
+
+
+def test_containers_publishing_port():
+    ps_output = (
+        "pasarguard-timescaledb-1\t127.0.0.1:5432->5432/tcp\n"
+        "other-panel-db\t0.0.0.0:6432->6432/tcp\n"
+    )
+    assert containers_publishing_port(ps_output, "5432") == ["pasarguard-timescaledb-1"]
+    assert containers_publishing_port(ps_output, "6432") == ["other-panel-db"]
+    assert containers_publishing_port("", "5432") == []
+
+
+def test_password_storage_rules():
+    scram = parse_pg_auth_context("md5|md5|scram-sha-256\n")
+    assert scram == {
+        "encryption": "md5", "verifier": "md5", "hba": "scram-sha-256",
+    }
+    assert required_password_encryption(scram) == "scram-sha-256"
+    assert password_storage_mismatch(scram) is True
+    assert password_storage_mismatch(
+        parse_pg_auth_context("scram-sha-256|scram-sha-256|scram-sha-256")
+    ) is False
+    # A trust or unknown host rule proves nothing: never rewrite a password on it.
+    assert required_password_encryption(parse_pg_auth_context("md5|md5|trust")) == ""
+    assert password_storage_mismatch(parse_pg_auth_context("md5|unknown|md5")) is False
+    assert parse_pg_auth_context("") == {}
+    assert password_storage_mismatch({}) is False
 
 
 def test_describe_password_source():
@@ -606,14 +857,23 @@ if __name__ == "__main__":
     test_start_panel_reraises_when_failure_is_not_auth()
     test_start_panel_keeps_original_error_when_repair_finds_nothing()
     test_repair_uses_panel_url_password_for_roles()
+    test_repair_fixes_password_encryption_before_syncing_roles()
     test_precheck_accepts_working_credentials_untouched()
     test_precheck_picks_the_password_that_survives_tcp_auth()
+    test_precheck_does_not_trust_the_containers_own_loopback()
+    test_precheck_fixes_the_cluster_default_even_when_login_works()
     test_precheck_repairs_role_when_no_password_authenticates()
-    test_precheck_leaves_everything_alone_when_alter_role_fails()
+    test_precheck_uses_the_port_docker_actually_publishes()
+    test_precheck_refuses_a_foreign_postgres_on_the_assumed_port()
+    test_precheck_stops_with_a_diagnosis_when_alter_role_fails()
     test_precheck_skipped_for_mysql_and_by_kill_switch()
     test_probe_result_classification()
     test_precheck_never_rewrites_roles_when_the_probe_cannot_reach_postgres()
-    test_precheck_falls_back_to_the_host_network_probe()
+    test_precheck_probes_the_way_alembic_connects()
+    test_endpoint_candidates_prefer_loopback_and_the_published_port()
+    test_parse_published_port_prefers_loopback()
+    test_containers_publishing_port()
+    test_password_storage_rules()
     test_describe_password_source()
     test_normalize_pg_env_passwords_only_touches_existing_keys()
     print("OK: x-ui PostgreSQL auth repair")
