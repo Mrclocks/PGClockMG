@@ -807,6 +807,9 @@ async function uploadRestoreZip(file) {
 
   const fd = new FormData();
   fd.append('file', file);
+  if (typeof largeUploadOverrideEnabled === 'function' && largeUploadOverrideEnabled()) {
+    fd.append('allow_large_upload', '1');
+  }
   try {
     const data = await uploadFormWithProgress('/api/upload', fd, (pct) => {
       setUploadProgressUi(progressIds, {

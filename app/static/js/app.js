@@ -28,6 +28,7 @@ const state = {
   sourcePwdValues: {},
   targetPwdValues: {},
   uploadLimits: null,
+  allowLargeUploadOverride: false,
 };
 
 function panelLatinName(panel) {
@@ -432,7 +433,7 @@ function resourceProfileHint(profile, limits) {
 }
 
 function largeUploadOverrideEnabled() {
-  return !!document.getElementById('allowLargeUploadOverride')?.checked;
+  return !!state.allowLargeUploadOverride;
 }
 
 function resourceProfileAction(profile, limits) {
@@ -447,8 +448,7 @@ async function refreshResourceCard() {
   await loadSystemCheck();
 }
 
-function renderUploadResourceCard() {
-  const card = document.getElementById('uploadResourceCard');
+function renderResourceCardInto(card, kind) {
   if (!card) return;
   const resources = state.systemCheck?.resources;
   const limits = state.uploadLimits;
@@ -480,6 +480,8 @@ function renderUploadResourceCard() {
   const overrideStatus = overrideEnabled
     ? t('step2.resourceOverrideEnabledNote')
     : t('step2.resourceOverrideDisabledNote');
+  const checkboxId = `allowLargeUploadOverride-${kind}`;
+  const refreshId = `btnRefreshResourceCard-${kind}`;
 
   card.innerHTML = `
     <div class="upload-resource-head">
@@ -527,22 +529,32 @@ function renderUploadResourceCard() {
       </div>
     </div>
     <div class="upload-resource-actions">
-      <button type="button" class="btn btn-secondary btn-sm" id="btnRefreshResourceCard">${t('step2.resourceRefresh')}</button>
+      <button type="button" class="btn btn-secondary btn-sm" id="${refreshId}">${t('step2.resourceRefresh')}</button>
     </div>
     <label class="upload-resource-override">
-      <input type="checkbox" id="allowLargeUploadOverride" ${overrideEnabled ? 'checked' : ''}>
+      <input type="checkbox" id="${checkboxId}" ${overrideEnabled ? 'checked' : ''}>
       <span>
         <strong>${t('step2.resourceOverrideTitle')}</strong>
         <small>${fmtMsg(t('step2.resourceOverrideHint'), { size: overrideLimit })}</small>
       </span>
     </label>`;
-  const checkbox = card.querySelector('#allowLargeUploadOverride');
-  if (checkbox) checkbox.addEventListener('change', () => renderUploadResourceCard());
+  const checkbox = card.querySelector(`#${checkboxId}`);
+  if (checkbox) {
+    checkbox.addEventListener('change', () => {
+      state.allowLargeUploadOverride = !!checkbox.checked;
+      renderUploadResourceCard();
+    });
+  }
 
-  const btn = card.querySelector('#btnRefreshResourceCard');
+  const btn = card.querySelector(`#${refreshId}`);
   if (btn) btn.addEventListener('click', refreshResourceCard);
 
   card.classList.remove('hidden');
+}
+
+function renderUploadResourceCard() {
+  renderResourceCardInto(document.getElementById('uploadResourceCard'), 'migrate');
+  renderResourceCardInto(document.getElementById('restoreUploadResourceCard'), 'restore');
 }
 
 function detectMarzbanSourceDb() {
