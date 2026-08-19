@@ -23,7 +23,10 @@ from app.services.upload_bundle import (
     init_bundle, save_bundle_slot, get_bundle_status, prepare_bundle_workspace, bundle_has_upload,
 )
 from app.services.upload_requirements import get_upload_requirements
-from app.services.archive_guard import MAX_UPLOAD_BYTES, safe_upload_name
+from app.services.archive_guard import (
+    MAX_UPLOAD_BYTES, MAX_OVERRIDE_UPLOAD_BYTES, MAX_ZIP_ENTRY_BYTES, MAX_ZIP_FILES, MAX_ZIP_RATIO,
+    MAX_ZIP_TOTAL_BYTES, allowed_upload_bytes, safe_upload_name,
+)
 from app.services.pg_access import get_panel_access_info
 from app.services.pg_restore import (
     analyze_pasarguard_backup, start_pasarguard_restore, get_restore_job,
@@ -31,7 +34,7 @@ from app.services.pg_restore import (
 from app.services.self_uninstall import uninstall_preview, schedule_self_uninstall
 from app.config import WEB_PORT
 
-APP_VERSION = "3.2.1"
+APP_VERSION = "3.2.2"
 app = FastAPI(title="PGClockMG", version=APP_VERSION)
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -69,6 +72,14 @@ async def api_info():
         "subscription_labels": SUBSCRIPTION_LABELS,
         "system": get_system_status(),
         "panel_access": get_panel_access_info(),
+        "upload_limits": {
+            "max_upload_bytes": MAX_UPLOAD_BYTES,
+            "max_override_upload_bytes": MAX_OVERRIDE_UPLOAD_BYTES,
+            "max_zip_entry_bytes": MAX_ZIP_ENTRY_BYTES,
+            "max_zip_total_bytes": MAX_ZIP_TOTAL_BYTES,
+            "max_zip_files": MAX_ZIP_FILES,
+            "max_zip_ratio": MAX_ZIP_RATIO,
+        },
         "convert_rules": {
             "sqlite_to_any": True,
             "non_sqlite_to_sqlite": False,
@@ -239,11 +250,14 @@ async def api_upload(
     panel_id: str | None = Form(None),
     source_db: str | None = Form(None),
     marzban_mode: str | None = Form(None),
+    allow_large_upload: str | None = Form(None),
 ):
     filename = safe_upload_name(file.filename)
     tmp_dir = Path(tempfile.mkdtemp(prefix="pg-upload-"))
     tmp_path = tmp_dir / filename
     size = 0
+    use_large_upload_limit = str(allow_large_upload or "").strip().lower() in ("1", "true", "yes", "on")
+    max_upload_bytes = allowed_upload_bytes(use_large_upload_limit)
     try:
         with open(tmp_path, "wb") as out:
             while True:
@@ -251,8 +265,9 @@ async def api_upload(
                 if not chunk:
                     break
                 size += len(chunk)
-                if size > MAX_UPLOAD_BYTES:
-                    raise HTTPException(400, "حداکثر حجم فایل ۵۰۰ مگابایت")
+                if size > max_upload_bytes:
+                    limit_mb = max_upload_bytes // (1024 * 1024)
+                    raise HTTPException(400, f"حداکثر حجم فایل {limit_mb} مگابایت است")
                 out.write(chunk)
 
         if slot or bundle_id:

@@ -10,6 +10,7 @@ from pathlib import Path
 
 
 DEFAULT_MAX_UPLOAD_BYTES = 500 * 1024 * 1024
+DEFAULT_MAX_OVERRIDE_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 DEFAULT_MAX_ZIP_FILES = 20_000
 DEFAULT_MAX_ZIP_ENTRY_BYTES = 2 * 1024 * 1024 * 1024
 DEFAULT_MAX_ZIP_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
@@ -28,6 +29,7 @@ def _env_int(name: str, default: int) -> int:
 
 
 MAX_UPLOAD_BYTES = _env_int("PG_MAX_UPLOAD_BYTES", DEFAULT_MAX_UPLOAD_BYTES)
+MAX_OVERRIDE_UPLOAD_BYTES = _env_int("PG_MAX_OVERRIDE_UPLOAD_BYTES", DEFAULT_MAX_OVERRIDE_UPLOAD_BYTES)
 MAX_ZIP_FILES = _env_int("PG_MAX_ZIP_FILES", DEFAULT_MAX_ZIP_FILES)
 MAX_ZIP_ENTRY_BYTES = _env_int("PG_MAX_ZIP_ENTRY_BYTES", DEFAULT_MAX_ZIP_ENTRY_BYTES)
 MAX_ZIP_TOTAL_BYTES = _env_int("PG_MAX_ZIP_TOTAL_BYTES", DEFAULT_MAX_ZIP_TOTAL_BYTES)
@@ -48,6 +50,12 @@ def safe_upload_name(filename: str | None) -> str:
     if not name or name in (".", ".."):
         return "upload.bin"
     return name.replace("\x00", "_")
+
+
+def allowed_upload_bytes(allow_override: bool = False) -> int:
+    if allow_override and MAX_OVERRIDE_UPLOAD_BYTES > MAX_UPLOAD_BYTES:
+        return MAX_OVERRIDE_UPLOAD_BYTES
+    return MAX_UPLOAD_BYTES
 
 
 def preflight_zip_file(path: str | Path) -> ZipPreflight:
