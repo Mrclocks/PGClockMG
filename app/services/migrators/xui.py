@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shutil
 import socket
 import sqlite3
@@ -111,23 +112,45 @@ def pg_auth_context_sql(role: str) -> str:
         "coalesce((SELECT CASE WHEN rolpassword LIKE 'SCRAM-SHA-256%' THEN 'scram-sha-256' "
         "WHEN rolpassword LIKE 'md5%' THEN 'md5' ELSE 'other' END "
         f"FROM pg_authid WHERE rolname = '{literal}'), 'unknown') || '|' || "
+        # pg_hba is first-match-wins, so read the first catch-all host rule.
         "coalesce((SELECT auth_method FROM pg_hba_file_rules WHERE type = 'host' "
-        "AND address = 'all' ORDER BY line_number DESC LIMIT 1), 'unknown')"
+        "AND address IN ('all', '0.0.0.0/0', '::/0') "
+        "ORDER BY line_number LIMIT 1), 'unknown')"
     )
+
+
+# Every command here shares one pipe for stdout and stderr, so docker warnings and
+# image-pull chatter land in the same text as the query result: match the answer's
+# own shape instead of trusting the first line.
+_PG_CONTEXT_LINE = re.compile(r"^[a-z0-9-]+\|[a-z0-9-]+\|[a-z0-9-]+$")
 
 
 def parse_pg_auth_context(text: str) -> dict[str, str]:
     """Parse the auth-context line; empty dict when PostgreSQL answered nothing."""
     for raw in (text or "").splitlines():
-        line = raw.strip()
-        if line.count("|") >= 2:
-            encryption, verifier, hba = (line.split("|") + ["", "", ""])[:3]
-            return {
-                "encryption": encryption.strip().lower(),
-                "verifier": verifier.strip().lower(),
-                "hba": hba.strip().lower(),
-            }
+        line = raw.strip().lower()
+        if _PG_CONTEXT_LINE.match(line):
+            encryption, verifier, hba = line.split("|")
+            return {"encryption": encryption, "verifier": verifier, "hba": hba}
     return {}
+
+
+def _ordered(values: list[str | None]) -> list[str]:
+    """Non-empty values without duplicates, first occurrence wins."""
+    out: list[str] = []
+    for value in values:
+        if value and value not in out:
+            out.append(value)
+    return out
+
+
+def pg_fingerprint_value(text: str) -> str:
+    """The postmaster epoch out of psql output, ignoring docker's own noise."""
+    for raw in reversed((text or "").splitlines()):
+        line = raw.strip()
+        if line.isdigit():
+            return line
+    return ""
 
 
 def required_password_encryption(ctx: dict[str, str]) -> str:
@@ -177,14 +200,6 @@ def parse_published_port(text: str, container_port: str = "5432/tcp") -> tuple[s
         if not fallback[1]:
             fallback = (host_ip, host_port)
     return fallback
-
-
-def _first_value(text: str) -> str:
-    """First non-empty line of psql -tA output."""
-    for line in (text or "").splitlines():
-        if line.strip():
-            return line.strip()
-    return ""
 
 
 def pg_endpoint_candidates(host: str, port: str) -> list[tuple[str, str]]:
@@ -2331,7 +2346,7 @@ class XuiMigrator(BaseMigrator):
             quiet=True,
         )
         text = out or ""
-        return pg_probe_result(ok and bool(_first_value(text)), text), text
+        return pg_probe_result(ok, text), text
 
     async def _pg_auth_context(
         self, service: str, *, user: str, password: str,
@@ -2479,7 +2494,10 @@ class XuiMigrator(BaseMigrator):
                     image, host=host, port=port, user=user, password=pwd,
                 )
                 source = describe_password_source(env_text, pwd)
-                if result == "ok" and fingerprint and _first_value(out) != fingerprint:
+                seen = pg_fingerprint_value(out)
+                # Only positive evidence rejects an endpoint: an answer we could
+                # not read must never look like a stranger's database.
+                if result == "ok" and fingerprint and seen and seen != fingerprint:
                     self.job.log(
                         f"  {user} / {source} → accepted by {host}:{port}, but that "
                         "server is not the PasarGuard database container (different "
@@ -2513,6 +2531,7 @@ class XuiMigrator(BaseMigrator):
             postgres_password_candidates,
             target_database_name,
         )
+        from app.services.db_credentials import get_target_connection
         from app.services.pasarguard_ops import resolve_db_service
 
         self.job.log(
@@ -2530,12 +2549,22 @@ class XuiMigrator(BaseMigrator):
             return env_text
         image = await self._service_image(service)
 
-        users = postgres_admin_users(env_text)
-        passwords = [p for p in postgres_password_candidates(env_text) if p]
+        # The credentials the copy would have used without this pre-check come
+        # first: when they work, nothing here touches the database at all.
+        try:
+            previous = get_target_connection(self.params)
+        except Exception:
+            previous = {}
+        users = _ordered([previous.get("user"), *postgres_admin_users(env_text)])
+        passwords = _ordered(
+            [previous.get("password"), *postgres_password_candidates(env_text)]
+        )
         if not users or not passwords:
             self.job.log("No PostgreSQL credentials found in .env — skipping credential pre-check")
             return env_text
-        database = target_database_name(env_text, target_db)
+        # Keep the database the copy was already going to write to; only the
+        # credentials and the address are in question here.
+        database = previous.get("database") or target_database_name(env_text, target_db)
 
         published_host, published_port = await self._pg_published_endpoint(service)
         if published_port:
@@ -2551,7 +2580,7 @@ class XuiMigrator(BaseMigrator):
         ok_fp, fp_out = await self._pg_query_in_container(
             service, user=users[0], password=passwords[0], sql=PG_FINGERPRINT_SQL,
         )
-        fingerprint = _first_value(fp_out) if ok_fp else ""
+        fingerprint = pg_fingerprint_value(fp_out) if ok_fp else ""
 
         ctx = await self._align_cluster_password_encryption(
             service, user=users[0], password=passwords[0],
@@ -2624,9 +2653,10 @@ class XuiMigrator(BaseMigrator):
                     last_error = error_after or unusable_after or last_error
 
         if working is None:
-            await self._raise_pg_auth_diagnosis(
+            await self._log_pg_auth_diagnosis(
                 service, host=host, port=port, user=users[0], detail=last_error,
             )
+            return env_text
 
         user, pwd = working
         self.job.log(
@@ -2643,20 +2673,18 @@ class XuiMigrator(BaseMigrator):
         }
         return self._normalize_pg_env_passwords(env_text, pwd)
 
-    async def _raise_pg_auth_diagnosis(
+    async def _log_pg_auth_diagnosis(
         self, service: str, *, host: str, port: str, user: str, detail: str,
     ) -> None:
-        """Stop with the reason, instead of an asyncpg traceback ten seconds later.
+        """Say why the credentials fail, above the traceback that will follow.
 
-        Everything alembic needs has already been tried here with the same
-        credentials, so continuing can only reproduce the same failure without
-        saying why.
+        The migration is left to run its normal course: this check exists to
+        explain a failure, never to create one.
         """
         publishers = await self._port_publishers(port)
         lines = [
-            f"PostgreSQL at {host}:{port} rejects every credential in "
-            f"{PASARGUARD_ENV} for role {user}, so alembic and the data copy "
-            "cannot connect either."
+            f"PostgreSQL at {host}:{port} rejects every known credential for role "
+            f"{user}, so alembic is about to fail the same way."
         ]
         if publishers:
             lines.append(f"Host port {port} is published by: {', '.join(publishers)}.")
@@ -2667,9 +2695,7 @@ class XuiMigrator(BaseMigrator):
             )
         if detail.strip():
             lines.append(detail.strip()[-400:])
-        message = " ".join(lines)
-        self.job.log(f"Error: {message}")
-        raise RuntimeError(message)
+        self.job.log(" ".join(lines))
 
     async def _compose_container_id(self, service: str) -> str:
         ok, out = await self._run_cmd(
