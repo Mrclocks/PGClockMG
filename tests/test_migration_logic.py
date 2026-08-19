@@ -544,6 +544,8 @@ def test_system_status():
     assert "pasarguard" in status
     assert "marzban" in status
     assert "docker" in status
+    assert "resources" in status
+    assert status["resources"]["profile"] in {"weak", "normal", "strong"}
     print("OK: system status")
 
 

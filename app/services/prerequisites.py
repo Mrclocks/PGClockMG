@@ -1,11 +1,12 @@
 """System prerequisite checks."""
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
 from app.config import (
-    PASARGUARD_DIR, PASARGUARD_ENV, PASARGUARD_DATA,
+    PASARGUARD_DIR, PASARGUARD_ENV, PASARGUARD_DATA, UPLOAD_DIR, BACKUP_DIR,
     MARZBAN_DIR, MARZBAN_DATA, XUI_DB_PATHS, HIDDIFY_DIR,
 )
 from app.panels import PANELS, DATABASE_TYPES, TARGET_DB_RECOMMENDATIONS
@@ -18,6 +19,105 @@ def _run(cmd: list[str], timeout: int = 30) -> tuple[bool, str]:
         return r.returncode == 0, (r.stdout + r.stderr).strip()
     except Exception as e:
         return False, str(e)
+
+
+def _read_mem_value_bytes(label: str) -> int | None:
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.startswith(label):
+                parts = line.split()
+                if len(parts) >= 2 and parts[1].isdigit():
+                    return int(parts[1]) * 1024
+    except Exception:
+        return None
+    return None
+
+
+def _disk_stats(path: Path) -> dict | None:
+    try:
+        usage = shutil.disk_usage(str(path))
+    except Exception:
+        return None
+    return {
+        "path": str(path),
+        "total_bytes": usage.total,
+        "used_bytes": usage.used,
+        "free_bytes": usage.free,
+    }
+
+
+def _classify_resources(resources: dict) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    memory = resources.get("memory") or {}
+    storage = resources.get("storage") or {}
+    upload = storage.get("upload") or {}
+    backup = storage.get("backup") or {}
+
+    mem_avail = memory.get("available_bytes") or 0
+    upload_free = upload.get("free_bytes") or 0
+    backup_free = backup.get("free_bytes") or 0
+    cpu_count = resources.get("cpu_count") or 0
+    load_ratio = resources.get("load_ratio_1m")
+
+    if mem_avail and mem_avail < 2 * 1024 * 1024 * 1024:
+        reasons.append("low_ram")
+    if upload_free and upload_free < 6 * 1024 * 1024 * 1024:
+        reasons.append("low_upload_disk")
+    if backup_free and backup_free < 6 * 1024 * 1024 * 1024:
+        reasons.append("low_backup_disk")
+    if cpu_count and cpu_count <= 2:
+        reasons.append("low_cpu")
+    if isinstance(load_ratio, (int, float)) and load_ratio >= 1.2:
+        reasons.append("high_load")
+
+    if reasons:
+        return "weak", reasons
+
+    strong_signals = 0
+    if mem_avail >= 8 * 1024 * 1024 * 1024:
+        strong_signals += 1
+    if upload_free >= 20 * 1024 * 1024 * 1024 and backup_free >= 20 * 1024 * 1024 * 1024:
+        strong_signals += 1
+    if cpu_count >= 4:
+        strong_signals += 1
+    if isinstance(load_ratio, (int, float)) and load_ratio <= 0.5:
+        strong_signals += 1
+
+    if strong_signals >= 3:
+        return "strong", []
+    return "normal", []
+
+
+def _resource_status() -> dict:
+    load_average = None
+    load_ratio = None
+    try:
+        one, five, fifteen = os.getloadavg()
+        load_average = {"1m": one, "5m": five, "15m": fifteen}
+    except Exception:
+        pass
+
+    cpu_count = os.cpu_count() or 0
+    if load_average and cpu_count:
+        load_ratio = round(load_average["1m"] / cpu_count, 2)
+
+    resources = {
+        "cpu_count": cpu_count or None,
+        "load_average": load_average,
+        "load_ratio_1m": load_ratio,
+        "memory": {
+            "total_bytes": _read_mem_value_bytes("MemTotal:"),
+            "available_bytes": _read_mem_value_bytes("MemAvailable:"),
+        },
+        "storage": {
+            "upload": _disk_stats(UPLOAD_DIR),
+            "backup": _disk_stats(BACKUP_DIR),
+        },
+    }
+    profile, reasons = _classify_resources(resources)
+    resources["profile"] = profile
+    resources["profile_reasons"] = reasons
+    return resources
 
 
 def is_pasarguard_installed() -> bool:
@@ -107,6 +207,7 @@ def get_system_status() -> dict:
             (MARZBAN_DIR / ".env").read_text(encoding="utf-8", errors="ignore")
         ) if marzban and (MARZBAN_DIR / ".env").exists() else None,
         "marzban_password_candidates": _password_candidates_from_env(MARZBAN_DIR / ".env", mz_db) if marzban else [],
+        "resources": _resource_status(),
     }
 
 

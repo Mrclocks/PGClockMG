@@ -1105,6 +1105,98 @@ button.db-card {
   overflow-y: visible;
   max-width: 100%;
 }
+
+.upload-resource-card {
+  background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)), var(--bg-card);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: var(--surface-pad);
+  margin-bottom: 16px;
+}
+
+.upload-resource-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.upload-resource-head h4 {
+  font-size: 0.98rem;
+  margin-bottom: 6px;
+  color: var(--text);
+}
+
+.upload-resource-desc,
+.upload-resource-reasons {
+  font-size: 0.84rem;
+  color: var(--text-muted);
+}
+
+.upload-resource-reasons {
+  margin-top: 6px;
+  color: var(--text-dim);
+}
+
+.upload-resource-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-soft);
+  background: hsla(0, 0%, 100%, 0.03);
+  color: var(--text);
+  font-size: 0.8rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.upload-resource-badge.tone-warn {
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+}
+
+.upload-resource-badge.tone-ok {
+  border-color: var(--success-border);
+  background: var(--success-bg);
+}
+
+.upload-resource-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.upload-resource-item {
+  padding: 12px 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: hsla(0, 0%, 100%, 0.02);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.upload-resource-label {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
+.upload-resource-item strong {
+  font-size: 0.98rem;
+  color: var(--text);
+}
+
+.upload-resource-item small {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
 .summary-row {
   display: flex;
   flex-wrap: wrap;
@@ -2107,6 +2199,9 @@ a.btn-panel-enter:focus {
   .form-group { margin-bottom: 14px; }
   .guide-steps { margin-inline-start: 1rem; padding-inline-start: 0.4rem; }
   .success-card, .warning-card, .info-box { padding: 14px; }
+  .upload-resource-head { flex-direction: column; }
+  .upload-resource-badge { align-self: flex-start; }
+  .upload-resource-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 380px) {
