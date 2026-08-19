@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> ⚠️ **`v3.1.8`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
+> ⚠️ **`v3.1.9`** — قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
   <b>فارسی</b> · <a href="README.en.md">English</a> · <a href="README.ru.md">Русский</a>
@@ -37,8 +37,17 @@
 sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
 ```
 
-آدرس: `http://SERVER_IP:7000`  
+نصب‌کننده موقع نصب می‌پرسد وب‌پنل روی چه پورتی بالا بیاید — با زدن Enter همان `7000` پیش‌فرض می‌ماند.
+اگر دوباره نصب/آپدیت کنید، پورت فعلی حفظ می‌شود.
+
+آدرس: `http://SERVER_IP:PORT` (پیش‌فرض `http://SERVER_IP:7000`)  
 پیش‌نیاز: Ubuntu/Debian · root · Docker
+
+نصب بدون سوال، روی پورت دلخواه:
+
+```bash
+sudo PG_MIGRATOR_PORT=8443 bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
+```
 
 ---
 

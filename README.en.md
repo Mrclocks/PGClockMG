@@ -1,4 +1,4 @@
-> ⚠️ **`v3.1.8`** — Always take a full backup before restore or migration.
+> ⚠️ **`v3.1.9`** — Always take a full backup before restore or migration.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <b>English</b> · <a href="README.ru.md">Русский</a>
@@ -35,8 +35,17 @@ Web wizard for restore and migration to PasarGuard
 sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
 ```
 
-URL: `http://SERVER_IP:7000`  
+The installer asks which port the web panel should use — press Enter for the default `7000`.
+Re-running it keeps the port of the current install.
+
+URL: `http://SERVER_IP:PORT` (default `http://SERVER_IP:7000`)  
 Requirements: Ubuntu/Debian · root · Docker
+
+Unattended install on a fixed port:
+
+```bash
+sudo PG_MIGRATOR_PORT=8443 bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
+```
 
 ---
 

@@ -1,4 +1,4 @@
-> ⚠️ **`v3.1.8`** — Перед restore или миграцией сделайте полный бэкап.
+> ⚠️ **`v3.1.9`** — Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <a href="README.en.md">English</a> · <b>Русский</b>
@@ -35,8 +35,17 @@
 sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
 ```
 
-Адрес: `http://SERVER_IP:7000`  
+Установщик спрашивает порт веб-панели — Enter оставит порт по умолчанию `7000`.
+При повторном запуске сохраняется порт текущей установки.
+
+Адрес: `http://SERVER_IP:PORT` (по умолчанию `http://SERVER_IP:7000`)  
 Требования: Ubuntu/Debian · root · Docker
+
+Установка без вопросов, на заданном порту:
+
+```bash
+sudo PG_MIGRATOR_PORT=8443 bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
+```
 
 ---
 
