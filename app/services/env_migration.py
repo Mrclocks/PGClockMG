@@ -648,7 +648,6 @@ def transform_marzban_env(
 
     text = re.sub(r"(?m)^(\s*MYSQL_DATABASE\s*=\s*)marzban\s*$", r"\1pasarguard", text, flags=re.I)
 
-    pg_env = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.exists() else None
     sqlalchemy_url = build_sqlalchemy_url_for_target(target_db, password_override)
     text = _set_sqlalchemy_url(text, sqlalchemy_url)
 

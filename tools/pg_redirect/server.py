@@ -15,6 +15,8 @@ from .mapping import build_redirect_url, load_path_index, path_only
 
 log = logging.getLogger("pg_redirect")
 
+READ_TIMEOUT = 10.0
+
 
 def _http_response(status: int, reason: str, headers: dict[str, str], body: bytes = b"") -> bytes:
     lines = [f"HTTP/1.1 {status} {reason}"]
@@ -29,16 +31,20 @@ def _http_response(status: int, reason: str, headers: dict[str, str], body: byte
     return ("\r\n".join(lines)).encode("utf-8") + body
 
 
-async def _read_request(reader: asyncio.StreamReader, limit: int = 65536) -> tuple[str, str]:
+async def _read_request(
+    reader: asyncio.StreamReader,
+    limit: int = 65536,
+    timeout: float = READ_TIMEOUT,
+) -> tuple[str, str]:
     """Return (method, path) from the first request line; path excludes query."""
-    data = await reader.read(limit)
-    if not data:
-        return "", ""
     try:
-        text = data.decode("iso-8859-1", errors="replace")
-    except Exception:
+        line = await asyncio.wait_for(reader.readline(), timeout)
+    except (asyncio.TimeoutError, ValueError, OSError):
         return "", ""
-    first = text.split("\r\n", 1)[0]
+    if not line or len(line) > limit:
+        return "", ""
+    text = line.decode("iso-8859-1", errors="replace")
+    first = text.split("\r\n", 1)[0].split("\n", 1)[0]
     parts = first.split()
     if len(parts) < 2:
         return "", ""

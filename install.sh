@@ -195,6 +195,7 @@ port_in_use() {
   fi
   if command -v netstat >/dev/null 2>&1; then
     netstat -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}\$" && return 0
+    netstat -an -p tcp 2>/dev/null | awk '$NF == "LISTEN" {print $4}' | grep -qE "[:.]${p}\$" && return 0
   fi
   return 1
 }

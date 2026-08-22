@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shutil
+import tempfile
 from pathlib import Path
 
 INSTALL_DIR = Path("/opt/pg-migrator")
@@ -36,6 +36,8 @@ async def schedule_self_uninstall(delay_sec: float = 2.0) -> dict:
 
 async def _do_uninstall(delay_sec: float) -> None:
     await asyncio.sleep(delay_sec)
+    tmp_dir = Path(tempfile.mkdtemp(prefix="pgclockmg-uninstall-"))
+    path = tmp_dir / "uninstall.sh"
     script = f"""#!/bin/bash
 set -e
 systemctl stop {SERVICE_NAME} 2>/dev/null || true
@@ -43,9 +45,8 @@ systemctl disable {SERVICE_NAME} 2>/dev/null || true
 rm -f {UNIT_PATH}
 systemctl daemon-reload 2>/dev/null || true
 # Remove install dir last (this process may live under it)
-nohup bash -c 'sleep 1; rm -rf {INSTALL_DIR}' >/dev/null 2>&1 &
+nohup bash -c 'sleep 1; rm -rf {INSTALL_DIR}; rm -rf {tmp_dir}' >/dev/null 2>&1 &
 """
-    path = Path("/tmp/pgclockmg-uninstall.sh")
     path.write_text(script, encoding="utf-8")
     os.chmod(path, 0o700)
     # Detach so HTTP can finish
