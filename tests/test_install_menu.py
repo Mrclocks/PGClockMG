@@ -194,13 +194,13 @@ def test_status_panel_reports_installed_stack():
             "services:\n  pasarguard:\n    image: ghcr.io/pasarguard/panel:v1.4.2\n"
             "  timescaledb:\n    image: timescale/timescaledb-ha:pg17\n",
         )
-        box.write_wizard(version="3.2.4", port=8443)
+        box.write_wizard(version="3.2.5", port=8443)
         box.write_redirect(port=443, extra_ports=[2083], panel="hiddify", ssl={"enabled": True})
 
         out = plain(box.run("print_status").stdout)
         assert "PasarGuard" in out and "v1.4.2" in out
         assert "timescaledb" in out
-        assert "3.2.4" in out and "8443" in out
+        assert "3.2.5" in out and "8443" in out
         assert "hiddify" in out and "443, 2083" in out
         assert "Installer" in out
         assert "was not found" not in out
@@ -238,7 +238,7 @@ def test_install_asks_the_port_then_installs_and_prints_the_url():
     """run_install is stubbed out — this covers the question → install → URL flow."""
     with sandbox() as tmp:
         box = Sandbox(tmp)
-        box.write_wizard(version="3.2.4", port=7000)
+        box.write_wizard(version="3.2.5", port=7000)
         code, out = box.run_on_tty(
             "run_install() { echo '[fake] installing...'; }\naction_install",
             ["8443\n"],

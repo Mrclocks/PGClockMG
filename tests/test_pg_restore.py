@@ -18,6 +18,10 @@ from app.services.pg_restore import (
     is_auth_failure_text,
     is_ts_catalog_mismatch_error,
     detect_dump_chunk_catalog_era,
+    detect_dump_ts_catalog_floor,
+    detect_backup_ts_catalog_floor,
+    ts_floor_from_error_text,
+    ts_pin_for_floor,
     resolve_wanted_ts_for_live,
     wanted_ts_for_restore_retry,
     collect_backup_ts_versions,
@@ -244,6 +248,247 @@ def test_wanted_ts_for_restore_retry_from_catalog_error():
     print("OK: wanted ts for restore retry")
 
 
+CONTINUOUS_AGG_228_COPY = (
+    "COPY _timescaledb_catalog.continuous_agg (mat_hypertable_id, raw_hypertable_id, "
+    "parent_mat_hypertable_id, user_view_schema, user_view_name, partial_view_schema, "
+    "partial_view_name, direct_view_schema, direct_view_name, materialized_only, "
+    "schema_change_timestamp) FROM stdin;\n"
+)
+CONTINUOUS_AGG_227_COPY = (
+    "COPY _timescaledb_catalog.continuous_agg (mat_hypertable_id, raw_hypertable_id, "
+    "parent_mat_hypertable_id, user_view_schema, user_view_name, partial_view_schema, "
+    "partial_view_name, direct_view_schema, direct_view_name, materialized_only) "
+    "FROM stdin;\n"
+)
+CONTINUOUS_AGG_228_ERROR = (
+    'ERROR:  column "schema_change_timestamp" of relation "continuous_agg" does not exist'
+)
+
+
+def test_detect_dump_ts_catalog_floor():
+    # continuous_agg.schema_change_timestamp arrived in TimescaleDB 2.28.0
+    assert detect_dump_ts_catalog_floor(CONTINUOUS_AGG_228_COPY) == "2.28.0"
+    assert detect_dump_ts_catalog_floor(CONTINUOUS_AGG_227_COPY) is None
+    assert (
+        detect_dump_ts_catalog_floor(
+            "COPY _timescaledb_catalog.chunk (id, hypertable_id, relid) FROM stdin;\n"
+        )
+        == TS_FIRST_RELID_CHUNK
+    )
+    # Highest floor wins when a dump carries several markers
+    assert (
+        detect_dump_ts_catalog_floor(
+            CONTINUOUS_AGG_228_COPY
+            + "COPY _timescaledb_catalog.chunk (id, hypertable_id, relid) FROM stdin;\n"
+        )
+        == TS_FIRST_RELID_CHUNK
+    )
+    # Application tables never imply a Timescale floor
+    assert detect_dump_ts_catalog_floor("COPY public.users (id, relid) FROM stdin;") is None
+    assert detect_dump_ts_catalog_floor("") is None
+    print("OK: dump timescale catalog floor")
+
+
+def test_detect_backup_ts_catalog_floor_multi_layout():
+    import tempfile
+    import shutil
+
+    td = Path(tempfile.mkdtemp(prefix="pg-ts-floor-"))
+    try:
+        pg = td / "pg_dump"
+        pg.mkdir()
+        (pg / "manifest.tsv").write_text("pasarguard\tpasarguard\t1\tpasarguard.sql\t\n", encoding="utf-8")
+        (pg / "globals.sql").write_text("CREATE ROLE pasarguard;\n", encoding="utf-8")
+        (pg / "pasarguard.sql").write_text(
+            "--\n-- PostgreSQL database dump\n--\n"
+            "COPY public.users (id, username) FROM stdin;\n1\tbob\n\\.\n"
+            + CONTINUOUS_AGG_228_COPY
+            + "1\t2\t\\N\tpublic\tv\t_timescaledb_internal\tp\t_timescaledb_internal\td\tt\t\\N\n\\.\n",
+            encoding="utf-8",
+        )
+        assert detect_backup_ts_catalog_floor(td) == "2.28.0"
+
+        (pg / "pasarguard.sql").write_text(CONTINUOUS_AGG_227_COPY, encoding="utf-8")
+        assert detect_backup_ts_catalog_floor(td) is None
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    print("OK: backup timescale catalog floor (pg_dump layout)")
+
+
+def test_detect_dump_ts_catalog_floor_new_tables():
+    # A catalog table the older extension does not have at all
+    assert (
+        detect_dump_ts_catalog_floor(
+            "COPY _timescaledb_catalog.chunk_column_stats (id, hypertable_id) FROM stdin;\n"
+        )
+        == "2.16.0"
+    )
+    # Generic names must never be read off an application table
+    assert detect_dump_ts_catalog_floor("COPY public.bgw_job (id, name) FROM stdin;") is None
+    assert (
+        detect_dump_ts_catalog_floor("COPY _timescaledb_catalog.bgw_job (id) FROM stdin;")
+        == "2.25.0"
+    )
+    print("OK: dump floor from catalog tables")
+
+
+def test_ts_floor_from_error_text():
+    assert ts_floor_from_error_text(CONTINUOUS_AGG_228_ERROR) == "2.28.0"
+    assert (
+        ts_floor_from_error_text(
+            'ERROR:  relation "_timescaledb_catalog.chunk_column_stats" does not exist'
+        )
+        == "2.16.0"
+    )
+    assert (
+        ts_floor_from_error_text('ERROR: column "relid" of relation "chunk" does not exist')
+        == TS_FIRST_RELID_CHUNK
+    )
+    # Old dump on a new server is a ceiling, not a floor — no pin implied here
+    assert ts_floor_from_error_text(
+        'ERROR: column "schema_name" of relation "chunk" does not exist'
+    ) is None
+    assert ts_floor_from_error_text('ERROR: column "note" of relation "users" does not exist') is None
+    print("OK: timescale floor from psql error text")
+
+
+def test_is_ts_catalog_mismatch_error_continuous_agg():
+    assert is_ts_catalog_mismatch_error(CONTINUOUS_AGG_228_ERROR)
+    assert is_ts_catalog_mismatch_error(
+        'ERROR: relation "_timescaledb_catalog.hypertable_cagg_settings" does not exist'
+    )
+    # Application-schema errors must stay out of the Timescale realign path
+    assert not is_ts_catalog_mismatch_error(
+        'ERROR: column "note" of relation "users" does not exist'
+    )
+    assert not is_ts_catalog_mismatch_error('ERROR: relation "hosts" does not exist')
+    print("OK: catalog mismatch detection for continuous_agg")
+
+
+def test_resolve_wanted_ts_for_live_honours_dump_floor():
+    # The reported failure: 2.28.x backup, live 2.26.4, no explicit version in the archive
+    assert (
+        resolve_wanted_ts_for_live(
+            None, live_ver="2.26.4", catalog_era="schema_name", min_ver="2.28.0"
+        )
+        == TS_LAST_SCHEMA_NAME_CHUNK
+    )
+    # Server already new enough → no realign, exactly as before the floor existed
+    assert (
+        resolve_wanted_ts_for_live(
+            None, live_ver="2.28.1", catalog_era="schema_name", min_ver="2.28.0"
+        )
+        is None
+    )
+    # A stale/bogus explicit pin below the floor must not win
+    assert (
+        resolve_wanted_ts_for_live(
+            "2.17.2", live_ver="2.26.4", catalog_era="schema_name", min_ver="2.28.0"
+        )
+        == TS_LAST_SCHEMA_NAME_CHUNK
+    )
+    # Explicit pin that satisfies the floor is still preferred
+    assert (
+        resolve_wanted_ts_for_live(
+            "2.28.1", live_ver="2.26.4", catalog_era="schema_name", min_ver="2.28.0"
+        )
+        == "2.28.1"
+    )
+    # 2.29+ dumps keep landing on 2.29.0
+    assert (
+        resolve_wanted_ts_for_live(
+            None, live_ver="2.26.4", catalog_era="relid", min_ver=TS_FIRST_RELID_CHUNK
+        )
+        == TS_FIRST_RELID_CHUNK
+    )
+    # Floor-free calls behave exactly like before
+    assert (
+        resolve_wanted_ts_for_live(None, live_ver="2.26.4", catalog_era="schema_name")
+        is None
+    )
+    print("OK: resolve wanted ts honours dump floor")
+
+
+def test_ts_pin_for_floor():
+    assert ts_pin_for_floor("2.28.0") == TS_LAST_SCHEMA_NAME_CHUNK
+    assert ts_pin_for_floor("2.28.0", "relid") == "2.28.0"
+    assert ts_pin_for_floor(TS_FIRST_RELID_CHUNK) == TS_FIRST_RELID_CHUNK
+    print("OK: ts pin for floor")
+
+
+def test_wanted_ts_for_restore_retry_newer_backup():
+    assert (
+        wanted_ts_for_restore_retry(
+            CONTINUOUS_AGG_228_ERROR,
+            {"timescaledb_versions": [], "timescaledb_chunk_catalog": "schema_name"},
+        )
+        == TS_LAST_SCHEMA_NAME_CHUNK
+    )
+    assert wanted_ts_for_restore_retry(CONTINUOUS_AGG_228_ERROR, {}) == TS_LAST_SCHEMA_NAME_CHUNK
+    # Floor from the analysis is enough when the error text is vaguer
+    assert (
+        wanted_ts_for_restore_retry(
+            'ERROR: column "x" of relation "continuous_agg" does not exist',
+            {"timescaledb_min_version": "2.28.0"},
+        )
+        == TS_LAST_SCHEMA_NAME_CHUNK
+    )
+    # Unrelated failures still trigger no image realign
+    assert wanted_ts_for_restore_retry("ERROR: permission denied for schema public", {}) is None
+    print("OK: wanted ts for restore retry (newer backup)")
+
+
+def test_align_image_failed_pull_keeps_data_and_tag():
+    """A tag that cannot be pulled must not stop containers or wipe the volume."""
+    import asyncio
+    import tempfile
+    import shutil
+    from unittest.mock import MagicMock, patch
+    from app.services import pg_restore as mod
+
+    td = Path(tempfile.mkdtemp(prefix="pg-align-pull-"))
+    compose = td / "docker-compose.yml"
+    original = "services:\n  timescaledb:\n    image: timescale/timescaledb:2.26.4-pg17\n"
+    compose.write_text(original, encoding="utf-8")
+    calls: list[tuple] = []
+
+    async def fake_compose(_job, *args, **_kwargs):
+        calls.append(args)
+        return (False, "manifest unknown") if args[0] == "pull" else (True, "")
+
+    job = MagicMock()
+    job.log = MagicMock()
+
+    async def _go():
+        with (
+            patch.object(mod, "PASARGUARD_DIR", td),
+            patch.object(mod, "_compose", side_effect=fake_compose),
+        ):
+            await mod._align_timescaledb_image(job, TS_LAST_SCHEMA_NAME_CHUNK, wipe_data=True)
+
+    try:
+        raised = False
+        try:
+            asyncio.run(_go())
+        except RuntimeError as e:
+            raised = "could not be pulled" in str(e)
+        assert raised, "failed pull must abort the restore"
+        assert compose.read_text(encoding="utf-8") == original
+        assert [c for c in calls if c[0] == "stop"] == []
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    print("OK: failed image pull keeps data and compose tag")
+
+
+def test_explain_newer_ts_backup_error():
+    exc = RuntimeError(f"Failed restoring pasarguard:\n{CONTINUOUS_AGG_228_ERROR}")
+    info = explain_restore_error(exc, "timescaledb", "timescaledb")
+    assert "2.28.0" in (info.get("en") or "")
+    assert "2.28.0" in (info.get("fa") or "")
+    assert any(TS_LAST_SCHEMA_NAME_CHUNK in c for c in info.get("causes_fa") or [])
+    print("OK: explain newer timescale backup error")
+
+
 def test_explain_schema_name_chunk_error():
     exc = RuntimeError(
         'PostgreSQL dump restore failed:\nERROR:  column "schema_name" of relation "chunk" does not exist'
@@ -335,6 +580,70 @@ def _make_backup_zip(dest: Path, db_url: str, layout: str = "single") -> Path:
             if p.is_file():
                 zf.write(p, p.relative_to(work).as_posix())
     return zpath
+
+
+def test_analyze_newer_timescale_backup_reports_floor():
+    """Reproduce the reported archive: 2.28.x dump, no version metadata anywhere.
+
+    The wizard used to see only the chunk catalog era (schema_name, i.e. "pre-2.29")
+    and conclude a 2.26.4 server was compatible, then fail inside psql.
+    """
+    import tempfile
+    import shutil
+    import app.services.pg_restore as mod
+
+    base = Path(tempfile.mkdtemp(prefix="pg-restore-ts-floor-"))
+    work = base / "content"
+    (work / "pg_dump").mkdir(parents=True)
+    (work / ".env").write_text(
+        'SQLALCHEMY_DATABASE_URL="postgresql+asyncpg://u:p@timescaledb:5432/pasarguard"\n'
+        'DB_PASSWORD="x"\n',
+        encoding="utf-8",
+    )
+    # Empty version column, exactly like the archive that failed
+    (work / "pg_dump" / "manifest.tsv").write_text(
+        "pasarguard\tpasarguard\t1\tpasarguard.sql\t\n", encoding="utf-8"
+    )
+    (work / "pg_dump" / "pasarguard.sql").write_text(
+        "COPY _timescaledb_catalog.chunk (id, hypertable_id, schema_name, table_name) "
+        "FROM stdin;\n1\t1\t_timescaledb_internal\t_hyper_1_1_chunk\n\\.\n"
+        + CONTINUOUS_AGG_228_COPY
+        + "\\.\n",
+        encoding="utf-8",
+    )
+    z = base / "backup.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        for p in work.rglob("*"):
+            if p.is_file():
+                zf.write(p, p.relative_to(work).as_posix())
+
+    orig_installed = mod.is_pasarguard_installed
+    orig_db = mod.get_pasarguard_db_type
+    mod.is_pasarguard_installed = lambda: True  # type: ignore
+    mod.get_pasarguard_db_type = lambda: "timescaledb"  # type: ignore
+    try:
+        a = analyze_pasarguard_backup(path=z)
+        assert a["backup_db"] == "timescaledb"
+        assert a["layout"] == "multi"
+        assert a["ok"] is True
+        assert a["timescaledb_versions"] == []
+        assert a["timescaledb_chunk_catalog"] == "schema_name"
+        assert a["timescaledb_min_version"] == "2.28.0"
+        # End to end: a 2.26.4 server now gets pinned instead of failing mid-restore
+        assert (
+            resolve_wanted_ts_for_live(
+                parse_timescale_wanted(a["timescaledb_versions"]),
+                live_ver="2.26.4",
+                catalog_era=a["timescaledb_chunk_catalog"],
+                min_ver=a["timescaledb_min_version"],
+            )
+            == TS_LAST_SCHEMA_NAME_CHUNK
+        )
+    finally:
+        mod.is_pasarguard_installed = orig_installed  # type: ignore
+        mod.get_pasarguard_db_type = orig_db  # type: ignore
+        shutil.rmtree(base, ignore_errors=True)
+    print("OK: analyze reports timescale floor for newer backup")
 
 
 def test_analyze_all_db_types():
@@ -518,14 +827,25 @@ if __name__ == "__main__":
     test_detect_ts_mismatch_from_official_error()
     test_is_ts_catalog_mismatch_error_schema_name()
     test_detect_dump_chunk_catalog_era()
+    test_detect_dump_ts_catalog_floor()
+    test_detect_dump_ts_catalog_floor_new_tables()
+    test_detect_backup_ts_catalog_floor_multi_layout()
+    test_ts_floor_from_error_text()
+    test_is_ts_catalog_mismatch_error_continuous_agg()
     test_resolve_wanted_ts_for_live_pins_pre_229()
+    test_resolve_wanted_ts_for_live_honours_dump_floor()
+    test_ts_pin_for_floor()
     test_wanted_ts_for_restore_retry_from_catalog_error()
+    test_wanted_ts_for_restore_retry_newer_backup()
+    test_align_image_failed_pull_keeps_data_and_tag()
+    test_explain_newer_ts_backup_error()
     test_explain_schema_name_chunk_error()
     test_collect_backup_ts_from_compose_and_catalog()
     test_is_auth_failure_text()
     test_sql_literal_escapes_quotes()
     test_merge_env_preserves_password()
     test_parse_manifest_ts_versions()
+    test_analyze_newer_timescale_backup_reports_floor()
     test_analyze_all_db_types()
     test_analyze_experimental_hard_mismatch()
     test_filter_globals_sql_makes_create_role_idempotent()

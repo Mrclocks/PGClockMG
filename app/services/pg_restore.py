@@ -196,6 +196,70 @@ def _sql_literal(value: str) -> str:
 TS_LAST_SCHEMA_NAME_CHUNK = "2.28.3"
 TS_FIRST_RELID_CHUNK = "2.29.0"
 
+# Catalog columns/tables that exist only from a given TimescaleDB version onward, so a
+# dump listing one of them cannot be loaded into an older extension. The chunk catalog
+# swap is a two-sided boundary (see catalog era above); these are one-sided floors,
+# which is what makes a NEWER backup fail on an OLDER server, e.g.
+#   ERROR: column "schema_change_timestamp" of relation "continuous_agg" does not exist
+#   ERROR: relation "_timescaledb_catalog.chunk_column_stats" does not exist
+# Both maps are read off timescale/timescaledb sql/pre_install/tables.sql per release tag.
+TS_CATALOG_COLUMN_FLOORS: dict[tuple[str, str], str] = {
+    ("chunk", "creation_time"): "2.13.0",
+    ("compression_chunk_size", "numrows_frozen_immediately"): "2.13.0",
+    ("compression_settings", "compress_relid"): "2.19.0",
+    ("compression_settings", "index"): "2.22.0",
+    ("continuous_agg", "schema_change_timestamp"): "2.28.0",
+    ("dimension_slice", "chunk_id"): "2.28.0",
+    ("chunk", "relid"): TS_FIRST_RELID_CHUNK,
+}
+
+TS_CATALOG_TABLE_FLOORS: dict[str, str] = {
+    "continuous_aggs_watermark": "2.11.0",
+    "compression_settings": "2.14.0",
+    "chunk_column_stats": "2.16.0",
+    "continuous_aggs_materialization_ranges": "2.22.0",
+    "chunk_rewrite": "2.24.0",
+    "bgw_job": "2.25.0",
+    "continuous_aggs_jobs_refresh_ranges": "2.26.3",
+    "continuous_aggs_tenant_tracking": TS_FIRST_RELID_CHUNK,
+    "hypertable_cagg_settings": TS_FIRST_RELID_CHUNK,
+}
+
+# Tables owned by the timescaledb extension. A missing column on one of them is version
+# skew; the same error on an application table is a real schema problem.
+TS_CATALOG_RELATIONS = frozenset({
+    "chunk",
+    "chunk_column_stats",
+    "chunk_constraint",
+    "chunk_index",
+    "compression_chunk_size",
+    "compression_settings",
+    "continuous_agg",
+    "continuous_aggs_bucket_function",
+    "continuous_aggs_hypertable_invalidation_log",
+    "continuous_aggs_invalidation_threshold",
+    "continuous_aggs_materialization_invalidation_log",
+    "continuous_aggs_materialization_ranges",
+    "continuous_aggs_watermark",
+    "dimension",
+    "dimension_slice",
+    "hypertable",
+    "hypertable_compression",
+})
+
+_TS_COPY_HEADER_RE = re.compile(
+    r"COPY\s+(_timescaledb_catalog\.)?\"?(\w+)\"?\s*\(([^)]*)\)\s+FROM\s+stdin",
+    re.I,
+)
+_TS_MISSING_COLUMN_RE = re.compile(
+    r"column\s+\"?(\w+)\"?\s+of\s+relation\s+\"?(\w+)\"?\s+does\s+not\s+exist",
+    re.I,
+)
+_TS_MISSING_RELATION_RE = re.compile(
+    r"relation\s+\"?_timescaledb_catalog\.(\w+)\"?\s+does\s+not\s+exist",
+    re.I,
+)
+
 
 def parse_timescale_wanted(versions: list[str] | None) -> str | None:
     """Pick a concrete TimescaleDB version like 2.28.1 from backup metadata."""
@@ -232,6 +296,14 @@ def ts_version_lt(a: str | None, b: str | None) -> bool:
     if ta is None or tb is None:
         return False
     return ta < tb
+
+
+def _max_ts_version(a: str | None, b: str | None) -> str | None:
+    if not a:
+        return b
+    if not b:
+        return a
+    return b if ts_version_lt(a, b) else a
 
 
 def detect_ts_mismatch_from_text(text: str) -> tuple[str, str] | None:
@@ -287,6 +359,16 @@ def is_ts_catalog_mismatch_error(text: str) -> bool:
         c in low for c in catalog_cols
     ):
         return True
+    # Any timescaledb-owned catalog table, which also covers the reverse skew of a
+    # newer backup on an older server (continuous_agg.schema_change_timestamp, 2.28.0).
+    if any(
+        m.group(2).lower() in TS_CATALOG_RELATIONS
+        for m in _TS_MISSING_COLUMN_RE.finditer(text)
+    ):
+        return True
+    # A catalog table the dump has and this extension does not (chunk_column_stats…)
+    if _TS_MISSING_RELATION_RE.search(text):
+        return True
     return False
 
 
@@ -319,6 +401,96 @@ def detect_dump_chunk_catalog_era(sql_text: str) -> str | None:
     ):
         return "relid"
     return None
+
+
+def _ts_floor_for_copy_header(table: str, cols_blob: str, *, qualified: bool) -> str | None:
+    """Version floor implied by one `COPY <catalog table> (cols…)` header.
+
+    Table-level floors need the _timescaledb_catalog schema in the dump so generic
+    names (bgw_job, dimension) can never be read off an application table.
+    """
+    table = (table or "").strip().strip('"').lower()
+    cols = {c.strip().strip('"').lower() for c in (cols_blob or "").split(",")}
+    floor: str | None = None
+    if qualified:
+        floor = TS_CATALOG_TABLE_FLOORS.get(table)
+    for (marker_table, marker_col), version in TS_CATALOG_COLUMN_FLOORS.items():
+        if marker_table == table and marker_col in cols:
+            floor = _max_ts_version(floor, version)
+    return floor
+
+
+def detect_dump_ts_catalog_floor(sql_text: str) -> str | None:
+    """Lowest TimescaleDB version whose catalog can accept this dump text."""
+    if not sql_text:
+        return None
+    floor: str | None = None
+    for m in _TS_COPY_HEADER_RE.finditer(sql_text):
+        floor = _max_ts_version(
+            floor,
+            _ts_floor_for_copy_header(m.group(2), m.group(3), qualified=bool(m.group(1))),
+        )
+    return floor
+
+
+def ts_floor_from_error_text(text: str) -> str | None:
+    """Version floor implied by a psql missing column/relation error."""
+    if not text:
+        return None
+    floor: str | None = None
+    for m in _TS_MISSING_COLUMN_RE.finditer(text):
+        floor = _max_ts_version(
+            floor,
+            TS_CATALOG_COLUMN_FLOORS.get((m.group(2).lower(), m.group(1).lower())),
+        )
+    for m in _TS_MISSING_RELATION_RE.finditer(text):
+        floor = _max_ts_version(floor, TS_CATALOG_TABLE_FLOORS.get(m.group(1).lower()))
+    return floor
+
+
+def ts_pin_for_floor(min_ver: str, catalog_era: str | None = None) -> str:
+    """Image version that satisfies a dump's floor without crossing the 2.29 boundary."""
+    if ts_version_lt(min_ver, TS_FIRST_RELID_CHUNK) and catalog_era != "relid":
+        return TS_LAST_SCHEMA_NAME_CHUNK
+    return min_ver
+
+
+def _backup_dump_files(root: Path, *, max_files: int = 8) -> list[Path]:
+    """Dump SQL files in a backup, both single-file and pg_dump/ layouts."""
+    candidates: list[Path] = []
+    single = root / "db_backup.sql"
+    if single.is_file():
+        candidates.append(single)
+    pg = root / "pg_dump"
+    if pg.is_dir():
+        candidates.extend(sorted(p for p in pg.glob("*.sql") if p.is_file()))
+    return candidates[:max_files]
+
+
+def _scan_file_ts_catalog_floor(path: Path) -> str | None:
+    """Stream a dump line by line, reading only its COPY headers.
+
+    pg_dump always writes the column list on the same line as COPY, so this stays
+    cheap on multi-gigabyte dumps and never buffers a whole file.
+    """
+    floor: str | None = None
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                if line[:5].upper() != "COPY " and line.lstrip()[:5].upper() != "COPY ":
+                    continue
+                floor = _max_ts_version(floor, detect_dump_ts_catalog_floor(line))
+    except OSError:
+        return floor
+    return floor
+
+
+def detect_backup_ts_catalog_floor(root: Path) -> str | None:
+    """Lowest TimescaleDB version that can accept the dumps inside a backup."""
+    floor: str | None = None
+    for path in _backup_dump_files(root):
+        floor = _max_ts_version(floor, _scan_file_ts_catalog_floor(path))
+    return floor
 
 
 def _iter_backup_sql_texts(root: Path, *, max_files: int = 8, max_bytes: int = 1_200_000) -> list[str]:
@@ -475,12 +647,33 @@ def resolve_wanted_ts_for_live(
     *,
     live_ver: str | None,
     catalog_era: str | None,
+    min_ver: str | None = None,
 ) -> str | None:
     """Choose Timescale image version that can accept this dump on the live server.
 
     Prefer an explicit backup version. When missing, use catalog-era inference so
     pre-2.29 dumps (schema_name on chunk) are not restored into latest-pg17 (2.29+).
+
+    ``min_ver`` is the dump's catalog floor (see detect_backup_ts_catalog_floor). It
+    only changes the outcome when the era/version logic alone would leave the live
+    extension too old to read the dump.
     """
+    base = _resolve_wanted_ts_by_era(wanted, live_ver=live_ver, catalog_era=catalog_era)
+    if not min_ver:
+        return base
+    if base:
+        return base if not ts_version_lt(base, min_ver) else ts_pin_for_floor(min_ver, catalog_era)
+    if not live_ver or ts_version_lt(live_ver, min_ver):
+        return ts_pin_for_floor(min_ver, catalog_era)
+    return None
+
+
+def _resolve_wanted_ts_by_era(
+    wanted: str | None,
+    *,
+    live_ver: str | None,
+    catalog_era: str | None,
+) -> str | None:
     if catalog_era == "schema_name":
         # Dump COPY lists schema_name — cannot land on TimescaleDB 2.29+
         if not live_ver or ts_version_ge(live_ver, TS_FIRST_RELID_CHUNK):
@@ -511,14 +704,20 @@ def wanted_ts_for_restore_retry(out: str, analysis: dict) -> str | None:
     mismatch = detect_ts_mismatch_from_text(out or "")
     if mismatch and mismatch[0]:
         return mismatch[0]
+    era = analysis.get("timescaledb_chunk_catalog")
+    # The failing column itself names the version the dump needs; the analysis floor
+    # covers dumps whose error text is less specific.
+    floor = ts_floor_from_error_text(out or "") or analysis.get("timescaledb_min_version")
     wanted = parse_timescale_wanted(analysis.get("timescaledb_versions"))
     if wanted:
-        era = analysis.get("timescaledb_chunk_catalog")
         if era == "schema_name" and ts_version_ge(wanted, TS_FIRST_RELID_CHUNK):
             return TS_LAST_SCHEMA_NAME_CHUNK
+        if floor and ts_version_lt(wanted, floor):
+            return ts_pin_for_floor(floor, era)
         return wanted
+    if floor:
+        return ts_pin_for_floor(floor, era)
     if is_ts_catalog_mismatch_error(out or ""):
-        era = analysis.get("timescaledb_chunk_catalog")
         if not era:
             low = (out or "").lower()
             if "schema_name" in low or "table_name" in low or "compressed_chunk_id" in low:
@@ -646,9 +845,10 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
 
         ts_versions = collect_backup_ts_versions(root)
         chunk_catalog_era = detect_backup_chunk_catalog_era(root)
+        ts_min_version = detect_backup_ts_catalog_floor(root)
         # Official Timescale backups keep postgresql+asyncpg URL — use manifest / dump hints
         if db_type in (None, "postgresql"):
-            if ts_versions or chunk_catalog_era:
+            if ts_versions or chunk_catalog_era or ts_min_version:
                 db_type = "timescaledb"
             elif _backup_sql_mentions_timescale(root):
                 db_type = "timescaledb"
@@ -736,6 +936,22 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
                     f"Образ будет закреплён на {TS_LAST_SCHEMA_NAME_CHUNK}."
                 ),
             })
+        elif ts_min_version:
+            pin = ts_pin_for_floor(ts_min_version, chunk_catalog_era)
+            warnings.append({
+                "en": (
+                    f"Backup catalog needs TimescaleDB {ts_min_version} or newer. "
+                    f"Wizard pins the image to {pin} before restore if the server is older."
+                ),
+                "fa": (
+                    f"کاتالوگ بکاپ به TimescaleDB {ts_min_version} یا بالاتر نیاز دارد. "
+                    f"اگر سرور قدیمی‌تر باشد، قبل از ریستور ایمیج روی {pin} پین می‌شود."
+                ),
+                "ru": (
+                    f"Каталог бэкапа требует TimescaleDB {ts_min_version} или новее. "
+                    f"Если сервер старее, образ будет закреплён на {pin}."
+                ),
+            })
 
         # table_counts kept for server-side verify only — not shown in the wizard UI
 
@@ -753,6 +969,7 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
             "layout": layout,
             "timescaledb_versions": sorted(set(ts_versions)),
             "timescaledb_chunk_catalog": chunk_catalog_era,
+            "timescaledb_min_version": ts_min_version,
             "table_counts": table_counts,
             "env_summary": {k: v for k, v in (summary or {}).items() if k != "db_password"},
             "has_env": bool(env_path),
@@ -1005,7 +1222,17 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
 
     job.set_progress(25, "Pulling TimescaleDB image...")
     # Pull the exact image first so `compose up` never silently uses a stale cached layer
-    await _compose(job, "pull", "timescaledb", timeout=600)
+    ok_pull, out_pull = await _compose(job, "pull", "timescaledb", timeout=600)
+    if not ok_pull:
+        # Never stop containers or wipe the volume for a tag we could not fetch
+        compose.write_text(text, encoding="utf-8")
+        job.log(f"Could not pull timescale/timescaledb:{new_tag} — reverted tag to {current_tag}")
+        if wipe_data:
+            raise RuntimeError(
+                f"TimescaleDB image {new_tag} could not be pulled — "
+                f"restore stopped before touching the database:\n{(out_pull or '')[-800:]}"
+            )
+        return
 
     job.set_progress(28, "Recreating TimescaleDB with matching version...")
     await _compose(job, "stop", "pasarguard", timeout=120)
@@ -1528,11 +1755,26 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
     ):
         fa = "کاتالوگ TimescaleDB بکاپ با نسخه نصب‌شده سازگار نیست (مثلاً schema_name در chunk)."
         en = "TimescaleDB catalog in the backup does not match the installed extension (e.g. chunk.schema_name)."
-        causes_fa = [
-            f"از TimescaleDB 2.29 ستون schema_name از جدول chunk حذف شده — بکاپ‌های قدیمی نیاز به ایمیج {TS_LAST_SCHEMA_NAME_CHUNK} دارند",
-            "ویزارد در نسخه جدید اثر انگشت دامپ را تشخیص می‌دهد و ایمیج را قبل از ریستور هم‌تراز می‌کند — آپدیت کنید و دوباره ریستور کنید",
-            "اگر هنوز خطا می‌دهد، در docker-compose.yml ایمیج timescaledb را دستی روی 2.28.3-pgXX بگذارید و volume را پاک کنید",
-        ]
+        needs_ver = ts_floor_from_error_text(raw)
+        if needs_ver:
+            pin = ts_pin_for_floor(needs_ver)
+            fa = f"بکاپ از TimescaleDB جدیدتری گرفته شده — کاتالوگ آن به نسخه {needs_ver} یا بالاتر نیاز دارد."
+            en = (
+                f"Backup catalog needs TimescaleDB {needs_ver} or newer — "
+                f"the installed extension is older."
+            )
+            ru = f"Каталог бэкапа требует TimescaleDB {needs_ver} или новее — установленная версия старее."
+            causes_fa = [
+                f"نسخه TimescaleDB سرور از بکاپ قدیمی‌تر است — ایمیج باید روی {pin} پین شود",
+                "ویزارد جدید این حالت را قبل از ریستور تشخیص می‌دهد و ایمیج را هم‌تراز می‌کند — آپدیت کنید و دوباره ریستور کنید",
+                f"دستی: در docker-compose.yml ایمیج timescaledb را روی {pin}-pgXX بگذارید، volume را پاک کنید و ریستور را تکرار کنید",
+            ]
+        else:
+            causes_fa = [
+                f"از TimescaleDB 2.29 ستون schema_name از جدول chunk حذف شده — بکاپ‌های قدیمی نیاز به ایمیج {TS_LAST_SCHEMA_NAME_CHUNK} دارند",
+                "ویزارد در نسخه جدید اثر انگشت دامپ را تشخیص می‌دهد و ایمیج را قبل از ریستور هم‌تراز می‌کند — آپدیت کنید و دوباره ریستور کنید",
+                "اگر هنوز خطا می‌دهد، در docker-compose.yml ایمیج timescaledb را دستی روی 2.28.3-pgXX بگذارید و volume را پاک کنید",
+            ]
     elif (
         "certificate files were not restored" in low
         or "certs restore failed" in low
@@ -2141,6 +2383,13 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             if catalog_era:
                 analysis["timescaledb_chunk_catalog"] = catalog_era
                 job.log(f"Detected Timescale chunk catalog era from dump: {catalog_era}")
+        ts_min_version = analysis.get("timescaledb_min_version")
+        if not ts_min_version and backup_db in ("timescaledb", "postgresql"):
+            ts_min_version = detect_backup_ts_catalog_floor(root)
+            if ts_min_version:
+                analysis["timescaledb_min_version"] = ts_min_version
+        if ts_min_version:
+            job.log(f"Backup catalog requires TimescaleDB >= {ts_min_version}")
         if installed_db in ("timescaledb", "postgresql"):
             container = await _detect_db_container(job, installed_db)
             live_ver = None
@@ -2154,11 +2403,15 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             # so pre-2.29 backups are not restored into timescale/timescaledb:latest (2.29+).
             align_to = resolve_wanted_ts_for_live(
                 wanted_ts, live_ver=live_ver, catalog_era=catalog_era,
+                # Plain PostgreSQL installs have no timescaledb image to pin — that
+                # path strips Timescale DDL from the dump instead.
+                min_ver=ts_min_version if installed_db == "timescaledb" else None,
             )
             if align_to and live_ver and live_ver != align_to:
                 job.log(
                     f"TimescaleDB mismatch: live={live_ver} backup={align_to}"
                     + (f" (catalog={catalog_era})" if catalog_era else "")
+                    + (f" (min={ts_min_version})" if ts_min_version else "")
                 )
                 await _align_timescaledb_image(job, align_to, wipe_data=True)
             elif align_to and not live_ver and installed_db == "timescaledb":
