@@ -1222,7 +1222,17 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
 
     job.set_progress(25, "Pulling TimescaleDB image...")
     # Pull the exact image first so `compose up` never silently uses a stale cached layer
-    await _compose(job, "pull", "timescaledb", timeout=600)
+    ok_pull, out_pull = await _compose(job, "pull", "timescaledb", timeout=600)
+    if not ok_pull:
+        # Never stop containers or wipe the volume for a tag we could not fetch
+        compose.write_text(text, encoding="utf-8")
+        job.log(f"Could not pull timescale/timescaledb:{new_tag} — reverted tag to {current_tag}")
+        if wipe_data:
+            raise RuntimeError(
+                f"TimescaleDB image {new_tag} could not be pulled — "
+                f"restore stopped before touching the database:\n{(out_pull or '')[-800:]}"
+            )
+        return
 
     job.set_progress(28, "Recreating TimescaleDB with matching version...")
     await _compose(job, "stop", "pasarguard", timeout=120)

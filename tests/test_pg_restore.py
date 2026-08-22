@@ -438,6 +438,48 @@ def test_wanted_ts_for_restore_retry_newer_backup():
     print("OK: wanted ts for restore retry (newer backup)")
 
 
+def test_align_image_failed_pull_keeps_data_and_tag():
+    """A tag that cannot be pulled must not stop containers or wipe the volume."""
+    import asyncio
+    import tempfile
+    import shutil
+    from unittest.mock import MagicMock, patch
+    from app.services import pg_restore as mod
+
+    td = Path(tempfile.mkdtemp(prefix="pg-align-pull-"))
+    compose = td / "docker-compose.yml"
+    original = "services:\n  timescaledb:\n    image: timescale/timescaledb:2.26.4-pg17\n"
+    compose.write_text(original, encoding="utf-8")
+    calls: list[tuple] = []
+
+    async def fake_compose(_job, *args, **_kwargs):
+        calls.append(args)
+        return (False, "manifest unknown") if args[0] == "pull" else (True, "")
+
+    job = MagicMock()
+    job.log = MagicMock()
+
+    async def _go():
+        with (
+            patch.object(mod, "PASARGUARD_DIR", td),
+            patch.object(mod, "_compose", side_effect=fake_compose),
+        ):
+            await mod._align_timescaledb_image(job, TS_LAST_SCHEMA_NAME_CHUNK, wipe_data=True)
+
+    try:
+        raised = False
+        try:
+            asyncio.run(_go())
+        except RuntimeError as e:
+            raised = "could not be pulled" in str(e)
+        assert raised, "failed pull must abort the restore"
+        assert compose.read_text(encoding="utf-8") == original
+        assert [c for c in calls if c[0] == "stop"] == []
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    print("OK: failed image pull keeps data and compose tag")
+
+
 def test_explain_newer_ts_backup_error():
     exc = RuntimeError(f"Failed restoring pasarguard:\n{CONTINUOUS_AGG_228_ERROR}")
     info = explain_restore_error(exc, "timescaledb", "timescaledb")
@@ -795,6 +837,7 @@ if __name__ == "__main__":
     test_ts_pin_for_floor()
     test_wanted_ts_for_restore_retry_from_catalog_error()
     test_wanted_ts_for_restore_retry_newer_backup()
+    test_align_image_failed_pull_keeps_data_and_tag()
     test_explain_newer_ts_backup_error()
     test_explain_schema_name_chunk_error()
     test_collect_backup_ts_from_compose_and_catalog()
