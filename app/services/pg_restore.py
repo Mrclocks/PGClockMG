@@ -13,7 +13,7 @@ import zipfile
 from pathlib import Path
 from typing import Callable
 
-from app.config import PASARGUARD_DIR, PASARGUARD_ENV, PASARGUARD_DATA, UPLOAD_DIR
+from app.config import PASARGUARD_DIR, PASARGUARD_ENV, PASARGUARD_DATA, UPLOAD_DIR, WORK_DIR
 from app.services.archive_guard import safe_extract as _guarded_zip_extract
 from app.services.env_migration import (
     detect_db_type_from_env,
@@ -90,47 +90,65 @@ def filter_timescaledb_extension_sql(sql: str, *, strip_all: bool = False) -> st
     When restoring a Timescale backup into stock PostgreSQL, set strip_all=True to
     also drop hypertable helpers and any other timescaledb-qualified statements.
     """
-    out_lines: list[str] = []
-    for ln in sql.splitlines():
+    return "\n".join(
+        ln for ln in sql.splitlines() if not _ts_extension_line_dropped(ln, strip_all)
+    )
+
+
+def _ts_extension_line_dropped(ln: str, strip_all: bool) -> bool:
+    if re.search(
+        r"^\s*(DROP|CREATE)\s+EXTENSION\s+(IF\s+(EXISTS|NOT\s+EXISTS)\s+)?"
+        r"timescaledb(_toolkit)?\b",
+        ln,
+        re.I,
+    ):
+        return True
+    if re.search(r"^\s*COMMENT\s+ON\s+EXTENSION\s+timescaledb", ln, re.I):
+        return True
+    if strip_all:
+        # Internal Timescale schemas / objects
+        if re.search(r"_timescaledb_(catalog|internal|config|cache|functions)\b", ln, re.I):
+            return True
         if re.search(
-            r"^\s*(DROP|CREATE)\s+EXTENSION\s+(IF\s+(EXISTS|NOT\s+EXISTS)\s+)?"
-            r"timescaledb(_toolkit)?\b",
+            r"timescaledb_(pre|post)_restore\s*\("
+            r"|create_hypertable\s*\("
+            r"|add_dimension\s*\("
+            r"|set_chunk_time_interval\s*\("
+            r"|compress_chunk\s*\("
+            r"|decompress_chunk\s*\("
+            r"|alter_job\s*\("
+            r"|add_retention_policy\s*\("
+            r"|remove_retention_policy\s*\("
+            r"|add_compression_policy\s*\("
+            r"|remove_compression_policy\s*\("
+            r"|timescaledb\.",
             ln,
             re.I,
         ):
-            continue
-        if re.search(r"^\s*COMMENT\s+ON\s+EXTENSION\s+timescaledb", ln, re.I):
-            continue
-        if strip_all:
-            # Internal Timescale schemas / objects
-            if re.search(r"_timescaledb_(catalog|internal|config|cache|functions)\b", ln, re.I):
+            return True
+        # Storage parameters / WITH options referencing timescaledb
+        if re.search(r"timescaledb\.", ln, re.I):
+            return True
+        if re.search(r"\btimescaledb\b", ln, re.I) and re.search(
+            r"^\s*(CREATE|ALTER|DROP|SELECT|COMMENT|GRANT|REVOKE|SET)\b", ln, re.I
+        ):
+            return True
+    return False
+
+
+def filter_timescaledb_extension_sql_file(
+    src: Path, dest: Path, *, strip_all: bool = False,
+) -> Path:
+    """Stream `src` into `dest`, dropping the same lines as the in-memory filter."""
+    with open(src, "r", encoding="utf-8", errors="ignore") as fh, \
+            open(dest, "w", encoding="utf-8") as out:
+        for raw in fh:
+            ln = raw.rstrip("\n").rstrip("\r")
+            if _ts_extension_line_dropped(ln, strip_all):
                 continue
-            if re.search(
-                r"timescaledb_(pre|post)_restore\s*\("
-                r"|create_hypertable\s*\("
-                r"|add_dimension\s*\("
-                r"|set_chunk_time_interval\s*\("
-                r"|compress_chunk\s*\("
-                r"|decompress_chunk\s*\("
-                r"|alter_job\s*\("
-                r"|add_retention_policy\s*\("
-                r"|remove_retention_policy\s*\("
-                r"|add_compression_policy\s*\("
-                r"|remove_compression_policy\s*\("
-                r"|timescaledb\.",
-                ln,
-                re.I,
-            ):
-                continue
-            # Storage parameters / WITH options referencing timescaledb
-            if re.search(r"timescaledb\.", ln, re.I):
-                continue
-            if re.search(r"\btimescaledb\b", ln, re.I) and re.search(
-                r"^\s*(CREATE|ALTER|DROP|SELECT|COMMENT|GRANT|REVOKE|SET)\b", ln, re.I
-            ):
-                continue
-        out_lines.append(ln)
-    return "\n".join(out_lines)
+            out.write(ln)
+            out.write("\n")
+    return dest
 
 
 def filter_globals_sql(sql: str) -> str:
@@ -824,7 +842,7 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
     if not zip_path.exists():
         raise FileNotFoundError(str(zip_path))
 
-    tmp = Path(tempfile.mkdtemp(prefix="pg-backup-analyze-"))
+    tmp = Path(tempfile.mkdtemp(prefix="pg-backup-analyze-", dir=str(WORK_DIR)))
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
             _safe_extract(zf, tmp)
@@ -2024,13 +2042,10 @@ def _estimate_backup_table_counts(root: Path, layout: str | None = None) -> dict
         if src and src.exists():
             return _snapshot_sqlite_counts(src)
 
-    chunks: list[str] = []
+    paths: list[Path] = []
     single = root / "db_backup.sql"
     if single.exists():
-        try:
-            chunks.append(single.read_text(encoding="utf-8", errors="ignore"))
-        except Exception:
-            pass
+        paths.append(single)
     manifest = root / "pg_dump" / "manifest.tsv"
     if manifest.exists():
         for line in manifest.read_text(encoding="utf-8", errors="ignore").splitlines():
@@ -2039,21 +2054,19 @@ def _estimate_backup_table_counts(root: Path, layout: str | None = None) -> dict
                 continue
             dump_path = root / "pg_dump" / parts[3]
             if dump_path.exists():
-                try:
-                    chunks.append(dump_path.read_text(encoding="utf-8", errors="ignore"))
-                except Exception:
-                    pass
-    if not chunks:
-        for p in (root / "pg_dump").glob("*.sql") if (root / "pg_dump").is_dir() else []:
-            try:
-                chunks.append(p.read_text(encoding="utf-8", errors="ignore"))
-            except Exception:
-                pass
+                paths.append(dump_path)
+    if not paths and (root / "pg_dump").is_dir():
+        paths.extend(sorted((root / "pg_dump").glob("*.sql")))
 
     merged: dict[str, int] = {}
-    for text in chunks:
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
         for k, v in _estimate_sql_table_counts(text).items():
             merged[k] = merged.get(k, 0) + v
+        del text
     return merged
 
 
@@ -3017,15 +3030,15 @@ async def _restore_mysql(
             if db:
                 cmd.append(db)
             job.log(f"Trying MySQL restore as {user}" + (f"/{db}" if db else "") + f" ({mysql_cmd})")
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=str(PASARGUARD_DIR),
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            data = dump.read_bytes()
-            out_b, _ = await proc.communicate(input=data)
+            with open(dump, "rb") as dump_fh:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(PASARGUARD_DIR),
+                    stdin=dump_fh,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                out_b, _ = await proc.communicate()
             out = (out_b or b"").decode("utf-8", errors="replace")
             if proc.returncode == 0:
                 job.log("MySQL/MariaDB dump restored")
@@ -3119,15 +3132,15 @@ async def _restore_postgres(
             svc, "psql", "-v", stop, "-U", user, "-d", db,
         ]
         if use_file:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=str(PASARGUARD_DIR),
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            data = use_file.read_bytes()
-            out_b, _ = await proc.communicate(input=data)
+            with open(use_file, "rb") as sql_fh:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(PASARGUARD_DIR),
+                    stdin=sql_fh,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                out_b, _ = await proc.communicate()
             return proc.returncode == 0, (out_b or b"").decode("utf-8", errors="replace")
         proc = await asyncio.create_subprocess_exec(
             *cmd, "-c", sql,
@@ -3258,12 +3271,8 @@ async def _restore_postgres(
                         f"{extract_psql_errors(out_ext)}"
                     )
                 await psql("SELECT timescaledb_pre_restore();", db=dbn)
-                filtered = dump_path.with_suffix(dump_path.suffix + ".filtered")
-                filtered.write_text(
-                    filter_timescaledb_extension_sql(
-                        dump_path.read_text(encoding="utf-8", errors="ignore")
-                    ),
-                    encoding="utf-8",
+                filtered = filter_timescaledb_extension_sql_file(
+                    dump_path, dump_path.with_suffix(dump_path.suffix + ".filtered"),
                 )
                 restore_file = filtered
                 ok, out = await restore_dump_file(dbn, restore_file, tolerant=False)
@@ -3275,13 +3284,9 @@ async def _restore_postgres(
                     await psql("SELECT timescaledb_post_restore();", db=dbn)
             elif dump_wants_ts and not use_timescale:
                 # Timescale backup → plain PostgreSQL (fallback if convert path not used)
-                filtered = dump_path.with_suffix(dump_path.suffix + ".pg-plain")
-                filtered.write_text(
-                    filter_timescaledb_extension_sql(
-                        dump_path.read_text(encoding="utf-8", errors="ignore"),
-                        strip_all=True,
-                    ),
-                    encoding="utf-8",
+                filtered = filter_timescaledb_extension_sql_file(
+                    dump_path, dump_path.with_suffix(dump_path.suffix + ".pg-plain"),
+                    strip_all=True,
                 )
                 restore_file = filtered
                 ok, out = await restore_dump_file(dbn, restore_file, tolerant=True)
@@ -3317,12 +3322,8 @@ async def _restore_postgres(
                             )
                         await psql("CREATE EXTENSION IF NOT EXISTS timescaledb;", db=dbn)
                         await psql("SELECT timescaledb_pre_restore();", db=dbn)
-                        filtered2 = dump_path.with_suffix(dump_path.suffix + ".filtered")
-                        filtered2.write_text(
-                            filter_timescaledb_extension_sql(
-                                dump_path.read_text(encoding="utf-8", errors="ignore")
-                            ),
-                            encoding="utf-8",
+                        filtered2 = filter_timescaledb_extension_sql_file(
+                            dump_path, dump_path.with_suffix(dump_path.suffix + ".filtered"),
                         )
                         ok, out = await restore_dump_file(dbn, filtered2, tolerant=False)
                         ok_post2, out_post2 = await psql("SELECT timescaledb_post_restore();", db=dbn)
@@ -3332,13 +3333,9 @@ async def _restore_postgres(
                             await psql("SELECT timescaledb_post_restore();", db=dbn)
                 if not ok and dump_wants_ts and not use_timescale:
                     job.log("Retrying Timescale→PG dump with tolerant import...")
-                    filtered3 = dump_path.with_suffix(dump_path.suffix + ".pg-plain-retry")
-                    filtered3.write_text(
-                        filter_timescaledb_extension_sql(
-                            dump_path.read_text(encoding="utf-8", errors="ignore"),
-                            strip_all=True,
-                        ),
-                        encoding="utf-8",
+                    filtered3 = filter_timescaledb_extension_sql_file(
+                        dump_path, dump_path.with_suffix(dump_path.suffix + ".pg-plain-retry"),
+                        strip_all=True,
                     )
                     ok, out = await restore_dump_file(dbn, filtered3, tolerant=True)
                 if not ok:
@@ -3370,11 +3367,8 @@ async def _restore_postgres(
                 f"Target cannot create timescaledb extension:\n{extract_psql_errors(out_ext)}"
             )
         await psql("SELECT timescaledb_pre_restore();", db=db_name)
-        filtered = root / "db_backup_filtered.sql"
-        dump_text = dump.read_text(encoding="utf-8", errors="ignore")
-        filtered.write_text(
-            filter_timescaledb_extension_sql(dump_text),
-            encoding="utf-8",
+        filtered = filter_timescaledb_extension_sql_file(
+            dump, root / "db_backup_filtered.sql",
         )
         ok, out = await restore_dump_file(db_name, filtered, tolerant=False)
         if not ok:
@@ -3382,7 +3376,7 @@ async def _restore_postgres(
             if not wanted and is_ts_catalog_mismatch_error(out or ""):
                 era = (
                     analysis.get("timescaledb_chunk_catalog")
-                    or detect_dump_chunk_catalog_era(dump_text)
+                    or detect_backup_chunk_catalog_era(root)
                 )
                 wanted = infer_ts_version_from_catalog_era(era) or TS_LAST_SCHEMA_NAME_CHUNK
             if wanted:
@@ -3402,10 +3396,7 @@ async def _restore_postgres(
                     )
                 await psql("CREATE EXTENSION IF NOT EXISTS timescaledb;", db=db_name)
                 await psql("SELECT timescaledb_pre_restore();", db=db_name)
-                filtered.write_text(
-                    filter_timescaledb_extension_sql(dump_text),
-                    encoding="utf-8",
-                )
+                filter_timescaledb_extension_sql_file(dump, filtered)
                 ok, out = await restore_dump_file(db_name, filtered, tolerant=False)
         ok_post_s, out_post_s = await psql("SELECT timescaledb_post_restore();", db=db_name)
         if not ok_post_s:
@@ -3413,13 +3404,8 @@ async def _restore_postgres(
             await asyncio.sleep(3)
             await psql("SELECT timescaledb_post_restore();", db=db_name)
     elif backup_has_ts and not use_timescale:
-        filtered = root / "db_backup_pg_plain.sql"
-        filtered.write_text(
-            filter_timescaledb_extension_sql(
-                dump.read_text(encoding="utf-8", errors="ignore"),
-                strip_all=True,
-            ),
-            encoding="utf-8",
+        filtered = filter_timescaledb_extension_sql_file(
+            dump, root / "db_backup_pg_plain.sql", strip_all=True,
         )
         ok, out = await restore_dump_file(db_name, filtered, tolerant=True)
     else:

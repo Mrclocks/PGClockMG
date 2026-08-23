@@ -5,6 +5,7 @@ BASE_DIR = Path(os.environ.get("PG_MIGRATOR_HOME", Path(__file__).resolve().pare
 UPLOAD_DIR = BASE_DIR / "uploads"
 BACKUP_DIR = BASE_DIR / "backups"
 LOG_DIR = BASE_DIR / "logs"
+WORK_DIR = BASE_DIR / "work"
 TOOLS_DIR = BASE_DIR / "tools"
 
 PASARGUARD_DIR = Path("/opt/pasarguard")
@@ -39,3 +40,4 @@ WEB_PORT = _web_port()
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+WORK_DIR.mkdir(parents=True, exist_ok=True)
