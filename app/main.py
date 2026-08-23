@@ -34,7 +34,7 @@ from app.services.pg_restore import (
 from app.services.self_uninstall import uninstall_preview, schedule_self_uninstall
 from app.config import WEB_PORT
 
-APP_VERSION = "3.2.5"
+APP_VERSION = "3.2.6"
 app = FastAPI(title="PGClockMG", version=APP_VERSION)
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -162,8 +162,21 @@ async def api_pasarguard_restore(req: PasarguardRestoreRequest):
     return {"job_id": job.job_id, "status": job.status}
 
 
+def _log_window(job, since: int, limit: int) -> dict:
+    """Logs from `since` onward, capped at `limit`, plus offsets for the next poll."""
+    total = len(job.logs)
+    start = max(0, total - limit) if since < 0 else min(since, total)
+    if total - start > limit:
+        start = total - limit
+    return {
+        "logs": job.logs[start:],
+        "log_start": start,
+        "log_total": total,
+    }
+
+
 @app.get("/api/pasarguard/restore/{job_id}")
-async def api_pasarguard_restore_status(job_id: str):
+async def api_pasarguard_restore_status(job_id: str, since: int = -1):
     job = get_restore_job(job_id)
     if not job:
         raise HTTPException(404, "Restore job not found")
@@ -172,7 +185,7 @@ async def api_pasarguard_restore_status(job_id: str):
         "status": job.status,
         "progress": job.progress,
         "message": job.message,
-        "logs": job.logs[-200:],
+        **_log_window(job, since, 2000),
         "result": job.result,
     }
 
@@ -352,7 +365,7 @@ async def api_migrate(req: MigrationRequest):
 
 
 @app.get("/api/migrate/{job_id}")
-async def api_migrate_status(job_id: str):
+async def api_migrate_status(job_id: str, since: int = -1):
     job = get_job(job_id)
     if not job:
         raise HTTPException(404, "Job یافت نشد")
@@ -361,7 +374,7 @@ async def api_migrate_status(job_id: str):
         "status": job.status,
         "progress": job.progress,
         "message": job.message,
-        "logs": job.logs[-100:],
+        **_log_window(job, since, 2000),
         "result": job.result,
     }
 
@@ -374,24 +387,14 @@ async def ws_migrate(websocket: WebSocket, job_id: str):
         await websocket.close(code=4004)
         return
 
-    for log in job.logs:
-        await websocket.send_json({"type": "log", "message": log})
+    import asyncio
 
-    def on_log(msg):
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(websocket.send_json({"type": "log", "message": msg}))
-        except Exception:
-            pass
-
-    job.on_log(on_log)
-
+    sent = 0
     try:
         while True:
-            import asyncio
-            await asyncio.sleep(1)
+            while sent < len(job.logs):
+                await websocket.send_json({"type": "log", "message": job.logs[sent]})
+                sent += 1
             await websocket.send_json({
                 "type": "status",
                 "status": job.status,
@@ -406,6 +409,7 @@ async def ws_migrate(websocket: WebSocket, job_id: str):
                     "result": job.result,
                 })
                 break
+            await asyncio.sleep(1)
     except WebSocketDisconnect:
         pass
 

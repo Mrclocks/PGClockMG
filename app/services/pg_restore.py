@@ -29,6 +29,15 @@ from app.services.upload import get_upload_path
 
 PASARGUARD_BACKUP_DIR = PASARGUARD_DIR / "backup"
 _restore_jobs: dict[str, MigrationJob] = {}
+_restore_tasks: set[asyncio.Task] = set()
+MAX_FINISHED_RESTORE_JOBS = 20
+
+
+def _prune_finished_restore_jobs() -> None:
+    finished = [j for j in _restore_jobs.values() if j.status in ("success", "error")]
+    for job in finished[: max(0, len(finished) - MAX_FINISHED_RESTORE_JOBS)]:
+        _restore_jobs.pop(job.job_id, None)
+        job.clear_log_callbacks()
 
 SUPPORTED_RESTORE_DBS = frozenset({
     "sqlite", "mysql", "mariadb", "postgresql", "timescaledb",
@@ -152,13 +161,16 @@ def filter_timescaledb_extension_sql_file(
 
 
 def filter_globals_sql(sql: str) -> str:
-    """Rewrite globals.sql so it is idempotent when roles/databases already exist.
+    """Rewrite globals.sql so it is idempotent when roles already exist.
 
-    pg_dumpall emits plain ``CREATE ROLE`` and ``CREATE DATABASE`` statements
-    that fail with *"already exists"* when the cluster was initialised by
-    docker-compose before the restore.  We wrap every such statement in a
-    DO-block that silently swallows ``duplicate_object`` / ``duplicate_database``
-    so the restore proceeds without errors even on a live cluster.
+    pg_dumpall emits plain ``CREATE ROLE`` statements that fail with
+    *"already exists"* when the cluster was initialised by docker-compose before
+    the restore.  We wrap each one in a DO-block that silently swallows
+    ``duplicate_object`` so the restore proceeds without errors on a live cluster.
+
+    ``CREATE DATABASE`` is deliberately left alone: PostgreSQL refuses to run it
+    inside a DO-block, and globals are applied with ON_ERROR_STOP=0 while the
+    manifest loop recreates each database explicitly, so a duplicate is harmless.
     """
     out: list[str] = []
     buf: list[str] = []
@@ -289,7 +301,18 @@ def parse_timescale_wanted(versions: list[str] | None) -> str | None:
         v = (v or "").strip()
         if re.match(r"^\d+\.\d+(\.\d+)?$", v):
             scored.append(v)
-    return scored[0] if scored else (versions[0].strip() or None)
+    if scored:
+        return max(scored, key=_ts_sort_key)
+    return versions[0].strip() or None
+
+
+def _ts_sort_key(ver: str) -> tuple:
+    return (_ts_version_tuple(ver) or (-1, -1, -1), ver)
+
+
+def sort_ts_versions(versions) -> list[str]:
+    """Deduplicate and order Timescale versions numerically, not lexicographically."""
+    return sorted({(v or "").strip() for v in versions if (v or "").strip()}, key=_ts_sort_key)
 
 
 def _ts_version_tuple(ver: str | None) -> tuple[int, ...] | None:
@@ -861,7 +884,7 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
         elif (root / "db.sqlite3").exists() or list(root.rglob("db.sqlite3")):
             layout = "sqlite_file"
 
-        ts_versions = collect_backup_ts_versions(root)
+        ts_versions = sort_ts_versions(collect_backup_ts_versions(root))
         chunk_catalog_era = detect_backup_chunk_catalog_era(root)
         ts_min_version = detect_backup_ts_catalog_floor(root)
         # Official Timescale backups keep postgresql+asyncpg URL — use manifest / dump hints
@@ -935,9 +958,9 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
 
         if ts_versions:
             warnings.append({
-                "en": f"Backup TimescaleDB: {', '.join(sorted(set(ts_versions)))}. Wizard auto-aligns the image before restore.",
-                "fa": f"نسخه TimescaleDB بکاپ: {', '.join(sorted(set(ts_versions)))}. قبل از ریستور ایمیج سرور هم‌تراز می‌شود.",
-                "ru": f"TimescaleDB в бэкапе: {', '.join(sorted(set(ts_versions)))}. Образ будет выровнен автоматически.",
+                "en": f"Backup TimescaleDB: {', '.join(ts_versions)}. Wizard auto-aligns the image before restore.",
+                "fa": f"نسخه TimescaleDB بکاپ: {', '.join(ts_versions)}. قبل از ریستور ایمیج سرور هم‌تراز می‌شود.",
+                "ru": f"TimescaleDB в бэкапе: {', '.join(ts_versions)}. Образ будет выровнен автоматически.",
             })
         elif chunk_catalog_era == "schema_name":
             warnings.append({
@@ -985,7 +1008,7 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
             "convert_blocked": convert_blocked,
             "supported_target_dbs": sorted(SUPPORTED_RESTORE_DBS),
             "layout": layout,
-            "timescaledb_versions": sorted(set(ts_versions)),
+            "timescaledb_versions": ts_versions,
             "timescaledb_chunk_catalog": chunk_catalog_era,
             "timescaledb_min_version": ts_min_version,
             "table_counts": table_counts,
@@ -1021,9 +1044,12 @@ async def start_pasarguard_restore(params: dict) -> MigrationJob:
         "accept_experimental": True,
     }
 
+    _prune_finished_restore_jobs()
     job = MigrationJob()
     _restore_jobs[job.job_id] = job
-    asyncio.create_task(_run_restore(job, params, analysis))
+    task = asyncio.create_task(_run_restore(job, params, analysis))
+    _restore_tasks.add(task)
+    task.add_done_callback(_restore_tasks.discard)
     return job
 
 
@@ -1093,7 +1119,7 @@ def _read_current_env() -> str:
     return PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.exists() else ""
 
 
-def _set_env_var(text: str, key: str, value: str) -> str:
+def _set_env_var(text: str, key: str, value: str | None) -> str:
     """Set KEY=value and remove any duplicate prior assignments of KEY."""
     from app.services.env_migration import _set_env_var_simple
 
@@ -1672,7 +1698,7 @@ async def _maybe_cross_db_after_restore(
                 )
             mig_params = migration_params_from_connection(backup_db, target_db, admin)
         else:
-            mig_params = {
+            mig_params: dict = {
                 "source_db": backup_db,
                 "target_db": target_db,
                 "target_db_user": user,
@@ -2266,7 +2292,7 @@ async def _verify_restored_data(
     if not expected and require_any_data:
         job.log(
             "Warning: no backup row estimates; live counts: "
-            + ", ".join(f"{k}={v}" for k, v in actual.items() if v > 0) or "all empty"
+            + (", ".join(f"{k}={v}" for k, v in actual.items() if v > 0) or "all empty")
         )
         if critical_total == 0:
             raise RuntimeError(
@@ -2479,6 +2505,7 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
 
         restore_engine = backup_db
         if backup_db == "sqlite" or analysis.get("layout") == "sqlite_file":
+            restore_engine = "sqlite"
             await _restore_sqlite(job, root)
             expected_counts = _snapshot_sqlite_counts(PASARGUARD_DATA / "db.sqlite3") or expected_counts
             if expected_counts:
@@ -2542,6 +2569,9 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                         bak_name or cur_name or "pasarguard",
                     )
         else:
+            raise RuntimeError(f"Unsupported backup database: {backup_db}")
+
+        if not restore_engine:
             raise RuntimeError(f"Unsupported backup database: {backup_db}")
 
         job.set_progress(75, "Merging configuration...")
@@ -2671,6 +2701,10 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
 
         # After convert / same-engine: credentials must match what we wrote into .env
         final_engine_pre = final_db or target_db or restore_engine or backup_db
+        if not final_engine_pre:
+            raise RuntimeError(
+                "Could not determine the target database engine after restore"
+            )
         live_admin = (copy_report or {}).get("live_admin") or {}
         if needs_convert:
             verify_user = cur_user or live_admin.get("user") or "pasarguard"
@@ -2729,14 +2763,14 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         await _finalize_env_after_restore(
             job,
             install_env_snapshot,
-            final_db or target_db or restore_engine or backup_db,
+            final_engine_pre,
             verify_pass,
             verify_user,
             verify_db,
         )
         _env_completeness_checklist(
             job,
-            final_db or target_db or restore_engine or backup_db,
+            final_engine_pre,
             backup_env,
         )
 
@@ -2744,7 +2778,7 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             _relocate_sqlite_after_convert(job)
 
         job.set_progress(90, "Starting PasarGuard...")
-        final_engine = final_db or installed_db or backup_db
+        final_engine = final_db or installed_db or backup_db or final_engine_pre
         mini_params: dict = {
             "target_db": final_engine,
             "target_db_password": verify_pass,

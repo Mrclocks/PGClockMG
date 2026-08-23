@@ -194,9 +194,10 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
             paths["hiddify_json"] = str(p)
 
     panel_hint = _detect_panel(inventory, paths)
+    sqlite_path = paths.get("sqlite")
     # Renamed 3x-ui dumps (*.db) may not match x-ui.db — detect via tables
-    if panel_hint != "3x-ui" and paths.get("sqlite"):
-        if _sqlite_looks_like_xui(Path(paths["sqlite"])):
+    if panel_hint != "3x-ui" and sqlite_path:
+        if _sqlite_looks_like_xui(Path(sqlite_path)):
             panel_hint = "3x-ui"
     if panel_hint != "hiddify" and paths.get("hiddify_json"):
         panel_hint = "hiddify"
@@ -266,8 +267,8 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
         ))
 
     xui_schema = None
-    if panel_hint == "3x-ui" and paths.get("sqlite"):
-        xui_schema = _detect_xui_schema(Path(paths["sqlite"]))
+    if panel_hint == "3x-ui" and sqlite_path:
+        xui_schema = _detect_xui_schema(Path(sqlite_path))
 
     return {
         "extract_root": str(root.relative_to(upload_dir)).replace("\\", "/") if root != upload_dir else ".",

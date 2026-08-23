@@ -44,6 +44,18 @@ class MigrationJob:
     def on_log(self, callback: Callable):
         self._callbacks.append(callback)
 
+    def off_log(self, callback: Callable) -> None:
+        try:
+            self._callbacks.remove(callback)
+        except ValueError:
+            pass
+
+    def clear_log_callbacks(self) -> None:
+        self._callbacks.clear()
+
+    def log_offset(self) -> int:
+        return len(self.logs)
+
 
 class BaseMigrator(ABC):
     def __init__(self, job: MigrationJob, params: dict | None = None):
@@ -95,6 +107,8 @@ class BaseMigrator(ABC):
         output_lines = []
 
         async def _drain_stdout() -> None:
+            if proc.stdout is None:
+                return
             while True:
                 line = await proc.stdout.readline()
                 if not line:

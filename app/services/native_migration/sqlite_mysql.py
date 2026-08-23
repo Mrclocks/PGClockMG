@@ -53,7 +53,8 @@ def copy_sqlite_to_mysql(
 
         def reset_seq(table: str) -> None:
             cur.execute(f"SELECT COALESCE(MAX(id), 0) + 1 FROM `{table}`")
-            nxt = cur.fetchone()[0]
+            row = cur.fetchone()
+            nxt = row[0] if row else 1
             cur.execute(f"ALTER TABLE `{table}` AUTO_INCREMENT = {int(nxt)}")
 
         stats = copy_sqlite_tables(

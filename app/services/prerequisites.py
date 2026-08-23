@@ -328,7 +328,7 @@ def check_prerequisites(panel_id: str, marzban_mode: str | None = None, upload_i
                     f"Копия OK ({upload_analysis['total_files']} файлов)" if backup_ok and upload_analysis
                     else "Копия готова" if backup_ok
                     else "Данные Marzban на сервере" if has_marzban_data
-                    else "Загрузите копию на шаге 2",
+                    else "Загрузите копию на шаге 2"
                 ),
             },
         })

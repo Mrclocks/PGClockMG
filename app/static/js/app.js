@@ -1252,6 +1252,7 @@ function connectWebSocket(jobId) {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${proto}//${location.host}/ws/migrate/${jobId}`);
   state._migrateWs = ws;
+  let finished = false;
   const terminal = document.getElementById('logTerminal');
 
   ws.onmessage = (ev) => {
@@ -1275,12 +1276,14 @@ function connectWebSocket(jobId) {
       if (msg.message) document.getElementById('statusMsg').textContent = msg.message;
     }
     if (msg.type === 'done') {
+      finished = true;
       state._migrateWs = null;
       if (msg.status === 'success' && !msg.result?.error) showSuccess(msg.result);
       else showError(msg.result?.error || msg.message || 'Error', terminal.textContent);
     }
   };
-  ws.onerror = () => pollStatus(jobId);
+  ws.onerror = () => { if (!finished) pollStatus(jobId); };
+  ws.onclose = () => { if (!finished) pollStatus(jobId); };
 }
 
 function stopMigrationPoll() {
@@ -1300,7 +1303,7 @@ async function pollStatus(jobId) {
   if (state._migratePollInterval) clearInterval(state._migratePollInterval);
   const interval = setInterval(async () => {
     try {
-      const res = await fetch(`/api/migrate/${jobId}`);
+      const res = await fetch(`/api/migrate/${jobId}?since=${cursor.lastLen}`);
       const data = await res.json();
       if (typeof applyUiProgress === 'function') {
         applyUiProgress(
@@ -1314,7 +1317,7 @@ async function pollStatus(jobId) {
         document.getElementById('progressText').textContent = data.progress + '%';
       }
       if (data.message) document.getElementById('statusMsg').textContent = data.message;
-      appendMigrateLogs(terminal, data.logs, cursor);
+      appendMigrateLogs(terminal, data.logs, cursor, data);
       if (data.status === 'success' && !data.result?.error) {
         clearInterval(interval);
         state._migratePollInterval = null;
@@ -1330,12 +1333,20 @@ async function pollStatus(jobId) {
   state._migratePollInterval = interval;
 }
 
-function appendMigrateLogs(terminal, logs, cursor) {
-  if (!terminal || !Array.isArray(logs) || logs.length <= cursor.lastLen) return;
-  const chunk = logs.slice(cursor.lastLen).join('\n');
-  const prefix = cursor.lastLen > 0 && terminal.textContent ? '\n' : '';
+function appendMigrateLogs(terminal, logs, cursor, data) {
+  if (!terminal || !Array.isArray(logs) || !logs.length) return;
+  const start = Number.isInteger(data?.log_start) ? data.log_start : 0;
+  const total = Number.isInteger(data?.log_total) ? data.log_total : start + logs.length;
+  if (total <= cursor.lastLen) return;
+  const skip = Math.max(0, cursor.lastLen - start);
+  if (skip >= logs.length) {
+    cursor.lastLen = total;
+    return;
+  }
+  const chunk = logs.slice(skip).join('\n');
+  const prefix = terminal.textContent ? '\n' : '';
   terminal.appendChild(document.createTextNode(prefix + chunk));
-  cursor.lastLen = logs.length;
+  cursor.lastLen = total;
   terminal.scrollTop = terminal.scrollHeight;
 }
 

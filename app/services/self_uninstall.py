@@ -11,6 +11,8 @@ INSTALL_DIR = Path("/opt/pg-migrator")
 SERVICE_NAME = "pg-migrator"
 UNIT_PATH = Path(f"/etc/systemd/system/{SERVICE_NAME}.service")
 
+_uninstall_tasks: set[asyncio.Task] = set()
+
 
 def uninstall_preview() -> dict:
     return {
@@ -30,7 +32,9 @@ def uninstall_preview() -> dict:
 async def schedule_self_uninstall(delay_sec: float = 2.0) -> dict:
     """Stop serving shortly after response, then remove service + files."""
     preview = uninstall_preview()
-    asyncio.create_task(_do_uninstall(delay_sec))
+    task = asyncio.create_task(_do_uninstall(delay_sec))
+    _uninstall_tasks.add(task)
+    task.add_done_callback(_uninstall_tasks.discard)
     return {**preview, "scheduled": True, "delay_sec": delay_sec}
 
 

@@ -192,7 +192,8 @@ class MysqlReader(TableReader):
         try:
             cur = self._conn.cursor()
             cur.execute(f"SELECT COUNT(*) FROM `{safe}`")
-            return int(cur.fetchone()[0])
+            row = cur.fetchone()
+            return int(row[0]) if row else -1
         except Exception:
             return -1
 
@@ -257,7 +258,8 @@ class PostgresReader(TableReader):
         try:
             cur = self._conn.cursor()
             cur.execute(f'SELECT COUNT(*) FROM "{safe}"')
-            return int(cur.fetchone()[0])
+            row = cur.fetchone()
+            return int(row[0]) if row else -1
         except Exception:
             return -1
 
@@ -560,7 +562,8 @@ class MysqlWriter(TableWriter):
     def row_count(self, table: str) -> int:
         cur = self._conn.cursor()
         cur.execute(f"SELECT COUNT(*) FROM `{table}`")
-        return int(cur.fetchone()[0])
+        row = cur.fetchone()
+        return int(row[0]) if row else -1
 
     def recover(self) -> None:
         """Rollback failed row only — never wipe successful inserts in this table."""
@@ -600,7 +603,8 @@ class MysqlWriter(TableWriter):
     def reset_sequence(self, table: str) -> None:
         cur = self._conn.cursor()
         cur.execute(f"SELECT COALESCE(MAX(id), 0) + 1 FROM `{table}`")
-        nxt = cur.fetchone()[0]
+        row = cur.fetchone()
+        nxt = row[0] if row else 1
         cur.execute(f"ALTER TABLE `{table}` AUTO_INCREMENT = {int(nxt)}")
 
     def set_alembic_version(self, version: str) -> None:
@@ -987,7 +991,8 @@ class PostgresWriter(TableWriter):
     def row_count(self, table: str) -> int:
         cur = self._conn.cursor()
         cur.execute(f'SELECT COUNT(*) FROM "{table}"')
-        return int(cur.fetchone()[0])
+        row = cur.fetchone()
+        return int(row[0]) if row else -1
 
     def enum_columns(self, table: str) -> list[str]:
         types = self._types_for(table)

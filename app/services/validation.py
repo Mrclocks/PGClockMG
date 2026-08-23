@@ -24,7 +24,7 @@ from app.services.upload_requirements import get_upload_requirements
 def validate_migration(params: dict) -> dict:
     """Return {ok: bool, errors: [{en, fa, ru}]}"""
     errors: list[dict] = []
-    panel_id = params.get("source_panel")
+    panel_id = str(params.get("source_panel") or "")
     panel = PANELS.get(panel_id)
     if not panel:
         return {"ok": False, "errors": [_msg("Invalid panel", "پنل نامعتبر", "Неверная панель")]}
