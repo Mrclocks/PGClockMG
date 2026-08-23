@@ -18,7 +18,7 @@
 #
 set -eo pipefail
 
-readonly SCRIPT_VERSION="3.2.7"
+readonly SCRIPT_VERSION="3.2.8"
 readonly INSTALL_DIR="${PG_MIGRATOR_INSTALL_DIR:-/opt/pg-migrator}"
 readonly SERVICE_NAME="pg-migrator"
 readonly SYSTEMD_DIR="${PG_MIGRATOR_SYSTEMD_DIR:-/etc/systemd/system}"
@@ -95,15 +95,20 @@ check_ubuntu() {
 tty_available() { [[ -t 0 || -r /dev/tty ]]; }
 
 # stdin can be an already-drained pipe (curl | bash), so ask the terminal directly.
+# Prefer interactive stdin when it is a TTY; only then fall back to /dev/tty.
+# Some consoles advertise /dev/tty as readable but opening it fails with
+# "No such device or address" — never let that kill a working stdin TTY.
 ask_tty() {
   local prompt="$1" __var="$2"
   if [[ -t 0 ]]; then
-    read -r -p "$prompt" "$__var"
-  elif [[ -r /dev/tty ]]; then
-    read -r -p "$prompt" "$__var" < /dev/tty
-  else
-    return 1
+    if read -r -p "$prompt" "$__var"; then
+      return 0
+    fi
   fi
+  if [[ -e /dev/tty ]] && read -r -p "$prompt" "$__var" < /dev/tty 2>/dev/null; then
+    return 0
+  fi
+  return 1
 }
 
 confirm() {
@@ -564,10 +569,14 @@ print_menu() {
 }
 
 show_home() {
-  clear_screen
-  print_banner
+  clear_screen || true
+  print_banner || true
+  # Status probes (docker/systemctl) must never abort the interactive menu.
+  set +e
   print_status
   print_menu
+  set -e
+  return 0
 }
 
 # ── port question ─────────────────────────────────────────────────────────────
@@ -764,26 +773,42 @@ open_firewall() {
 
 # Write /opt/pg-migrator/.access_token (0600) if missing. Keep an existing token
 # across updates so the operator's bookmark keeps working.
+# IMPORTANT: never call fail()/exit here — this runs from the status panel and
+# must not kill the interactive menu.
 ensure_access_token() {
-  local f="${INSTALL_DIR}/.access_token" tok py
-  mkdir -p "$INSTALL_DIR"
+  local f="${INSTALL_DIR}/.access_token" tok="" py=""
+  mkdir -p "$INSTALL_DIR" 2>/dev/null || {
+    fail_soft "Cannot create ${INSTALL_DIR} for the access token"
+    return 1
+  }
   if [[ -s "$f" ]]; then
     chmod 600 "$f" 2>/dev/null || true
     return 0
   fi
   if command -v openssl >/dev/null 2>&1; then
-    tok="$(openssl rand -hex 24)"
-  else
+    tok="$(openssl rand -hex 24 2>/dev/null || true)"
+  fi
+  if [[ -z "$tok" ]]; then
     py="${INSTALL_DIR}/venv/bin/python"
     [[ -x "$py" ]] || py="$(command -v python3 || true)"
-    [[ -n "$py" ]] || fail "Cannot generate access token (openssl/python missing)"
-    tok="$("$py" -c 'import secrets; print(secrets.token_hex(24))')"
+    if [[ -n "$py" ]]; then
+      tok="$("$py" -c 'import secrets; print(secrets.token_hex(24))' 2>/dev/null || true)"
+    fi
   fi
-  [[ -n "$tok" && ${#tok} -ge 32 ]] || fail "Failed to generate access token"
-  umask 077
-  printf '%s\n' "$tok" > "$f"
-  chmod 600 "$f"
+  if [[ -z "$tok" || ${#tok} -lt 32 ]]; then
+    fail_soft "Failed to generate access token (need openssl or python3)"
+    return 1
+  fi
+  (
+    umask 077
+    printf '%s\n' "$tok" > "$f"
+  ) 2>/dev/null || {
+    fail_soft "Cannot write access token to ${f}"
+    return 1
+  }
+  chmod 600 "$f" 2>/dev/null || true
   ok "Access token created at ${f}"
+  return 0
 }
 
 read_access_token() {
@@ -793,13 +818,16 @@ read_access_token() {
 }
 
 print_success() {
-  local ip app_ver token url
+  local ip app_ver token="" url
   ip="$(server_ip)"
   app_ver="$(read_app_version)"
-  ensure_access_token
-  token="$(read_access_token)"
-  [[ -n "$token" ]] || fail "Access token missing after install — cannot print login URL"
-  url="http://${ip}:${WEB_PORT}/?token=${token}"
+  ensure_access_token || true
+  token="$(read_access_token 2>/dev/null || true)"
+  if [[ -n "$token" ]]; then
+    url="http://${ip}:${WEB_PORT}/?token=${token}"
+  else
+    url="http://${ip}:${WEB_PORT}"
+  fi
   log ""
   log "${C_GREEN}  ╔══════════════════════════════════════════════════════════╗${C_RESET}"
   log "${C_GREEN}  ║${C_RESET}   ${C_BOLD}${C_WHITE}PGClockMG is installed and running${C_RESET}                     ${C_GREEN}║${C_RESET}"
@@ -812,9 +840,14 @@ print_success() {
   log "   ${C_DIM}Service${C_RESET}     systemctl status ${SERVICE_NAME}"
   log "   ${C_DIM}Token file${C_RESET}  ${INSTALL_DIR}/.access_token"
   log ""
-  log "   ${C_YELLOW}Next:${C_RESET} open the URL above — the access token is already in the link."
-  log "   ${C_DIM}The wizard is protected: without that token nobody can reach it.${C_RESET}"
-  log "   ${C_DIM}Recovery:${C_RESET} cat ${INSTALL_DIR}/.access_token"
+  if [[ -n "$token" ]]; then
+    log "   ${C_YELLOW}Next:${C_RESET} open the URL above — the access token is already in the link."
+    log "   ${C_DIM}The wizard is protected: without that token nobody can reach it.${C_RESET}"
+    log "   ${C_DIM}Recovery:${C_RESET} cat ${INSTALL_DIR}/.access_token"
+  else
+    fail_soft "Access token was not created — open ${url} and check ${INSTALL_DIR}/.access_token"
+    log "   ${C_DIM}Re-run Install / update, or: openssl rand -hex 24 > ${INSTALL_DIR}/.access_token && chmod 600 ${INSTALL_DIR}/.access_token${C_RESET}"
+  fi
   if ! pasarguard_installed; then
     log "   ${C_YELLOW}Note:${C_RESET} PasarGuard is not installed yet — install the panel before migrating."
   fi
@@ -1114,10 +1147,10 @@ action_redirect_logs() {
 }
 
 redirect_menu() {
-  local choice
+  local choice tries
   while true; do
-    clear_screen
-    print_banner
+    clear_screen || true
+    print_banner || true
     log ""
     log "  ${C_BOLD}REDIRECT SERVER${C_RESET}  ${C_DIM}(3x-ui / Hiddify migrations only)${C_RESET}"
     rule
@@ -1135,7 +1168,9 @@ redirect_menu() {
       return 0
     fi
 
+    set +e
     redirect_summary
+    set -e
 
     log ""
     log "  ${C_BOLD}ACTIONS${C_RESET}"
@@ -1148,9 +1183,15 @@ redirect_menu() {
     log ""
 
     choice=""
-    if ! ask_tty "  Select an option [1-5]: " choice; then
-      return 0
-    fi
+    tries=0
+    while ! ask_tty "  Select an option [1-5]: " choice; do
+      tries=$((tries + 1))
+      if (( tries >= 3 )); then
+        warn "Could not read from the terminal — returning to the main menu."
+        return 0
+      fi
+      sleep 1
+    done
     choice="${choice//[[:space:]]/}"
 
     case "$choice" in
@@ -1167,14 +1208,26 @@ redirect_menu() {
 # ── menu ──────────────────────────────────────────────────────────────────────
 
 menu_loop() {
-  local choice
+  local choice tries
   while true; do
     show_home
     choice=""
-    if ! ask_tty "  Select an option [1-4]: " choice; then
-      log ""
-      return 0
-    fi
+    tries=0
+    # A single failed read (EOF / flaky console) used to drop straight back to
+    # the shell. Retry a few times before giving up.
+    while ! ask_tty "  Select an option [1-4]: " choice; do
+      tries=$((tries + 1))
+      if (( tries >= 3 )); then
+        log ""
+        warn "Could not read from the terminal after several tries."
+        log "   ${C_DIM}Open a real SSH/console session and run:${C_RESET}"
+        log "   ${C_DIM}  sudo bash -c \"\$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh')\"${C_RESET}"
+        log ""
+        return 0
+      fi
+      warn "No input received — try again (${tries}/3)..."
+      sleep 1
+    done
     choice="${choice//[[:space:]]/}"
 
     case "$choice" in
@@ -1224,7 +1277,8 @@ main() {
   if ! tty_available; then
     # curl | bash with no terminal attached keeps the classic behaviour: install.
     print_banner
-    info "No terminal detected — running an unattended install."
+    info "No interactive terminal detected — running an unattended install."
+    info "To use the menu, run the installer from an SSH session (not a pipe-only console)."
     run_action action_install
     return "$LAST_ACTION_RC"
   fi

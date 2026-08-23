@@ -194,13 +194,13 @@ def test_status_panel_reports_installed_stack():
             "services:\n  pasarguard:\n    image: ghcr.io/pasarguard/panel:v1.4.2\n"
             "  timescaledb:\n    image: timescale/timescaledb-ha:pg17\n",
         )
-        box.write_wizard(version="3.2.7", port=8443)
+        box.write_wizard(version="3.2.8", port=8443)
         box.write_redirect(port=443, extra_ports=[2083], panel="hiddify", ssl={"enabled": True})
 
         out = plain(box.run("print_status").stdout)
         assert "PasarGuard" in out and "v1.4.2" in out
         assert "timescaledb" in out
-        assert "3.2.7" in out and "8443" in out
+        assert "3.2.8" in out and "8443" in out
         assert "hiddify" in out and "443, 2083" in out
         assert "Installer" in out
         assert "was not found" not in out
@@ -250,11 +250,56 @@ def test_ensure_access_token_writes_0600_file_once():
     print("OK: ensure_access_token creates a stable 0600 token file")
 
 
+def test_ensure_access_token_soft_fails_without_killing_the_script():
+    """Menu status used to die here because ensure_access_token called exit."""
+    with sandbox() as tmp:
+        box = Sandbox(tmp)
+        # Replace the install directory with a file so mkdir -p cannot succeed.
+        if box.install.exists():
+            if box.install.is_dir():
+                import shutil
+                shutil.rmtree(box.install)
+            else:
+                box.install.unlink()
+        box.install.write_text("not-a-directory", encoding="utf-8")
+        # set -e would abort on a non-zero return — the point is that ensure
+        # itself must not call exit, so the caller can handle the failure.
+        res = box.run(
+            "set +e\n"
+            "ensure_access_token\n"
+            "echo RC=$?\n"
+            "echo SURVIVED"
+        )
+        out = plain(res.stdout + res.stderr)
+        assert res.returncode == 0, out
+        assert "SURVIVED" in out, out
+        assert "RC=1" in out, out
+        assert "Cannot create" in out or "Cannot write" in out or "Failed to generate" in out
+    print("OK: ensure_access_token returns soft failure instead of exiting")
+
+
+def test_print_success_survives_missing_token():
+    with sandbox() as tmp:
+        box = Sandbox(tmp)
+        box.write_wizard(version="3.2.8", port=7000)
+        res = box.run(
+            "ensure_access_token() { return 1; }\n"
+            "read_access_token() { return 1; }\n"
+            "print_success; echo SURVIVED"
+        )
+        out = plain(res.stdout + res.stderr)
+        assert res.returncode == 0, out
+        assert "SURVIVED" in out, out
+        assert "PGClockMG is installed and running" in out, out
+        assert "Access token was not created" in out, out
+    print("OK: print_success stays alive when token creation fails")
+
+
 def test_install_asks_the_port_then_installs_and_prints_the_url():
     """run_install is stubbed out — this covers the question → install → URL flow."""
     with sandbox() as tmp:
         box = Sandbox(tmp)
-        box.write_wizard(version="3.2.7", port=7000)
+        box.write_wizard(version="3.2.8", port=7000)
         code, out = box.run_on_tty(
             "run_install() { echo '[fake] installing...'; }\naction_install",
             ["8443\n"],
@@ -519,10 +564,27 @@ def test_menu_install_flow_end_to_end():
         )
         assert code == 0, out
         assert "[fake] installing..." in out, out
-        assert re.search(r"Web panel\s+http://\S+:8443", out), out
+        assert re.search(r"Web panel\s+http://\S+:8443/\?token=[0-9a-f]{32,}", out), out
         assert "Press Enter to return to the menu" in out, out
         assert out.rstrip().endswith("Bye."), out[-200:]
     print("OK: install can be driven from the menu and returns to it")
+
+
+def test_menu_loop_retries_before_giving_up_on_dead_tty():
+    """A single failed read used to drop the operator straight back to the shell."""
+    with sandbox() as tmp:
+        box = Sandbox(tmp)
+        res = box.run(
+            "ask_tty() { return 1; }\n"
+            "menu_loop; echo SURVIVED"
+        )
+        out = plain(res.stdout + res.stderr)
+        assert res.returncode == 0, out
+        assert "SURVIVED" in out, out
+        assert "Could not read from the terminal" in out, out
+        assert "No input received" in out, out
+        assert out.count("No input received") >= 2
+    print("OK: menu loop retries failed reads before exiting")
 
 
 def test_cli_redirect_restart_needs_a_configured_redirect():
