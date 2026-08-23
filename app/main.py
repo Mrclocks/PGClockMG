@@ -2,6 +2,7 @@
 
 import socket
 import tempfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request, WebSocket, WebSocketDisconnect, Form
@@ -32,11 +33,20 @@ from app.services.pg_restore import (
     analyze_pasarguard_backup, start_pasarguard_restore, get_restore_job,
 )
 from app.services.self_uninstall import uninstall_preview, schedule_self_uninstall
-from app.services.auth import COOKIE_NAME, COOKIE_MAX_AGE, get_token, token_matches
+from app.services.auth import COOKIE_NAME, COOKIE_MAX_AGE, ensure_token, token_matches
 from app.config import WEB_PORT
 
-APP_VERSION = "3.2.6"
-app = FastAPI(title="PGClockMG", version=APP_VERSION)
+APP_VERSION = "3.2.7"
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # Create .access_token on boot so install/login recovery always has a file.
+    ensure_token()
+    yield
+
+
+app = FastAPI(title="PGClockMG", version=APP_VERSION, lifespan=_lifespan)
 
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -64,8 +74,10 @@ _LOGIN_PAGE = """<!doctype html>
 <form class="card" method="get" action="/login">
  <h1>PGClockMG</h1>
  %(error)s
- <p>Paste the access token printed by the installer.<br>
-    On the server: <code>cat %(token_file)s</code></p>
+ <p>Open the URL printed at the end of install<br>
+    (<code>http://IP:PORT/?token=...</code>).<br><br>
+    Or paste the token here. Recovery on the server:<br>
+    <code>cat %(token_file)s</code></p>
  <input name="token" type="password" autofocus autocomplete="off" placeholder="access token">
  <button type="submit">Open wizard</button>
 </form></body></html>
@@ -75,6 +87,7 @@ _LOGIN_PAGE = """<!doctype html>
 def _login_page(error: bool = False) -> str:
     from app.services.auth import token_path
 
+    ensure_token()
     return _LOGIN_PAGE % {
         "error": '<div class="err">Invalid token.</div>' if error else "",
         "token_file": token_path(),

@@ -23,25 +23,75 @@ def _read_token_file() -> str | None:
     return value or None
 
 
+def _write_token_file(token: str) -> None:
+    """Create or replace the token file with mode 0600."""
+    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = TOKEN_FILE.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(token.strip() + "\n")
+        os.replace(tmp, TOKEN_FILE)
+        try:
+            os.chmod(TOKEN_FILE, 0o600)
+        except OSError:
+            pass
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def _create_token_file() -> str:
     token = secrets.token_hex(24)
     try:
         fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
-        return _read_token_file() or token
+        existing = _read_token_file()
+        if existing:
+            return existing
+        # Empty/racy file — overwrite safely.
+        _write_token_file(token)
+        return token
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(token + "\n")
     return token
 
 
 def get_token() -> str:
-    """Access token for this install, generated on first start."""
+    """Access token for this install.
+
+    Prefer the on-disk file (so ``cat .access_token`` always works). Fall back to
+    ``PG_MIGRATOR_TOKEN`` and persist it to disk when the file is missing. Generate
+    a new token on first start when neither exists.
+    """
     global _cached_token
     if _cached_token:
         return _cached_token
+
+    file_token = _read_token_file()
+    if file_token:
+        _cached_token = file_token
+        return _cached_token
+
     env_token = (os.environ.get("PG_MIGRATOR_TOKEN") or "").strip()
-    _cached_token = env_token or _read_token_file() or _create_token_file()
+    if env_token:
+        try:
+            _write_token_file(env_token)
+        except OSError:
+            pass
+        _cached_token = env_token
+        return _cached_token
+
+    _cached_token = _create_token_file()
     return _cached_token
+
+
+def ensure_token() -> str:
+    """Make sure the access-token file exists and return its value."""
+    return get_token()
 
 
 def token_matches(candidate: str | None) -> bool:
