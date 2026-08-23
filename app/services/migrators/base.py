@@ -2,11 +2,40 @@
 
 import asyncio
 import os
+import re
 import signal
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Callable
+
+
+REDACTED = "***"
+
+# Each pattern captures (prefix)(secret)(suffix); only the middle group is dropped.
+_SECRET_PATTERNS: tuple[re.Pattern, ...] = (
+    re.compile(
+        r"(?i)(\b(?:PGPASSWORD|MYSQL_PWD|MYSQL_ROOT_PASSWORD|MYSQL_PASSWORD"
+        r"|POSTGRES_PASSWORD|DB_PASSWORD|PGADMIN_PASSWORD)\s*=\s*)(\S+)()"
+    ),
+    re.compile(r"(?i)(://[^\s:/@]+:)([^\s@]+)(@)"),
+    re.compile(r"(?i)(IDENTIFIED\s+BY\s+')([^']*)(')"),
+    re.compile(r"(?i)(WITH\s+PASSWORD\s+')([^']*)(')"),
+    re.compile(r"(?i)((?:\bmariadb|\bmaria|\bmysql)(?:\s+\S+)*?\s+-p)(\S+)()"),
+)
+
+
+def redact_secrets(text: str, extra: set[str] | None = None) -> str:
+    """Strip credentials out of anything that reaches the job log or the API."""
+    if not text:
+        return text
+    out = text
+    for value in sorted(extra or (), key=len, reverse=True):
+        if value and len(value) >= 3:
+            out = out.replace(value, REDACTED)
+    for pattern in _SECRET_PATTERNS:
+        out = pattern.sub(lambda m: f"{m.group(1)}{REDACTED}{m.group(3)}", out)
+    return out
 
 
 class MigrationJob:
@@ -18,10 +47,20 @@ class MigrationJob:
         self.logs: list[str] = []
         self.result: dict | None = None
         self._callbacks: list[Callable] = []
+        self._secrets: set[str] = set()
+
+    def add_secret(self, *values: str | None) -> None:
+        """Register a live credential so it never reaches the log or the API."""
+        for v in values:
+            if v and len(str(v)) >= 3:
+                self._secrets.add(str(v))
+
+    def redact(self, text: str) -> str:
+        return redact_secrets(text, self._secrets)
 
     def log(self, msg: str):
         ts = datetime.now().strftime("%H:%M:%S")
-        line = f"[{ts}] {msg}"
+        line = f"[{ts}] {self.redact(str(msg))}"
         self.logs.append(line)
         for cb in self._callbacks:
             try:

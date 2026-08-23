@@ -36,7 +36,10 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "UPLOAD_DIR", uploads, raising=False)
     monkeypatch.setattr(upload_mod, "UPLOAD_DIR", uploads, raising=False)
     monkeypatch.delenv("PG_CLEANUP_ENABLED", raising=False)
+    from app.services.auth import get_token
+
     with TestClient(fastapi_app) as c:
+        c.headers.update({"X-Auth-Token": get_token()})
         c.uploads = uploads  # type: ignore[attr-defined]
         yield c
 

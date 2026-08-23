@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 from app.config import PASARGUARD_DIR, PASARGUARD_ENV, PASARGUARD_DATA, UPLOAD_DIR, WORK_DIR
-from app.services.archive_guard import safe_extract as _guarded_zip_extract
+from app.services.archive_guard import safe_extract as _guarded_zip_extract, safe_upload_name
 from app.services.env_migration import (
     detect_db_type_from_env,
     env_points_to_db,
@@ -218,6 +218,17 @@ def filter_globals_sql(sql: str) -> str:
 
 def _sql_literal(value: str) -> str:
     return "'" + (value or "").replace("'", "''") + "'"
+
+
+_PG_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$-]{0,62}$")
+
+
+def safe_pg_identifier(name: str | None, *, what: str = "identifier") -> str:
+    """Validate a PostgreSQL identifier that came from backup metadata."""
+    cleaned = (name or "").strip().strip('"')
+    if not _PG_IDENT_RE.match(cleaned):
+        raise RuntimeError(f"Unsafe {what} in backup manifest: {name!r}")
+    return cleaned
 
 
 # TimescaleDB 2.29.0 replaced chunk.schema_name/table_name with relid.
@@ -1246,6 +1257,9 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
     wanted = parse_timescale_wanted([wanted]) or wanted
     if not compose.exists() or not wanted:
         return
+    if not re.match(r"^\d+\.\d+(\.\d+)?$", wanted):
+        job.log(f"Ignoring unusable TimescaleDB version from backup: {wanted!r}")
+        return
     text = compose.read_text(encoding="utf-8", errors="ignore")
     m = re.search(r"timescale/timescaledb:([^\s\"']+)", text)
     current_tag = m.group(1) if m else "latest-pg17"
@@ -2078,7 +2092,7 @@ def _estimate_backup_table_counts(root: Path, layout: str | None = None) -> dict
             parts = line.split("\t")
             if len(parts) < 4:
                 continue
-            dump_path = root / "pg_dump" / parts[3]
+            dump_path = root / "pg_dump" / safe_upload_name(parts[3])
             if dump_path.exists():
                 paths.append(dump_path)
     if not paths and (root / "pg_dump").is_dir():
@@ -2393,6 +2407,7 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         cur_user = read_env_var(current_env, "DB_USER")
         cur_name = read_env_var(current_env, "DB_NAME")
         cur_pg_pass = read_env_var(current_env, "POSTGRES_PASSWORD") or cur_db_pass
+        job.add_secret(cur_db_pass, cur_mysql_root, cur_pg_pass)
 
         # Stage archive into official backup dir for traceability
         PASARGUARD_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
@@ -2499,6 +2514,7 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         bak_user = read_env_var(backup_env, "DB_USER") or read_env_var(backup_env, "POSTGRES_USER")
         bak_name = read_env_var(backup_env, "DB_NAME") or read_env_var(backup_env, "POSTGRES_DB")
         bak_url = read_env_var(backup_env, "SQLALCHEMY_DATABASE_URL")
+        job.add_secret(bak_db_pass, bak_mysql_root, bak_pg_pass)
 
         job.set_progress(40, "Restoring database...")
         await _compose(job, "stop", "pasarguard", timeout=120)
@@ -2644,7 +2660,7 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                     for line in manifest.read_text(encoding="utf-8", errors="ignore").splitlines():
                         parts = line.split("\t")
                         if len(parts) >= 4:
-                            cand = root / "pg_dump" / parts[3]
+                            cand = root / "pg_dump" / safe_upload_name(parts[3])
                             if cand.exists():
                                 candidates.append(cand)
                 if not candidates and (root / "pg_dump").is_dir():
@@ -3274,19 +3290,21 @@ async def _restore_postgres(
             if len(parts) < 4:
                 continue
             dbn, owner, has_ts, filename = parts[0], parts[1], parts[2], parts[3]
+            filename = safe_upload_name(filename)
             dump_path = root / "pg_dump" / filename
             if not dump_path.exists():
                 raise RuntimeError(f"Missing dump file in backup: pg_dump/{filename}")
             # Skip role-only / globals-style dumps that aren't the app DB
             if filename.lower() in ("globals.sql", "roles.sql"):
                 continue
+            dbn = safe_pg_identifier(dbn, what="database name")
+            owner_q = safe_pg_identifier(owner or user, what="database owner")
             job.log(f"Restoring database {dbn}...")
             await psql(
                 f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                f"WHERE datname = '{dbn}' AND pid <> pg_backend_pid();"
+                f"WHERE datname = {_sql_literal(dbn)} AND pid <> pg_backend_pid();"
             )
             await psql(f'DROP DATABASE IF EXISTS "{dbn}";')
-            owner_q = owner or user
             ok, out = await psql(f'CREATE DATABASE "{dbn}" OWNER "{owner_q}";')
             if not ok:
                 raise RuntimeError(f"CREATE DATABASE {dbn} failed:\n{out[-1000:]}")

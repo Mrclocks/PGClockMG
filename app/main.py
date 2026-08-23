@@ -4,10 +4,10 @@ import socket
 import tempfile
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request, WebSocket, WebSocketDisconnect, Form
 from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 from app.models import BackupCleanupRequest, MigrationRequest, PasarguardRestoreRequest
 from app.panels import (
@@ -32,6 +32,7 @@ from app.services.pg_restore import (
     analyze_pasarguard_backup, start_pasarguard_restore, get_restore_job,
 )
 from app.services.self_uninstall import uninstall_preview, schedule_self_uninstall
+from app.services.auth import COOKIE_NAME, COOKIE_MAX_AGE, get_token, token_matches
 from app.config import WEB_PORT
 
 APP_VERSION = "3.2.6"
@@ -39,6 +40,85 @@ app = FastAPI(title="PGClockMG", version=APP_VERSION)
 
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+PUBLIC_PATHS = frozenset({"/login", "/favicon.ico"})
+
+_LOGIN_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PGClockMG</title>
+<style>
+ body{background:#0f1420;color:#e6e9ef;font-family:system-ui,-apple-system,Segoe UI,sans-serif;
+      display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+ .card{background:#182031;padding:32px;border-radius:14px;width:min(92vw,420px);
+       box-shadow:0 18px 40px rgba(0,0,0,.45)}
+ h1{margin:0 0 6px;font-size:1.25rem}
+ p{margin:0 0 18px;color:#95a0b5;font-size:.9rem;line-height:1.6}
+ input{width:100%%;padding:11px 12px;border-radius:8px;border:1px solid #2b3650;
+       background:#0f1420;color:#e6e9ef;font-size:1rem;box-sizing:border-box}
+ button{width:100%%;margin-top:12px;padding:11px;border:0;border-radius:8px;
+        background:#3d7dff;color:#fff;font-size:1rem;cursor:pointer}
+ code{background:#0f1420;padding:2px 6px;border-radius:5px;font-size:.82rem}
+ .err{color:#ff8080;font-size:.85rem;margin-bottom:12px}
+</style></head><body>
+<form class="card" method="get" action="/login">
+ <h1>PGClockMG</h1>
+ %(error)s
+ <p>Paste the access token printed by the installer.<br>
+    On the server: <code>cat %(token_file)s</code></p>
+ <input name="token" type="password" autofocus autocomplete="off" placeholder="access token">
+ <button type="submit">Open wizard</button>
+</form></body></html>
+"""
+
+
+def _login_page(error: bool = False) -> str:
+    from app.services.auth import token_path
+
+    return _LOGIN_PAGE % {
+        "error": '<div class="err">Invalid token.</div>' if error else "",
+        "token_file": token_path(),
+    }
+
+
+@app.middleware("http")
+async def require_access_token(request: Request, call_next):
+    path = request.url.path
+    if path in PUBLIC_PATHS:
+        return await call_next(request)
+
+    from_query = request.query_params.get("token")
+    supplied = (
+        request.cookies.get(COOKIE_NAME)
+        or request.headers.get("X-Auth-Token")
+        or from_query
+    )
+    if not token_matches(supplied):
+        if path.startswith("/api/") or path.startswith("/ws/"):
+            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+        return HTMLResponse(_login_page(), status_code=401)
+
+    response = await call_next(request)
+    if from_query and token_matches(from_query):
+        response.set_cookie(
+            COOKIE_NAME, from_query, httponly=True, samesite="lax",
+            path="/", max_age=COOKIE_MAX_AGE,
+        )
+    if path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/login")
+async def login(token: str = ""):
+    if not token_matches(token):
+        return HTMLResponse(_login_page(error=bool(token)), status_code=401)
+    response = RedirectResponse("/", status_code=303)
+    response.set_cookie(
+        COOKIE_NAME, token, httponly=True, samesite="lax",
+        path="/", max_age=COOKIE_MAX_AGE,
+    )
+    return response
 
 
 def _server_ip() -> str:
@@ -381,6 +461,11 @@ async def api_migrate_status(job_id: str, since: int = -1):
 
 @app.websocket("/ws/migrate/{job_id}")
 async def ws_migrate(websocket: WebSocket, job_id: str):
+    if not token_matches(
+        websocket.cookies.get(COOKIE_NAME) or websocket.query_params.get("token")
+    ):
+        await websocket.close(code=4401)
+        return
     await websocket.accept()
     job = get_job(job_id)
     if not job:

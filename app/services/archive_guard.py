@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import zipfile
 from dataclasses import dataclass
@@ -43,6 +44,26 @@ class ZipPreflight:
     total_compressed: int
     largest_entry: int
     compression_ratio: int
+
+
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def is_safe_id(value: str | None) -> bool:
+    """True for ids we generate (uuid slices) — never a path fragment."""
+    return bool(value and _SAFE_ID_RE.match(value))
+
+
+def resolve_within(base: Path, name: str | None) -> Path | None:
+    """base/name, but only when `name` is a safe id that stays inside `base`."""
+    if not is_safe_id(name):
+        return None
+    target = base / str(name)
+    try:
+        target.resolve().relative_to(base.resolve())
+    except (ValueError, OSError):
+        return None
+    return target
 
 
 def safe_upload_name(filename: str | None) -> str:

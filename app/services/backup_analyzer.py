@@ -6,6 +6,7 @@ import re
 import sqlite3
 from pathlib import Path
 
+from app.services.archive_guard import resolve_within
 from app.services.env_migration import (
     read_env_var,
     transform_marzban_env,
@@ -37,8 +38,8 @@ MARZBAN_PATH_MARKERS = (
 
 
 def get_upload_dir(upload_id: str, base: Path) -> Path | None:
-    d = base / upload_id
-    return d if d.exists() else None
+    d = resolve_within(base, upload_id)
+    return d if d is not None and d.exists() else None
 
 
 def resolve_extract_root(upload_dir: Path) -> Path:

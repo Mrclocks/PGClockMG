@@ -109,13 +109,12 @@ async def _probe_pg(
 ) -> bool:
     if not password:
         return False
-    cwd = str(PASARGUARD_DIR)
-    cmd = (
-        f'cd "{cwd}" && docker compose exec -T {service} '
-        f'env PGPASSWORD="{password.replace(chr(34), "")}" '
-        f'psql -U {user} -d {database} -tAc "SELECT 1" 2>/dev/null'
-    )
-    ok, out = await migrator._run_cmd(cmd, timeout=25)
+    cmd = [
+        "docker", "compose", "exec", "-T",
+        "-e", f"PGPASSWORD={password}",
+        service, "psql", "-U", user, "-d", database, "-tAc", "SELECT 1",
+    ]
+    ok, out = await migrator._run_cmd(cmd, cwd=str(PASARGUARD_DIR), timeout=25)
     return ok and "1" in (out or "")
 
 
@@ -128,20 +127,20 @@ async def _probe_mysql(
 ) -> bool:
     if not password:
         return False
-    cwd = str(PASARGUARD_DIR)
-    pwd = password.replace('"', '\\"')
     # MariaDB images often ship `mariadb` only; MySQL ships `mysql`.
     # Prefer service-aware order (mariadb service → try mariadb client first).
     bins = ("mariadb", "mysql") if "maria" in (service or "").lower() else ("mysql", "mariadb")
     for bin_name in bins:
         # Prefer named DB; fall back to no-DB probe (avoids false auth fail on missing schema)
         for db_arg in (database, ""):
-            db_part = f" {db_arg}" if db_arg else ""
-            cmd = (
-                f'cd "{cwd}" && docker compose exec -T {service} '
-                f'{bin_name} -u {user} -p"{pwd}" -N -e "SELECT 1"{db_part} 2>/dev/null'
-            )
-            ok, out = await migrator._run_cmd(cmd, timeout=25)
+            cmd = [
+                "docker", "compose", "exec", "-T",
+                "-e", f"MYSQL_PWD={password}",
+                service, bin_name, "-u", user, "-N", "-e", "SELECT 1",
+            ]
+            if db_arg:
+                cmd.append(db_arg)
+            ok, out = await migrator._run_cmd(cmd, cwd=str(PASARGUARD_DIR), timeout=25)
             if ok and "1" in (out or ""):
                 return True
     return False
@@ -491,25 +490,23 @@ async def sync_mysql_roles_to_password(
         f"auth candidates={len(auth_pwds)})..."
     )
     last_out = ""
-    # Use single-quoted -e payload so SQL single-quotes stay intact; escape ' as '\''
-    sql_q = sql.replace("'", "'\\''")
     for bin_name in _mysql_client_bins(db_type, service):
         for auth_pwd in auth_pwds:
-            pwd_q = auth_pwd.replace('"', '\\"')
-            cmd = (
-                f'cd "{cwd}" && docker compose exec -T {service} '
-                f"{bin_name} -u root -p\"{pwd_q}\" -e '{sql_q}'"
-            )
-            ok, out = await migrator._run_cmd(cmd, timeout=60)
+            cmd = [
+                "docker", "compose", "exec", "-T",
+                "-e", f"MYSQL_PWD={auth_pwd}",
+                service, bin_name, "-u", "root", "-e", sql,
+            ]
+            ok, out = await migrator._run_cmd(cmd, cwd=cwd, timeout=60)
             if ok:
                 migrator.job.log(f"Synced MySQL passwords on {service} ({bin_name})")
                 return True
             last_out = out or last_out
-        cmd2 = (
-            f'cd "{cwd}" && docker compose exec -T {service} '
-            f"{bin_name} -u root -e '{sql_q}'"
-        )
-        ok2, out2 = await migrator._run_cmd(cmd2, timeout=60)
+        cmd2 = [
+            "docker", "compose", "exec", "-T",
+            service, bin_name, "-u", "root", "-e", sql,
+        ]
+        ok2, out2 = await migrator._run_cmd(cmd2, cwd=cwd, timeout=60)
         if ok2:
             migrator.job.log(f"Synced MySQL passwords on {service} ({bin_name}, no-password)")
             return True
@@ -595,12 +592,13 @@ async def sync_postgres_roles_to_app_password(
     any_ok = False
     for role in roles:
         sql = f'ALTER ROLE "{role}" WITH PASSWORD {lit};'
-        cmd = (
-            f'cd "{cwd}" && docker compose exec -T {service} '
-            f'env PGPASSWORD="{admin_pwd.replace(chr(34), "")}" '
-            f'psql -U {admin_user} -d postgres -v ON_ERROR_STOP=0 -c "{sql}"'
-        )
-        ok, out = await migrator._run_cmd(cmd, timeout=30)
+        cmd = [
+            "docker", "compose", "exec", "-T",
+            "-e", f"PGPASSWORD={admin_pwd}",
+            service, "psql", "-U", admin_user, "-d", "postgres",
+            "-v", "ON_ERROR_STOP=0", "-c", sql,
+        ]
+        ok, out = await migrator._run_cmd(cmd, cwd=cwd, timeout=30)
         if ok:
             any_ok = True
         else:
