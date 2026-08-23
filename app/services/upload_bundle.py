@@ -10,7 +10,7 @@ import zipfile
 from pathlib import Path
 
 from app.config import UPLOAD_DIR
-from app.services.archive_guard import safe_extract_zip_file, safe_upload_name
+from app.services.archive_guard import resolve_within, safe_extract_zip_file, safe_upload_name
 from app.services.backup_analyzer import analyze_upload_directory, resolve_extract_root
 from app.services.upload_requirements import get_upload_requirements
 
@@ -23,7 +23,10 @@ def create_bundle_id() -> str:
 
 
 def bundle_dir(bundle_id: str) -> Path:
-    return BUNDLES_ROOT / bundle_id
+    d = resolve_within(BUNDLES_ROOT, bundle_id)
+    if d is None:
+        raise ValueError("Invalid bundle id")
+    return d
 
 
 def _manifest_path(bundle_id: str) -> Path:
@@ -53,7 +56,10 @@ def init_bundle(bundle_id: str | None = None) -> str:
 
 
 def _slot_dir(bundle_id: str, slot: str) -> Path:
-    return bundle_dir(bundle_id) / "slots" / slot
+    d = resolve_within(bundle_dir(bundle_id) / "slots", slot)
+    if d is None:
+        raise ValueError("Invalid slot name")
+    return d
 
 
 def _validate_slot_file(
@@ -320,7 +326,11 @@ def validate_bundle(
 
 
 def get_bundle_status(bundle_id: str) -> dict | None:
-    if not _manifest_path(bundle_id).exists():
+    try:
+        manifest_path = _manifest_path(bundle_id)
+    except ValueError:
+        return None
+    if not manifest_path.exists():
         return None
     manifest = _load_manifest(bundle_id)
     return validate_bundle(
@@ -390,5 +400,8 @@ def prepare_bundle_workspace(bundle_id: str) -> Path:
 
 
 def bundle_has_upload(bundle_id: str) -> bool:
-    manifest = _load_manifest(bundle_id)
+    try:
+        manifest = _load_manifest(bundle_id)
+    except ValueError:
+        return False
     return bool(manifest.get("slots"))

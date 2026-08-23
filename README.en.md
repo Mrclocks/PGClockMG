@@ -1,4 +1,4 @@
-> ⚠️ **`v3.2.5`** — Always take a full backup before restore or migration.
+> ⚠️ **`v3.2.6`** — Always take a full backup before restore or migration.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <b>English</b> · <a href="README.ru.md">Русский</a>
@@ -40,8 +40,16 @@ PGClockMG is a web wizard for **backup restore** and **migration to PasarGuard**
 - Docker
 - PasarGuard already installed on the new server
 
-Panel URL after install: `http://SERVER_IP:PORT`  
+Panel URL after install: `http://SERVER_IP:PORT/?token=...`  
 Default port: `7000`
+
+From `v3.2.6` the wizard is protected by an **access token**. Without it nobody can
+reach the panel. The installer prints a ready-to-open URL that already includes the
+token. If you need it later:
+
+```bash
+cat /opt/pg-migrator/.access_token
+```
 
 ---
 
@@ -57,7 +65,7 @@ After running, the script clears the screen and shows the main menu.
 
 | Option | What it does |
 |--------|--------------|
-| 1 · Install / update | Asks for the web panel port (Enter keeps `7000`), completes installation, then prints the login URL |
+| 1 · Install / update | Asks for the web panel port (Enter keeps `7000`), completes installation, then prints the login URL (with token) |
 | 2 · Uninstall | Removes the service and `/opt/pg-migrator`, offering to keep your backups. PasarGuard, your databases, and the redirect server stay untouched |
 | 3 · Redirect server | Status, restart, force restart, and logs for `pg-redirect` — only used by 3x-ui / Hiddify migrations |
 | 4 · Exit | Leaves the menu |
@@ -78,7 +86,8 @@ missing, the script says so — it only moves data into an existing panel.
    the required conversion/migration automatically.  
 3. Make sure the new panel is up and reachable, then temporarily disable the old panel.  
 4. Install the PGClockMG script on the new server.  
-5. At the end of installation the script prints the web panel address. Open it and follow the wizard step by step.  
+5. At the end of installation the script prints the web panel URL (with token). Open that link and follow the wizard step by step.  
+6. Run restore or migration.
 
 ### Recommended order
 
@@ -90,6 +99,18 @@ missing, the script says so — it only moves data into an existing panel.
 ---
 
 ## Important notes
+
+### Opening the web panel (access token)
+
+From `v3.2.6` the wizard will not open without a token. After install, use the URL
+printed by the installer (`http://SERVER_IP:PORT/?token=...`). If you lost the link:
+
+```bash
+cat /opt/pg-migrator/.access_token
+```
+
+The token is stored at `/opt/pg-migrator/.access_token` with mode `0600`.
+Do not paste it into public chats or screenshots.
 
 ### Old subscription links broken after a 3x-ui / Hiddify migration?
 

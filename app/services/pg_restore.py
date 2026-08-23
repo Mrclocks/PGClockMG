@@ -13,8 +13,8 @@ import zipfile
 from pathlib import Path
 from typing import Callable
 
-from app.config import PASARGUARD_DIR, PASARGUARD_ENV, PASARGUARD_DATA, UPLOAD_DIR
-from app.services.archive_guard import safe_extract as _guarded_zip_extract
+from app.config import PASARGUARD_DIR, PASARGUARD_ENV, PASARGUARD_DATA, UPLOAD_DIR, WORK_DIR
+from app.services.archive_guard import safe_extract as _guarded_zip_extract, safe_upload_name
 from app.services.env_migration import (
     detect_db_type_from_env,
     env_points_to_db,
@@ -29,6 +29,15 @@ from app.services.upload import get_upload_path
 
 PASARGUARD_BACKUP_DIR = PASARGUARD_DIR / "backup"
 _restore_jobs: dict[str, MigrationJob] = {}
+_restore_tasks: set[asyncio.Task] = set()
+MAX_FINISHED_RESTORE_JOBS = 20
+
+
+def _prune_finished_restore_jobs() -> None:
+    finished = [j for j in _restore_jobs.values() if j.status in ("success", "error")]
+    for job in finished[: max(0, len(finished) - MAX_FINISHED_RESTORE_JOBS)]:
+        _restore_jobs.pop(job.job_id, None)
+        job.clear_log_callbacks()
 
 SUPPORTED_RESTORE_DBS = frozenset({
     "sqlite", "mysql", "mariadb", "postgresql", "timescaledb",
@@ -90,57 +99,78 @@ def filter_timescaledb_extension_sql(sql: str, *, strip_all: bool = False) -> st
     When restoring a Timescale backup into stock PostgreSQL, set strip_all=True to
     also drop hypertable helpers and any other timescaledb-qualified statements.
     """
-    out_lines: list[str] = []
-    for ln in sql.splitlines():
+    return "\n".join(
+        ln for ln in sql.splitlines() if not _ts_extension_line_dropped(ln, strip_all)
+    )
+
+
+def _ts_extension_line_dropped(ln: str, strip_all: bool) -> bool:
+    if re.search(
+        r"^\s*(DROP|CREATE)\s+EXTENSION\s+(IF\s+(EXISTS|NOT\s+EXISTS)\s+)?"
+        r"timescaledb(_toolkit)?\b",
+        ln,
+        re.I,
+    ):
+        return True
+    if re.search(r"^\s*COMMENT\s+ON\s+EXTENSION\s+timescaledb", ln, re.I):
+        return True
+    if strip_all:
+        # Internal Timescale schemas / objects
+        if re.search(r"_timescaledb_(catalog|internal|config|cache|functions)\b", ln, re.I):
+            return True
         if re.search(
-            r"^\s*(DROP|CREATE)\s+EXTENSION\s+(IF\s+(EXISTS|NOT\s+EXISTS)\s+)?"
-            r"timescaledb(_toolkit)?\b",
+            r"timescaledb_(pre|post)_restore\s*\("
+            r"|create_hypertable\s*\("
+            r"|add_dimension\s*\("
+            r"|set_chunk_time_interval\s*\("
+            r"|compress_chunk\s*\("
+            r"|decompress_chunk\s*\("
+            r"|alter_job\s*\("
+            r"|add_retention_policy\s*\("
+            r"|remove_retention_policy\s*\("
+            r"|add_compression_policy\s*\("
+            r"|remove_compression_policy\s*\("
+            r"|timescaledb\.",
             ln,
             re.I,
         ):
-            continue
-        if re.search(r"^\s*COMMENT\s+ON\s+EXTENSION\s+timescaledb", ln, re.I):
-            continue
-        if strip_all:
-            # Internal Timescale schemas / objects
-            if re.search(r"_timescaledb_(catalog|internal|config|cache|functions)\b", ln, re.I):
+            return True
+        # Storage parameters / WITH options referencing timescaledb
+        if re.search(r"timescaledb\.", ln, re.I):
+            return True
+        if re.search(r"\btimescaledb\b", ln, re.I) and re.search(
+            r"^\s*(CREATE|ALTER|DROP|SELECT|COMMENT|GRANT|REVOKE|SET)\b", ln, re.I
+        ):
+            return True
+    return False
+
+
+def filter_timescaledb_extension_sql_file(
+    src: Path, dest: Path, *, strip_all: bool = False,
+) -> Path:
+    """Stream `src` into `dest`, dropping the same lines as the in-memory filter."""
+    with open(src, "r", encoding="utf-8", errors="ignore") as fh, \
+            open(dest, "w", encoding="utf-8") as out:
+        for raw in fh:
+            ln = raw.rstrip("\n").rstrip("\r")
+            if _ts_extension_line_dropped(ln, strip_all):
                 continue
-            if re.search(
-                r"timescaledb_(pre|post)_restore\s*\("
-                r"|create_hypertable\s*\("
-                r"|add_dimension\s*\("
-                r"|set_chunk_time_interval\s*\("
-                r"|compress_chunk\s*\("
-                r"|decompress_chunk\s*\("
-                r"|alter_job\s*\("
-                r"|add_retention_policy\s*\("
-                r"|remove_retention_policy\s*\("
-                r"|add_compression_policy\s*\("
-                r"|remove_compression_policy\s*\("
-                r"|timescaledb\.",
-                ln,
-                re.I,
-            ):
-                continue
-            # Storage parameters / WITH options referencing timescaledb
-            if re.search(r"timescaledb\.", ln, re.I):
-                continue
-            if re.search(r"\btimescaledb\b", ln, re.I) and re.search(
-                r"^\s*(CREATE|ALTER|DROP|SELECT|COMMENT|GRANT|REVOKE|SET)\b", ln, re.I
-            ):
-                continue
-        out_lines.append(ln)
-    return "\n".join(out_lines)
+            out.write(ln)
+            out.write("\n")
+    return dest
 
 
 def filter_globals_sql(sql: str) -> str:
-    """Rewrite globals.sql so it is idempotent when roles/databases already exist.
+    """Rewrite globals.sql so it is idempotent when roles already exist.
 
-    pg_dumpall emits plain ``CREATE ROLE`` and ``CREATE DATABASE`` statements
-    that fail with *"already exists"* when the cluster was initialised by
-    docker-compose before the restore.  We wrap every such statement in a
-    DO-block that silently swallows ``duplicate_object`` / ``duplicate_database``
-    so the restore proceeds without errors even on a live cluster.
+    pg_dumpall emits plain ``CREATE ROLE`` statements that fail with
+    *"already exists"* when the cluster was initialised by docker-compose before
+    the restore.  We wrap each one in a DO-block that silently swallows
+    ``duplicate_object`` so the restore proceeds without errors on a live cluster.
+
+    ``CREATE DATABASE`` is deliberately left alone: PostgreSQL refuses to run it
+    inside a DO-block, and globals are applied with ON_ERROR_STOP=0 while the
+    manifest loop recreates each database explicitly, so a duplicate is harmless.
     """
     out: list[str] = []
     buf: list[str] = []
@@ -188,6 +218,17 @@ def filter_globals_sql(sql: str) -> str:
 
 def _sql_literal(value: str) -> str:
     return "'" + (value or "").replace("'", "''") + "'"
+
+
+_PG_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$-]{0,62}$")
+
+
+def safe_pg_identifier(name: str | None, *, what: str = "identifier") -> str:
+    """Validate a PostgreSQL identifier that came from backup metadata."""
+    cleaned = (name or "").strip().strip('"')
+    if not _PG_IDENT_RE.match(cleaned):
+        raise RuntimeError(f"Unsafe {what} in backup manifest: {name!r}")
+    return cleaned
 
 
 # TimescaleDB 2.29.0 replaced chunk.schema_name/table_name with relid.
@@ -271,7 +312,18 @@ def parse_timescale_wanted(versions: list[str] | None) -> str | None:
         v = (v or "").strip()
         if re.match(r"^\d+\.\d+(\.\d+)?$", v):
             scored.append(v)
-    return scored[0] if scored else (versions[0].strip() or None)
+    if scored:
+        return max(scored, key=_ts_sort_key)
+    return versions[0].strip() or None
+
+
+def _ts_sort_key(ver: str) -> tuple:
+    return (_ts_version_tuple(ver) or (-1, -1, -1), ver)
+
+
+def sort_ts_versions(versions) -> list[str]:
+    """Deduplicate and order Timescale versions numerically, not lexicographically."""
+    return sorted({(v or "").strip() for v in versions if (v or "").strip()}, key=_ts_sort_key)
 
 
 def _ts_version_tuple(ver: str | None) -> tuple[int, ...] | None:
@@ -824,7 +876,7 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
     if not zip_path.exists():
         raise FileNotFoundError(str(zip_path))
 
-    tmp = Path(tempfile.mkdtemp(prefix="pg-backup-analyze-"))
+    tmp = Path(tempfile.mkdtemp(prefix="pg-backup-analyze-", dir=str(WORK_DIR)))
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
             _safe_extract(zf, tmp)
@@ -843,7 +895,7 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
         elif (root / "db.sqlite3").exists() or list(root.rglob("db.sqlite3")):
             layout = "sqlite_file"
 
-        ts_versions = collect_backup_ts_versions(root)
+        ts_versions = sort_ts_versions(collect_backup_ts_versions(root))
         chunk_catalog_era = detect_backup_chunk_catalog_era(root)
         ts_min_version = detect_backup_ts_catalog_floor(root)
         # Official Timescale backups keep postgresql+asyncpg URL — use manifest / dump hints
@@ -917,9 +969,9 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
 
         if ts_versions:
             warnings.append({
-                "en": f"Backup TimescaleDB: {', '.join(sorted(set(ts_versions)))}. Wizard auto-aligns the image before restore.",
-                "fa": f"نسخه TimescaleDB بکاپ: {', '.join(sorted(set(ts_versions)))}. قبل از ریستور ایمیج سرور هم‌تراز می‌شود.",
-                "ru": f"TimescaleDB в бэкапе: {', '.join(sorted(set(ts_versions)))}. Образ будет выровнен автоматически.",
+                "en": f"Backup TimescaleDB: {', '.join(ts_versions)}. Wizard auto-aligns the image before restore.",
+                "fa": f"نسخه TimescaleDB بکاپ: {', '.join(ts_versions)}. قبل از ریستور ایمیج سرور هم‌تراز می‌شود.",
+                "ru": f"TimescaleDB в бэкапе: {', '.join(ts_versions)}. Образ будет выровнен автоматически.",
             })
         elif chunk_catalog_era == "schema_name":
             warnings.append({
@@ -967,7 +1019,7 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
             "convert_blocked": convert_blocked,
             "supported_target_dbs": sorted(SUPPORTED_RESTORE_DBS),
             "layout": layout,
-            "timescaledb_versions": sorted(set(ts_versions)),
+            "timescaledb_versions": ts_versions,
             "timescaledb_chunk_catalog": chunk_catalog_era,
             "timescaledb_min_version": ts_min_version,
             "table_counts": table_counts,
@@ -1003,9 +1055,12 @@ async def start_pasarguard_restore(params: dict) -> MigrationJob:
         "accept_experimental": True,
     }
 
+    _prune_finished_restore_jobs()
     job = MigrationJob()
     _restore_jobs[job.job_id] = job
-    asyncio.create_task(_run_restore(job, params, analysis))
+    task = asyncio.create_task(_run_restore(job, params, analysis))
+    _restore_tasks.add(task)
+    task.add_done_callback(_restore_tasks.discard)
     return job
 
 
@@ -1075,7 +1130,7 @@ def _read_current_env() -> str:
     return PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.exists() else ""
 
 
-def _set_env_var(text: str, key: str, value: str) -> str:
+def _set_env_var(text: str, key: str, value: str | None) -> str:
     """Set KEY=value and remove any duplicate prior assignments of KEY."""
     from app.services.env_migration import _set_env_var_simple
 
@@ -1201,6 +1256,9 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
     compose = PASARGUARD_DIR / "docker-compose.yml"
     wanted = parse_timescale_wanted([wanted]) or wanted
     if not compose.exists() or not wanted:
+        return
+    if not re.match(r"^\d+\.\d+(\.\d+)?$", wanted):
+        job.log(f"Ignoring unusable TimescaleDB version from backup: {wanted!r}")
         return
     text = compose.read_text(encoding="utf-8", errors="ignore")
     m = re.search(r"timescale/timescaledb:([^\s\"']+)", text)
@@ -1654,7 +1712,7 @@ async def _maybe_cross_db_after_restore(
                 )
             mig_params = migration_params_from_connection(backup_db, target_db, admin)
         else:
-            mig_params = {
+            mig_params: dict = {
                 "source_db": backup_db,
                 "target_db": target_db,
                 "target_db_user": user,
@@ -2024,36 +2082,31 @@ def _estimate_backup_table_counts(root: Path, layout: str | None = None) -> dict
         if src and src.exists():
             return _snapshot_sqlite_counts(src)
 
-    chunks: list[str] = []
+    paths: list[Path] = []
     single = root / "db_backup.sql"
     if single.exists():
-        try:
-            chunks.append(single.read_text(encoding="utf-8", errors="ignore"))
-        except Exception:
-            pass
+        paths.append(single)
     manifest = root / "pg_dump" / "manifest.tsv"
     if manifest.exists():
         for line in manifest.read_text(encoding="utf-8", errors="ignore").splitlines():
             parts = line.split("\t")
             if len(parts) < 4:
                 continue
-            dump_path = root / "pg_dump" / parts[3]
+            dump_path = root / "pg_dump" / safe_upload_name(parts[3])
             if dump_path.exists():
-                try:
-                    chunks.append(dump_path.read_text(encoding="utf-8", errors="ignore"))
-                except Exception:
-                    pass
-    if not chunks:
-        for p in (root / "pg_dump").glob("*.sql") if (root / "pg_dump").is_dir() else []:
-            try:
-                chunks.append(p.read_text(encoding="utf-8", errors="ignore"))
-            except Exception:
-                pass
+                paths.append(dump_path)
+    if not paths and (root / "pg_dump").is_dir():
+        paths.extend(sorted((root / "pg_dump").glob("*.sql")))
 
     merged: dict[str, int] = {}
-    for text in chunks:
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
         for k, v in _estimate_sql_table_counts(text).items():
             merged[k] = merged.get(k, 0) + v
+        del text
     return merged
 
 
@@ -2253,7 +2306,7 @@ async def _verify_restored_data(
     if not expected and require_any_data:
         job.log(
             "Warning: no backup row estimates; live counts: "
-            + ", ".join(f"{k}={v}" for k, v in actual.items() if v > 0) or "all empty"
+            + (", ".join(f"{k}={v}" for k, v in actual.items() if v > 0) or "all empty")
         )
         if critical_total == 0:
             raise RuntimeError(
@@ -2354,6 +2407,7 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         cur_user = read_env_var(current_env, "DB_USER")
         cur_name = read_env_var(current_env, "DB_NAME")
         cur_pg_pass = read_env_var(current_env, "POSTGRES_PASSWORD") or cur_db_pass
+        job.add_secret(cur_db_pass, cur_mysql_root, cur_pg_pass)
 
         # Stage archive into official backup dir for traceability
         PASARGUARD_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
@@ -2460,12 +2514,14 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         bak_user = read_env_var(backup_env, "DB_USER") or read_env_var(backup_env, "POSTGRES_USER")
         bak_name = read_env_var(backup_env, "DB_NAME") or read_env_var(backup_env, "POSTGRES_DB")
         bak_url = read_env_var(backup_env, "SQLALCHEMY_DATABASE_URL")
+        job.add_secret(bak_db_pass, bak_mysql_root, bak_pg_pass)
 
         job.set_progress(40, "Restoring database...")
         await _compose(job, "stop", "pasarguard", timeout=120)
 
         restore_engine = backup_db
         if backup_db == "sqlite" or analysis.get("layout") == "sqlite_file":
+            restore_engine = "sqlite"
             await _restore_sqlite(job, root)
             expected_counts = _snapshot_sqlite_counts(PASARGUARD_DATA / "db.sqlite3") or expected_counts
             if expected_counts:
@@ -2529,6 +2585,9 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                         bak_name or cur_name or "pasarguard",
                     )
         else:
+            raise RuntimeError(f"Unsupported backup database: {backup_db}")
+
+        if not restore_engine:
             raise RuntimeError(f"Unsupported backup database: {backup_db}")
 
         job.set_progress(75, "Merging configuration...")
@@ -2601,7 +2660,7 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                     for line in manifest.read_text(encoding="utf-8", errors="ignore").splitlines():
                         parts = line.split("\t")
                         if len(parts) >= 4:
-                            cand = root / "pg_dump" / parts[3]
+                            cand = root / "pg_dump" / safe_upload_name(parts[3])
                             if cand.exists():
                                 candidates.append(cand)
                 if not candidates and (root / "pg_dump").is_dir():
@@ -2658,6 +2717,10 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
 
         # After convert / same-engine: credentials must match what we wrote into .env
         final_engine_pre = final_db or target_db or restore_engine or backup_db
+        if not final_engine_pre:
+            raise RuntimeError(
+                "Could not determine the target database engine after restore"
+            )
         live_admin = (copy_report or {}).get("live_admin") or {}
         if needs_convert:
             verify_user = cur_user or live_admin.get("user") or "pasarguard"
@@ -2716,14 +2779,14 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         await _finalize_env_after_restore(
             job,
             install_env_snapshot,
-            final_db or target_db or restore_engine or backup_db,
+            final_engine_pre,
             verify_pass,
             verify_user,
             verify_db,
         )
         _env_completeness_checklist(
             job,
-            final_db or target_db or restore_engine or backup_db,
+            final_engine_pre,
             backup_env,
         )
 
@@ -2731,7 +2794,7 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             _relocate_sqlite_after_convert(job)
 
         job.set_progress(90, "Starting PasarGuard...")
-        final_engine = final_db or installed_db or backup_db
+        final_engine = final_db or installed_db or backup_db or final_engine_pre
         mini_params: dict = {
             "target_db": final_engine,
             "target_db_password": verify_pass,
@@ -3017,15 +3080,15 @@ async def _restore_mysql(
             if db:
                 cmd.append(db)
             job.log(f"Trying MySQL restore as {user}" + (f"/{db}" if db else "") + f" ({mysql_cmd})")
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=str(PASARGUARD_DIR),
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            data = dump.read_bytes()
-            out_b, _ = await proc.communicate(input=data)
+            with open(dump, "rb") as dump_fh:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(PASARGUARD_DIR),
+                    stdin=dump_fh,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                out_b, _ = await proc.communicate()
             out = (out_b or b"").decode("utf-8", errors="replace")
             if proc.returncode == 0:
                 job.log("MySQL/MariaDB dump restored")
@@ -3119,15 +3182,15 @@ async def _restore_postgres(
             svc, "psql", "-v", stop, "-U", user, "-d", db,
         ]
         if use_file:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=str(PASARGUARD_DIR),
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            data = use_file.read_bytes()
-            out_b, _ = await proc.communicate(input=data)
+            with open(use_file, "rb") as sql_fh:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(PASARGUARD_DIR),
+                    stdin=sql_fh,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                out_b, _ = await proc.communicate()
             return proc.returncode == 0, (out_b or b"").decode("utf-8", errors="replace")
         proc = await asyncio.create_subprocess_exec(
             *cmd, "-c", sql,
@@ -3227,19 +3290,21 @@ async def _restore_postgres(
             if len(parts) < 4:
                 continue
             dbn, owner, has_ts, filename = parts[0], parts[1], parts[2], parts[3]
+            filename = safe_upload_name(filename)
             dump_path = root / "pg_dump" / filename
             if not dump_path.exists():
                 raise RuntimeError(f"Missing dump file in backup: pg_dump/{filename}")
             # Skip role-only / globals-style dumps that aren't the app DB
             if filename.lower() in ("globals.sql", "roles.sql"):
                 continue
+            dbn = safe_pg_identifier(dbn, what="database name")
+            owner_q = safe_pg_identifier(owner or user, what="database owner")
             job.log(f"Restoring database {dbn}...")
             await psql(
                 f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                f"WHERE datname = '{dbn}' AND pid <> pg_backend_pid();"
+                f"WHERE datname = {_sql_literal(dbn)} AND pid <> pg_backend_pid();"
             )
             await psql(f'DROP DATABASE IF EXISTS "{dbn}";')
-            owner_q = owner or user
             ok, out = await psql(f'CREATE DATABASE "{dbn}" OWNER "{owner_q}";')
             if not ok:
                 raise RuntimeError(f"CREATE DATABASE {dbn} failed:\n{out[-1000:]}")
@@ -3258,12 +3323,8 @@ async def _restore_postgres(
                         f"{extract_psql_errors(out_ext)}"
                     )
                 await psql("SELECT timescaledb_pre_restore();", db=dbn)
-                filtered = dump_path.with_suffix(dump_path.suffix + ".filtered")
-                filtered.write_text(
-                    filter_timescaledb_extension_sql(
-                        dump_path.read_text(encoding="utf-8", errors="ignore")
-                    ),
-                    encoding="utf-8",
+                filtered = filter_timescaledb_extension_sql_file(
+                    dump_path, dump_path.with_suffix(dump_path.suffix + ".filtered"),
                 )
                 restore_file = filtered
                 ok, out = await restore_dump_file(dbn, restore_file, tolerant=False)
@@ -3275,13 +3336,9 @@ async def _restore_postgres(
                     await psql("SELECT timescaledb_post_restore();", db=dbn)
             elif dump_wants_ts and not use_timescale:
                 # Timescale backup → plain PostgreSQL (fallback if convert path not used)
-                filtered = dump_path.with_suffix(dump_path.suffix + ".pg-plain")
-                filtered.write_text(
-                    filter_timescaledb_extension_sql(
-                        dump_path.read_text(encoding="utf-8", errors="ignore"),
-                        strip_all=True,
-                    ),
-                    encoding="utf-8",
+                filtered = filter_timescaledb_extension_sql_file(
+                    dump_path, dump_path.with_suffix(dump_path.suffix + ".pg-plain"),
+                    strip_all=True,
                 )
                 restore_file = filtered
                 ok, out = await restore_dump_file(dbn, restore_file, tolerant=True)
@@ -3317,12 +3374,8 @@ async def _restore_postgres(
                             )
                         await psql("CREATE EXTENSION IF NOT EXISTS timescaledb;", db=dbn)
                         await psql("SELECT timescaledb_pre_restore();", db=dbn)
-                        filtered2 = dump_path.with_suffix(dump_path.suffix + ".filtered")
-                        filtered2.write_text(
-                            filter_timescaledb_extension_sql(
-                                dump_path.read_text(encoding="utf-8", errors="ignore")
-                            ),
-                            encoding="utf-8",
+                        filtered2 = filter_timescaledb_extension_sql_file(
+                            dump_path, dump_path.with_suffix(dump_path.suffix + ".filtered"),
                         )
                         ok, out = await restore_dump_file(dbn, filtered2, tolerant=False)
                         ok_post2, out_post2 = await psql("SELECT timescaledb_post_restore();", db=dbn)
@@ -3332,13 +3385,9 @@ async def _restore_postgres(
                             await psql("SELECT timescaledb_post_restore();", db=dbn)
                 if not ok and dump_wants_ts and not use_timescale:
                     job.log("Retrying Timescale→PG dump with tolerant import...")
-                    filtered3 = dump_path.with_suffix(dump_path.suffix + ".pg-plain-retry")
-                    filtered3.write_text(
-                        filter_timescaledb_extension_sql(
-                            dump_path.read_text(encoding="utf-8", errors="ignore"),
-                            strip_all=True,
-                        ),
-                        encoding="utf-8",
+                    filtered3 = filter_timescaledb_extension_sql_file(
+                        dump_path, dump_path.with_suffix(dump_path.suffix + ".pg-plain-retry"),
+                        strip_all=True,
                     )
                     ok, out = await restore_dump_file(dbn, filtered3, tolerant=True)
                 if not ok:
@@ -3370,11 +3419,8 @@ async def _restore_postgres(
                 f"Target cannot create timescaledb extension:\n{extract_psql_errors(out_ext)}"
             )
         await psql("SELECT timescaledb_pre_restore();", db=db_name)
-        filtered = root / "db_backup_filtered.sql"
-        dump_text = dump.read_text(encoding="utf-8", errors="ignore")
-        filtered.write_text(
-            filter_timescaledb_extension_sql(dump_text),
-            encoding="utf-8",
+        filtered = filter_timescaledb_extension_sql_file(
+            dump, root / "db_backup_filtered.sql",
         )
         ok, out = await restore_dump_file(db_name, filtered, tolerant=False)
         if not ok:
@@ -3382,7 +3428,7 @@ async def _restore_postgres(
             if not wanted and is_ts_catalog_mismatch_error(out or ""):
                 era = (
                     analysis.get("timescaledb_chunk_catalog")
-                    or detect_dump_chunk_catalog_era(dump_text)
+                    or detect_backup_chunk_catalog_era(root)
                 )
                 wanted = infer_ts_version_from_catalog_era(era) or TS_LAST_SCHEMA_NAME_CHUNK
             if wanted:
@@ -3402,10 +3448,7 @@ async def _restore_postgres(
                     )
                 await psql("CREATE EXTENSION IF NOT EXISTS timescaledb;", db=db_name)
                 await psql("SELECT timescaledb_pre_restore();", db=db_name)
-                filtered.write_text(
-                    filter_timescaledb_extension_sql(dump_text),
-                    encoding="utf-8",
-                )
+                filter_timescaledb_extension_sql_file(dump, filtered)
                 ok, out = await restore_dump_file(db_name, filtered, tolerant=False)
         ok_post_s, out_post_s = await psql("SELECT timescaledb_post_restore();", db=db_name)
         if not ok_post_s:
@@ -3413,13 +3456,8 @@ async def _restore_postgres(
             await asyncio.sleep(3)
             await psql("SELECT timescaledb_post_restore();", db=db_name)
     elif backup_has_ts and not use_timescale:
-        filtered = root / "db_backup_pg_plain.sql"
-        filtered.write_text(
-            filter_timescaledb_extension_sql(
-                dump.read_text(encoding="utf-8", errors="ignore"),
-                strip_all=True,
-            ),
-            encoding="utf-8",
+        filtered = filter_timescaledb_extension_sql_file(
+            dump, root / "db_backup_pg_plain.sql", strip_all=True,
         )
         ok, out = await restore_dump_file(db_name, filtered, tolerant=True)
     else:

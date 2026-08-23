@@ -238,7 +238,11 @@ def test_sync_mysql_roles_tries_old_password_then_succeeds():
             text = cmd if isinstance(cmd, str) else " ".join(cmd)
             seen.append(text)
             # Fail until we authenticate with the old/install password.
-            if '-p"oldroot"' in text or "-poldroot" in text:
+            if (
+                '-p"oldroot"' in text
+                or "-poldroot" in text
+                or "MYSQL_PWD=oldroot" in text
+            ):
                 return True, "ok"
             if "skip-grant-tables" in text:
                 raise AssertionError("skip-grant must not run when a candidate works")
@@ -383,8 +387,8 @@ def test_pg_restore_sync_mysql_uses_candidates_then_recovery():
     print("OK: pg_restore sync uses auth_passwords before recovery")
 
 
-def test_mysql_probe_shell_string_via_base_migrator():
-    """Regression: x-ui→MySQL died because BaseMigrator exec'd shell strings char-by-char."""
+def test_mysql_probe_uses_argv_without_password_in_args():
+    """The probe must run as argv (never a shell string) and keep the password out of argv."""
     import asyncio
     from unittest.mock import patch
 
@@ -399,10 +403,11 @@ def test_mysql_probe_shell_string_via_base_migrator():
         job = MigrationJob(job_id="probe1")
         migrator = Dummy(job, {})
         env = "MYSQL_ROOT_PASSWORD=secret\nMYSQL_DATABASE=pasarguard\n"
-        seen = {"shell": 0}
+        seen = {"exec": 0}
 
         class FakeProc:
             returncode = 0
+            pid = 4242
 
             def __init__(self):
                 class Out:
@@ -420,15 +425,17 @@ def test_mysql_probe_shell_string_via_base_migrator():
             def kill(self):
                 pass
 
-        async def fake_shell(cmd, **kwargs):
-            seen["shell"] += 1
-            assert isinstance(cmd, str)
-            assert "docker compose exec" in cmd
-            assert "mysql" in cmd or "mariadb" in cmd
+        async def fake_exec(*args, **kwargs):
+            seen["exec"] += 1
+            argv = [str(a) for a in args]
+            assert argv[:4] == ["docker", "compose", "exec", "-T"], argv
+            assert any(a.startswith("MYSQL_PWD=") for a in argv), argv
+            # password must never ride along as a -p<secret> argument
+            assert not any(a.startswith("-p") and len(a) > 2 for a in argv), argv
             return FakeProc()
 
-        async def fake_exec(*_a, **_k):
-            raise AssertionError("probe must use create_subprocess_shell for shell strings")
+        async def fake_shell(cmd, **kwargs):
+            raise AssertionError("probe must not build shell strings")
 
         with patch("app.services.db_auth.PASARGUARD_DIR", Path("/opt/pasarguard")), \
              patch("app.services.db_auth.resolve_db_service", return_value="mysql"), \
@@ -438,11 +445,12 @@ def test_mysql_probe_shell_string_via_base_migrator():
 
         assert conn["password"] == "secret"
         assert conn["user"] == "root"
-        assert seen["shell"] >= 1
-        assert not any("$ c d" in line for line in job.logs)
+        assert seen["exec"] >= 1
+        # the echoed command must not leak the password into the job log
+        assert not any("secret" in line for line in job.logs), job.logs
 
     asyncio.run(_run())
-    print("OK: mysql probe uses shell via BaseMigrator")
+    print("OK: mysql probe uses argv and hides the password")
 
 
 if __name__ == "__main__":
@@ -461,5 +469,5 @@ if __name__ == "__main__":
     test_sync_mysql_roles_tries_old_password_then_succeeds()
     test_sync_mysql_roles_skip_grant_recovery_when_locked_out()
     test_pg_restore_sync_mysql_uses_candidates_then_recovery()
-    test_mysql_probe_shell_string_via_base_migrator()
+    test_mysql_probe_uses_argv_without_password_in_args()
     print("\nAll db_auth tests passed")

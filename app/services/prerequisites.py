@@ -163,11 +163,11 @@ def get_marzban_db_type() -> str | None:
         if (MARZBAN_DATA / "db.sqlite3").exists():
             return "sqlite"
         return None
-    text = env_path.read_text(encoding="utf-8", errors="ignore")
-    if "mysql" in text or "pymysql" in text:
-        return "mysql"
+    text = env_path.read_text(encoding="utf-8", errors="ignore").lower()
     if "mariadb" in text:
         return "mariadb"
+    if "mysql" in text or "pymysql" in text:
+        return "mysql"
     if "sqlite" in text:
         return "sqlite"
     return None
@@ -328,7 +328,7 @@ def check_prerequisites(panel_id: str, marzban_mode: str | None = None, upload_i
                     f"Копия OK ({upload_analysis['total_files']} файлов)" if backup_ok and upload_analysis
                     else "Копия готова" if backup_ok
                     else "Данные Marzban на сервере" if has_marzban_data
-                    else "Загрузите копию на шаге 2",
+                    else "Загрузите копию на шаге 2"
                 ),
             },
         })

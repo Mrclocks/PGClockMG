@@ -22,10 +22,23 @@ def read_env_var(text: str, key: str) -> str | None:
     if not raw or raw.startswith("#"):
         return None
     if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ('"', "'"):
-        return raw[1:-1]
-    if "#" in raw:
-        raw = raw.split("#", 1)[0].strip()
+        inner = raw[1:-1]
+        if raw[0] == '"':
+            inner = re.sub(r'\\(["\\])', r"\1", inner)
+        return inner
+    inline = re.search(r"\s#", raw)
+    if inline:
+        raw = raw[: inline.start()].strip()
     return raw.strip().strip('"').strip("'") or None
+
+
+def _env_value_literal(value: str | None) -> str:
+    v = "" if value is None else str(value)
+    if '"' not in v and "\\" not in v:
+        return f'"{v}"'
+    if "'" not in v and "\\" not in v:
+        return f"'{v}'"
+    return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def mask_password(value: str) -> str:
@@ -648,7 +661,6 @@ def transform_marzban_env(
 
     text = re.sub(r"(?m)^(\s*MYSQL_DATABASE\s*=\s*)marzban\s*$", r"\1pasarguard", text, flags=re.I)
 
-    pg_env = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.exists() else None
     sqlalchemy_url = build_sqlalchemy_url_for_target(target_db, password_override)
     text = _set_sqlalchemy_url(text, sqlalchemy_url)
 
@@ -690,17 +702,17 @@ def _set_sqlalchemy_url(text: str, url: str) -> str:
     *last* value, so replacing only the first left the panel on sqlite after convert
     — data was in Timescale, UI looked empty.
     """
-    url_line = f'SQLALCHEMY_DATABASE_URL = "{url}"'
+    url_line = f"SQLALCHEMY_DATABASE_URL = {_env_value_literal(url)}"
     cleaned = re.sub(_sqlalchemy_url_line_pattern(), "", text)
     # Collapse excessive blank lines left by removals
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).rstrip() + "\n"
     return cleaned + url_line + "\n"
 
 
-def _set_env_var_simple(text: str, key: str, value: str) -> str:
+def _set_env_var_simple(text: str, key: str, value: str | None) -> str:
     """Set KEY=value, removing any prior duplicates of KEY (active or commented)."""
     pattern = rf"(?m)^\s*#?\s*{re.escape(key)}\s*=.*$"
-    line = f'{key}="{value}"'
+    line = f"{key}={_env_value_literal(value)}"
     if re.search(pattern, text):
         # Drop all existing assignments, then append a single authoritative line.
         text = re.sub(pattern, "", text)
@@ -724,7 +736,7 @@ def _compose_has_pgadmin() -> bool:
     return bool(re.search(r"^\s*pgadmin\s*:", body, re.MULTILINE))
 
 
-def _resolve_ssl_cert_path(path_str: str) -> Path | None:
+def _resolve_ssl_cert_path(path_str: str | None) -> Path | None:
     """Map container SSL paths to host paths under PasarGuard install."""
     from app.config import PASARGUARD_DIR
 
