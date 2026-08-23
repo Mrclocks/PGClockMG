@@ -23,12 +23,20 @@ function stopRestorePoll() {
 }
 
 /** Append-only log update (avoids rewriting huge textContent every poll). */
-function appendJobLogs(term, logs, cursor) {
-  if (!term || !Array.isArray(logs) || logs.length <= cursor.lastLen) return cursor.lastLen;
-  const chunk = logs.slice(cursor.lastLen).join('\n');
-  const prefix = cursor.lastLen > 0 && term.textContent ? '\n' : '';
+function appendJobLogs(term, logs, cursor, job) {
+  if (!term || !Array.isArray(logs) || !logs.length) return cursor.lastLen;
+  const start = Number.isInteger(job?.log_start) ? job.log_start : 0;
+  const total = Number.isInteger(job?.log_total) ? job.log_total : start + logs.length;
+  if (total <= cursor.lastLen) return cursor.lastLen;
+  const skip = Math.max(0, cursor.lastLen - start);
+  if (skip >= logs.length) {
+    cursor.lastLen = total;
+    return cursor.lastLen;
+  }
+  const chunk = logs.slice(skip).join('\n');
+  const prefix = term.textContent ? '\n' : '';
   term.appendChild(document.createTextNode(prefix + chunk));
-  cursor.lastLen = logs.length;
+  cursor.lastLen = total;
   term.scrollTop = term.scrollHeight;
   return cursor.lastLen;
 }
@@ -1208,11 +1216,11 @@ async function pollRestore(jobId) {
 
   const tick = async () => {
     try {
-      const res = await fetch(`/api/pasarguard/restore/${jobId}`);
+      const res = await fetch(`/api/pasarguard/restore/${jobId}?since=${cursor.lastLen}`);
       const job = await res.json();
       applyUiProgress(fill, text, job.progress || 0, '_restoreUiProgress');
       if (status) status.textContent = job.message || t('restore.restoring');
-      appendJobLogs(term, job.logs, cursor);
+      appendJobLogs(term, job.logs, cursor, job);
 
       if (job.status === 'success') {
         stopRestorePoll();

@@ -7,6 +7,7 @@ venv/
 backups/
 uploads/
 logs/
+work/
 tools/
 # Ship native redirect with the app (cloned PasarGuard tools stay ignored)
 !tools/pg_redirect/
@@ -23,3 +24,9 @@ scripts/_local_*
 _backup_test/
 *.sqlite3.bak*
 pgmig-backup-*/
+
+# macOS
+.DS_Store
+
+# generated at first start — never commit
+.access_token

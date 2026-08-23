@@ -21,6 +21,15 @@ MIGRATORS = {
 }
 
 _active_jobs: dict[str, MigrationJob] = {}
+_job_tasks: set[asyncio.Task] = set()
+MAX_FINISHED_JOBS = 20
+
+
+def _prune_finished_jobs() -> None:
+    finished = [j for j in _active_jobs.values() if j.status in ("success", "error")]
+    for job in finished[: max(0, len(finished) - MAX_FINISHED_JOBS)]:
+        _active_jobs.pop(job.job_id, None)
+        job.clear_log_callbacks()
 
 
 def get_job(job_id: str) -> MigrationJob | None:
@@ -47,7 +56,7 @@ class MigrationAlreadyRunning(RuntimeError):
 
 
 async def start_migration(params: dict, on_log: Callable | None = None) -> MigrationJob:
-    panel = params.get("source_panel")
+    panel = str(params.get("source_panel") or "")
     migrator_cls = MIGRATORS.get(panel)
     if not migrator_cls:
         raise ValueError(f"Unsupported panel: {panel}")
@@ -56,6 +65,7 @@ async def start_migration(params: dict, on_log: Callable | None = None) -> Migra
     if existing:
         raise MigrationAlreadyRunning(existing)
 
+    _prune_finished_jobs()
     job = MigrationJob()
     _active_jobs[job.job_id] = job
 
@@ -78,5 +88,7 @@ async def start_migration(params: dict, on_log: Callable | None = None) -> Migra
             job.log(traceback.format_exc())
             job.result = {"error": str(e)}
 
-    asyncio.create_task(_run())
+    task = asyncio.create_task(_run())
+    _job_tasks.add(task)
+    task.add_done_callback(_job_tasks.discard)
     return job

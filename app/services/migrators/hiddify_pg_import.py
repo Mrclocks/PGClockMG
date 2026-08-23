@@ -582,7 +582,7 @@ async def run_hiddify_user_import(migrator, users: list[dict], work: Path) -> di
                 ok, out = await migrator._run_cmd(cmd, timeout=timeout)
                 logs.append(f"# docker run network=container ok={ok}\n{(out or '')[-2000:]}")
             finally:
-                if env_file and env_file.name.endswith(".container.env"):
+                if env_file is not None:
                     try:
                         env_file.unlink(missing_ok=True)
                     except Exception:

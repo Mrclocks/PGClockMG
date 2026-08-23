@@ -150,10 +150,7 @@ def get_panel_access_info(prefer_host: str | None = None) -> dict:
     node_url = "https://github.com/PasarGuard/node"
     docs_url = "https://docs.pasarguard.org/en/panel/installation/"
 
-    # Preferred open URL: if domain/IP known → https://host:port/dashboard/
-    login_url = public_https if (domain or prefer or ssl or host) else localhost_url
-    if not ssl and not domain and not prefer:
-        login_url = localhost_url
+    login_url = public_https if (ssl or domain or prefer) else localhost_url
 
     guide = {
         "en": [
@@ -168,7 +165,7 @@ def get_panel_access_info(prefer_host: str | None = None) -> dict:
             {
                 "title": "2) Panel address",
                 "items": [
-                    {"text": "Dashboard URL:", "copy": login_url if ssl or domain or prefer else public_https},
+                    {"text": "Dashboard URL:", "copy": public_https},
                     {"text": "Config file:", "copy": env_path},
                     {"text": "Change port/path with UVICORN_PORT and UVICORN_ROOT_PATH in .env", "copy": None},
                 ],
@@ -201,7 +198,7 @@ def get_panel_access_info(prefer_host: str | None = None) -> dict:
             {
                 "title": "۲) آدرس پنل",
                 "items": [
-                    {"text": "لینک داشبورد:", "copy": login_url if ssl or domain or prefer else public_https},
+                    {"text": "لینک داشبورد:", "copy": public_https},
                     {"text": "مسیر فایل تنظیمات:", "copy": env_path},
                     {"text": "پورت و path را با UVICORN_PORT و UVICORN_ROOT_PATH در .env عوض کنید.", "copy": None},
                 ],
@@ -234,7 +231,7 @@ def get_panel_access_info(prefer_host: str | None = None) -> dict:
             {
                 "title": "2) Адрес панели",
                 "items": [
-                    {"text": "URL дашборда:", "copy": login_url if ssl or domain or prefer else public_https},
+                    {"text": "URL дашборда:", "copy": public_https},
                     {"text": "Файл настроек:", "copy": env_path},
                     {"text": "Порт/path: UVICORN_PORT и UVICORN_ROOT_PATH в .env", "copy": None},
                 ],

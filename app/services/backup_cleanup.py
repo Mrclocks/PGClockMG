@@ -28,6 +28,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.config import WORK_DIR
 from app.services.archive_guard import safe_extract as _guarded_zip_extract
 
 # Tables whose contents are traffic/usage history. Removing them costs the panel
@@ -533,7 +534,7 @@ def analyze_cleanup(zip_path: str | Path) -> dict:
         return {"available": False, "reason": "disabled", "rules": [], "default_rule_ids": []}
 
     all_ids = [r.id for r in CLEANUP_RULES]
-    tmp = Path(tempfile.mkdtemp(prefix="pg-cleanup-analyze-"))
+    tmp = Path(tempfile.mkdtemp(prefix="pg-cleanup-analyze-", dir=str(WORK_DIR)))
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
             _safe_extract(zf, tmp)
@@ -679,7 +680,7 @@ def apply_cleanup(
     tables = resolve_tables(rule_ids)
     applied = [r.id for r in CLEANUP_RULES if r.id in set(rule_ids or ())]
 
-    tmp = Path(tempfile.mkdtemp(prefix="pg-cleanup-apply-"))
+    tmp = Path(tempfile.mkdtemp(prefix="pg-cleanup-apply-", dir=str(WORK_DIR)))
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
             _safe_extract(zf, tmp)

@@ -120,12 +120,12 @@ def build_app_sqlalchemy_url(params: dict) -> str:
     if target_db in ("mysql", "mariadb"):
         user = conn.get("user") or "root"
         host = conn.get("host") or "127.0.0.1"
-        port = conn.get("port") or "3306"
+        port = conn.get("port") or _DEFAULT_PORTS[target_db]
         db = conn.get("database") or "pasarguard"
         return f"mysql+asyncmy://{user}:{pwd}@{host}:{port}/{db}"
     user = conn.get("user") or "postgres"
     host = conn.get("host") or "127.0.0.1"
-    port = conn.get("port") or "5432"
+    port = conn.get("port") or _DEFAULT_PORTS.get(target_db, "5432")
     db = conn.get("database") or "pasarguard"
     return f"postgresql+asyncpg://{user}:{pwd}@{host}:{port}/{db}"
 

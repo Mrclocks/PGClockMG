@@ -18,7 +18,7 @@
 #
 set -eo pipefail
 
-readonly SCRIPT_VERSION="3.2.5"
+readonly SCRIPT_VERSION="3.2.6"
 readonly INSTALL_DIR="${PG_MIGRATOR_INSTALL_DIR:-/opt/pg-migrator}"
 readonly SERVICE_NAME="pg-migrator"
 readonly SYSTEMD_DIR="${PG_MIGRATOR_SYSTEMD_DIR:-/etc/systemd/system}"
@@ -195,6 +195,7 @@ port_in_use() {
   fi
   if command -v netstat >/dev/null 2>&1; then
     netstat -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}\$" && return 0
+    netstat -an -p tcp 2>/dev/null | awk '$NF == "LISTEN" {print $4}' | grep -qE "[:.]${p}\$" && return 0
   fi
   return 1
 }
@@ -513,7 +514,13 @@ print_status() {
     port="$(detect_installed_port)"
     [[ -z "$port" ]] && port="$DEFAULT_WEB_PORT"
     if unit_active "$SERVICE_NAME"; then
-      status_row ok "Wizard" "v${app_ver} · http://${ip}:${port}"
+      local tok
+      tok="$(head -n1 "${INSTALL_DIR}/.access_token" 2>/dev/null | tr -d '[:space:]')"
+      if [[ -n "$tok" ]]; then
+        status_row ok "Wizard" "v${app_ver} · http://${ip}:${port}/?token=${tok}"
+      else
+        status_row ok "Wizard" "v${app_ver} · http://${ip}:${port}"
+      fi
     else
       status_row warn "Wizard" "v${app_ver} · port ${port} · service stopped"
     fi
@@ -751,22 +758,42 @@ open_firewall() {
   fi
 }
 
+# Access token the wizard generates on first start (file is created by the app).
+read_access_token() {
+  local f="${INSTALL_DIR}/.access_token" i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    [[ -s "$f" ]] && { head -n1 "$f" | tr -d '[:space:]'; return 0; }
+    sleep 1
+  done
+  return 0
+}
+
 print_success() {
-  local ip app_ver
+  local ip app_ver token url
   ip="$(server_ip)"
   app_ver="$(read_app_version)"
+  token="$(read_access_token)"
+  if [[ -n "$token" ]]; then
+    url="http://${ip}:${WEB_PORT}/?token=${token}"
+  else
+    url="http://${ip}:${WEB_PORT}"
+  fi
   log ""
   log "${C_GREEN}  ╔══════════════════════════════════════════════════════════╗${C_RESET}"
   log "${C_GREEN}  ║${C_RESET}   ${C_BOLD}${C_WHITE}PGClockMG is installed and running${C_RESET}                     ${C_GREEN}║${C_RESET}"
   log "${C_GREEN}  ╚══════════════════════════════════════════════════════════╝${C_RESET}"
   log ""
-  log "   ${C_BOLD}Web panel${C_RESET}   ${C_GREEN}http://${ip}:${WEB_PORT}${C_RESET}"
+  log "   ${C_BOLD}Web panel${C_RESET}   ${C_GREEN}${url}${C_RESET}"
   log "   ${C_DIM}Port${C_RESET}        ${WEB_PORT}"
   log "   ${C_DIM}Version${C_RESET}     ${app_ver}"
   log "   ${C_DIM}Path${C_RESET}        ${INSTALL_DIR}"
   log "   ${C_DIM}Service${C_RESET}     systemctl status ${SERVICE_NAME}"
+  if [[ -n "$token" ]]; then
+    log "   ${C_DIM}Token${C_RESET}       cat ${INSTALL_DIR}/.access_token"
+  fi
   log ""
-  log "   ${C_YELLOW}Next:${C_RESET} open the URL above and follow the wizard."
+  log "   ${C_YELLOW}Next:${C_RESET} open the URL above — it carries the access token."
+  log "   ${C_DIM}The wizard is protected: without that token nobody can reach it.${C_RESET}"
   if ! pasarguard_installed; then
     log "   ${C_YELLOW}Note:${C_RESET} PasarGuard is not installed yet — install the panel before migrating."
   fi

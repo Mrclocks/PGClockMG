@@ -1,0 +1,22 @@
+{
+  "include": [
+    "app",
+    "tools"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    ".venv",
+    "work",
+    "uploads",
+    "backups",
+    "logs"
+  ],
+  "extraPaths": [
+    ".",
+    "tools"
+  ],
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.13",
+  "typeCheckingMode": "basic"
+}
