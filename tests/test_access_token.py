@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import stat
 import sys
 from pathlib import Path
 
@@ -12,7 +14,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.main import app as fastapi_app
-from app.services.auth import COOKIE_NAME, get_token, token_matches
+from app.services import auth as auth_mod
+from app.services.auth import COOKIE_NAME, ensure_token, get_token, token_matches, token_path
+
 
 PROTECTED_GETS = (
     "/",
@@ -27,9 +31,14 @@ PROTECTED_GETS = (
 
 
 @pytest.fixture()
-def client():
+def client(tmp_path, monkeypatch):
+    token_file = tmp_path / ".access_token"
+    monkeypatch.setattr(auth_mod, "TOKEN_FILE", token_file)
+    auth_mod._cached_token = None
+    ensure_token()
     with TestClient(fastapi_app) as c:
         yield c
+    auth_mod._cached_token = None
 
 
 @pytest.mark.parametrize("path", PROTECTED_GETS)
@@ -91,3 +100,38 @@ def test_token_comparison_rejects_prefixes():
     assert not token_matches(token + "x")
     assert not token_matches("")
     assert not token_matches(None)
+
+
+def test_ensure_token_writes_readable_0600_file(tmp_path, monkeypatch):
+    token_file = tmp_path / ".access_token"
+    monkeypatch.setattr(auth_mod, "TOKEN_FILE", token_file)
+    auth_mod._cached_token = None
+    monkeypatch.delenv("PG_MIGRATOR_TOKEN", raising=False)
+
+    token = ensure_token()
+    assert token_file.is_file()
+    assert token_file.read_text(encoding="utf-8").strip() == token
+    mode = stat.S_IMODE(token_file.stat().st_mode)
+    assert mode == 0o600
+    assert token_path() == token_file
+
+    # Unauthenticated login page must still leave a recoverable file behind.
+    auth_mod._cached_token = None
+    with TestClient(fastapi_app) as c:
+        page = c.get("/")
+        assert page.status_code == 401
+        assert "cat " in page.text
+        assert str(token_file) in page.text
+        assert "?token=" in page.text
+    assert token_file.read_text(encoding="utf-8").strip() == token
+
+
+def test_env_token_is_persisted_to_disk(tmp_path, monkeypatch):
+    token_file = tmp_path / ".access_token"
+    monkeypatch.setattr(auth_mod, "TOKEN_FILE", token_file)
+    auth_mod._cached_token = None
+    monkeypatch.setenv("PG_MIGRATOR_TOKEN", "abcdef0123456789abcdef0123456789abcdef0123456789")
+
+    token = ensure_token()
+    assert token == "abcdef0123456789abcdef0123456789abcdef0123456789"
+    assert token_file.read_text(encoding="utf-8").strip() == token

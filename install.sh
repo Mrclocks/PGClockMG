@@ -18,7 +18,7 @@
 #
 set -eo pipefail
 
-readonly SCRIPT_VERSION="3.2.6"
+readonly SCRIPT_VERSION="3.2.7"
 readonly INSTALL_DIR="${PG_MIGRATOR_INSTALL_DIR:-/opt/pg-migrator}"
 readonly SERVICE_NAME="pg-migrator"
 readonly SYSTEMD_DIR="${PG_MIGRATOR_SYSTEMD_DIR:-/etc/systemd/system}"
@@ -515,11 +515,13 @@ print_status() {
     [[ -z "$port" ]] && port="$DEFAULT_WEB_PORT"
     if unit_active "$SERVICE_NAME"; then
       local tok
-      tok="$(head -n1 "${INSTALL_DIR}/.access_token" 2>/dev/null | tr -d '[:space:]')"
+      # Repair installs that never wrote .access_token (broken on early v3.2.6).
+      ensure_access_token >/dev/null 2>&1 || true
+      tok="$(read_access_token 2>/dev/null || true)"
       if [[ -n "$tok" ]]; then
         status_row ok "Wizard" "v${app_ver} · http://${ip}:${port}/?token=${tok}"
       else
-        status_row ok "Wizard" "v${app_ver} · http://${ip}:${port}"
+        status_row warn "Wizard" "v${app_ver} · http://${ip}:${port} · token missing"
       fi
     else
       status_row warn "Wizard" "v${app_ver} · port ${port} · service stopped"
@@ -743,6 +745,8 @@ WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   systemctl enable "${SERVICE_NAME}"
+  # Token file must exist before the service boots and before we print the URL.
+  ensure_access_token
   systemctl restart "${SERVICE_NAME}"
   ok "Service ${SERVICE_NAME} started"
 }
@@ -758,26 +762,44 @@ open_firewall() {
   fi
 }
 
-# Access token the wizard generates on first start (file is created by the app).
+# Write /opt/pg-migrator/.access_token (0600) if missing. Keep an existing token
+# across updates so the operator's bookmark keeps working.
+ensure_access_token() {
+  local f="${INSTALL_DIR}/.access_token" tok py
+  mkdir -p "$INSTALL_DIR"
+  if [[ -s "$f" ]]; then
+    chmod 600 "$f" 2>/dev/null || true
+    return 0
+  fi
+  if command -v openssl >/dev/null 2>&1; then
+    tok="$(openssl rand -hex 24)"
+  else
+    py="${INSTALL_DIR}/venv/bin/python"
+    [[ -x "$py" ]] || py="$(command -v python3 || true)"
+    [[ -n "$py" ]] || fail "Cannot generate access token (openssl/python missing)"
+    tok="$("$py" -c 'import secrets; print(secrets.token_hex(24))')"
+  fi
+  [[ -n "$tok" && ${#tok} -ge 32 ]] || fail "Failed to generate access token"
+  umask 077
+  printf '%s\n' "$tok" > "$f"
+  chmod 600 "$f"
+  ok "Access token created at ${f}"
+}
+
 read_access_token() {
-  local f="${INSTALL_DIR}/.access_token" i
-  for i in 1 2 3 4 5 6 7 8 9 10; do
-    [[ -s "$f" ]] && { head -n1 "$f" | tr -d '[:space:]'; return 0; }
-    sleep 1
-  done
-  return 0
+  local f="${INSTALL_DIR}/.access_token"
+  [[ -s "$f" ]] || return 1
+  head -n1 "$f" | tr -d '[:space:]'
 }
 
 print_success() {
   local ip app_ver token url
   ip="$(server_ip)"
   app_ver="$(read_app_version)"
+  ensure_access_token
   token="$(read_access_token)"
-  if [[ -n "$token" ]]; then
-    url="http://${ip}:${WEB_PORT}/?token=${token}"
-  else
-    url="http://${ip}:${WEB_PORT}"
-  fi
+  [[ -n "$token" ]] || fail "Access token missing after install — cannot print login URL"
+  url="http://${ip}:${WEB_PORT}/?token=${token}"
   log ""
   log "${C_GREEN}  ╔══════════════════════════════════════════════════════════╗${C_RESET}"
   log "${C_GREEN}  ║${C_RESET}   ${C_BOLD}${C_WHITE}PGClockMG is installed and running${C_RESET}                     ${C_GREEN}║${C_RESET}"
@@ -788,12 +810,11 @@ print_success() {
   log "   ${C_DIM}Version${C_RESET}     ${app_ver}"
   log "   ${C_DIM}Path${C_RESET}        ${INSTALL_DIR}"
   log "   ${C_DIM}Service${C_RESET}     systemctl status ${SERVICE_NAME}"
-  if [[ -n "$token" ]]; then
-    log "   ${C_DIM}Token${C_RESET}       cat ${INSTALL_DIR}/.access_token"
-  fi
+  log "   ${C_DIM}Token file${C_RESET}  ${INSTALL_DIR}/.access_token"
   log ""
-  log "   ${C_YELLOW}Next:${C_RESET} open the URL above — it carries the access token."
+  log "   ${C_YELLOW}Next:${C_RESET} open the URL above — the access token is already in the link."
   log "   ${C_DIM}The wizard is protected: without that token nobody can reach it.${C_RESET}"
+  log "   ${C_DIM}Recovery:${C_RESET} cat ${INSTALL_DIR}/.access_token"
   if ! pasarguard_installed; then
     log "   ${C_YELLOW}Note:${C_RESET} PasarGuard is not installed yet — install the panel before migrating."
   fi
@@ -832,6 +853,7 @@ action_install() {
   [[ -n "$errexit_was_on" ]] && set -e
 
   if (( rc == 0 )); then
+    ensure_access_token
     print_success
     return 0
   fi

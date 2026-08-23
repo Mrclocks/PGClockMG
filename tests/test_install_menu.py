@@ -194,13 +194,13 @@ def test_status_panel_reports_installed_stack():
             "services:\n  pasarguard:\n    image: ghcr.io/pasarguard/panel:v1.4.2\n"
             "  timescaledb:\n    image: timescale/timescaledb-ha:pg17\n",
         )
-        box.write_wizard(version="3.2.6", port=8443)
+        box.write_wizard(version="3.2.7", port=8443)
         box.write_redirect(port=443, extra_ports=[2083], panel="hiddify", ssl={"enabled": True})
 
         out = plain(box.run("print_status").stdout)
         assert "PasarGuard" in out and "v1.4.2" in out
         assert "timescaledb" in out
-        assert "3.2.6" in out and "8443" in out
+        assert "3.2.7" in out and "8443" in out
         assert "hiddify" in out and "443, 2083" in out
         assert "Installer" in out
         assert "was not found" not in out
@@ -234,11 +234,27 @@ def test_menu_lists_the_four_entries():
 # ── install action ────────────────────────────────────────────────────────────
 
 
+def test_ensure_access_token_writes_0600_file_once():
+    with sandbox() as tmp:
+        box = Sandbox(tmp)
+        out1 = plain(box.run("ensure_access_token").stdout + box.run("ensure_access_token").stdout)
+        path = box.install / ".access_token"
+        assert path.is_file(), out1
+        token = path.read_text(encoding="utf-8").strip()
+        assert re.fullmatch(r"[0-9a-f]{48}", token), token
+        mode = path.stat().st_mode & 0o777
+        assert mode == 0o600, oct(mode)
+        # Second call must keep the same token (updates must not rotate it).
+        box.run("ensure_access_token")
+        assert path.read_text(encoding="utf-8").strip() == token
+    print("OK: ensure_access_token creates a stable 0600 token file")
+
+
 def test_install_asks_the_port_then_installs_and_prints_the_url():
     """run_install is stubbed out — this covers the question → install → URL flow."""
     with sandbox() as tmp:
         box = Sandbox(tmp)
-        box.write_wizard(version="3.2.6", port=7000)
+        box.write_wizard(version="3.2.7", port=7000)
         code, out = box.run_on_tty(
             "run_install() { echo '[fake] installing...'; }\naction_install",
             ["8443\n"],
@@ -247,9 +263,13 @@ def test_install_asks_the_port_then_installs_and_prints_the_url():
         assert "Which port should the web panel listen on?" in out, out
         assert "[fake] installing..." in out, out
         assert "PGClockMG is installed and running" in out, out
-        assert re.search(r"Web panel\s+http://\S+:8443", out), out
+        assert re.search(r"Web panel\s+http://\S+:8443/\?token=[0-9a-f]{32,}", out), out
         assert "Port        8443" in out, out
-    print("OK: install asks the port, installs, then shows the panel URL")
+        assert (box.install / ".access_token").is_file(), "token file must exist after install"
+        token = (box.install / ".access_token").read_text(encoding="utf-8").strip()
+        assert len(token) >= 32
+        assert f"?token={token}" in out
+    print("OK: install asks the port, installs, then shows the panel URL with token")
 
 
 def test_install_failure_is_reported_without_killing_the_menu():

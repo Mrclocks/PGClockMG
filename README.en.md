@@ -1,4 +1,4 @@
-> ⚠️ **`v3.2.6`** — Always take a full backup before restore or migration.
+> ⚠️ **`v3.2.7`** — Always take a full backup before restore or migration.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <b>English</b> · <a href="README.ru.md">Русский</a>
@@ -43,9 +43,9 @@ PGClockMG is a web wizard for **backup restore** and **migration to PasarGuard**
 Panel URL after install: `http://SERVER_IP:PORT/?token=...`  
 Default port: `7000`
 
-From `v3.2.6` the wizard is protected by an **access token**. Without it nobody can
-reach the panel. The installer prints a ready-to-open URL that already includes the
-token. If you need it later:
+The wizard is protected by an **access token**. Without it nobody can reach the
+panel. The installer prints a ready-to-open URL that already includes the token
+(`http://SERVER_IP:PORT/?token=...`). Recovery:
 
 ```bash
 cat /opt/pg-migrator/.access_token
@@ -102,14 +102,14 @@ missing, the script says so — it only moves data into an existing panel.
 
 ### Opening the web panel (access token)
 
-From `v3.2.6` the wizard will not open without a token. After install, use the URL
-printed by the installer (`http://SERVER_IP:PORT/?token=...`). If you lost the link:
+The wizard will not open without a token. After install, use the URL printed by
+the installer (`http://SERVER_IP:PORT/?token=...`). If you lost the link:
 
 ```bash
 cat /opt/pg-migrator/.access_token
 ```
 
-The token is stored at `/opt/pg-migrator/.access_token` with mode `0600`.
+The token is created during install at `/opt/pg-migrator/.access_token` with mode `0600`.
 Do not paste it into public chats or screenshots.
 
 ### Old subscription links broken after a 3x-ui / Hiddify migration?

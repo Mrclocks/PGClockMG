@@ -2972,7 +2972,8 @@ async def _disable_nodes_after_restore(
                 job,
                 [
                     "docker", "compose", "exec", "-T",
-                    svc, bin_name, "-u", user, f"-p{password}",
+                    "-e", f"MYSQL_PWD={password}",
+                    svc, bin_name, "-u", user,
                     "-D", db_name, "-e", sql,
                 ],
                 cwd=str(PASARGUARD_DIR),
