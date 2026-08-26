@@ -873,12 +873,12 @@ def test_discover_third_party_mysql_named_dump():
         shutil.rmtree(td, ignore_errors=True)
 
 
-def test_analyze_third_party_netb_style_zip():
-    """netb_backuper-style zip: .env under opt/, dump not named db_backup.sql."""
+def test_analyze_third_party_nested_opt_zip():
+    """Third-party zip: .env under opt/pasarguard, dump not named db_backup.sql."""
     import tempfile
     import shutil
 
-    td = Path(tempfile.mkdtemp(prefix="pg-netb-"))
+    td = Path(tempfile.mkdtemp(prefix="pg-thirdparty-"))
     try:
         z = _zip_tree(td, {
             "opt/pasarguard/.env": (
@@ -886,15 +886,15 @@ def test_analyze_third_party_netb_style_zip():
                 'MYSQL_ROOT_PASSWORD="x"\n'
                 'DB_PASSWORD="x"\n'
             ),
-            "0826-1130.sql": MYSQL_PANEL_DUMP,
+            "panel.sql": MYSQL_PANEL_DUMP,
             "var/lib/pasarguard/xray_config.json": "{}",
         })
         a = _analyze_zip(z, "mysql")
         assert a["ok"] is True, a.get("warnings")
         assert a["layout"] == "single"
         assert a["backup_db"] == "mysql"
-        assert a["dump_name"] == "0826-1130.sql"
-        print("OK: analyze netb-style zip")
+        assert a["dump_name"] == "panel.sql"
+        print("OK: analyze nested opt/ third-party zip")
     finally:
         shutil.rmtree(td, ignore_errors=True)
 
@@ -1032,7 +1032,7 @@ if __name__ == "__main__":
     test_verify_settings_soft_when_critical_ok()
     test_verify_users_gap_still_hard_fails()
     test_discover_third_party_mysql_named_dump()
-    test_analyze_third_party_netb_style_zip()
+    test_analyze_third_party_nested_opt_zip()
     test_analyze_nested_sqlite_var_lib()
     test_analyze_mysql_env_without_sql_dump_fails()
     test_analyze_sql_gz_dump()
