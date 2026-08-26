@@ -367,22 +367,20 @@ def _count_value_tuples(statement: str) -> int:
 
 
 def _sql_files(root: Path) -> list[Path]:
-    """Dump files in a backup, both layouts."""
-    out: list[Path] = []
-    single = root / "db_backup.sql"
-    if single.is_file():
-        out.append(single)
-    pg_dir = root / "pg_dump"
-    if pg_dir.is_dir():
-        out.extend(sorted(p for p in pg_dir.glob("*.sql") if p.is_file()))
-    return out
+    """Dump files in a backup, official or third-party layouts."""
+    from app.services.pg_restore import _backup_dump_files
+
+    return _backup_dump_files(root)
 
 
 def _sqlite_files(root: Path) -> list[Path]:
-    found = [p for p in [root / "db.sqlite3"] if p.is_file()]
-    if not found:
-        found = sorted(p for p in root.rglob("db.sqlite3") if p.is_file())
-    return found
+    from app.services.pg_restore import resolve_backup_sqlite
+
+    found = resolve_backup_sqlite(root, env_db="sqlite")
+    if found and found.is_file():
+        return [found]
+    nested = sorted(p for p in root.rglob("db.sqlite3") if p.is_file())
+    return nested
 
 
 # --------------------------------------------------------------------------
@@ -449,17 +447,9 @@ def _safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
 
 def _find_backup_root(extracted: Path) -> Path:
     """Same root resolution the restore analyzer uses."""
-    for p in [extracted / ".env", *extracted.rglob(".env")]:
-        if p.is_file() and p.name == ".env":
-            return p.parent
-    for cand in [extracted, *extracted.iterdir()]:
-        if cand.is_dir() and (
-            (cand / "db_backup.sql").exists()
-            or (cand / "pg_dump" / "manifest.tsv").exists()
-            or (cand / "db.sqlite3").exists()
-        ):
-            return cand
-    return extracted
+    from app.services.pg_restore import _find_backup_root as _restore_root
+
+    return _restore_root(extracted)
 
 
 def measure_tree(root: Path, tables: set[str]) -> FilterStats:

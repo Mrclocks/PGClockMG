@@ -32,6 +32,7 @@ from app.services.pg_restore import (
     _parse_manifest_ts_versions,
     analyze_pasarguard_backup,
     explain_restore_error,
+    discover_backup_artifacts,
 )
 
 
@@ -816,6 +817,185 @@ def test_verify_users_gap_still_hard_fails():
     print("OK: users gap still hard-fails")
 
 
+MYSQL_PANEL_DUMP = (
+    "-- MySQL dump 10.13\n"
+    "CREATE TABLE `users` (\n"
+    "  `id` int NOT NULL,\n"
+    "  `username` varchar(64)\n"
+    ") ENGINE=InnoDB;\n"
+    "INSERT INTO `users` VALUES (1,'alice');\n"
+    "CREATE TABLE `hosts` (`id` int) ENGINE=InnoDB;\n"
+)
+
+
+def _zip_tree(base: Path, mapping: dict[str, bytes | str]) -> Path:
+    zpath = base / "backup.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        for name, content in mapping.items():
+            data = content.encode("utf-8") if isinstance(content, str) else content
+            zf.writestr(name, data)
+    return zpath
+
+
+def _analyze_zip(z: Path, installed_db: str = "mysql"):
+    import app.services.pg_restore as mod
+
+    orig_installed = mod.is_pasarguard_installed
+    orig_db = mod.get_pasarguard_db_type
+    mod.is_pasarguard_installed = lambda: True  # type: ignore
+    mod.get_pasarguard_db_type = lambda: installed_db  # type: ignore
+    try:
+        return analyze_pasarguard_backup(path=z)
+    finally:
+        mod.is_pasarguard_installed = orig_installed  # type: ignore
+        mod.get_pasarguard_db_type = orig_db  # type: ignore
+
+
+def test_discover_third_party_mysql_named_dump():
+    import tempfile
+    import shutil
+
+    td = Path(tempfile.mkdtemp(prefix="pg-discover-mysql-"))
+    try:
+        (td / "opt" / "pasarguard").mkdir(parents=True)
+        (td / "opt" / "pasarguard" / ".env").write_text(
+            'SQLALCHEMY_DATABASE_URL="mysql+asyncmy://u:p@127.0.0.1/pasarguard"\n'
+            'DB_PASSWORD="x"\n',
+            encoding="utf-8",
+        )
+        (td / "pasarguard.sql").write_text(MYSQL_PANEL_DUMP, encoding="utf-8")
+        art = discover_backup_artifacts(td, env_db="mysql")
+        assert art["layout"] == "single"
+        assert Path(art["dump_path"]).name == "pasarguard.sql"
+        assert art["dump_engine"] in ("mysql", "mariadb")
+        print("OK: discover third-party mysql dump by content")
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def test_analyze_third_party_netb_style_zip():
+    """netb_backuper-style zip: .env under opt/, dump not named db_backup.sql."""
+    import tempfile
+    import shutil
+
+    td = Path(tempfile.mkdtemp(prefix="pg-netb-"))
+    try:
+        z = _zip_tree(td, {
+            "opt/pasarguard/.env": (
+                'SQLALCHEMY_DATABASE_URL="mysql+asyncmy://u:p@127.0.0.1/pasarguard"\n'
+                'MYSQL_ROOT_PASSWORD="x"\n'
+                'DB_PASSWORD="x"\n'
+            ),
+            "0826-1130.sql": MYSQL_PANEL_DUMP,
+            "var/lib/pasarguard/xray_config.json": "{}",
+        })
+        a = _analyze_zip(z, "mysql")
+        assert a["ok"] is True, a.get("warnings")
+        assert a["layout"] == "single"
+        assert a["backup_db"] == "mysql"
+        assert a["dump_name"] == "0826-1130.sql"
+        print("OK: analyze netb-style zip")
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def test_analyze_nested_sqlite_var_lib():
+    import tempfile
+    import shutil
+    import sqlite3
+
+    td = Path(tempfile.mkdtemp(prefix="pg-sqlite-nested-"))
+    try:
+        db_bytes_path = td / "tmp.db"
+        conn = sqlite3.connect(str(db_bytes_path))
+        conn.execute("CREATE TABLE users (id INTEGER)")
+        conn.execute("CREATE TABLE alembic_version (version_num VARCHAR(32))")
+        conn.commit()
+        conn.close()
+        z = _zip_tree(td, {
+            "opt/pasarguard/.env": (
+                'SQLALCHEMY_DATABASE_URL="sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3"\n'
+            ),
+            "var/lib/pasarguard/db.sqlite3": db_bytes_path.read_bytes(),
+        })
+        a = _analyze_zip(z, "sqlite")
+        assert a["ok"] is True, a.get("warnings")
+        assert a["layout"] == "sqlite_file"
+        assert a["backup_db"] == "sqlite"
+        print("OK: analyze nested sqlite var/lib zip")
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def test_analyze_mysql_env_without_sql_dump_fails():
+    """Folder-only bot backup of a MySQL panel must still fail (no mysqldump)."""
+    import tempfile
+    import shutil
+
+    td = Path(tempfile.mkdtemp(prefix="pg-mysql-nodump-"))
+    try:
+        z = _zip_tree(td, {
+            "opt/pasarguard/.env": (
+                'SQLALCHEMY_DATABASE_URL="mysql+asyncmy://u:p@127.0.0.1/pasarguard"\n'
+                'DB_PASSWORD="x"\n'
+            ),
+            "var/lib/pasarguard/db.sqlite3": b"SQLite format 3\x00leftover",
+            "opt/pasarguard/docker-compose.yml": "services: {}\n",
+        })
+        a = _analyze_zip(z, "mysql")
+        assert a["ok"] is False
+        assert a["layout"] == "none"
+        msgs = " ".join(w.get("fa") or w.get("en") or "" for w in a.get("warnings") or [])
+        assert "دامپ" in msgs or "dump" in msgs.lower()
+        print("OK: mysql env without sql dump still fails")
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def test_analyze_sql_gz_dump():
+    import gzip
+    import tempfile
+    import shutil
+
+    td = Path(tempfile.mkdtemp(prefix="pg-sqlgz-"))
+    try:
+        gz = gzip.compress(MYSQL_PANEL_DUMP.encode("utf-8"))
+        z = _zip_tree(td, {
+            ".env": (
+                'SQLALCHEMY_DATABASE_URL="mysql+asyncmy://u:p@127.0.0.1/pasarguard"\n'
+                'DB_PASSWORD="x"\n'
+            ),
+            "backup.sql.gz": gz,
+        })
+        a = _analyze_zip(z, "mysql")
+        assert a["ok"] is True, a.get("warnings")
+        assert a["layout"] == "single"
+        assert a["dump_name"] == "backup.sql.gz"
+        print("OK: analyze .sql.gz dump")
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def test_discover_ignores_xui_sqlite():
+    import tempfile
+    import shutil
+    import sqlite3
+
+    td = Path(tempfile.mkdtemp(prefix="pg-xui-"))
+    try:
+        db = td / "x-ui.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute("CREATE TABLE inbounds (id INTEGER)")
+        conn.execute("CREATE TABLE client_traffics (id INTEGER)")
+        conn.commit()
+        conn.close()
+        art = discover_backup_artifacts(td, env_db="mysql")
+        assert art["layout"] == "none"
+        print("OK: 3x-ui sqlite is not treated as PasarGuard dump")
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_soft_db_family_matrix()
     test_ts_to_ts_syncs_alembic_before_panel()
@@ -851,4 +1031,10 @@ if __name__ == "__main__":
     test_filter_globals_sql_makes_create_role_idempotent()
     test_verify_settings_soft_when_critical_ok()
     test_verify_users_gap_still_hard_fails()
+    test_discover_third_party_mysql_named_dump()
+    test_analyze_third_party_netb_style_zip()
+    test_analyze_nested_sqlite_var_lib()
+    test_analyze_mysql_env_without_sql_dump_fails()
+    test_analyze_sql_gz_dump()
+    test_discover_ignores_xui_sqlite()
     print("\nAll pg_restore tests passed")

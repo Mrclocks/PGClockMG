@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import os
 import re
 import shutil
@@ -508,14 +509,36 @@ def ts_pin_for_floor(min_ver: str, catalog_era: str | None = None) -> str:
 
 
 def _backup_dump_files(root: Path, *, max_files: int = 8) -> list[Path]:
-    """Dump SQL files in a backup, both single-file and pg_dump/ layouts."""
+    """Dump SQL files in a backup, both official and third-party layouts."""
     candidates: list[Path] = []
-    single = root / "db_backup.sql"
-    if single.is_file():
-        candidates.append(single)
+    seen: set[Path] = set()
+
+    def _add(path: Path | None) -> None:
+        if path is None:
+            return
+        path = Path(path)
+        if not path.is_file():
+            return
+        if path.name.lower().endswith(".gz"):
+            path = _ensure_plain_sql(path)
+        key = path.resolve() if path.exists() else path
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(path)
+
+    _add(root / "db_backup.sql")
     pg = root / "pg_dump"
     if pg.is_dir():
-        candidates.extend(sorted(p for p in pg.glob("*.sql") if p.is_file()))
+        for p in sorted(pg.glob("*.sql")):
+            _add(p)
+    art = discover_backup_artifacts(root)
+    _add(art.get("dump_path"))
+    if art.get("layout") == "multi" and art.get("dump_path"):
+        pg_dir = Path(art["dump_path"]).parent
+        if pg_dir.is_dir():
+            for p in sorted(pg_dir.glob("*.sql")):
+                _add(p)
     return candidates[:max_files]
 
 
@@ -552,13 +575,7 @@ def _iter_backup_sql_texts(root: Path, *, max_files: int = 8, max_bytes: int = 1
     statements often appear late in pg_dump output.
     """
     texts: list[str] = []
-    candidates: list[Path] = []
-    single = root / "db_backup.sql"
-    if single.exists():
-        candidates.append(single)
-    pg = root / "pg_dump"
-    if pg.is_dir():
-        candidates.extend(sorted(p for p in pg.glob("*.sql") if p.is_file()))
+    candidates = _backup_dump_files(root, max_files=max_files)
     for path in candidates[:max_files]:
         try:
             size = path.stat().st_size
@@ -578,13 +595,7 @@ def _iter_backup_sql_texts(root: Path, *, max_files: int = 8, max_bytes: int = 1
 
 def detect_backup_chunk_catalog_era(root: Path) -> str | None:
     """Scan backup dumps for Timescale chunk catalog era."""
-    candidates: list[Path] = []
-    single = root / "db_backup.sql"
-    if single.exists():
-        candidates.append(single)
-    pg = root / "pg_dump"
-    if pg.is_dir():
-        candidates.extend(sorted(p for p in pg.glob("*.sql") if p.is_file()))
+    candidates = _backup_dump_files(root, max_files=8)
     for path in candidates[:8]:
         era = _scan_file_chunk_catalog_era(path)
         if era:
@@ -828,19 +839,301 @@ def _find_env(root: Path) -> Path | None:
     return None
 
 
+def _official_dump_here(path: Path) -> bool:
+    return (
+        (path / "db_backup.sql").is_file()
+        or (path / "pg_dump" / "manifest.tsv").is_file()
+        or (path / "db.sqlite3").is_file()
+    )
+
+
 def _find_backup_root(extracted: Path) -> Path:
-    """Prefer directory that contains .env + dump artifacts."""
+    """Prefer official co-located .env+dump; otherwise the extract top.
+
+    Third-party bots zip /opt/pasarguard + /var/lib/pasarguard, so .env and the
+    dump live in different folders. Searching only next to .env misses them.
+    """
     env = _find_env(extracted)
-    if env:
+    if env and _official_dump_here(env.parent):
         return env.parent
     for cand in [extracted, *extracted.iterdir()]:
-        if cand.is_dir() and (
-            (cand / "db_backup.sql").exists()
-            or (cand / "pg_dump" / "manifest.tsv").exists()
-            or (cand / "db.sqlite3").exists()
-        ):
+        if cand.is_dir() and _official_dump_here(cand):
             return cand
     return extracted
+
+
+_SKIP_BACKUP_DIR_NAMES = frozenset({
+    ".git", "node_modules", "__pycache__", "proc", "sys", "dev",
+})
+_SKIP_SQL_NAMES = frozenset({
+    "globals.sql", "roles.sql",
+    "db_backup_filtered.sql", "db_backup_pg_plain.sql",
+})
+_PANEL_SQL_HINTS = (
+    "alembic_version",
+    "users_groups_association",
+    "inbounds_groups_association",
+    "core_configs",
+    "create table users",
+    "create table `users`",
+    'create table "users"',
+    "insert into users",
+    "insert into `users`",
+    "copy public.users",
+    "create table hosts",
+    "create table nodes",
+    "create table admins",
+    "create table inbounds",
+)
+
+
+def _backup_rel_parts(path: Path, root: Path) -> tuple[str, ...]:
+    try:
+        return path.relative_to(root).parts
+    except ValueError:
+        return path.parts
+
+
+def _is_sqlite_file(path: Path) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(16).startswith(b"SQLite format 3")
+    except OSError:
+        return False
+
+
+def _open_sql_text(path: Path):
+    """Text-mode reader for .sql or .sql.gz dumps."""
+    name = path.name.lower()
+    if name.endswith(".gz"):
+        return gzip.open(path, "rt", encoding="utf-8", errors="ignore")
+    return open(path, "r", encoding="utf-8", errors="ignore")
+
+
+def _read_sql_head(path: Path, max_bytes: int = 96_000) -> str:
+    try:
+        with _open_sql_text(path) as fh:
+            return fh.read(max_bytes)
+    except OSError:
+        return ""
+
+
+def _ensure_plain_sql(path: Path) -> Path:
+    """Decompress .sql.gz next to the archive so mysql/psql can read it."""
+    name = path.name.lower()
+    if not name.endswith(".gz"):
+        return path
+    dest_name = path.name[: -3] if name.endswith(".gz") else path.name
+    if not dest_name.lower().endswith(".sql"):
+        dest_name = dest_name + ".sql"
+    dest = path.parent / dest_name
+    if dest.exists() and dest.stat().st_size > 0:
+        return dest
+    with gzip.open(path, "rb") as src, open(dest, "wb") as out:
+        shutil.copyfileobj(src, out)
+    return dest
+
+
+def _sniff_sql_dump(path: Path) -> tuple[int, str | None]:
+    """Score a file as a DB dump and guess engine. (0, None) = not a dump."""
+    name = path.name.lower()
+    if name in _SKIP_SQL_NAMES:
+        return 0, None
+    if not (name.endswith(".sql") or name.endswith(".sql.gz") or name.endswith(".sql.gzip")):
+        return 0, None
+    head = _read_sql_head(path)
+    if not head or not head.strip():
+        return 0, None
+    low = head.lower()
+    score = 0
+    engine: str | None = None
+    if "timescaledb" in low:
+        engine = "timescaledb"
+        score += 8
+    elif "-- postgresql database dump" in low or "copy public." in low or "set statement_timeout" in low:
+        engine = "postgresql"
+        score += 6
+    elif "-- mariadb dump" in low or "engine=aria" in low:
+        engine = "mariadb"
+        score += 6
+    elif "-- mysql dump" in low or "engine=innodb" in low or "lock tables" in low or "/*!40101" in low:
+        engine = "mysql"
+        score += 6
+    elif "create table" in low or "insert into" in low or re.search(r"^\s*copy\s+", low, re.M):
+        score += 2
+        if "`" in head:
+            engine = "mysql"
+        elif "copy " in low:
+            engine = "postgresql"
+    if score <= 0:
+        return 0, None
+    for hint in _PANEL_SQL_HINTS:
+        if hint in low:
+            score += 3
+    if name == "db_backup.sql":
+        score += 10
+    elif any(tok in name for tok in ("dump", "backup", "pasarguard", "marzban", "database")):
+        score += 4
+    return score, engine
+
+
+def _sqlite_panel_score(path: Path) -> int:
+    if not _is_sqlite_file(path):
+        return 0
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            tables = {
+                str(r[0])
+                for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+        finally:
+            conn.close()
+    except Exception:
+        return 1
+    score = 1
+    for table in ("users", "hosts", "nodes", "alembic_version", "admins", "inbounds", "groups"):
+        if table in tables:
+            score += 3
+    # 3x-ui dumps belong on the migrator, not PasarGuard restore
+    if "client_traffics" in tables and "users" not in tables:
+        score -= 6
+    return score
+
+
+def _has_raw_mysql_datadir(root: Path) -> bool:
+    for p in root.rglob("ibdata1"):
+        if p.is_file() and not _path_skipped_dir(p, root):
+            return True
+    return False
+
+
+def _path_skipped_dir(path: Path, root: Path) -> bool:
+    return any(part in _SKIP_BACKUP_DIR_NAMES for part in _backup_rel_parts(path, root)[:-1])
+
+
+def _pick_pg_dump_app_file(pg_dir: Path) -> Path | None:
+    manifest = pg_dir / "manifest.tsv"
+    if manifest.is_file():
+        for line in manifest.read_text(encoding="utf-8", errors="ignore").splitlines():
+            parts = line.split("\t")
+            if len(parts) < 4:
+                continue
+            name = safe_upload_name(parts[3])
+            if name.lower() in _SKIP_SQL_NAMES:
+                continue
+            cand = pg_dir / name
+            if cand.is_file():
+                return cand
+    sqls = sorted(
+        p for p in pg_dir.glob("*.sql")
+        if p.is_file() and p.name.lower() not in _SKIP_SQL_NAMES
+    )
+    return sqls[0] if sqls else None
+
+
+def discover_backup_artifacts(root: Path, *, env_db: str | None = None) -> dict:
+    """Locate a dump/sqlite in official PasarGuard zips *or* third-party layouts."""
+    result: dict = {
+        "layout": "none",
+        "dump_path": None,
+        "sqlite_path": None,
+        "dump_engine": None,
+        "has_raw_mysql_datadir": False,
+    }
+    env_db = (env_db or "").strip().lower() or None
+    server_env = env_db in ("mysql", "mariadb", "postgresql", "timescaledb")
+
+    def _set_multi(pg_dir: Path) -> dict:
+        result["layout"] = "multi"
+        result["dump_path"] = _pick_pg_dump_app_file(pg_dir)
+        result["dump_engine"] = env_db if env_db in ("postgresql", "timescaledb") else "postgresql"
+        if result["dump_path"]:
+            sniffed = _sniff_sql_dump(result["dump_path"])[1]
+            if sniffed:
+                result["dump_engine"] = sniffed
+        return result
+
+    def _set_single(path: Path, engine: str | None) -> dict:
+        result["layout"] = "single"
+        result["dump_path"] = path
+        result["dump_engine"] = engine or env_db
+        return result
+
+    def _set_sqlite(path: Path) -> dict:
+        result["layout"] = "sqlite_file"
+        result["sqlite_path"] = path
+        result["dump_engine"] = "sqlite"
+        return result
+
+    # --- official names at this root ---
+    if (root / "pg_dump" / "manifest.tsv").is_file():
+        return _set_multi(root / "pg_dump")
+    official_sql = root / "db_backup.sql"
+    if official_sql.is_file():
+        return _set_single(official_sql, _sniff_sql_dump(official_sql)[1])
+    official_sqlite = root / "db.sqlite3"
+    if official_sqlite.is_file() and _is_sqlite_file(official_sqlite) and not server_env:
+        return _set_sqlite(official_sqlite)
+
+    # --- nested official names (wrapper folder / var/lib tree) ---
+    for man in root.rglob("manifest.tsv"):
+        if _path_skipped_dir(man, root):
+            continue
+        if man.parent.name == "pg_dump" and man.is_file():
+            return _set_multi(man.parent)
+    for sql in root.rglob("db_backup.sql"):
+        if sql.is_file() and not _path_skipped_dir(sql, root):
+            return _set_single(sql, _sniff_sql_dump(sql)[1])
+
+    sql_candidates: list[tuple[int, Path, str | None]] = []
+    sqlite_candidates: list[tuple[int, Path]] = []
+    for path in root.rglob("*"):
+        if not path.is_file() or _path_skipped_dir(path, root):
+            continue
+        name = path.name.lower()
+        if name.endswith(".sql") or name.endswith(".sql.gz") or name.endswith(".sql.gzip"):
+            score, engine = _sniff_sql_dump(path)
+            if score > 0:
+                sql_candidates.append((score, path, engine))
+            continue
+        if name.endswith((".sqlite3", ".sqlite", ".db")) or name == "db.sqlite3":
+            score = _sqlite_panel_score(path)
+            if score > 0:
+                sqlite_candidates.append((score, path))
+
+    if sql_candidates:
+        sql_candidates.sort(key=lambda x: (-x[0], len(str(x[1]))))
+        _score, path, engine = sql_candidates[0]
+        return _set_single(path, engine)
+
+    # Leftover sqlite next to a MySQL/PG .env is not the dump — bots zip /var/lib
+    # without running mysqldump. Only accept sqlite when the backup is (or looks) sqlite.
+    sqlite_candidates.sort(key=lambda x: (-x[0], len(str(x[1]))))
+    if sqlite_candidates and not server_env:
+        best_score, best_path = sqlite_candidates[0]
+        if best_score >= 1:
+            return _set_sqlite(best_path)
+    elif sqlite_candidates and server_env:
+        # Keep the path for a clearer error; do not treat it as the dump.
+        result["sqlite_path"] = sqlite_candidates[0][1]
+
+    result["has_raw_mysql_datadir"] = _has_raw_mysql_datadir(root)
+    return result
+
+
+def resolve_backup_sql_dump(root: Path, *, env_db: str | None = None) -> Path | None:
+    art = discover_backup_artifacts(root, env_db=env_db)
+    path = art.get("dump_path")
+    if not path:
+        return None
+    return _ensure_plain_sql(Path(path))
+
+
+def resolve_backup_sqlite(root: Path, *, env_db: str | None = None) -> Path | None:
+    art = discover_backup_artifacts(root, env_db=env_db)
+    path = art.get("sqlite_path")
+    return Path(path) if path else None
 
 
 def _parse_manifest_ts_versions(root: Path) -> list[str]:
@@ -880,44 +1173,51 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
             _safe_extract(zf, tmp)
-        root = _find_backup_root(tmp)
-        env_path = _find_env(root)
+        # Search the whole extract. Third-party bots nest .env under opt/pasarguard
+        # and the dump at the zip root (or the reverse).
+        env_path = _find_env(tmp)
         env_text = env_path.read_text(encoding="utf-8", errors="ignore") if env_path else ""
         # Backup .env must NOT use live compose (that would mislabel every PG backup as Timescale)
         db_type = detect_db_type_from_env(env_text, prefer_compose=False) if env_text else None
         summary = extract_env_summary(env_text) if env_text else None
 
-        layout = "none"
-        if (root / "pg_dump" / "manifest.tsv").exists():
-            layout = "multi"
-        elif (root / "db_backup.sql").exists():
-            layout = "single"
-        elif (root / "db.sqlite3").exists() or list(root.rglob("db.sqlite3")):
-            layout = "sqlite_file"
+        artifacts = discover_backup_artifacts(tmp, env_db=db_type)
+        layout = artifacts["layout"]
+        if not db_type:
+            db_type = artifacts.get("dump_engine")
+        elif db_type == "postgresql" and artifacts.get("dump_engine") == "timescaledb":
+            db_type = "timescaledb"
 
-        ts_versions = sort_ts_versions(collect_backup_ts_versions(root))
-        chunk_catalog_era = detect_backup_chunk_catalog_era(root)
-        ts_min_version = detect_backup_ts_catalog_floor(root)
+        ts_versions = sort_ts_versions(collect_backup_ts_versions(tmp))
+        chunk_catalog_era = detect_backup_chunk_catalog_era(tmp)
+        ts_min_version = detect_backup_ts_catalog_floor(tmp)
         # Official Timescale backups keep postgresql+asyncpg URL — use manifest / dump hints
         if db_type in (None, "postgresql"):
             if ts_versions or chunk_catalog_era or ts_min_version:
                 db_type = "timescaledb"
-            elif _backup_sql_mentions_timescale(root):
+            elif _backup_sql_mentions_timescale(tmp):
                 db_type = "timescaledb"
 
-        table_counts = _estimate_backup_table_counts(root, layout)
+        table_counts = _estimate_backup_table_counts(tmp, layout)
         installed = is_pasarguard_installed()
         installed_db = get_pasarguard_db_type() if installed else None
 
         warnings: list[dict] = []
         ok = True
         if not env_path:
-            ok = False
-            warnings.append({
-                "en": "Backup is missing .env — cannot detect database type",
-                "fa": "بکاپ فاقد .env است — نوع دیتابیس مشخص نیست",
-                "ru": "В бэкапе нет .env — тип БД неизвестен",
-            })
+            if layout != "none" and db_type:
+                warnings.append({
+                    "en": "Backup has no .env — live panel settings are kept; only the database is restored.",
+                    "fa": "بکاپ فاقد .env است — تنظیمات پنل نصب‌شده می‌ماند؛ فقط دیتابیس ریستور می‌شود.",
+                    "ru": "В бэкапе нет .env — настройки панели сохранятся; восстановится только БД.",
+                })
+            else:
+                ok = False
+                warnings.append({
+                    "en": "Backup is missing .env — cannot detect database type",
+                    "fa": "بکاپ فاقد .env است — نوع دیتابیس مشخص نیست",
+                    "ru": "В бэкапе нет .env — тип БД неизвестен",
+                })
         if not installed:
             ok = False
             warnings.append({
@@ -959,13 +1259,20 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
                     "ru": f"Тип БД отличается (backup={db_type}, installed={installed_db}). При восстановлении будет автоконвертация.",
                 })
 
-        if layout == "none" and db_type != "sqlite":
+        if layout == "none":
             ok = False
-            warnings.append({
-                "en": "No database dump found in backup (expected db_backup.sql or pg_dump/).",
-                "fa": "دامپ دیتابیس داخل بکاپ پیدا نشد (db_backup.sql یا pg_dump/).",
-                "ru": "Дамп БД в бэкапе не найден.",
-            })
+            if artifacts.get("has_raw_mysql_datadir"):
+                warnings.append({
+                    "en": "Zip has a raw MySQL data directory, not an SQL dump. The backup script must run mysqldump.",
+                    "fa": "این زیپ پوشه خام MySQL دارد، نه دامپ SQL. اسکریپت بکاپ باید mysqldump بگیرد.",
+                    "ru": "В zip сырой каталог MySQL, а не SQL-дамп. Скрипт должен делать mysqldump.",
+                })
+            else:
+                warnings.append({
+                    "en": "No database dump in the zip. A .sql dump or sqlite file is required (any filename).",
+                    "fa": "دامپ دیتابیس داخل بکاپ پیدا نشد. یک فایل .sql یا sqlite لازم است (اسم فایل مهم نیست).",
+                    "ru": "В архиве нет дампа БД. Нужен файл .sql или sqlite (имя файла не важно).",
+                })
 
         if ts_versions:
             warnings.append({
@@ -1019,6 +1326,10 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
             "convert_blocked": convert_blocked,
             "supported_target_dbs": sorted(SUPPORTED_RESTORE_DBS),
             "layout": layout,
+            "dump_name": (
+                Path(artifacts["dump_path"]).name if artifacts.get("dump_path")
+                else (Path(artifacts["sqlite_path"]).name if artifacts.get("sqlite_path") else None)
+            ),
             "timescaledb_versions": ts_versions,
             "timescaledb_chunk_catalog": chunk_catalog_era,
             "timescaledb_min_version": ts_min_version,
@@ -2022,16 +2333,9 @@ def _snapshot_sqlite_counts(path: Path) -> dict[str, int]:
 
 
 def _backup_sql_mentions_timescale(root: Path) -> bool:
-    candidates: list[Path] = []
-    single = root / "db_backup.sql"
-    if single.exists():
-        candidates.append(single)
-    pg = root / "pg_dump"
-    if pg.is_dir():
-        candidates.extend(p for p in pg.glob("*.sql") if p.is_file())
-    for path in candidates[:8]:
+    for path in _backup_dump_files(root)[:8]:
         try:
-            head = path.read_text(encoding="utf-8", errors="ignore")[:200_000]
+            head = _read_sql_head(path, 200_000)
         except Exception:
             continue
         if re.search(r"timescaledb", head, re.I):
@@ -2074,34 +2378,21 @@ def _estimate_sql_table_counts(sql_text: str) -> dict[str, int]:
 
 def _estimate_backup_table_counts(root: Path, layout: str | None = None) -> dict[str, int]:
     """Estimate critical table row counts from backup files before restore."""
-    if layout == "sqlite_file" or (root / "db.sqlite3").exists() or list(root.rglob("db.sqlite3")):
-        src = root / "db.sqlite3"
+    art = discover_backup_artifacts(root)
+    sqlite_src = art.get("sqlite_path")
+    if layout == "sqlite_file" or sqlite_src:
+        src = Path(sqlite_src) if sqlite_src else root / "db.sqlite3"
         if not src.exists():
             found = list(root.rglob("db.sqlite3"))
             src = found[0] if found else None
         if src and src.exists():
             return _snapshot_sqlite_counts(src)
 
-    paths: list[Path] = []
-    single = root / "db_backup.sql"
-    if single.exists():
-        paths.append(single)
-    manifest = root / "pg_dump" / "manifest.tsv"
-    if manifest.exists():
-        for line in manifest.read_text(encoding="utf-8", errors="ignore").splitlines():
-            parts = line.split("\t")
-            if len(parts) < 4:
-                continue
-            dump_path = root / "pg_dump" / safe_upload_name(parts[3])
-            if dump_path.exists():
-                paths.append(dump_path)
-    if not paths and (root / "pg_dump").is_dir():
-        paths.extend(sorted((root / "pg_dump").glob("*.sql")))
-
+    paths = _backup_dump_files(root, max_files=8)
     merged: dict[str, int] = {}
     for path in paths:
         try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
+            text = _read_sql_head(path, 2_000_000)
         except Exception:
             continue
         for k, v in _estimate_sql_table_counts(text).items():
@@ -2387,15 +2678,24 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
             _safe_extract(zf, work)
-        root = _find_backup_root(work)
-        backup_env_path = _find_env(root)
-        if not backup_env_path:
-            raise RuntimeError("Backup .env missing")
-        backup_env = backup_env_path.read_text(encoding="utf-8", errors="ignore")
-        # Prefer analyze() result (timescale manifest override); never trust live compose for backup label
-        backup_db = analysis.get("backup_db") or detect_db_type_from_env(backup_env, prefer_compose=False)
+        root = work
         current_env = _read_current_env()
         install_env_snapshot = current_env
+        backup_env_path = _find_env(work)
+        if backup_env_path:
+            backup_env = backup_env_path.read_text(encoding="utf-8", errors="ignore")
+        else:
+            job.log("Backup has no .env — keeping live panel settings")
+            backup_env = current_env
+        # Prefer analyze() result (timescale manifest override); never trust live compose for backup label
+        backup_db = analysis.get("backup_db") or detect_db_type_from_env(backup_env, prefer_compose=False)
+        dump_path = resolve_backup_sql_dump(work, env_db=backup_db)
+        if dump_path:
+            try:
+                rel = dump_path.relative_to(work)
+            except ValueError:
+                rel = dump_path.name
+            job.log(f"Using dump file: {rel}")
         installed_db = detect_db_type_from_env(current_env) or get_pasarguard_db_type()
 
         job.log(f"Backup DB={backup_db}, installed DB={installed_db}, layout={analysis.get('layout')}")
@@ -2531,9 +2831,9 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                 )
         elif backup_db in ("mysql", "mariadb"):
             if needs_convert:
-                dump = root / "db_backup.sql"
-                if not dump.exists():
-                    raise RuntimeError("db_backup.sql missing — cannot convert without dump")
+                dump = dump_path
+                if not dump or not dump.exists():
+                    raise RuntimeError("SQL dump missing — cannot convert without dump")
                 job.log(
                     f"Hard convert path: skip native {backup_db} container restore; "
                     f"will import dump → {target_db}"
@@ -2543,6 +2843,7 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                 restore_into = installed_db if soft_db_family(backup_db, installed_db) else backup_db
                 await _restore_mysql(
                     job, root, restore_into or backup_db, current_env, backup_env,
+                    dump=dump_path,
                 )
                 # Same-engine: force MySQL roles to backup password (written into .env next)
                 sync_pass = bak_db_pass or bak_mysql_root or ""
@@ -2562,9 +2863,10 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                     )
         elif backup_db in ("postgresql", "timescaledb"):
             if needs_convert:
-                dump = root / "db_backup.sql"
-                if not dump.exists() and analysis.get("layout") != "multi":
-                    raise RuntimeError("PostgreSQL dump missing — cannot convert without dump")
+                dump = dump_path
+                if not dump or not dump.exists():
+                    if analysis.get("layout") != "multi":
+                        raise RuntimeError("PostgreSQL dump missing — cannot convert without dump")
                 job.log(
                     f"Hard convert path: skip native {backup_db} restore into foreign engine; "
                     f"will import dump → {target_db}"
@@ -2574,6 +2876,7 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                 restore_into = installed_db if soft_db_family(backup_db, installed_db) else backup_db
                 await _restore_postgres(
                     job, root, restore_into or backup_db, current_env, backup_env, analysis,
+                    dump=dump_path,
                 )
                 svc = await _detect_db_container(job, restore_into or installed_db or backup_db)
                 # Same-engine: sync roles to BACKUP password (globals.sql restores old secrets)
@@ -2649,8 +2952,8 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         if restore_engine == "sqlite" or analysis.get("layout") == "sqlite_file":
             convert_source = str(PASARGUARD_DATA / "db.sqlite3")
         else:
-            dump = root / "db_backup.sql"
-            if dump.exists():
+            dump = dump_path or resolve_backup_sql_dump(root, env_db=backup_db)
+            if dump and dump.exists():
                 convert_source = str(dump)
             elif analysis.get("layout") == "multi":
                 # Prefer the application DB dump (skip globals.sql which has roles only)
@@ -3007,27 +3310,33 @@ async def _disable_nodes_after_restore(
 
 
 async def _restore_sqlite(job: MigrationJob, root: Path) -> None:
-    src = root / "db.sqlite3"
-    if not src.exists():
-        found = list(root.rglob("db.sqlite3"))
-        src = found[0] if found else None
+    src = resolve_backup_sqlite(root, env_db="sqlite")
     if not src or not src.exists():
-        # sometimes under var/lib path in archive
-        raise RuntimeError("db.sqlite3 not found in backup")
+        src = root / "db.sqlite3"
+        if not src.exists():
+            found = list(root.rglob("db.sqlite3"))
+            src = found[0] if found else None
+    if not src or not src.exists():
+        raise RuntimeError("SQLite database not found in backup")
     PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
     dest = PASARGUARD_DATA / "db.sqlite3"
     if dest.exists():
         shutil.copy2(dest, dest.with_suffix(".sqlite3.bak-before-restore"))
     shutil.copy2(src, dest)
-    job.log(f"SQLite restored → {dest}")
+    job.log(f"SQLite restored from {src.name} → {dest}")
 
 
 async def _restore_mysql(
-    job: MigrationJob, root: Path, db_type: str, current_env: str, backup_env: str
+    job: MigrationJob,
+    root: Path,
+    db_type: str,
+    current_env: str,
+    backup_env: str,
+    dump: Path | None = None,
 ) -> None:
-    dump = root / "db_backup.sql"
-    if not dump.exists():
-        raise RuntimeError("db_backup.sql missing")
+    dump = dump or resolve_backup_sql_dump(root, env_db=db_type)
+    if not dump or not dump.exists():
+        raise RuntimeError("SQL dump missing")
     svc = await _detect_db_container(job, db_type)
     if not svc:
         raise RuntimeError("MySQL/MariaDB container not found")
@@ -3106,6 +3415,7 @@ async def _restore_postgres(
     current_env: str,
     backup_env: str,
     analysis: dict,
+    dump: Path | None = None,
 ) -> None:
     """Restore PG/Timescale dump into the live installed service (db_type = restore-into engine)."""
     svc = await _detect_db_container(job, db_type)
@@ -3401,10 +3711,10 @@ async def _restore_postgres(
             raise RuntimeError("Multi-dump restore finished with zero databases restored")
         return
 
-    # Legacy single dump
-    dump = root / "db_backup.sql"
-    if not dump.exists():
-        raise RuntimeError("db_backup.sql missing")
+    # Legacy / third-party single dump
+    dump = dump or resolve_backup_sql_dump(root, env_db=analysis.get("backup_db") or db_type)
+    if not dump or not dump.exists():
+        raise RuntimeError("SQL dump missing")
     await psql(
         f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
         f"WHERE datname = '{db_name}' AND pid <> pg_backend_pid();"
@@ -3690,6 +4000,8 @@ async def _restore_data_files(job: MigrationJob, root: Path) -> None:
         if item.name in skip_names or item.name.startswith("pasarguard_"):
             continue
         if item.name.endswith(".sql") or item.name.endswith(".filtered"):
+            continue
+        if item.suffix.lower() in {".gz", ".db", ".sqlite", ".sqlite3"}:
             continue
         # Never put certs under /opt — already handled
         if item.name.lower() in ("fullchain.pem", "privkey.pem", "cert.pem", "key.pem"):
