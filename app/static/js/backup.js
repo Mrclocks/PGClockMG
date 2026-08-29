@@ -31,6 +31,13 @@ const I18N = {
     lblSetupToken: "توکن نصب (یک‌بارمصرف)",
     authSetupTokenHint: "همان توکنی که نصب‌کننده در پایان چاپ کرد.",
     lblCurrentPass: "رمز فعلی",
+    errSetupToken: "توکن نصب نامعتبر است. همان توکن چاپ‌شده توسط نصب‌کننده را بدون فاصله کپی کنید.",
+    errPassMismatch: "رمز و تکرار آن یکی نیست.",
+    errPassSet: "رمز قبلاً تنظیم شده — از ورود استفاده کنید.",
+    errWeakPass: "رمز ضعیف است. حداقل ۱۲ کاراکتر با حرف بزرگ، کوچک، عدد و نماد.",
+    errBadPass: "رمز اشتباه است.",
+    errThrottle: "تلاش‌های زیاد — چند دقیقه صبر کنید.",
+    errServer: "خطای سرور. لاگ سرویس را ببینید: journalctl -u pg-backup -n 50",
     authLoginTitle: "ورود به پنل بکاپ",
     authLoginDesc: "با رمز پنل بکاپ وارد شوید.",
     lblPassword: "رمز عبور",
@@ -150,6 +157,13 @@ const I18N = {
     lblSetupToken: "Install setup token (one-time)",
     authSetupTokenHint: "Use the token printed by the installer at the end.",
     lblCurrentPass: "Current password",
+    errSetupToken: "Invalid setup token. Paste the installer token exactly, with no spaces.",
+    errPassMismatch: "Password and confirmation do not match.",
+    errPassSet: "Password already set — use login.",
+    errWeakPass: "Weak password. Use 12+ chars with upper, lower, digit, and symbol.",
+    errBadPass: "Wrong password.",
+    errThrottle: "Too many attempts — wait a few minutes.",
+    errServer: "Server error. Check: journalctl -u pg-backup -n 50",
     authLoginTitle: "Backup panel login",
     authLoginDesc: "Sign in with your backup panel password.",
     lblPassword: "Password",
@@ -269,6 +283,13 @@ const I18N = {
     lblSetupToken: "Токен установки (одноразовый)",
     authSetupTokenHint: "Тот же токен, который установщик напечатал в конце.",
     lblCurrentPass: "Текущий пароль",
+    errSetupToken: "Неверный токен установки. Вставьте токен установщика без пробелов.",
+    errPassMismatch: "Пароль и подтверждение не совпадают.",
+    errPassSet: "Пароль уже задан — войдите.",
+    errWeakPass: "Слабый пароль. Минимум 12 символов: верхний/нижний регистр, цифра, спецсимвол.",
+    errBadPass: "Неверный пароль.",
+    errThrottle: "Слишком много попыток — подождите несколько минут.",
+    errServer: "Ошибка сервера. Смотрите: journalctl -u pg-backup -n 50",
     authLoginTitle: "Вход в панель бэкапа",
     authLoginDesc: "Войдите с паролем панели бэкапа.",
     lblPassword: "Пароль",
@@ -452,7 +473,15 @@ async function api(path, opts = {}) {
   else data = await res.text();
   if (!res.ok) {
     const detail = (data && data.detail) || data || res.statusText;
-    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    let msg = typeof detail === "string" ? detail : JSON.stringify(detail);
+    if (msg === "setup_token_invalid") msg = t("errSetupToken");
+    else if (msg === "password_mismatch") msg = t("errPassMismatch");
+    else if (msg === "password_already_set") msg = t("errPassSet");
+    else if (String(msg).startsWith("weak_password")) msg = t("errWeakPass");
+    else if (msg === "invalid_password") msg = t("errBadPass");
+    else if (msg === "too_many_attempts") msg = t("errThrottle");
+    else if (msg === "Internal Server Error") msg = t("errServer");
+    throw new Error(msg);
   }
   return data;
 }
