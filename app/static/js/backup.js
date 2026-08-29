@@ -122,6 +122,9 @@ const I18N = {
     telegramOff: "تلگرام خاموش",
     telegramReady: "پیکربندی کامل",
     telegramNeedConfig: "نیاز به تنظیم",
+    tgConnected: "متصل",
+    tgDisconnected: "قطع",
+    tgChecking: "در حال بررسی…",
     proxyOn: "پروکسی روشن",
     streamSet: "مقصد استریم ست شده",
     streamUnset: "مقصد استریم خالی",
@@ -235,6 +238,9 @@ const I18N = {
     telegramOff: "Telegram off",
     telegramReady: "Configured",
     telegramNeedConfig: "Needs setup",
+    tgConnected: "Connected",
+    tgDisconnected: "Disconnected",
+    tgChecking: "Checking…",
     proxyOn: "Proxy on",
     streamSet: "Stream destination set",
     streamUnset: "No stream destination",
@@ -348,6 +354,9 @@ const I18N = {
     telegramOff: "Telegram выкл.",
     telegramReady: "Настроено",
     telegramNeedConfig: "Нужна настройка",
+    tgConnected: "Подключено",
+    tgDisconnected: "Нет связи",
+    tgChecking: "Проверка…",
     proxyOn: "Прокси вкл.",
     streamSet: "Назначение задано",
     streamUnset: "Назначение пусто",
@@ -490,7 +499,7 @@ function metricCard({ tone, icon, value, label, sub }) {
 async function boot() {
   setBackupLang(lang);
   const st = await api("/api/setup/status");
-  document.getElementById("appVersion").textContent = "v" + (st.version || "3.3.0");
+  document.getElementById("appVersion").textContent = "v" + (st.version || "4.0.0");
   setupMode = !st.password_set;
   document.getElementById("authConfirmWrap").classList.toggle("hidden", !setupMode);
   applyI18n();
@@ -653,9 +662,17 @@ async function refreshDashboard() {
   }
 
   const delivery = document.getElementById("dashDelivery");
+  let tgLive = { connected: false };
+  try {
+    tgLive = await api("/api/telegram/status");
+  } catch (_) {
+    tgLive = { connected: false };
+  }
+  const tgTagClass = tgLive.connected ? "is-connected" : "is-disconnected";
+  const tgTagLabel = tgLive.connected ? t("tgConnected") : t("tgDisconnected");
   delivery.innerHTML = `<div class="backup-section-head">
       <span class="choice-icon icon-tone-cyan" aria-hidden="true">${ICONS.send}</span>
-      <div><h3 style="margin:0 0 4px;font-size:1rem">${t("deliveryTitle")}</h3>
+      <div><h3 style="margin:0 0 4px;font-size:1rem">${t("deliveryTitle")} <span class="backup-status-tag ${tgTagClass}">${tgTagLabel}</span></h3>
       <p class="desc-sm" style="margin:0">${tg.enabled ? t("telegramOn") : t("telegramOff")} · ${tg.configured ? t("telegramReady") : t("telegramNeedConfig")}</p></div></div>
       <div class="backup-item-chips">
         <span class="backup-chip">${sched.enabled ? t("scheduleOn") : t("scheduleOff")}</span>
@@ -663,6 +680,8 @@ async function refreshDashboard() {
         <span class="backup-chip">${data.stream_dest ? t("streamSet") : t("streamUnset")}</span>
       </div>
       ${data.stream_dest ? `<p class="desc-sm" style="margin-top:10px;word-break:break-all">${data.stream_dest}</p>` : ""}`;
+
+  setTelegramStatusTag({ connected: !!tgLive.connected });
 
   const errBox = document.getElementById("dashError");
   if (data.last_error && data.last_error.message) {
@@ -830,6 +849,38 @@ async function loadSettingsForm() {
   document.getElementById("proxyUser").value = tg.proxy_user || "";
   document.getElementById("proxyPass").value = "";
   document.getElementById("streamDest").value = (s.stream && s.stream.default_dest_url) || "";
+  setTelegramStatusTag({ checking: true });
+  refreshTelegramStatusTag().catch(() => setTelegramStatusTag({ connected: false }));
+}
+
+function setTelegramStatusTag({ connected, checking } = {}) {
+  const el = document.getElementById("tgStatusTag");
+  if (!el) return;
+  el.classList.remove("is-connected", "is-disconnected", "is-unknown");
+  if (checking) {
+    el.classList.add("is-unknown");
+    el.textContent = t("tgChecking");
+    return;
+  }
+  if (connected) {
+    el.classList.add("is-connected");
+    el.textContent = t("tgConnected");
+  } else {
+    el.classList.add("is-disconnected");
+    el.textContent = t("tgDisconnected");
+  }
+}
+
+async function refreshTelegramStatusTag() {
+  setTelegramStatusTag({ checking: true });
+  try {
+    const st = await api("/api/telegram/status");
+    setTelegramStatusTag({ connected: !!st.connected });
+    return st;
+  } catch (_) {
+    setTelegramStatusTag({ connected: false });
+    return null;
+  }
 }
 
 async function saveSettings() {
@@ -874,14 +925,17 @@ async function saveSettings() {
   }
   msg.textContent = t("saved");
   msg.classList.remove("hidden");
+  refreshTelegramStatusTag().catch(() => {});
 }
 
 async function testTelegram() {
   try {
     await saveSettings();
     const r = await api("/api/telegram/test", { method: "POST", body: "{}" });
+    setTelegramStatusTag({ connected: true });
     alert("OK · @" + ((r.bot && r.bot.username) || "?"));
   } catch (e) {
+    setTelegramStatusTag({ connected: false });
     alert(e.message);
   }
 }

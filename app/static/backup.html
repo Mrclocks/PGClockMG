@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#0f1218">
   <title>PGClockMG Backup</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=3.3.3">
-  <link rel="stylesheet" href="/static/css/backup.css?v=3.3.3">
+  <link rel="stylesheet" href="/static/css/style.css?v=4.0.0">
+  <link rel="stylesheet" href="/static/css/backup.css?v=4.0.0">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
@@ -28,7 +28,7 @@
         </div>
         <div class="header-titles">
           <h1>PGClockMG Backup</h1>
-          <p class="header-version" id="appVersion">v3.3.0</p>
+          <p class="header-version" id="appVersion">v4.0.0</p>
         </div>
       </div>
       <div class="header-meta">
@@ -196,7 +196,10 @@
                 <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M22 3L11 14"/><path d="M22 3l-7 19-3-8-8-3 18-8z"/></svg>
               </span>
               <div>
-                <h3 class="section-title" id="setTgTitle"></h3>
+                <div class="backup-tg-title-row">
+                  <h3 class="section-title" id="setTgTitle"></h3>
+                  <span id="tgStatusTag" class="backup-status-tag is-unknown" role="status">…</span>
+                </div>
                 <p class="desc-sm" id="setTgHint"></p>
               </div>
             </div>
@@ -336,6 +339,6 @@
 
     </main>
   </div>
-  <script src="/static/js/backup.js?v=3.3.3"></script>
+  <script src="/static/js/backup.js?v=4.0.0"></script>
 </body>
 </html>

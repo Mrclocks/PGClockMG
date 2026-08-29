@@ -32,12 +32,13 @@ from app.services.backup_stream import push_backup_file
 from app.services.backup_telegram import (
     format_caption,
     human_size,
+    probe_telegram_connection,
     send_backup_to_telegram,
     test_telegram_connection,
 )
 from app.services.prerequisites import get_system_status, is_pasarguard_installed
 
-APP_VERSION = "3.3.0"
+APP_VERSION = "4.0.0"
 
 
 @asynccontextmanager
@@ -380,11 +381,37 @@ async def api_put_settings(body: SettingsPatch):
     return public_settings(saved)
 
 
+@app.get("/api/telegram/status")
+async def api_telegram_status():
+    cfg = load_settings()
+    tg = cfg.get("telegram") or {}
+    enabled = bool(tg.get("enabled"))
+    configured = bool((tg.get("bot_token") or "").strip() and (tg.get("chat_id") or "").strip())
+    if not enabled or not configured:
+        return {
+            "ok": False,
+            "connected": False,
+            "enabled": enabled,
+            "configured": configured,
+            "error": "disabled" if not enabled else "not_configured",
+        }
+    result = probe_telegram_connection(cfg)
+    return {
+        "ok": bool(result.get("ok")),
+        "connected": bool(result.get("connected")),
+        "enabled": enabled,
+        "configured": configured,
+        "bot": result.get("bot"),
+        "error": result.get("error"),
+    }
+
+
 @app.post("/api/telegram/test")
 async def api_telegram_test(body: TelegramTestBody | None = None):
     result = test_telegram_connection()
     if not result.get("ok"):
         raise HTTPException(400, result.get("error") or "telegram_test_failed")
+    result["connected"] = True
     return result
 
 

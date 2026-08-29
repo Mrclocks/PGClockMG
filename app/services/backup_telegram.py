@@ -72,6 +72,33 @@ def telegram_config(settings: dict | None = None) -> dict:
     return dict(cfg.get("telegram") or {})
 
 
+def probe_telegram_connection(settings: dict | None = None) -> dict:
+    """Lightweight connectivity check (getMe only — does not send a chat message)."""
+    tg = telegram_config(settings)
+    token = (tg.get("bot_token") or "").strip()
+    chat_id = (tg.get("chat_id") or "").strip()
+    if not token:
+        return {"ok": False, "connected": False, "error": "bot_token_missing"}
+    if not chat_id:
+        return {"ok": False, "connected": False, "error": "chat_id_missing"}
+    try:
+        with _client(tg, timeout=20.0) as client:
+            me = client.get(f"https://api.telegram.org/bot{token}/getMe")
+            me.raise_for_status()
+            me_data = me.json()
+            if not me_data.get("ok"):
+                return {
+                    "ok": False,
+                    "connected": False,
+                    "error": me_data.get("description") or "getMe_failed",
+                }
+            return {"ok": True, "connected": True, "bot": me_data.get("result")}
+    except httpx.HTTPError as exc:
+        return {"ok": False, "connected": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "connected": False, "error": str(exc)}
+
+
 def test_telegram_connection(settings: dict | None = None) -> dict:
     tg = telegram_config(settings)
     token = (tg.get("bot_token") or "").strip()

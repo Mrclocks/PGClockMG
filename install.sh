@@ -18,7 +18,7 @@
 #
 set -eo pipefail
 
-readonly SCRIPT_VERSION="3.3.0"
+readonly SCRIPT_VERSION="4.0.0"
 readonly INSTALL_DIR="${PG_MIGRATOR_INSTALL_DIR:-/opt/pg-migrator}"
 readonly SERVICE_NAME="pg-migrator"
 readonly BACKUP_SERVICE_NAME="pg-backup"
