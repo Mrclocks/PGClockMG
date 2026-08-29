@@ -102,7 +102,21 @@
             <h2 id="dashH2"></h2>
             <p class="desc" id="dashDesc"></p>
           </div>
-          <button type="button" class="btn btn-primary" id="btnBackupNow" onclick="createBackupNow()"></button>
+          <div class="backup-run-col">
+            <button type="button" class="btn btn-primary" id="btnBackupNow" onclick="createBackupNow()"></button>
+            <div id="backupProgress" class="backup-run-box hidden" role="status" aria-live="polite">
+              <div class="backup-section-head">
+                <span class="choice-icon icon-tone-orange" id="backupProgressIcon" aria-hidden="true">
+                  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 3v4"/><path d="M12 17v4"/><path d="M3 12h4"/><path d="M17 12h4"/><circle cx="12" cy="12" r="3"/></svg>
+                </span>
+                <p id="backupProgressTitle" class="desc-sm" style="margin:0"></p>
+              </div>
+              <div class="backup-progress-track" aria-hidden="true">
+                <div class="backup-progress-bar" id="backupProgressBar"></div>
+              </div>
+              <pre id="backupProgressLog" class="backup-log"></pre>
+            </div>
+          </div>
         </div>
 
         <h3 class="section-title" id="secHealthTitle"></h3>
@@ -131,16 +145,6 @@
           <div class="info-box backup-section-card" id="dashDelivery"></div>
         </div>
         <div id="dashError" class="warning-card hidden" style="margin-top:12px"></div>
-
-        <div id="backupProgress" class="info-box hidden" style="margin-top:16px">
-          <div class="backup-section-head">
-            <span class="choice-icon icon-tone-orange" aria-hidden="true">
-              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 3v4"/><path d="M12 17v4"/><path d="M3 12h4"/><path d="M17 12h4"/><circle cx="12" cy="12" r="3"/></svg>
-            </span>
-            <p id="backupProgressTitle" class="desc-sm" style="margin:0"></p>
-          </div>
-          <pre id="backupProgressLog" class="backup-log"></pre>
-        </div>
       </section>
 
       <section class="panel" id="panel-list">

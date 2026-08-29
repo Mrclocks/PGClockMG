@@ -106,7 +106,7 @@
   justify-content: space-between;
   gap: 14px;
   flex-wrap: wrap;
-  margin-bottom: 8px;
+  margin-bottom: 20px;
 }
 
 .backup-page-head .desc {
@@ -116,6 +116,98 @@
 .backup-page-head .btn {
   flex: 0 0 auto;
   min-width: min(100%, 200px);
+}
+
+.backup-run-col {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  flex: 0 1 auto;
+  min-width: min(100%, 260px);
+  max-width: 100%;
+}
+
+.backup-run-col > .btn {
+  width: 100%;
+  min-width: 0;
+}
+
+.backup-run-box {
+  background: var(--bg-card);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 14px 14px 12px;
+  min-width: 0;
+}
+
+.backup-run-box.is-running {
+  border-color: var(--orange);
+}
+
+.backup-run-box.is-success {
+  border-color: var(--success);
+  background: var(--success-bg);
+}
+
+.backup-run-box.is-error {
+  border-color: var(--orange);
+  background: var(--warning-bg);
+}
+
+.backup-progress-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-soft);
+  overflow: hidden;
+  margin: 0 0 4px;
+}
+
+.backup-progress-bar {
+  height: 100%;
+  width: 35%;
+  border-radius: inherit;
+  background: var(--orange);
+  transform-origin: inline-start;
+  animation: none;
+}
+
+.backup-run-box.is-running .backup-progress-bar {
+  width: 40%;
+  animation: backup-progress-pulse 1.1s ease-in-out infinite;
+}
+
+.backup-run-box.is-success .backup-progress-bar {
+  width: 100%;
+  background: var(--success);
+  animation: none;
+}
+
+.backup-run-box.is-error .backup-progress-bar {
+  width: 100%;
+  background: var(--orange);
+  animation: none;
+}
+
+.backup-run-box .backup-log {
+  margin-top: 8px;
+  max-height: 180px;
+}
+
+@keyframes backup-progress-pulse {
+  0%, 100% { opacity: 0.45; transform: scaleX(0.85); }
+  50% { opacity: 1; transform: scaleX(1); }
+}
+
+/* Page-level captions sit further above their boxes */
+.backup-app .panel > .section-title {
+  margin-top: 30px;
+  margin-bottom: 16px;
+}
+
+.backup-app .panel > .backup-page-head + .section-title {
+  margin-top: 12px;
 }
 
 .backup-section-head {
@@ -487,8 +579,11 @@ textarea.text-input {
   .backup-page-head {
     flex-direction: column;
   }
+  .backup-run-col,
   .backup-page-head .btn {
     width: 100%;
+    max-width: none;
+    min-width: 0;
   }
   .backup-icon-grid {
     grid-template-columns: 1fr 1fr;

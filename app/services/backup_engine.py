@@ -30,6 +30,7 @@ from app.services.env_migration import (
     detect_db_type_from_env,
     get_pasarguard_admin_connection,
     read_env_var,
+    sqlite_fs_path_from_url,
 )
 from app.services.pasarguard_ops import mysql_client_bins, resolve_db_service
 from app.services.prerequisites import get_pasarguard_db_type, is_pasarguard_installed
@@ -237,7 +238,7 @@ def live_panel_stats() -> dict:
 def _sqlite_counts(path: Path) -> dict[str, int | None]:
     out: dict[str, int | None] = {t: None for t in STAT_TABLES}
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
+        conn = _sqlite_connect_ro(path, timeout=10)
     except sqlite3.Error:
         return out
     try:
@@ -299,25 +300,84 @@ def _docker_sql_counts(db_type: str) -> dict[str, int | None]:
     return out
 
 
+def _normalize_sqlite_fs_path(raw: str | Path) -> Path:
+    """Collapse UNC-style ``//path`` into a normal absolute Unix path."""
+    s = str(raw).strip().split("?", 1)[0].split("#", 1)[0]
+    if s.startswith("//") or s.startswith("\\\\"):
+        s = "/" + s.lstrip("/\\")
+    return Path(s).expanduser()
+
+
+def _sqlite_connect_ro(path: Path, *, timeout: float = 120) -> sqlite3.Connection:
+    """Open SQLite read-only via a proper ``file:///...`` URI (never ``file://host``)."""
+    path = _normalize_sqlite_fs_path(path)
+    # resolve() also collapses //host-style paths on Linux
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    uri = resolved.as_uri() + "?mode=ro"
+    return sqlite3.connect(uri, uri=True, timeout=timeout)
+
+
 def _resolve_sqlite_path(env_text: str = "") -> Path:
-    """Prefer SQLALCHEMY sqlite path from .env; fall back to official data dir."""
+    """Prefer SQLALCHEMY sqlite path from .env; fall back to official data dir.
+
+    Covers absolute, relative, aiosqlite, query strings, and miswritten slash counts
+    so backup never opens ``file://var/...`` (invalid URI authority).
+    """
     url = read_env_var(env_text, "SQLALCHEMY_DATABASE_URL") or ""
-    # sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3  or sqlite:////path
-    m = re.search(r"sqlite(?:\+\w+)?:(?:///)?(/[^\s\"']+)", url, re.I)
-    if m:
-        p = Path(m.group(1))
-        if p.is_file() or p.parent.is_dir():
-            return p
-    return PASARGUARD_DATA / "db.sqlite3"
+    candidates: list[Path] = []
+
+    parsed = sqlite_fs_path_from_url(url)
+    if parsed:
+        p = _normalize_sqlite_fs_path(parsed)
+        if not p.is_absolute():
+            # Relative paths: try PasarGuard data dir, then install dir, then cwd
+            candidates.append(PASARGUARD_DATA / p)
+            candidates.append(PASARGUARD_DIR / p)
+            candidates.append(Path.cwd() / p)
+        else:
+            candidates.append(p)
+            # Docker-style /var/lib/pasarguard/... may also exist under PASARGUARD_DATA
+            try:
+                posix = p.as_posix()
+                if posix.startswith("/var/lib/pasarguard/"):
+                    rel = posix[len("/var/lib/pasarguard/") :]
+                    if rel:
+                        candidates.append(PASARGUARD_DATA / rel)
+            except Exception:
+                pass
+
+    candidates.append(PASARGUARD_DATA / "db.sqlite3")
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    ordered: list[Path] = []
+    for c in candidates:
+        key = str(c)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(c)
+
+    for c in ordered:
+        if c.is_file():
+            return _normalize_sqlite_fs_path(c)
+    # Prefer a candidate whose parent exists (for clearer errors / upcoming create)
+    for c in ordered:
+        if c.parent.is_dir():
+            return _normalize_sqlite_fs_path(c)
+    return _normalize_sqlite_fs_path(PASARGUARD_DATA / "db.sqlite3")
 
 
 def _dump_sqlite(dest: Path, job: dict, *, env_text: str = "") -> None:
     src = _resolve_sqlite_path(env_text)
+    src = _normalize_sqlite_fs_path(src)
     if not src.is_file():
         raise RuntimeError(f"SQLite database not found at {src}")
     _log(job, f"Copying SQLite database from {src}…")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    src_conn = sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=120)
+    src_conn = _sqlite_connect_ro(src, timeout=120)
     try:
         dst_conn = sqlite3.connect(str(dest))
         try:

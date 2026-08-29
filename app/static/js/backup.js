@@ -755,7 +755,8 @@ async function createBackupNow() {
   const box = document.getElementById("backupProgress");
   const title = document.getElementById("backupProgressTitle");
   const logEl = document.getElementById("backupProgressLog");
-  box.classList.remove("hidden");
+  box.classList.remove("hidden", "is-success", "is-error");
+  box.classList.add("is-running");
   title.textContent = t("backupRunning");
   logEl.textContent = "";
   document.getElementById("btnBackupNow").disabled = true;
@@ -763,10 +764,14 @@ async function createBackupNow() {
   if (listBtn) listBtn.disabled = true;
   try {
     const job = await api("/api/backups/create", { method: "POST", body: "{}" });
-    await pollJob(job.job_id, title, logEl);
+    await pollJob(job.job_id, title, logEl, box);
+    box.classList.remove("is-running");
+    box.classList.add("is-success");
     await refreshDashboard();
     await refreshList();
   } catch (e) {
+    box.classList.remove("is-running");
+    box.classList.add("is-error");
     title.textContent = t("backupFail") + ": " + e.message;
   } finally {
     document.getElementById("btnBackupNow").disabled = false;
@@ -774,7 +779,7 @@ async function createBackupNow() {
   }
 }
 
-async function pollJob(jobId, title, logEl) {
+async function pollJob(jobId, title, logEl, box) {
   return new Promise((resolve, reject) => {
     const tick = async () => {
       try {
@@ -787,6 +792,10 @@ async function pollJob(jobId, title, logEl) {
           return;
         }
         if (job.status === "error") {
+          if (box) {
+            box.classList.remove("is-running");
+            box.classList.add("is-error");
+          }
           title.textContent = t("backupFail") + ": " + (job.error || "");
           reject(new Error(job.error || "error"));
           return;

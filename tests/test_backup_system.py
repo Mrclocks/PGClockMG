@@ -215,6 +215,62 @@ def test_resolve_sqlite_path_from_env(tmp_path, monkeypatch):
     print("OK: sqlite path from .env")
 
 
+def test_sqlite_url_path_variants_no_uri_authority(tmp_path, monkeypatch):
+    """All SQLite URL slash forms resolve to a normal path and open read-only."""
+    import sqlite3
+    from app.services.env_migration import sqlite_fs_path_from_url, parse_sqlalchemy_url
+    import app.services.backup_engine as eng
+
+    db = tmp_path / "db.sqlite3"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE users (id INTEGER)")
+    conn.execute("INSERT INTO users VALUES (1)")
+    conn.commit()
+    conn.close()
+
+    abs_posix = db.as_posix()
+    assert abs_posix.startswith("/")
+    urls = [
+        f"sqlite+aiosqlite:////{abs_posix.lstrip('/')}",
+        f"sqlite:////{abs_posix.lstrip('/')}",
+        f"sqlite+aiosqlite://///{abs_posix.lstrip('/')}",  # 5-slash rebuild bug
+        f"sqlite:///{abs_posix.lstrip('/')}",  # 3-slash absolute-looking
+        f"sqlite+aiosqlite://{abs_posix.lstrip('/')}",  # host-style //var…
+        f"sqlite+aiosqlite:////{abs_posix.lstrip('/')}?check_same_thread=false",
+    ]
+    for url in urls:
+        parsed = sqlite_fs_path_from_url(url)
+        assert parsed == abs_posix, (url, parsed)
+        assert not parsed.startswith("//")
+        assert parse_sqlalchemy_url(url)["sqlite_path"] == abs_posix
+
+        monkeypatch.setattr(eng, "PASARGUARD_DATA", tmp_path / "missing-data")
+        monkeypatch.setattr(eng, "PASARGUARD_DIR", tmp_path / "missing-dir")
+        env = f'SQLALCHEMY_DATABASE_URL="{url}"\n'
+        resolved = eng._resolve_sqlite_path(env)
+        assert resolved == db
+        assert not str(resolved).startswith("//")
+
+        ro = eng._sqlite_connect_ro(resolved)
+        try:
+            assert ro.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1
+        finally:
+            ro.close()
+
+        dest = tmp_path / f"out-{abs(hash(url)) % 10_000}.sqlite3"
+        job = {"logs": []}
+        eng._dump_sqlite(dest, job, env_text=env)
+        assert dest.is_file() and dest.stat().st_size >= 64
+        assert "invalid uri authority" not in " ".join(job.get("logs") or []).lower()
+
+    # Double-slash Path must still open (regression for screenshot error)
+    weird = eng._normalize_sqlite_fs_path(Path("//" + abs_posix.lstrip("/")))
+    assert str(weird) == abs_posix
+    ro = eng._sqlite_connect_ro(Path("//" + abs_posix.lstrip("/")))
+    ro.close()
+    print("OK: sqlite URL variants + URI authority regression")
+
+
 def test_stream_push_receive_roundtrip(tmp_path, monkeypatch):
     """Chunked receive reconstructs the exact zip bytes."""
     import asyncio
