@@ -74,7 +74,6 @@ def list_backup_files() -> list[dict]:
         items.append({
             "id": path.stem,
             "filename": path.name,
-            "path": str(path),
             "size_bytes": st.st_size,
             "mtime": datetime.fromtimestamp(st.st_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "manifest": meta,

@@ -2,12 +2,18 @@ import os
 from pathlib import Path
 
 BASE_DIR = Path(os.environ.get("PG_MIGRATOR_HOME", Path(__file__).resolve().parent.parent))
+# Backup panel may use its own root (/opt/pg-backup) via PG_BACKUP_HOME.
+BACKUP_HOME = Path(
+    os.environ.get("PG_BACKUP_HOME")
+    or os.environ.get("PG_MIGRATOR_HOME")
+    or BASE_DIR
+)
 UPLOAD_DIR = BASE_DIR / "uploads"
-BACKUP_DIR = BASE_DIR / "backups"
+BACKUP_DIR = BACKUP_HOME / "backups"
 LOG_DIR = BASE_DIR / "logs"
 WORK_DIR = BASE_DIR / "work"
 TOOLS_DIR = BASE_DIR / "tools"
-BACKUP_PANEL_DIR = BASE_DIR / "backup_panel"
+BACKUP_PANEL_DIR = BACKUP_HOME / "backup_panel"
 BACKUP_SETTINGS_FILE = BACKUP_PANEL_DIR / "settings.json"
 BACKUP_PASSWORD_FILE = BACKUP_PANEL_DIR / ".password"
 BACKUP_SECRET_FILE = BACKUP_PANEL_DIR / ".session_secret"
