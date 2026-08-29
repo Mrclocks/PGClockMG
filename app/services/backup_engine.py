@@ -1,0 +1,652 @@
+"""Create PasarGuard full-bundle backups compatible with PGClockMG restore."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import tempfile
+import threading
+import time
+import uuid
+import zipfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable
+
+from app.config import (
+    BACKUP_DIR,
+    BACKUP_JOBS_DIR,
+    PASARGUARD_DATA,
+    PASARGUARD_DIR,
+    PASARGUARD_ENV,
+    WORK_DIR,
+)
+from app.services.env_migration import (
+    detect_db_type_from_env,
+    get_pasarguard_admin_connection,
+    read_env_var,
+)
+from app.services.pasarguard_ops import mysql_client_bins, resolve_db_service
+from app.services.prerequisites import get_pasarguard_db_type, is_pasarguard_installed
+
+LogFn = Callable[[str], None]
+
+_CREATE_LOCK = threading.Lock()
+_jobs: dict[str, dict] = {}
+_jobs_lock = threading.Lock()
+
+STAT_TABLES = ("users", "nodes", "admins", "inbounds", "hosts", "groups")
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+
+def _log(job: dict, msg: str) -> None:
+    line = f"[{time.strftime('%H:%M:%S')}] {msg}"
+    job.setdefault("logs", []).append(line)
+    if len(job["logs"]) > 500:
+        job["logs"] = job["logs"][-400:]
+
+
+def get_backup_job(job_id: str) -> dict | None:
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        return dict(job) if job else None
+
+
+def list_backup_files() -> list[dict]:
+    items: list[dict] = []
+    if not BACKUP_DIR.is_dir():
+        return items
+    for path in sorted(BACKUP_DIR.glob("pgclockmg-*.zip"), key=lambda p: p.stat().st_mtime, reverse=True):
+        meta = _read_sidecar_meta(path) or {}
+        st = path.stat()
+        items.append({
+            "id": path.stem,
+            "filename": path.name,
+            "path": str(path),
+            "size_bytes": st.st_size,
+            "mtime": datetime.fromtimestamp(st.st_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "manifest": meta,
+        })
+    return items
+
+
+def resolve_backup_path(backup_id: str) -> Path | None:
+    if not backup_id or not re.fullmatch(r"[A-Za-z0-9._-]{1,120}", backup_id):
+        return None
+    # accept with or without .zip
+    name = backup_id if backup_id.endswith(".zip") else f"{backup_id}.zip"
+    path = BACKUP_DIR / name
+    if path.is_file():
+        return path
+    # also allow stem match for pgclockmg-...
+    for cand in BACKUP_DIR.glob("pgclockmg-*.zip"):
+        if cand.stem == backup_id or cand.name == backup_id:
+            return cand
+    return None
+
+
+def delete_backup_file(backup_id: str) -> bool:
+    path = resolve_backup_path(backup_id)
+    if not path:
+        return False
+    try:
+        path.unlink(missing_ok=True)
+        meta = path.with_suffix(path.suffix + ".json")
+        meta.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+def apply_retention(keep: int) -> int:
+    keep = max(1, int(keep or 10))
+    files = sorted(BACKUP_DIR.glob("pgclockmg-*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+    removed = 0
+    for path in files[keep:]:
+        try:
+            path.unlink(missing_ok=True)
+            path.with_suffix(path.suffix + ".json").unlink(missing_ok=True)
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+def _read_sidecar_meta(path: Path) -> dict | None:
+    meta = path.with_suffix(path.suffix + ".json")
+    if not meta.is_file():
+        return None
+    try:
+        return json.loads(meta.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _write_sidecar_meta(path: Path, data: dict) -> None:
+    meta = path.with_suffix(path.suffix + ".json")
+    meta.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    try:
+        os.chmod(meta, 0o600)
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _run(cmd: list[str], *, cwd: str | None = None, env: dict | None = None, timeout: int = 600) -> tuple[bool, str]:
+    try:
+        r = subprocess.run(
+            cmd,
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        out = ((r.stdout or "") + (r.stderr or "")).strip()
+        return r.returncode == 0, out
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _copy_tree_filtered(src: Path, dest: Path, *, skip_names: set[str] | None = None) -> None:
+    skip_names = skip_names or set()
+    if not src.is_dir():
+        return
+    dest.mkdir(parents=True, exist_ok=True)
+    for root, dirs, files in os.walk(src):
+        rel = Path(root).relative_to(src)
+        # prune heavy/irrelevant dirs
+        dirs[:] = [
+            d for d in dirs
+            if d not in skip_names and d not in {".git", "__pycache__", "node_modules"}
+        ]
+        target_dir = dest / rel
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for name in files:
+            if name in skip_names:
+                continue
+            sp = Path(root) / name
+            # skip huge sqlite wal copies if we already dump db separately — still include certs etc.
+            try:
+                if sp.stat().st_size > 2 * 1024 * 1024 * 1024:
+                    continue
+            except OSError:
+                continue
+            dp = target_dir / name
+            try:
+                shutil.copy2(sp, dp)
+            except OSError:
+                continue
+
+
+def live_panel_stats() -> dict:
+    """Best-effort live counts from the installed PasarGuard database."""
+    result = {
+        "ok": False,
+        "db_type": None,
+        "counts": {t: None for t in STAT_TABLES},
+        "error": None,
+    }
+    if not is_pasarguard_installed():
+        result["error"] = "pasarguard_not_installed"
+        return result
+    db_type = get_pasarguard_db_type() or "sqlite"
+    result["db_type"] = db_type
+    try:
+        if db_type == "sqlite":
+            path = PASARGUARD_DATA / "db.sqlite3"
+            if not path.is_file():
+                result["error"] = "sqlite_missing"
+                return result
+            counts = _sqlite_counts(path)
+            result["counts"] = counts
+            result["ok"] = True
+            return result
+        counts = _docker_sql_counts(db_type)
+        result["counts"] = counts
+        result["ok"] = any(v is not None for v in counts.values())
+        return result
+    except Exception as exc:
+        result["error"] = str(exc)
+        return result
+
+
+def _sqlite_counts(path: Path) -> dict[str, int | None]:
+    out: dict[str, int | None] = {t: None for t in STAT_TABLES}
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
+    except sqlite3.Error:
+        return out
+    try:
+        cur = conn.cursor()
+        for table in STAT_TABLES:
+            try:
+                cur.execute(f'SELECT COUNT(*) FROM "{table}"')
+                out[table] = int(cur.fetchone()[0])
+            except sqlite3.Error:
+                out[table] = None
+    finally:
+        conn.close()
+    return out
+
+
+def _docker_sql_counts(db_type: str) -> dict[str, int | None]:
+    out: dict[str, int | None] = {t: None for t in STAT_TABLES}
+    svc = resolve_db_service(db_type)
+    if not svc:
+        return out
+    conn = get_pasarguard_admin_connection(db_type)
+    user = conn.get("user") or ("root" if db_type in ("mysql", "mariadb") else "postgres")
+    password = conn.get("password") or ""
+    database = conn.get("database") or "pasarguard"
+
+    for table in STAT_TABLES:
+        if db_type in ("mysql", "mariadb"):
+            bins = mysql_client_bins(db_type, svc)
+            ok = False
+            text = ""
+            for binary in bins:
+                ok, text = _run(
+                    [
+                        "docker", "compose", "exec", "-T",
+                        "-e", f"MYSQL_PWD={password}",
+                        svc, binary, "-u", user, "-N", "-e",
+                        f"SELECT COUNT(*) FROM `{table}`;", database,
+                    ],
+                    cwd=str(PASARGUARD_DIR),
+                    timeout=60,
+                )
+                if ok:
+                    break
+        else:
+            ok, text = _run(
+                [
+                    "docker", "compose", "exec", "-T",
+                    "-e", f"PGPASSWORD={password}",
+                    svc, "psql", "-U", user, "-d", database, "-At",
+                    "-c", f'SELECT COUNT(*) FROM "{table}";',
+                ],
+                cwd=str(PASARGUARD_DIR),
+                timeout=60,
+            )
+        if ok:
+            line = (text or "").strip().splitlines()
+            if line and line[-1].strip().isdigit():
+                out[table] = int(line[-1].strip())
+    return out
+
+
+def _dump_sqlite(dest: Path, job: dict) -> None:
+    src = PASARGUARD_DATA / "db.sqlite3"
+    if not src.is_file():
+        raise RuntimeError("SQLite database not found at /var/lib/pasarguard/db.sqlite3")
+    _log(job, "Copying SQLite database…")
+    # Consistent online copy
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    src_conn = sqlite3.connect(str(src), timeout=60)
+    try:
+        dst_conn = sqlite3.connect(str(dest))
+        try:
+            src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+    finally:
+        src_conn.close()
+
+
+def _dump_postgres(db_type: str, dest: Path, job: dict) -> None:
+    svc = resolve_db_service(db_type)
+    if not svc:
+        raise RuntimeError(f"No Docker DB service found for {db_type}")
+    conn = get_pasarguard_admin_connection(db_type)
+    user = conn.get("user") or "postgres"
+    password = conn.get("password") or ""
+    database = conn.get("database") or "pasarguard"
+    _log(job, f"Running pg_dump via {svc}…")
+    # Prefer custom-compatible plain SQL that restore accepts as db_backup.sql
+    cmd = [
+        "docker", "compose", "exec", "-T",
+        "-e", f"PGPASSWORD={password}",
+        svc, "pg_dump",
+        "-U", user,
+        "-d", database,
+        "--clean",
+        "--if-exists",
+        "--no-owner",
+        "--no-acl",
+    ]
+    try:
+        with dest.open("wb") as out:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(PASARGUARD_DIR),
+                stdout=out,
+                stderr=subprocess.PIPE,
+            )
+            _, err = proc.communicate(timeout=1800)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise RuntimeError("pg_dump timed out")
+    if proc.returncode != 0:
+        raise RuntimeError((err or b"").decode("utf-8", errors="replace")[-1500:] or "pg_dump failed")
+    if dest.stat().st_size < 64:
+        raise RuntimeError("pg_dump produced an empty file")
+
+
+def _dump_mysql(db_type: str, dest: Path, job: dict) -> None:
+    svc = resolve_db_service(db_type)
+    if not svc:
+        raise RuntimeError(f"No Docker DB service found for {db_type}")
+    conn = get_pasarguard_admin_connection(db_type)
+    user = conn.get("user") or "root"
+    password = conn.get("password") or ""
+    database = conn.get("database") or "pasarguard"
+    _log(job, f"Running mysqldump via {svc}…")
+    dump_bins = ["mysqldump", "mariadb-dump"]
+    if "maria" in (svc or "").lower() or db_type == "mariadb":
+        dump_bins = ["mariadb-dump", "mysqldump"]
+    last_err = ""
+    for binary in dump_bins:
+        cmd = [
+            "docker", "compose", "exec", "-T",
+            "-e", f"MYSQL_PWD={password}",
+            svc, binary,
+            "-u", user,
+            "--single-transaction",
+            "--routines",
+            "--triggers",
+            "--events",
+            "--hex-blob",
+            "--default-character-set=utf8mb4",
+            database,
+        ]
+        try:
+            with dest.open("wb") as out:
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(PASARGUARD_DIR),
+                    stdout=out,
+                    stderr=subprocess.PIPE,
+                )
+                _, err = proc.communicate(timeout=1800)
+        except FileNotFoundError:
+            continue
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            raise RuntimeError("mysqldump timed out")
+        if proc.returncode == 0 and dest.stat().st_size >= 64:
+            return
+        last_err = (err or b"").decode("utf-8", errors="replace")[-1500:]
+        # binary missing inside container
+        if "executable file not found" in last_err.lower() or "no such file" in last_err.lower():
+            continue
+    raise RuntimeError(last_err or "mysqldump failed")
+
+
+def _collect_extra_files(staging: Path, job: dict) -> None:
+    """Copy .env, compose, certs, templates, and light data files into staging."""
+    if PASARGUARD_ENV.is_file():
+        shutil.copy2(PASARGUARD_ENV, staging / ".env")
+        _log(job, "Included .env")
+    compose = PASARGUARD_DIR / "docker-compose.yml"
+    if compose.is_file():
+        shutil.copy2(compose, staging / "docker-compose.yml")
+        _log(job, "Included docker-compose.yml")
+    for name in ("docker-compose.yaml", "compose.yml", "compose.yaml"):
+        p = PASARGUARD_DIR / name
+        if p.is_file() and not (staging / name).exists():
+            shutil.copy2(p, staging / name)
+
+    certs = PASARGUARD_DATA / "certs"
+    if certs.is_dir():
+        _copy_tree_filtered(certs, staging / "certs")
+        _log(job, "Included certs/")
+
+    templates = PASARGUARD_DATA / "templates"
+    if templates.is_dir():
+        _copy_tree_filtered(templates, staging / "templates")
+        _log(job, "Included templates/")
+
+    # Light config / xray files from data dir (skip the live sqlite we dump separately)
+    if PASARGUARD_DATA.is_dir():
+        data_staging = staging / "pasarguard_data"
+        data_staging.mkdir(parents=True, exist_ok=True)
+        skip = {"db.sqlite3", "db.sqlite3-wal", "db.sqlite3-shm", "mysql", "postgresql", "postgres"}
+        for child in PASARGUARD_DATA.iterdir():
+            if child.name in skip:
+                continue
+            if child.name in ("certs", "templates"):
+                continue  # already copied at zip root for restore compatibility
+            if child.is_file():
+                if child.suffix.lower() in {".json", ".yml", ".yaml", ".conf", ".toml", ".pem", ".key", ".crt"}:
+                    try:
+                        shutil.copy2(child, data_staging / child.name)
+                    except OSError:
+                        pass
+            elif child.is_dir() and child.name in ("xray", "configs", "custom"):
+                _copy_tree_filtered(child, data_staging / child.name)
+
+
+def create_backup_bundle(*, trigger: str = "manual") -> dict:
+    """Synchronously build a full-bundle zip. Returns job dict."""
+    job_id = uuid.uuid4().hex[:12]
+    with _jobs_lock:
+        _jobs[job_id] = {
+            "job_id": job_id,
+            "status": "running",
+            "trigger": trigger,
+            "logs": [],
+            "started_at": _utc_now(),
+            "finished_at": None,
+            "backup_id": None,
+            "filename": None,
+            "size_bytes": None,
+            "manifest": None,
+            "error": None,
+        }
+    result = _create_backup_into(job_id, trigger=trigger)
+    try:
+        BACKUP_JOBS_DIR.mkdir(parents=True, exist_ok=True)
+        (BACKUP_JOBS_DIR / f"{job_id}.json").write_text(
+            json.dumps(result, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+    return result
+
+
+def start_backup_async(*, trigger: str = "manual") -> dict:
+    """Start backup in a background thread; return running job stub."""
+    job_id = uuid.uuid4().hex[:12]
+    job = {
+        "job_id": job_id,
+        "status": "queued",
+        "trigger": trigger,
+        "logs": [],
+        "started_at": _utc_now(),
+        "finished_at": None,
+        "backup_id": None,
+        "filename": None,
+        "size_bytes": None,
+        "manifest": None,
+        "error": None,
+    }
+    with _jobs_lock:
+        _jobs[job_id] = job
+
+    def _safe_runner():
+        try:
+            with _jobs_lock:
+                _jobs[job_id]["status"] = "running"
+                _jobs[job_id]["logs"].append(f"[{time.strftime('%H:%M:%S')}] Starting backup…")
+            result = _create_backup_into(job_id, trigger=trigger)
+            with _jobs_lock:
+                _jobs[job_id] = result
+        except Exception as exc:
+            with _jobs_lock:
+                j = _jobs.get(job_id) or job
+                j["status"] = "error"
+                j["error"] = str(exc)
+                j["finished_at"] = _utc_now()
+                _jobs[job_id] = j
+
+    threading.Thread(target=_safe_runner, name=f"backup-{job_id}", daemon=True).start()
+    return dict(job)
+
+
+def _create_backup_into(job_id: str, *, trigger: str) -> dict:
+    """Like create_backup_bundle but writes into an existing job_id."""
+    with _jobs_lock:
+        job = _jobs.setdefault(job_id, {
+            "job_id": job_id,
+            "status": "running",
+            "trigger": trigger,
+            "logs": [],
+            "started_at": _utc_now(),
+            "finished_at": None,
+            "backup_id": None,
+            "filename": None,
+            "size_bytes": None,
+            "manifest": None,
+            "error": None,
+        })
+        job["status"] = "running"
+
+    if not _CREATE_LOCK.acquire(blocking=False):
+        job["status"] = "error"
+        job["error"] = "Another backup is already running"
+        job["finished_at"] = _utc_now()
+        _log(job, job["error"])
+        return dict(job)
+
+    staging: Path | None = None
+    try:
+        if not is_pasarguard_installed():
+            raise RuntimeError("PasarGuard is not installed on this server")
+        if not PASARGUARD_ENV.is_file():
+            raise RuntimeError("PasarGuard .env not found")
+
+        env_text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+        db_type = get_pasarguard_db_type() or detect_db_type_from_env(env_text, prefer_compose=True) or "sqlite"
+        _log(job, f"Detected database: {db_type}")
+
+        staging = Path(tempfile.mkdtemp(prefix="pg-backup-", dir=str(WORK_DIR)))
+        _collect_extra_files(staging, job)
+
+        if db_type == "sqlite":
+            _dump_sqlite(staging / "db.sqlite3", job)
+        elif db_type in ("postgresql", "timescaledb"):
+            _dump_postgres(db_type, staging / "db_backup.sql", job)
+        elif db_type in ("mysql", "mariadb"):
+            _dump_mysql(db_type, staging / "db_backup.sql", job)
+        else:
+            raise RuntimeError(f"Unsupported database type: {db_type}")
+
+        stats = live_panel_stats()
+        counts = stats.get("counts") or {}
+        version = read_env_var(env_text, "APP_VERSION") or None
+
+        manifest = {
+            "format": "pgclockmg-full-bundle",
+            "format_version": 1,
+            "created_at": _utc_now(),
+            "trigger": trigger,
+            "hostname": os.uname().nodename if hasattr(os, "uname") else "",
+            "pasarguard_version": version,
+            "db_type": db_type,
+            "counts": {k: counts.get(k) for k in STAT_TABLES},
+            "files": sorted(str(p.relative_to(staging)) for p in staging.rglob("*") if p.is_file()),
+        }
+        (staging / "pgclockmg-manifest.json").write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        filename = f"pgclockmg-{db_type}-{_stamp()}.zip"
+        out_path = BACKUP_DIR / filename
+        _log(job, f"Writing zip {filename}…")
+        with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            for path in staging.rglob("*"):
+                if path.is_file():
+                    zf.write(path, arcname=str(path.relative_to(staging)))
+
+        digest = _sha256_file(out_path)
+        manifest["sha256"] = digest
+        manifest["size_bytes"] = out_path.stat().st_size
+        manifest["filename"] = filename
+        _write_sidecar_meta(out_path, manifest)
+
+        with zipfile.ZipFile(out_path, "r") as zf:
+            names = set(zf.namelist())
+        if ".env" not in names and not any(n.endswith("/.env") for n in names):
+            raise RuntimeError("Backup zip missing .env")
+        has_dump = (
+            "db_backup.sql" in names
+            or "db.sqlite3" in names
+            or any(n.endswith("/db_backup.sql") or n.endswith("/db.sqlite3") for n in names)
+        )
+        if not has_dump:
+            raise RuntimeError("Backup zip missing database dump")
+
+        job["status"] = "success"
+        job["backup_id"] = out_path.stem
+        job["filename"] = filename
+        job["size_bytes"] = out_path.stat().st_size
+        job["manifest"] = manifest
+        job["finished_at"] = _utc_now()
+        _log(job, f"Backup ready ({job['size_bytes']} bytes)")
+
+        from app.services.backup_settings import update_settings
+        update_settings({
+            "last_backup": {
+                "backup_id": job["backup_id"],
+                "filename": filename,
+                "created_at": manifest["created_at"],
+                "size_bytes": job["size_bytes"],
+                "db_type": db_type,
+                "counts": manifest["counts"],
+                "sha256": digest,
+            },
+            "last_error": None,
+        })
+        return dict(job)
+    except Exception as exc:
+        job["status"] = "error"
+        job["error"] = str(exc)
+        job["finished_at"] = _utc_now()
+        _log(job, f"ERROR: {exc}")
+        try:
+            from app.services.backup_settings import update_settings
+            update_settings({"last_error": {"at": _utc_now(), "message": str(exc)}})
+        except Exception:
+            pass
+        return dict(job)
+    finally:
+        _CREATE_LOCK.release()
+        if staging and staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)

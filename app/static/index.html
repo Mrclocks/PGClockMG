@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#0f1218">
   <title>PGClockMG</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=3.2.8">
+  <link rel="stylesheet" href="/static/css/style.css?v=3.3.0">
   <!-- Fonts: non-blocking so mobile/Iran networks don't stall first paint -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -37,7 +37,7 @@
         </div>
         <div>
           <h1>PGClockMG</h1>
-          <p class="header-version" id="appVersion">v3.2.8</p>
+          <p class="header-version" id="appVersion">v3.3.0</p>
         </div>
       </div>
       <div class="header-meta">
@@ -208,6 +208,18 @@
               <svg class="icon icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>
             </div>
             <p><span id="restoreDragText"></span> <span class="link" id="restoreSelectText"></span></p>
+          </div>
+
+          <div class="info-box" id="restoreStreamBox" style="margin-top:14px">
+            <p id="restoreStreamHint" class="desc-sm"></p>
+            <div class="actions" style="margin-top:10px">
+              <button type="button" class="btn btn-primary" id="btnStreamListen" onclick="startStreamListen()"></button>
+            </div>
+            <div id="restoreStreamStatus" class="desc-sm hidden" style="margin-top:10px"></div>
+            <div id="restoreStreamTokenBox" class="install-cmd-row hidden" style="margin-top:10px">
+              <div class="install-cmd-box"><code id="restoreStreamToken"></code></div>
+              <button type="button" class="btn btn-copy" onclick="copyText('restoreStreamToken')"></button>
+            </div>
           </div>
           <div id="restoreUploadProgress" class="progress-panel upload-progress hidden">
             <div class="progress-meta">

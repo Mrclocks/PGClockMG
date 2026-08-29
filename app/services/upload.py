@@ -80,8 +80,11 @@ def get_upload_path(upload_id: str) -> str | None:
     upload_dir = get_upload_dir(upload_id)
     if not upload_dir:
         return None
-    for f in upload_dir.iterdir():
-        if f.is_file():
+    zips = sorted(p for p in upload_dir.iterdir() if p.is_file() and p.suffix.lower() == ".zip")
+    if zips:
+        return str(zips[0])
+    for f in sorted(upload_dir.iterdir()):
+        if f.is_file() and f.name != "stream_meta.json":
             return str(f)
     return str(upload_dir)
 

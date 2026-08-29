@@ -1,0 +1,246 @@
+"""Tests for backup panel auth, settings, telegram caption, and stream listener."""
+
+from __future__ import annotations
+
+import io
+import json
+import zipfile
+from pathlib import Path
+
+import pytest
+
+
+def test_password_policy_and_session(tmp_path, monkeypatch):
+    import app.services.backup_auth as auth
+
+    monkeypatch.setattr(auth, "BACKUP_PASSWORD_FILE", tmp_path / ".password")
+    monkeypatch.setattr(auth, "BACKUP_SECRET_FILE", tmp_path / ".session_secret")
+
+    with pytest.raises(auth.PasswordPolicyError):
+        auth.set_password("short")
+    with pytest.raises(auth.PasswordPolicyError):
+        auth.set_password("alllowercase1!")
+    with pytest.raises(auth.PasswordPolicyError):
+        auth.set_password("ALLUPPERCASE1!")
+    with pytest.raises(auth.PasswordPolicyError):
+        auth.set_password("NoSpecial1234")
+
+    auth.set_password("StrongPass123!")
+    assert auth.password_is_set()
+    assert auth.check_password("StrongPass123!")
+    assert not auth.check_password("WrongPass123!")
+
+    cookie = auth.create_session_cookie()
+    assert auth.session_cookie_valid(cookie)
+    assert not auth.session_cookie_valid(cookie + "x")
+    assert not auth.session_cookie_valid(None)
+    print("OK: backup password policy + session")
+
+
+def test_settings_mask_secrets(tmp_path, monkeypatch):
+    import app.services.backup_settings as settings
+
+    monkeypatch.setattr(settings, "BACKUP_SETTINGS_FILE", tmp_path / "settings.json")
+    data = settings.update_settings({
+        "telegram": {
+            "enabled": True,
+            "bot_token": "123456:ABC-DEF",
+            "chat_id": "-1001",
+            "proxy_password": "proxypass",
+        }
+    })
+    pub = settings.public_settings(data)
+    assert pub["telegram"]["bot_token"] == ""
+    assert pub["telegram"]["bot_token_set"] is True
+    assert pub["telegram"]["proxy_password"] == ""
+    assert pub["telegram"]["chat_id"] == "-1001"
+    # reload keeps secrets on disk
+    loaded = settings.load_settings()
+    assert loaded["telegram"]["bot_token"] == "123456:ABC-DEF"
+    print("OK: settings mask secrets")
+
+
+def test_telegram_caption_and_chunk_math():
+    from app.services.backup_telegram import format_caption, human_size
+    import math
+    from app.config import TELEGRAM_BOT_MAX_BYTES
+
+    text = format_caption(
+        "U={users} N={nodes} S={size} {missing}",
+        {"users": 10, "nodes": 2, "size": human_size(2048)},
+    )
+    assert "U=10" in text
+    assert "N=2" in text
+    assert "{missing}" in text
+    size = 120 * 1024 * 1024
+    parts = math.ceil(size / TELEGRAM_BOT_MAX_BYTES)
+    assert parts >= 3
+    print("OK: telegram caption + chunk sizing")
+
+
+def test_stream_listener_lifecycle():
+    from app.services import backup_stream as stream
+
+    stream._LISTENERS.clear()
+    info = stream.create_listener(label="test")
+    token = info["token"]
+    got = stream.get_listener(token)
+    assert got and got["status"] == "listening"
+    stream.mark_listener_consumed(token)
+    assert stream.get_listener(token)["status"] == "consumed"
+    print("OK: stream listener lifecycle")
+
+
+def test_stream_receive_writes_zip(tmp_path, monkeypatch):
+    import asyncio
+    from app.services import backup_stream as stream
+
+    monkeypatch.setattr(stream, "UPLOAD_DIR", tmp_path / "uploads")
+    (tmp_path / "uploads").mkdir()
+    stream._LISTENERS.clear()
+    info = stream.create_listener()
+    token = info["token"]
+
+    payload = b"PK\x03\x04" + b"0" * 200  # not a real zip; size check only needs >= 64
+
+    async def gen():
+        yield payload[:50]
+        yield payload[50:]
+
+    async def _run():
+        return await stream.receive_stream(
+            token,
+            gen(),
+            filename="demo.zip",
+            expected_size=len(payload),
+        )
+
+    result = asyncio.run(_run())
+    assert result["ok"]
+    upload_id = result["upload_id"]
+    zip_path = tmp_path / "uploads" / upload_id / "backup.zip"
+    assert zip_path.is_file()
+    assert zip_path.stat().st_size == len(payload)
+    st = stream.get_listener(token)
+    assert st["status"] == "ready"
+    print("OK: stream receive writes zip")
+
+
+def test_backup_bundle_sqlite_layout(tmp_path, monkeypatch):
+    """Build a sqlite full-bundle zip without a live PasarGuard install."""
+    import sqlite3
+    import app.services.backup_engine as eng
+
+    pg_dir = tmp_path / "opt" / "pasarguard"
+    pg_data = tmp_path / "var" / "lib" / "pasarguard"
+    pg_dir.mkdir(parents=True)
+    pg_data.mkdir(parents=True)
+    (pg_dir / ".env").write_text(
+        'SQLALCHEMY_DATABASE_URL="sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3"\n',
+        encoding="utf-8",
+    )
+    (pg_dir / "docker-compose.yml").write_text("services:\n  pasarguard:\n    image: x\n", encoding="utf-8")
+    db = pg_data / "db.sqlite3"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT)")
+    conn.execute("INSERT INTO users(username) VALUES ('a'), ('b')")
+    conn.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE admins (id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE inbounds (id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE hosts (id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE groups (id INTEGER PRIMARY KEY)")
+    conn.commit()
+    conn.close()
+    (pg_data / "certs").mkdir()
+    (pg_data / "certs" / "fullchain.pem").write_text("CERT", encoding="utf-8")
+
+    monkeypatch.setattr(eng, "PASARGUARD_DIR", pg_dir)
+    monkeypatch.setattr(eng, "PASARGUARD_ENV", pg_dir / ".env")
+    monkeypatch.setattr(eng, "PASARGUARD_DATA", pg_data)
+    monkeypatch.setattr(eng, "BACKUP_DIR", tmp_path / "backups")
+    monkeypatch.setattr(eng, "WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr(eng, "BACKUP_JOBS_DIR", tmp_path / "jobs")
+    (tmp_path / "backups").mkdir()
+    (tmp_path / "work").mkdir()
+    (tmp_path / "jobs").mkdir()
+
+    monkeypatch.setattr(eng, "is_pasarguard_installed", lambda: True)
+    monkeypatch.setattr(eng, "get_pasarguard_db_type", lambda: "sqlite")
+
+    # settings write path
+    import app.services.backup_settings as settings
+    monkeypatch.setattr(settings, "BACKUP_SETTINGS_FILE", tmp_path / "settings.json")
+
+    job = eng.create_backup_bundle(trigger="test")
+    assert job["status"] == "success", job.get("error")
+    path = eng.resolve_backup_path(job["backup_id"])
+    assert path and path.is_file()
+    with zipfile.ZipFile(path, "r") as zf:
+        names = set(zf.namelist())
+    assert ".env" in names
+    assert "db.sqlite3" in names
+    assert "pgclockmg-manifest.json" in names
+    assert "certs/fullchain.pem" in names
+    assert job["manifest"]["counts"]["users"] == 2
+    print("OK: sqlite full-bundle layout")
+
+
+def test_backup_api_setup_login(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    import app.services.backup_auth as auth
+    import app.services.backup_settings as settings
+    import app.backup_main as bm
+
+    monkeypatch.setattr(auth, "BACKUP_PASSWORD_FILE", tmp_path / ".password")
+    monkeypatch.setattr(auth, "BACKUP_SECRET_FILE", tmp_path / ".session_secret")
+    monkeypatch.setattr(settings, "BACKUP_SETTINGS_FILE", tmp_path / "settings.json")
+
+    # Avoid scheduler/docker side effects
+    monkeypatch.setattr(bm, "start_scheduler", lambda: None)
+    monkeypatch.setattr(bm, "stop_scheduler", lambda: None)
+    monkeypatch.setattr(bm, "is_pasarguard_installed", lambda: False)
+    monkeypatch.setattr(bm, "get_system_status", lambda: {
+        "pasarguard": False, "pasarguard_db": None, "docker": False, "resources": {},
+    })
+    monkeypatch.setattr(bm, "live_panel_stats", lambda: {"ok": False, "counts": {}})
+    monkeypatch.setattr(bm, "list_backup_files", lambda: [])
+
+    client = TestClient(bm.app)
+    st = client.get("/api/setup/status")
+    assert st.status_code == 200
+    assert st.json()["password_set"] is False
+
+    bad = client.post("/api/setup/password", json={
+        "password": "alllowercase1!", "password_confirm": "alllowercase1!",
+    })
+    assert bad.status_code == 400
+
+    mismatch = client.post("/api/setup/password", json={
+        "password": "StrongPass123!", "password_confirm": "StrongPass123?",
+    })
+    assert mismatch.status_code == 400
+
+    ok = client.post("/api/setup/password", json={
+        "password": "StrongPass123!", "password_confirm": "StrongPass123!",
+    })
+    assert ok.status_code == 200
+    assert "pgclockmg_backup_session" in ok.cookies
+
+    dash = client.get("/api/dashboard")
+    assert dash.status_code == 200
+
+    # new client without cookie
+    client2 = TestClient(bm.app)
+    assert client2.get("/api/dashboard").status_code == 401
+    login = client2.post("/api/login", json={"password": "StrongPass123!"})
+    assert login.status_code == 200
+    print("OK: backup API setup + login")
+
+
+if __name__ == "__main__":
+    test_password_policy_and_session.__wrapped__ if False else None
+    # simple runner without pytest fixtures for a couple tests
+    import tempfile
+    from unittest.mock import patch
+    # prefer pytest
+    raise SystemExit("run with pytest")

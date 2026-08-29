@@ -18,14 +18,19 @@
 #
 set -eo pipefail
 
-readonly SCRIPT_VERSION="3.2.8"
+readonly SCRIPT_VERSION="3.3.0"
 readonly INSTALL_DIR="${PG_MIGRATOR_INSTALL_DIR:-/opt/pg-migrator}"
 readonly SERVICE_NAME="pg-migrator"
+readonly BACKUP_SERVICE_NAME="pg-backup"
 readonly SYSTEMD_DIR="${PG_MIGRATOR_SYSTEMD_DIR:-/etc/systemd/system}"
 readonly SERVICE_FILE="${SYSTEMD_DIR}/pg-migrator.service"
+readonly BACKUP_SERVICE_FILE="${SYSTEMD_DIR}/pg-backup.service"
 readonly DEFAULT_WEB_PORT=7000
+readonly DEFAULT_BACKUP_PORT=7001
 WEB_PORT="$DEFAULT_WEB_PORT"
+BACKUP_PORT="$DEFAULT_BACKUP_PORT"
 PREVIOUS_WEB_PORT=""
+PREVIOUS_BACKUP_PORT=""
 readonly TOOLS_DIR="${INSTALL_DIR}/tools"
 readonly DEFAULT_REPO="https://github.com/Mrclocks/PGClockMG.git"
 readonly DEFAULT_INSTALL_URL="https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh"
@@ -637,6 +642,73 @@ select_web_port() {
   fail "No usable port chosen after 5 attempts — re-run with PG_MIGRATOR_PORT=<port>"
 }
 
+select_backup_port() {
+  local default_port="$DEFAULT_BACKUP_PORT" answer attempt
+
+  PREVIOUS_BACKUP_PORT="$(detect_installed_port "$BACKUP_SERVICE_FILE")"
+  [[ -n "$PREVIOUS_BACKUP_PORT" ]] && default_port="$PREVIOUS_BACKUP_PORT"
+
+  if [[ -n "${PG_BACKUP_PORT:-}" ]]; then
+    valid_port "${PG_BACKUP_PORT}" \
+      || fail "PG_BACKUP_PORT='${PG_BACKUP_PORT}' is not a valid port (1-65535)"
+    BACKUP_PORT="$((10#${PG_BACKUP_PORT}))"
+    if [[ "$BACKUP_PORT" == "$WEB_PORT" ]]; then
+      fail "PG_BACKUP_PORT cannot be the same as the wizard port (${WEB_PORT})"
+    fi
+    ok "Backup panel port ${BACKUP_PORT} (from PG_BACKUP_PORT)"
+    return
+  fi
+
+  if ! tty_available; then
+    BACKUP_PORT="$default_port"
+    if [[ "$BACKUP_PORT" == "$WEB_PORT" ]]; then
+      BACKUP_PORT="$((WEB_PORT + 1))"
+      [[ "$BACKUP_PORT" -gt 65535 ]] && BACKUP_PORT=7001
+    fi
+    warn "No terminal — backup panel port ${BACKUP_PORT} (set PG_BACKUP_PORT to change)"
+    return
+  fi
+
+  log ""
+  log "  ${C_BOLD}Which port should the BACKUP panel listen on?${C_RESET}"
+  log "  ${C_DIM}Separate from the restore wizard (${WEB_PORT}). Default: ${default_port}.${C_RESET}"
+  [[ -n "$PREVIOUS_BACKUP_PORT" ]] \
+    && log "  ${C_DIM}Current backup panel uses ${PREVIOUS_BACKUP_PORT}. Press Enter to keep it.${C_RESET}"
+
+  for attempt in 1 2 3 4 5; do
+    answer=""
+    if ! ask_tty "  Backup port [${default_port}]: " answer; then
+      BACKUP_PORT="$default_port"
+      warn "Could not read the answer — using port ${BACKUP_PORT}"
+      return
+    fi
+    answer="${answer//[[:space:]]/}"
+    [[ -z "$answer" ]] && answer="$default_port"
+
+    if ! valid_port "$answer"; then
+      warn "'${answer}' is not a valid port. Enter a number between 1 and 65535."
+      continue
+    fi
+    answer="$((10#$answer))"
+
+    if [[ "$answer" == "$WEB_PORT" ]]; then
+      warn "Backup port cannot match the wizard port (${WEB_PORT})."
+      continue
+    fi
+    if [[ "$answer" != "${PREVIOUS_BACKUP_PORT}" ]] && port_in_use "$answer"; then
+      warn "Port ${answer} is already used by another service — pick a different one."
+      continue
+    fi
+
+    BACKUP_PORT="$answer"
+    ok "Backup panel port: ${BACKUP_PORT}"
+    log ""
+    return
+  done
+
+  fail "No usable backup port chosen — re-run with PG_BACKUP_PORT=<port>"
+}
+
 # ── install ───────────────────────────────────────────────────────────────────
 
 install_packages() {
@@ -729,7 +801,7 @@ setup_python_env() {
 }
 
 create_systemd_service() {
-  info "Creating systemd service..."
+  info "Creating systemd services..."
   cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=PGClockMG — PasarGuard restore & migration wizard
@@ -742,6 +814,7 @@ User=root
 WorkingDirectory=${INSTALL_DIR}
 Environment=PG_MIGRATOR_HOME=${INSTALL_DIR}
 Environment=PG_MIGRATOR_PORT=${WEB_PORT}
+Environment=PG_BACKUP_PORT=${BACKUP_PORT}
 Environment=PATH=${INSTALL_DIR}/venv/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=${INSTALL_DIR}/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port ${WEB_PORT}
 Restart=on-failure
@@ -752,21 +825,55 @@ StandardError=append:${INSTALL_DIR}/logs/service.log
 [Install]
 WantedBy=multi-user.target
 EOF
+
+  cat > "$BACKUP_SERVICE_FILE" <<EOF
+[Unit]
+Description=PGClockMG — PasarGuard backup panel
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=${INSTALL_DIR}
+Environment=PG_MIGRATOR_HOME=${INSTALL_DIR}
+Environment=PG_MIGRATOR_PORT=${WEB_PORT}
+Environment=PG_BACKUP_PORT=${BACKUP_PORT}
+Environment=PATH=${INSTALL_DIR}/venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=${INSTALL_DIR}/venv/bin/python -m uvicorn app.backup_main:app --host 0.0.0.0 --port ${BACKUP_PORT}
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:${INSTALL_DIR}/logs/backup-service.log
+StandardError=append:${INSTALL_DIR}/logs/backup-service.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
   systemctl daemon-reload
   systemctl enable "${SERVICE_NAME}"
+  systemctl enable "${BACKUP_SERVICE_NAME}"
   # Token file must exist before the service boots and before we print the URL.
   ensure_access_token
+  mkdir -p "${INSTALL_DIR}/backup_panel" "${INSTALL_DIR}/backups"
+  chmod 700 "${INSTALL_DIR}/backup_panel" 2>/dev/null || true
   systemctl restart "${SERVICE_NAME}"
-  ok "Service ${SERVICE_NAME} started"
+  systemctl restart "${BACKUP_SERVICE_NAME}"
+  ok "Services ${SERVICE_NAME} + ${BACKUP_SERVICE_NAME} started"
 }
 
 open_firewall() {
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "active"; then
     ufw allow "${WEB_PORT}/tcp" >/dev/null 2>&1 || true
-    ok "Firewall port ${WEB_PORT} opened"
+    ufw allow "${BACKUP_PORT}/tcp" >/dev/null 2>&1 || true
+    ok "Firewall ports ${WEB_PORT} + ${BACKUP_PORT} opened"
     if [[ -n "$PREVIOUS_WEB_PORT" && "$PREVIOUS_WEB_PORT" != "$WEB_PORT" ]]; then
       ufw delete allow "${PREVIOUS_WEB_PORT}/tcp" >/dev/null 2>&1 || true
-      info "Firewall rule for old port ${PREVIOUS_WEB_PORT} removed"
+      info "Firewall rule for old wizard port ${PREVIOUS_WEB_PORT} removed"
+    fi
+    if [[ -n "$PREVIOUS_BACKUP_PORT" && "$PREVIOUS_BACKUP_PORT" != "$BACKUP_PORT" ]]; then
+      ufw delete allow "${PREVIOUS_BACKUP_PORT}/tcp" >/dev/null 2>&1 || true
+      info "Firewall rule for old backup port ${PREVIOUS_BACKUP_PORT} removed"
     fi
   fi
 }
@@ -834,14 +941,18 @@ print_success() {
   log "${C_GREEN}  ╚══════════════════════════════════════════════════════════╝${C_RESET}"
   log ""
   log "   ${C_BOLD}Web panel${C_RESET}   ${C_GREEN}${url}${C_RESET}"
-  log "   ${C_DIM}Port${C_RESET}        ${WEB_PORT}"
+  log "   ${C_BOLD}Backup panel${C_RESET} ${C_GREEN}http://${ip}:${BACKUP_PORT}/${C_RESET}"
+  log "   ${C_DIM}Wizard port${C_RESET} ${WEB_PORT}"
+  log "   ${C_DIM}Backup port${C_RESET} ${BACKUP_PORT}"
   log "   ${C_DIM}Version${C_RESET}     ${app_ver}"
   log "   ${C_DIM}Path${C_RESET}        ${INSTALL_DIR}"
   log "   ${C_DIM}Service${C_RESET}     systemctl status ${SERVICE_NAME}"
+  log "   ${C_DIM}Backup svc${C_RESET}  systemctl status ${BACKUP_SERVICE_NAME}"
   log "   ${C_DIM}Token file${C_RESET}  ${INSTALL_DIR}/.access_token"
   log ""
   if [[ -n "$token" ]]; then
-    log "   ${C_YELLOW}Next:${C_RESET} open the URL above — the access token is already in the link."
+    log "   ${C_YELLOW}Next:${C_RESET} open the wizard URL above — the access token is already in the link."
+    log "   ${C_YELLOW}Backup:${C_RESET} open the backup panel URL and set a strong password on first visit."
     log "   ${C_DIM}The wizard is protected: without that token nobody can reach it.${C_RESET}"
     log "   ${C_DIM}Recovery:${C_RESET} cat ${INSTALL_DIR}/.access_token"
   else
@@ -872,6 +983,7 @@ action_install() {
   log "  ${C_BOLD}INSTALL / UPDATE${C_RESET}"
   rule
   select_web_port
+  select_backup_port
   info "Starting installation — this takes a few minutes."
   log ""
 
@@ -898,7 +1010,7 @@ action_install() {
 # ── uninstall ─────────────────────────────────────────────────────────────────
 
 action_uninstall() {
-  local port backup_dir keep_dir
+  local port bport backup_dir keep_dir
 
   log ""
   log "  ${C_BOLD}UNINSTALL${C_RESET}"
@@ -912,8 +1024,11 @@ action_uninstall() {
   port="$(detect_installed_port)"
   log "   This removes:"
   log "     ${C_DIM}•${C_RESET} systemd service ${SERVICE_NAME}"
+  log "     ${C_DIM}•${C_RESET} systemd service ${BACKUP_SERVICE_NAME}"
   log "     ${C_DIM}•${C_RESET} ${INSTALL_DIR} (app, uploads, backups, logs)"
-  [[ -n "$port" ]] && log "     ${C_DIM}•${C_RESET} firewall rule for port ${port}"
+  [[ -n "$port" ]] && log "     ${C_DIM}•${C_RESET} firewall rule for wizard port ${port}"
+  bport="$(detect_installed_port "$BACKUP_SERVICE_FILE")"
+  [[ -n "$bport" ]] && log "     ${C_DIM}•${C_RESET} firewall rule for backup port ${bport}"
   log ""
   log "   ${C_GREEN}Kept untouched:${C_RESET} PasarGuard, your databases and the redirect server."
   log ""
@@ -937,14 +1052,22 @@ action_uninstall() {
   if have_systemd; then
     systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
     systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
+    systemctl stop "$BACKUP_SERVICE_NAME" >/dev/null 2>&1 || true
+    systemctl disable "$BACKUP_SERVICE_NAME" >/dev/null 2>&1 || true
   fi
-  rm -f "$SERVICE_FILE"
+  rm -f "$SERVICE_FILE" "$BACKUP_SERVICE_FILE"
   have_systemd && systemctl daemon-reload >/dev/null 2>&1 || true
   rm -rf "$INSTALL_DIR"
 
-  if [[ -n "$port" ]] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "active"; then
-    ufw delete allow "${port}/tcp" >/dev/null 2>&1 || true
-    info "Firewall rule for port ${port} removed"
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "active"; then
+    if [[ -n "$port" ]]; then
+      ufw delete allow "${port}/tcp" >/dev/null 2>&1 || true
+      info "Firewall rule for wizard port ${port} removed"
+    fi
+    if [[ -n "${bport:-}" ]]; then
+      ufw delete allow "${bport}/tcp" >/dev/null 2>&1 || true
+      info "Firewall rule for backup port ${bport} removed"
+    fi
   fi
 
   ok "PGClockMG removed."

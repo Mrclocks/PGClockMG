@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0f1218">
+  <title>PGClockMG Backup</title>
+  <link rel="stylesheet" href="/static/css/style.css?v=3.3.0">
+  <link rel="stylesheet" href="/static/css/backup.css?v=3.3.0">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
+  <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&display=swap"></noscript>
+</head>
+<body>
+  <div class="app backup-app">
+
+    <header class="header">
+      <div class="header-brand">
+        <div class="logo" aria-hidden="true">
+          <svg class="icon" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="24" cy="24" r="20" fill="white" opacity="0.95"/>
+            <line x1="24" y1="24" x2="24" y2="10" stroke="#1a2e5a" stroke-width="2.8" stroke-linecap="round"/>
+            <line x1="24" y1="24" x2="34" y2="18" stroke="#1a2e5a" stroke-width="2.8" stroke-linecap="round"/>
+            <line x1="24" y1="24" x2="20" y2="35" stroke="#f97316" stroke-width="1.8" stroke-linecap="round"/>
+            <circle cx="24" cy="24" r="2.5" fill="#c2410c"/>
+          </svg>
+        </div>
+        <div>
+          <h1>PGClockMG Backup</h1>
+          <p class="header-version" id="appVersion">v3.3.0</p>
+        </div>
+      </div>
+      <div class="header-meta">
+        <div class="lang-switch" id="langSwitch" role="group" aria-label="Language">
+          <button type="button" class="lang-btn" data-lang="fa" onclick="setBackupLang('fa')">FA</button>
+          <button type="button" class="lang-btn" data-lang="en" onclick="setBackupLang('en')">EN</button>
+          <button type="button" class="lang-btn" data-lang="ru" onclick="setBackupLang('ru')">RU</button>
+        </div>
+        <button type="button" class="btn btn-back btn-sm hidden" id="btnLogout" onclick="logoutBackup()"></button>
+      </div>
+    </header>
+
+    <nav class="steps backup-tabs hidden" id="backupTabs">
+      <button type="button" class="step active" data-tab="dash" onclick="showBackupTab('dash')"><span id="tabDash"></span></button>
+      <button type="button" class="step" data-tab="list" onclick="showBackupTab('list')"><span id="tabList"></span></button>
+      <button type="button" class="step" data-tab="settings" onclick="showBackupTab('settings')"><span id="tabSettings"></span></button>
+    </nav>
+
+    <main class="main">
+
+      <!-- Auth / setup -->
+      <section class="panel active" id="panel-auth">
+        <div class="welcome-card">
+          <div class="welcome-header">
+            <h2 id="authTitle"></h2>
+            <p class="desc" id="authDesc"></p>
+          </div>
+          <div class="welcome-body">
+            <div id="authError" class="warning-card hidden"></div>
+            <div class="form-group">
+              <label id="lblPassword"></label>
+              <input type="password" id="authPassword" autocomplete="new-password" class="text-input">
+            </div>
+            <div class="form-group hidden" id="authConfirmWrap">
+              <label id="lblPasswordConfirm"></label>
+              <input type="password" id="authPasswordConfirm" autocomplete="new-password" class="text-input">
+              <p class="desc-sm" id="authPolicy"></p>
+            </div>
+            <div class="actions actions-center">
+              <button type="button" class="btn btn-primary" id="btnAuthSubmit" onclick="submitAuth()"></button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Dashboard -->
+      <section class="panel" id="panel-dash">
+        <h2 id="dashH2"></h2>
+        <p class="desc" id="dashDesc"></p>
+
+        <div id="dashPgCard" class="success-card">
+          <h3 id="dashPgTitle"></h3>
+          <div id="dashPgSpecs" class="specs-grid"></div>
+        </div>
+
+        <div class="choice-grid choice-grid-3 backup-stat-grid" id="dashStats"></div>
+
+        <div class="actions actions-center" style="margin-top:20px">
+          <button type="button" class="btn btn-primary btn-lg" id="btnBackupNow" onclick="createBackupNow()"></button>
+        </div>
+
+        <div id="backupProgress" class="info-box hidden" style="margin-top:16px">
+          <p id="backupProgressTitle" class="desc-sm"></p>
+          <pre id="backupProgressLog" class="backup-log"></pre>
+        </div>
+
+        <div id="dashLast" class="info-box" style="margin-top:16px"></div>
+      </section>
+
+      <!-- Backup list -->
+      <section class="panel" id="panel-list">
+        <h2 id="listH2"></h2>
+        <p class="desc" id="listDesc"></p>
+        <div id="backupList" class="backup-list"></div>
+      </section>
+
+      <!-- Settings -->
+      <section class="panel" id="panel-settings">
+        <h2 id="setH2"></h2>
+        <p class="desc" id="setDesc"></p>
+
+        <h3 class="section-title" id="setSchedTitle"></h3>
+        <div class="form-group">
+          <label class="check-row"><input type="checkbox" id="schedEnabled"> <span id="lblSchedEnabled"></span></label>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label id="lblSchedHour"></label>
+            <input type="number" min="0" max="23" id="schedHour" class="text-input">
+          </div>
+          <div class="form-group">
+            <label id="lblSchedMinute"></label>
+            <input type="number" min="0" max="59" id="schedMinute" class="text-input">
+          </div>
+          <div class="form-group">
+            <label id="lblRetention"></label>
+            <input type="number" min="1" max="100" id="retentionCount" class="text-input">
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="check-row"><input type="checkbox" id="schedTelegram"> <span id="lblSchedTelegram"></span></label>
+        </div>
+
+        <h3 class="section-title" id="setTgTitle"></h3>
+        <div class="form-group">
+          <label class="check-row"><input type="checkbox" id="tgEnabled"> <span id="lblTgEnabled"></span></label>
+        </div>
+        <div class="form-group">
+          <label id="lblTgToken"></label>
+          <input type="password" id="tgToken" class="text-input" autocomplete="off" placeholder="">
+          <p class="desc-sm" id="tgTokenHint"></p>
+        </div>
+        <div class="form-group">
+          <label id="lblTgChat"></label>
+          <input type="text" id="tgChat" class="text-input" autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label id="lblTgCaption"></label>
+          <textarea id="tgCaption" class="text-input" rows="5"></textarea>
+          <p class="desc-sm" id="tgCaptionHint"></p>
+        </div>
+        <div class="actions">
+          <button type="button" class="btn btn-back" id="btnTgPreview" onclick="previewTelegram()"></button>
+          <button type="button" class="btn btn-primary" id="btnTgTest" onclick="testTelegram()"></button>
+        </div>
+        <pre id="tgPreviewBox" class="backup-log hidden"></pre>
+
+        <h3 class="section-title" id="setProxyTitle"></h3>
+        <div class="form-group">
+          <label class="check-row"><input type="checkbox" id="proxyEnabled"> <span id="lblProxyEnabled"></span></label>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label id="lblProxyType"></label>
+            <select id="proxyType" class="text-input">
+              <option value="socks5">SOCKS5</option>
+              <option value="http">HTTP</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label id="lblProxyHost"></label>
+            <input type="text" id="proxyHost" class="text-input">
+          </div>
+          <div class="form-group">
+            <label id="lblProxyPort"></label>
+            <input type="number" id="proxyPort" class="text-input" min="1" max="65535">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label id="lblProxyUser"></label>
+            <input type="text" id="proxyUser" class="text-input" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label id="lblProxyPass"></label>
+            <input type="password" id="proxyPass" class="text-input" autocomplete="off">
+          </div>
+        </div>
+
+        <h3 class="section-title" id="setStreamTitle"></h3>
+        <div class="form-group">
+          <label id="lblStreamDest"></label>
+          <input type="text" id="streamDest" class="text-input" placeholder="http://DEST_IP:7000">
+          <p class="desc-sm" id="streamDestHint"></p>
+        </div>
+
+        <h3 class="section-title" id="setPassTitle"></h3>
+        <div class="form-group">
+          <label id="lblNewPass"></label>
+          <input type="password" id="newPassword" class="text-input" autocomplete="new-password">
+        </div>
+        <div class="form-group">
+          <label id="lblNewPassConfirm"></label>
+          <input type="password" id="newPasswordConfirm" class="text-input" autocomplete="new-password">
+        </div>
+
+        <div class="actions actions-center" style="margin-top:20px">
+          <button type="button" class="btn btn-primary" id="btnSaveSettings" onclick="saveSettings()"></button>
+        </div>
+        <div id="settingsMsg" class="success-card hidden" style="margin-top:12px"></div>
+      </section>
+
+      <!-- Stream send modal-ish panel -->
+      <section class="panel" id="panel-stream">
+        <h2 id="streamH2"></h2>
+        <p class="desc" id="streamDesc"></p>
+        <div class="form-group">
+          <label id="lblStreamUrl"></label>
+          <input type="text" id="streamUrl" class="text-input">
+        </div>
+        <div class="form-group">
+          <label id="lblStreamToken"></label>
+          <input type="text" id="streamToken" class="text-input" autocomplete="off">
+        </div>
+        <input type="hidden" id="streamBackupId">
+        <div class="actions">
+          <button type="button" class="btn btn-back" id="btnStreamBack" onclick="showBackupTab('list')"></button>
+          <button type="button" class="btn btn-primary" id="btnStreamSend" onclick="sendStream()"></button>
+        </div>
+        <div id="streamMsg" class="info-box hidden" style="margin-top:12px"></div>
+      </section>
+
+    </main>
+  </div>
+  <script src="/static/js/backup.js?v=3.3.0"></script>
+</body>
+</html>
