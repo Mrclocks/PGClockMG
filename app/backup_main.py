@@ -39,7 +39,7 @@ from app.services.backup_telegram import (
 )
 from app.services.prerequisites import get_system_status, is_pasarguard_installed
 
-APP_VERSION = "4.0.1"
+APP_VERSION = "4.0.2"
 
 
 @asynccontextmanager
@@ -184,12 +184,18 @@ async def setup_password(body: PasswordSetup, request: Request):
         raise HTTPException(400, "password_already_set")
     if body.password != body.password_confirm:
         raise HTTPException(400, "password_mismatch")
-    if not backup_auth.consume_setup_token(body.setup_token):
+    # Validate first (do not burn the one-time token on password write failures).
+    if not backup_auth.verify_setup_token(body.setup_token):
         raise HTTPException(403, "setup_token_invalid")
+    backup_auth.clear_empty_password_file()
     try:
         backup_auth.set_password(body.password, exclusive=True)
     except backup_auth.PasswordPolicyError as exc:
         raise HTTPException(400, f"weak_password:{exc}") from exc
+    except OSError as exc:
+        raise HTTPException(500, f"password_write_failed:{exc}") from exc
+    # Only consume after the password is safely stored.
+    backup_auth.consume_setup_token(body.setup_token)
     cookie = backup_auth.create_session_cookie()
     resp = JSONResponse({"ok": True})
     _set_session_cookie(resp, cookie, request)

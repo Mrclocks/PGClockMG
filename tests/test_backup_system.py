@@ -309,3 +309,41 @@ if __name__ == "__main__":
     from unittest.mock import patch
     # prefer pytest
     raise SystemExit("run with pytest")
+
+
+def test_setup_token_length_mismatch_no_500(tmp_path, monkeypatch):
+    """Unequal-length tokens must not crash (Python 3.10 compare_digest)."""
+    monkeypatch.setenv("PG_BACKUP_HOME", str(tmp_path))
+    monkeypatch.setenv("PG_MIGRATOR_HOME", str(tmp_path))
+    import importlib
+    import app.config as cfg
+    importlib.reload(cfg)
+    from app.services import backup_auth
+    importlib.reload(backup_auth)
+    from app import backup_main
+    importlib.reload(backup_main)
+    from fastapi.testclient import TestClient
+
+    tok = backup_auth.issue_setup_token()
+    client = TestClient(backup_main.app)
+    r = client.post(
+        "/api/setup/password",
+        json={
+            "password": "BackupTest1!ab",
+            "password_confirm": "BackupTest1!ab",
+            "setup_token": "SHORT",
+        },
+    )
+    assert r.status_code == 403, r.text
+    # Empty leftover password file + valid token must succeed
+    cfg.BACKUP_PASSWORD_FILE.write_text("", encoding="utf-8")
+    r2 = client.post(
+        "/api/setup/password",
+        json={
+            "password": "BackupTest1!ab",
+            "password_confirm": "BackupTest1!ab",
+            "setup_token": tok,
+        },
+    )
+    assert r2.status_code == 200, r2.text
+    print("OK: setup token mismatch + empty password file")

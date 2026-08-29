@@ -207,14 +207,30 @@ def setup_token_is_required() -> bool:
     )
 
 
+def _clean_token(value: str | None) -> str:
+    """Normalize pasted tokens (strip whitespace / invisible mobile paste chars)."""
+    if not value:
+        return ""
+    return "".join(ch for ch in value.strip() if ch.isprintable() and not ch.isspace())
+
+
+def verify_setup_token(provided: str | None) -> bool:
+    """Check setup token without consuming it. Never raises on length mismatch."""
+    if not setup_token_is_required():
+        return True
+    expected = _clean_token(BACKUP_SETUP_TOKEN_FILE.read_text(encoding="utf-8"))
+    got = _clean_token(provided)
+    if not expected or not got or len(got) != len(expected):
+        return False
+    return hmac.compare_digest(got, expected)
+
+
 def consume_setup_token(provided: str | None) -> bool:
     """Validate and delete the setup token. Returns False on mismatch/missing."""
-    if not setup_token_is_required():
-        # Legacy installs without a setup token file still allow first-run setup.
-        return True
-    expected = BACKUP_SETUP_TOKEN_FILE.read_text(encoding="utf-8").strip()
-    if not provided or not hmac.compare_digest(provided.strip(), expected):
+    if not verify_setup_token(provided):
         return False
+    if not setup_token_is_required():
+        return True
     try:
         BACKUP_SETUP_TOKEN_FILE.unlink(missing_ok=True)
     except OSError:
@@ -224,6 +240,15 @@ def consume_setup_token(provided: str | None) -> bool:
 
 def password_file_path() -> Path:
     return BACKUP_PASSWORD_FILE
+
+
+def clear_empty_password_file() -> None:
+    """Remove a leftover empty .password so exclusive first-setup can proceed."""
+    try:
+        if BACKUP_PASSWORD_FILE.is_file() and not BACKUP_PASSWORD_FILE.read_text(encoding="utf-8").strip():
+            BACKUP_PASSWORD_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 # Simple in-memory login throttle (per-process; good enough for single uvicorn worker).
