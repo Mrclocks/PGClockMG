@@ -1,4 +1,5 @@
-> ⚠️ **`v3.2.8`** — Always take a full backup before restore or migration.
+> 🚀 **`v4.0.1`** — Separate wizard & backup installs + security hardening  
+> ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
   <a href="README.md">فارسی</a> · <b>English</b> · <a href="README.ru.md">Русский</a>
@@ -10,160 +11,110 @@
 
 # PGClockMG
 
-Web wizard for restore and migration to PasarGuard
+🧰 Restore/migration wizard + PasarGuard backup panel (separate installs)
 
 </div>
 
 ---
 
-## Overview
+## ✨ Overview
 
-PGClockMG is a web wizard for **backup restore** and **migration to PasarGuard**.
+| Product | Path | Port | Service |
+|---------|------|------|---------|
+| 🧭 **PGClockMG** (wizard) | `/opt/pg-migrator` | `7000` | `pg-migrator` |
+| 💾 **PGClockBackup** | `/opt/pg-backup` | `7001` | `pg-backup` |
 
-### What it can do
+From **v4.0.1** they install and uninstall **independently**. Removing the wizard after restore does **not** remove the backup panel.
 
-- Restore PasarGuard backups — including database engine changes (SQLite / PostgreSQL / TimescaleDB / MySQL / MariaDB)
-- Automatically handle TimescaleDB version mismatches during restore (image pull, readiness probe, auth fallback)
-- Show a DB info card after backup upload — compares backup DB vs installed DB and shows compatibility
-- Optionally keep nodes disabled after restore to avoid conflicts with a still-active previous panel
-- Migrate from Marzban, 3x-ui, Hiddify, and Remnawave
-- Show panel status and official installation guidance
-
-> This wizard does not install PasarGuard for you. Install the panel first, then come back.
+> 📌 Install PasarGuard yourself — this tool does not install the panel.
 
 ---
 
-## Requirements
-
-- Ubuntu 22.04+
-- `root` access
-- Docker
-- PasarGuard already installed on the new server
-
-Panel URL after install: `http://SERVER_IP:PORT/?token=...`  
-Default port: `7000`
-
-The wizard is protected by an **access token**. Without it nobody can reach the
-panel. The installer prints a ready-to-open URL that already includes the token
-(`http://SERVER_IP:PORT/?token=...`). Recovery:
-
-```bash
-cat /opt/pg-migrator/.access_token
-```
-
----
-
-## Install
+## 📥 Install
 
 ```bash
 sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
 ```
 
-After running, the script clears the screen and shows the main menu.
-
-### Script menu
+### 🗂️ Script menu
 
 | Option | What it does |
 |--------|--------------|
-| 1 · Install / update | Asks for the web panel port (Enter keeps `7000`), completes installation, then prints the login URL (with token) |
-| 2 · Uninstall | Removes the service and `/opt/pg-migrator`, offering to keep your backups. PasarGuard, your databases, and the redirect server stay untouched |
-| 3 · Redirect server | Status, restart, force restart, and logs for `pg-redirect` — only used by 3x-ui / Hiddify migrations |
-| 4 · Exit | Leaves the menu |
+| 1 · Install PGClockMG | Wizard only — asks web port |
+| 2 · Install PGClockBackup | Backup only — asks backup port and prints a **one-time setup token** |
+| 3 · Uninstall PGClockMG | Removes wizard only (backup stays) |
+| 4 · Uninstall PGClockBackup | Removes backup panel only |
+| 5 · Redirect server | 3x-ui / Hiddify |
+| 6 · Exit | Leave menu |
 
-Above the menu the script shows PasarGuard status (installed, version, database
-engine), Docker, the wizard service, and the redirect server. If PasarGuard is
-missing, the script says so — it only moves data into an existing panel.
+### Unattended
 
----
-
-## How to use
-
-### Main workflow
-
-1. Take a backup from your current panel.  
-2. Install PasarGuard with the database engine you want on the **new server**. The
-   old panel's database type does not matter; if it is different, the wizard runs
-   the required conversion/migration automatically.  
-3. Make sure the new panel is up and reachable, then temporarily disable the old panel.  
-4. Install the PGClockMG script on the new server.  
-5. At the end of installation the script prints the web panel URL (with token). Open that link and follow the wizard step by step.  
-6. Run restore or migration.
-
-### Recommended order
-
-- First, back up the old panel
-- Then install and test PasarGuard on the new server
-- Temporarily disable the old panel so links, ports, or nodes do not conflict
-- Finally, run restore or migration from the PGClockMG web panel
+```bash
+sudo PG_MIGRATOR_ACTION=install-wizard PG_MIGRATOR_PORT=7000 bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
+sudo PG_MIGRATOR_ACTION=install-backup PG_BACKUP_PORT=7001 bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
+```
 
 ---
 
-## Important notes
+## 🧭 Wizard guide (PGClockMG)
 
-### Opening the web panel (access token)
+URL: `http://SERVER_IP:7000/?token=...`
 
-The wizard will not open without a token. After install, use the URL printed by
-the installer (`http://SERVER_IP:PORT/?token=...`). If you lost the link:
+### Features
+- ✅ Restore PasarGuard backups (including DB engine changes)
+- ✅ Migrate Marzban / 3x-ui / Hiddify / Remnawave
+- ✅ Receive streamed backup → **manual confirm** → restore
+- ✅ TimescaleDB auto-heal
+
+After a successful restore you can **Uninstall PGClockMG**; PGClockBackup keeps running if installed.
 
 ```bash
 cat /opt/pg-migrator/.access_token
 ```
 
-The token is created during install at `/opt/pg-migrator/.access_token` with mode `0600`.
-Do not paste it into public chats or screenshots.
+---
 
-### Old subscription links broken after a 3x-ui / Hiddify migration?
+## 💾 Backup panel guide (PGClockBackup)
 
-`pg-redirect` has to bind the port the old panel used. If that panel is still
-running, it keeps the port and the redirect service cannot start. Run the script,
-choose `3` (Redirect server), then `2` (Force restart): it stops the old panel,
-frees the ports, and brings the redirect server back with a health check.
+URL: `http://SERVER_IP:7001/` · First visit: **setup token** + strong password
 
-### Unattended mode
+### Features
+- 📦 Full bundle from `/opt/pasarguard` + `/var/lib/pasarguard`
+- 🗄️ SQLite / PostgreSQL / TimescaleDB / MySQL / MariaDB
+- 📊 Health dashboard & live stats
+- ⏰ Daily schedule + keep last N
+- 📱 Telegram (+ proxy) with Connected/Disconnected tag
+- 🌊 Stream to destination wizard → manual confirm → restore
+- 🔐 Separate password, session, and install path
+
+### Security highlights
+- One-time setup token for first password
+- Login throttling
+- Session rotation on password change
+- SSRF blocks on stream destinations / abusive proxy hosts
+- No public OpenAPI on the backup app
 
 ```bash
-sudo PG_MIGRATOR_PORT=8443 bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
-sudo PG_MIGRATOR_ACTION=redirect-restart bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
+cat /opt/pg-backup/backup_panel/.setup_token
 ```
 
-`PG_MIGRATOR_ACTION` accepts `install`, `uninstall`, `redirect-restart`, or `menu`  
-Add `PG_MIGRATOR_YES=1` to accept every confirmation automatically.
-
 ---
 
-## Panel support
-
-| Panel | Status |
-|-------|--------|
-| Marzban | Full |
-| PasarGuard | Restore / Change DB (not in panel migrate) |
-| 3X-UI | Full |
-| Hiddify | Incomplete (users + link redirect) |
-| Remnawave | Coming soon |
-
----
-
-## Useful commands
+## 🛠️ Commands
 
 ```bash
 systemctl status pg-migrator
-systemctl restart pg-migrator
+systemctl status pg-backup
 journalctl -u pg-migrator -f
-
-# Update
-sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
-
-# Stop
-systemctl stop pg-migrator && systemctl disable pg-migrator
+journalctl -u pg-backup -f
 ```
+
+Pre-v4 restore point: `restore-point-pre-v4.0.0`
 
 ---
 
-## License
+## 📄 License
 
 **Copyright (c) 2026 Mrclocks — All rights reserved.**
-
-Personal use on your own server is allowed.  
-Copying, republishing, or selling without permission is not allowed.
 
 [`LICENSE`](LICENSE) · [github.com/Mrclocks/PGClockMG](https://github.com/Mrclocks/PGClockMG)

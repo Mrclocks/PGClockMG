@@ -5,21 +5,26 @@
 # Usage:
 #   sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh)"
 #
-# Interactive menu: install / uninstall / redirect server / exit.
+# Interactive menu: install/uninstall PGClockMG or PGClockBackup / redirect / exit.
 #
 # Non-interactive:
-#   PG_MIGRATOR_ACTION=install|uninstall|redirect-restart|menu   (or pass as argv[1])
-#   PG_MIGRATOR_PORT=<port>       web panel port, no question asked
+#   PG_MIGRATOR_ACTION=install|install-wizard|install-backup|
+#                      uninstall|uninstall-wizard|uninstall-backup|
+#                      redirect-restart|menu   (or pass as argv[1])
+#   PG_MIGRATOR_PORT=<port>       wizard port, no question asked
+#   PG_BACKUP_PORT=<port>         backup panel port, no question asked
 #   PG_MIGRATOR_YES=1             answer every confirmation with yes
 #   PG_MIGRATOR_INSTALL_LIB=1     source the helpers only (used by the test suite)
 #
 # The test suite also redirects the paths it inspects with PG_MIGRATOR_INSTALL_DIR,
-# PG_MIGRATOR_SYSTEMD_DIR, PG_MIGRATOR_PASARGUARD_DIR and PG_MIGRATOR_REDIRECT_DIR.
+# PG_BACKUP_INSTALL_DIR, PG_MIGRATOR_SYSTEMD_DIR, PG_MIGRATOR_PASARGUARD_DIR and
+# PG_MIGRATOR_REDIRECT_DIR.
 #
 set -eo pipefail
 
-readonly SCRIPT_VERSION="4.0.0"
+readonly SCRIPT_VERSION="4.0.1"
 readonly INSTALL_DIR="${PG_MIGRATOR_INSTALL_DIR:-/opt/pg-migrator}"
+readonly BACKUP_INSTALL_DIR="${PG_BACKUP_INSTALL_DIR:-/opt/pg-backup}"
 readonly SERVICE_NAME="pg-migrator"
 readonly BACKUP_SERVICE_NAME="pg-backup"
 readonly SYSTEMD_DIR="${PG_MIGRATOR_SYSTEMD_DIR:-/etc/systemd/system}"
@@ -235,9 +240,10 @@ port_owner() {
   printf '%s' "$owner"
 }
 
-# ── PGClockMG state ───────────────────────────────────────────────────────────
+# ── PGClockMG / PGClockBackup state ───────────────────────────────────────────
 
 pgclockmg_installed() { [[ -d "$INSTALL_DIR" || -f "$SERVICE_FILE" ]]; }
+pgbackup_installed() { [[ -d "$BACKUP_INSTALL_DIR" || -f "$BACKUP_SERVICE_FILE" ]]; }
 
 # Port of an existing install, so re-running the installer keeps the user's choice.
 detect_installed_port() {
@@ -248,11 +254,24 @@ detect_installed_port() {
   return 0
 }
 
+detect_service_workdir() {
+  local unit="${1:-$SERVICE_FILE}" wd=""
+  [[ -f "$unit" ]] || return 0
+  wd="$(grep -E '^WorkingDirectory=' "$unit" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+  printf '%s' "$wd"
+  return 0
+}
+
 read_app_version() {
   # Prefer version from the synced app (source of truth), not this installer banner alone.
-  local v=""
-  if [[ -f "${INSTALL_DIR}/app/main.py" ]]; then
-    v="$(grep -E '^APP_VERSION\s*=' "${INSTALL_DIR}/app/main.py" | head -1 | sed -E 's/.*["'"'"']([^"'"'"']+)["'"'"'].*/\1/' || true)"
+  # Usage: read_app_version [install_dir] [py_file]
+  #   wizard default: INSTALL_DIR / main.py
+  #   backup:         BACKUP_INSTALL_DIR / backup_main.py
+  local dir="${1:-$INSTALL_DIR}"
+  local py="${2:-main.py}"
+  local v="" f="${dir}/app/${py}"
+  if [[ -f "$f" ]]; then
+    v="$(grep -E '^APP_VERSION\s*=' "$f" | head -1 | sed -E 's/.*["'"'"']([^"'"'"']+)["'"'"'].*/\1/' || true)"
   fi
   if [[ -n "$v" ]]; then
     printf '%s' "$v"
@@ -479,12 +498,13 @@ status_row() {
 print_banner() {
   log ""
   log "${C_CYAN}  ╔══════════════════════════════════════════════════════════╗${C_RESET}"
-  log "${C_CYAN}  ║${C_RESET}   ${C_BOLD}${C_WHITE}PGClockMG${C_RESET}  ·  PasarGuard restore & migration wizard    ${C_CYAN}║${C_RESET}"
+  log "${C_CYAN}  ║${C_RESET}   ${C_BOLD}${C_WHITE}PGClockMG${C_RESET}  ·  restore wizard   ${C_DIM}+${C_RESET}  ${C_BOLD}${C_WHITE}PGClockBackup${C_RESET}         ${C_CYAN}║${C_RESET}"
   log "${C_CYAN}  ╚══════════════════════════════════════════════════════════╝${C_RESET}"
 }
 
 print_status() {
   local app_ver port ip pg_container pg_ver pg_db redirect_state ports
+  local bver bport
 
   ip="$(server_ip)"
   log ""
@@ -540,6 +560,19 @@ print_status() {
     status_row none "Wizard" "not installed"
   fi
 
+  if pgbackup_installed; then
+    bver="$(read_app_version "$BACKUP_INSTALL_DIR" backup_main.py)"
+    bport="$(detect_installed_port "$BACKUP_SERVICE_FILE")"
+    [[ -z "$bport" ]] && bport="$DEFAULT_BACKUP_PORT"
+    if unit_active "$BACKUP_SERVICE_NAME"; then
+      status_row ok "Backup" "v${bver} · http://${ip}:${bport}/"
+    else
+      status_row warn "Backup" "v${bver} · port ${bport} · service stopped"
+    fi
+  else
+    status_row none "Backup" "not installed"
+  fi
+
   if redirect_configured; then
     redirect_load_config || true
     ports="$(format_ports "$(redirect_all_ports)")"
@@ -566,10 +599,12 @@ print_menu() {
   log ""
   log "  ${C_BOLD}MENU${C_RESET}"
   rule
-  log "   ${C_CYAN}1${C_RESET})  Install / update the web panel"
-  log "   ${C_CYAN}2${C_RESET})  Uninstall the web panel"
-  log "   ${C_CYAN}3${C_RESET})  Redirect server  ${C_DIM}(3x-ui / Hiddify only)${C_RESET}"
-  log "   ${C_CYAN}4${C_RESET})  Exit"
+  log "   ${C_CYAN}1${C_RESET})  Install / update PGClockMG"
+  log "   ${C_CYAN}2${C_RESET})  Install / update PGClockBackup"
+  log "   ${C_CYAN}3${C_RESET})  Uninstall PGClockMG"
+  log "   ${C_CYAN}4${C_RESET})  Uninstall PGClockBackup"
+  log "   ${C_CYAN}5${C_RESET})  Redirect server  ${C_DIM}(3x-ui / Hiddify only)${C_RESET}"
+  log "   ${C_CYAN}6${C_RESET})  Exit"
   log ""
 }
 
@@ -643,7 +678,11 @@ select_web_port() {
 }
 
 select_backup_port() {
-  local default_port="$DEFAULT_BACKUP_PORT" answer attempt
+  local default_port="$DEFAULT_BACKUP_PORT" answer attempt wizard_port
+
+  # When comparing against the wizard port, prefer the running unit; else default.
+  wizard_port="$(detect_installed_port "$SERVICE_FILE")"
+  [[ -z "$wizard_port" ]] && wizard_port="$DEFAULT_WEB_PORT"
 
   PREVIOUS_BACKUP_PORT="$(detect_installed_port "$BACKUP_SERVICE_FILE")"
   [[ -n "$PREVIOUS_BACKUP_PORT" ]] && default_port="$PREVIOUS_BACKUP_PORT"
@@ -652,8 +691,8 @@ select_backup_port() {
     valid_port "${PG_BACKUP_PORT}" \
       || fail "PG_BACKUP_PORT='${PG_BACKUP_PORT}' is not a valid port (1-65535)"
     BACKUP_PORT="$((10#${PG_BACKUP_PORT}))"
-    if [[ "$BACKUP_PORT" == "$WEB_PORT" ]]; then
-      fail "PG_BACKUP_PORT cannot be the same as the wizard port (${WEB_PORT})"
+    if [[ "$BACKUP_PORT" == "$wizard_port" ]]; then
+      fail "PG_BACKUP_PORT cannot be the same as the wizard port (${wizard_port})"
     fi
     ok "Backup panel port ${BACKUP_PORT} (from PG_BACKUP_PORT)"
     return
@@ -661,8 +700,8 @@ select_backup_port() {
 
   if ! tty_available; then
     BACKUP_PORT="$default_port"
-    if [[ "$BACKUP_PORT" == "$WEB_PORT" ]]; then
-      BACKUP_PORT="$((WEB_PORT + 1))"
+    if [[ "$BACKUP_PORT" == "$wizard_port" ]]; then
+      BACKUP_PORT="$((wizard_port + 1))"
       [[ "$BACKUP_PORT" -gt 65535 ]] && BACKUP_PORT=7001
     fi
     warn "No terminal — backup panel port ${BACKUP_PORT} (set PG_BACKUP_PORT to change)"
@@ -671,7 +710,7 @@ select_backup_port() {
 
   log ""
   log "  ${C_BOLD}Which port should the BACKUP panel listen on?${C_RESET}"
-  log "  ${C_DIM}Separate from the restore wizard (${WEB_PORT}). Default: ${default_port}.${C_RESET}"
+  log "  ${C_DIM}Separate from the restore wizard (${wizard_port}). Default: ${default_port}.${C_RESET}"
   [[ -n "$PREVIOUS_BACKUP_PORT" ]] \
     && log "  ${C_DIM}Current backup panel uses ${PREVIOUS_BACKUP_PORT}. Press Enter to keep it.${C_RESET}"
 
@@ -691,8 +730,8 @@ select_backup_port() {
     fi
     answer="$((10#$answer))"
 
-    if [[ "$answer" == "$WEB_PORT" ]]; then
-      warn "Backup port cannot match the wizard port (${WEB_PORT})."
+    if [[ "$answer" == "$wizard_port" ]]; then
+      warn "Backup port cannot match the wizard port (${wizard_port})."
       continue
     fi
     if [[ "$answer" != "${PREVIOUS_BACKUP_PORT}" ]] && port_in_use "$answer"; then
@@ -754,8 +793,10 @@ install_uv() {
 }
 
 copy_app_files() {
+  local target="${1:-$INSTALL_DIR}"
+  local tools_dir="${target}/tools"
   info "Syncing application from GitHub..."
-  mkdir -p "$INSTALL_DIR" "$TOOLS_DIR" "${INSTALL_DIR}/uploads" "${INSTALL_DIR}/backups" "${INSTALL_DIR}/logs"
+  mkdir -p "$target" "$tools_dir" "${target}/uploads" "${target}/backups" "${target}/logs"
 
   local repo="${PG_MIGRATOR_REPO:-$DEFAULT_REPO}"
   local branch="${PG_MIGRATOR_BRANCH:-$DEFAULT_BRANCH}"
@@ -764,20 +805,22 @@ copy_app_files() {
   git clone --depth 1 --branch "$branch" "$repo" /tmp/pg-migrator-src \
     || fail "Could not clone ${repo} @ ${branch}"
 
-  cp -r /tmp/pg-migrator-src/app "${INSTALL_DIR}/"
-  cp -f /tmp/pg-migrator-src/requirements.txt "${INSTALL_DIR}/"
-  [[ -d /tmp/pg-migrator-src/tests ]] && cp -r /tmp/pg-migrator-src/tests "${INSTALL_DIR}/"
+  cp -r /tmp/pg-migrator-src/app "${target}/"
+  cp -f /tmp/pg-migrator-src/requirements.txt "${target}/"
+  [[ -d /tmp/pg-migrator-src/tests ]] && cp -r /tmp/pg-migrator-src/tests "${target}/"
   # Native subscription redirect (stdlib) — must not depend on GitHub downloads at migrate time
   if [[ -d /tmp/pg-migrator-src/tools/pg_redirect ]]; then
-    mkdir -p "${TOOLS_DIR}"
-    rm -rf "${TOOLS_DIR}/pg_redirect"
-    cp -a /tmp/pg-migrator-src/tools/pg_redirect "${TOOLS_DIR}/pg_redirect"
+    mkdir -p "${tools_dir}"
+    rm -rf "${tools_dir}/pg_redirect"
+    cp -a /tmp/pg-migrator-src/tools/pg_redirect "${tools_dir}/pg_redirect"
   fi
   rm -rf /tmp/pg-migrator-src
 
-  [[ -f "${INSTALL_DIR}/app/main.py" ]] || fail "Application files not found after sync."
-  [[ -f "${TOOLS_DIR}/pg_redirect/__main__.py" ]] || warn "tools/pg_redirect missing — old sub link redirect may fail"
-  ok "Application synced to ${INSTALL_DIR}"
+  [[ -f "${target}/app/main.py" ]] || fail "Application files not found after sync."
+  if [[ "$target" == "$INSTALL_DIR" ]]; then
+    [[ -f "${tools_dir}/pg_redirect/__main__.py" ]] || warn "tools/pg_redirect missing — old sub link redirect may fail"
+  fi
+  ok "Application synced to ${target}"
 }
 
 clone_migration_tools() {
@@ -790,8 +833,9 @@ clone_migration_tools() {
 }
 
 setup_python_env() {
+  local target="${1:-$INSTALL_DIR}"
   info "Setting up Python environment..."
-  cd "$INSTALL_DIR"
+  cd "$target"
   python3 -m venv venv
   # shellcheck disable=SC1091
   source venv/bin/activate
@@ -800,8 +844,7 @@ setup_python_env() {
   ok "Python environment ready"
 }
 
-create_systemd_service() {
-  info "Creating systemd services..."
+write_wizard_unit() {
   cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=PGClockMG — PasarGuard restore & migration wizard
@@ -814,7 +857,6 @@ User=root
 WorkingDirectory=${INSTALL_DIR}
 Environment=PG_MIGRATOR_HOME=${INSTALL_DIR}
 Environment=PG_MIGRATOR_PORT=${WEB_PORT}
-Environment=PG_BACKUP_PORT=${BACKUP_PORT}
 Environment=PATH=${INSTALL_DIR}/venv/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=${INSTALL_DIR}/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port ${WEB_PORT}
 Restart=on-failure
@@ -825,57 +867,148 @@ StandardError=append:${INSTALL_DIR}/logs/service.log
 [Install]
 WantedBy=multi-user.target
 EOF
+}
 
+write_backup_unit() {
   cat > "$BACKUP_SERVICE_FILE" <<EOF
 [Unit]
-Description=PGClockMG — PasarGuard backup panel
+Description=PGClockBackup — PasarGuard backup panel
 After=network.target docker.service
 Wants=docker.service
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=${INSTALL_DIR}
-Environment=PG_MIGRATOR_HOME=${INSTALL_DIR}
-Environment=PG_MIGRATOR_PORT=${WEB_PORT}
+WorkingDirectory=${BACKUP_INSTALL_DIR}
+Environment=PG_MIGRATOR_HOME=${BACKUP_INSTALL_DIR}
+Environment=PG_BACKUP_HOME=${BACKUP_INSTALL_DIR}
 Environment=PG_BACKUP_PORT=${BACKUP_PORT}
-Environment=PATH=${INSTALL_DIR}/venv/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=${INSTALL_DIR}/venv/bin/python -m uvicorn app.backup_main:app --host 0.0.0.0 --port ${BACKUP_PORT}
+Environment=PATH=${BACKUP_INSTALL_DIR}/venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=${BACKUP_INSTALL_DIR}/venv/bin/python -m uvicorn app.backup_main:app --host 0.0.0.0 --port ${BACKUP_PORT}
 Restart=on-failure
 RestartSec=5
-StandardOutput=append:${INSTALL_DIR}/logs/backup-service.log
-StandardError=append:${INSTALL_DIR}/logs/backup-service.log
+StandardOutput=append:${BACKUP_INSTALL_DIR}/logs/backup-service.log
+StandardError=append:${BACKUP_INSTALL_DIR}/logs/backup-service.log
 
 [Install]
 WantedBy=multi-user.target
 EOF
-
-  systemctl daemon-reload
-  systemctl enable "${SERVICE_NAME}"
-  systemctl enable "${BACKUP_SERVICE_NAME}"
-  # Token file must exist before the service boots and before we print the URL.
-  ensure_access_token
-  mkdir -p "${INSTALL_DIR}/backup_panel" "${INSTALL_DIR}/backups"
-  chmod 700 "${INSTALL_DIR}/backup_panel" 2>/dev/null || true
-  systemctl restart "${SERVICE_NAME}"
-  systemctl restart "${BACKUP_SERVICE_NAME}"
-  ok "Services ${SERVICE_NAME} + ${BACKUP_SERVICE_NAME} started"
 }
 
+create_wizard_systemd_service() {
+  info "Creating wizard systemd service..."
+  mkdir -p "${INSTALL_DIR}/logs"
+  write_wizard_unit
+  systemctl daemon-reload
+  systemctl enable "${SERVICE_NAME}"
+  # Token file must exist before the service boots and before we print the URL.
+  ensure_access_token
+  systemctl restart "${SERVICE_NAME}"
+  ok "Service ${SERVICE_NAME} started"
+}
+
+create_backup_systemd_service() {
+  info "Creating backup systemd service..."
+  mkdir -p "${BACKUP_INSTALL_DIR}/logs" "${BACKUP_INSTALL_DIR}/backup_panel" "${BACKUP_INSTALL_DIR}/backups"
+  chmod 700 "${BACKUP_INSTALL_DIR}/backup_panel" 2>/dev/null || true
+  write_backup_unit
+  systemctl daemon-reload
+  systemctl enable "${BACKUP_SERVICE_NAME}"
+  systemctl restart "${BACKUP_SERVICE_NAME}"
+  ok "Service ${BACKUP_SERVICE_NAME} started"
+}
+
+# Open firewall for one port; optionally drop a previous port rule.
 open_firewall() {
+  local port="${1:-}" previous="${2:-}"
+  [[ -n "$port" ]] || return 0
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "active"; then
-    ufw allow "${WEB_PORT}/tcp" >/dev/null 2>&1 || true
-    ufw allow "${BACKUP_PORT}/tcp" >/dev/null 2>&1 || true
-    ok "Firewall ports ${WEB_PORT} + ${BACKUP_PORT} opened"
-    if [[ -n "$PREVIOUS_WEB_PORT" && "$PREVIOUS_WEB_PORT" != "$WEB_PORT" ]]; then
-      ufw delete allow "${PREVIOUS_WEB_PORT}/tcp" >/dev/null 2>&1 || true
-      info "Firewall rule for old wizard port ${PREVIOUS_WEB_PORT} removed"
-    fi
-    if [[ -n "$PREVIOUS_BACKUP_PORT" && "$PREVIOUS_BACKUP_PORT" != "$BACKUP_PORT" ]]; then
-      ufw delete allow "${PREVIOUS_BACKUP_PORT}/tcp" >/dev/null 2>&1 || true
-      info "Firewall rule for old backup port ${PREVIOUS_BACKUP_PORT} removed"
+    ufw allow "${port}/tcp" >/dev/null 2>&1 || true
+    ok "Firewall port ${port} opened"
+    if [[ -n "$previous" && "$previous" != "$port" ]]; then
+      ufw delete allow "${previous}/tcp" >/dev/null 2>&1 || true
+      info "Firewall rule for old port ${previous} removed"
     fi
   fi
+}
+
+# Copy legacy combined-install backup data into BACKUP_INSTALL_DIR when needed.
+migrate_legacy_backup_data() {
+  [[ "$BACKUP_INSTALL_DIR" != "$INSTALL_DIR" ]] || return 0
+  local copied=0
+  if [[ -d "${INSTALL_DIR}/backup_panel" ]] && [[ ! -e "${BACKUP_INSTALL_DIR}/backup_panel" ]]; then
+    mkdir -p "$BACKUP_INSTALL_DIR"
+    cp -a "${INSTALL_DIR}/backup_panel" "${BACKUP_INSTALL_DIR}/" && copied=1
+  fi
+  if [[ -d "${INSTALL_DIR}/backups" ]] && [[ ! -e "${BACKUP_INSTALL_DIR}/backups" ]]; then
+    mkdir -p "$BACKUP_INSTALL_DIR"
+    cp -a "${INSTALL_DIR}/backups" "${BACKUP_INSTALL_DIR}/" && copied=1
+  elif [[ -d "${INSTALL_DIR}/backups" ]] && [[ -d "${BACKUP_INSTALL_DIR}/backups" ]]; then
+    # Merge legacy files that are not already present in the new install.
+    if [[ -n "$(ls -A "${INSTALL_DIR}/backups" 2>/dev/null || true)" ]] \
+       && [[ -z "$(ls -A "${BACKUP_INSTALL_DIR}/backups" 2>/dev/null || true)" ]]; then
+      cp -a "${INSTALL_DIR}/backups/." "${BACKUP_INSTALL_DIR}/backups/" && copied=1
+    fi
+  fi
+  if (( copied )); then
+    ok "Migrated legacy backup data from ${INSTALL_DIR} → ${BACKUP_INSTALL_DIR}"
+  fi
+}
+
+ensure_backup_setup_token() {
+  local token_file="${BACKUP_INSTALL_DIR}/backup_panel/.setup_token" tok="" py=""
+  mkdir -p "${BACKUP_INSTALL_DIR}/backup_panel" 2>/dev/null || {
+    fail_soft "Cannot create ${BACKUP_INSTALL_DIR}/backup_panel for the setup token"
+    return 1
+  }
+  chmod 700 "${BACKUP_INSTALL_DIR}/backup_panel" 2>/dev/null || true
+  if [[ -s "$token_file" ]]; then
+    chmod 600 "$token_file" 2>/dev/null || true
+    return 0
+  fi
+
+  py="${BACKUP_INSTALL_DIR}/venv/bin/python"
+  if [[ -x "$py" ]]; then
+    tok="$(
+      PG_BACKUP_HOME="$BACKUP_INSTALL_DIR" PG_MIGRATOR_HOME="$BACKUP_INSTALL_DIR" \
+        "$py" -c 'from app.services.backup_auth import issue_setup_token; print(issue_setup_token())' 2>/dev/null || true
+    )"
+  fi
+  if [[ -z "$tok" ]] && [[ ! -s "$token_file" ]]; then
+    if command -v openssl >/dev/null 2>&1; then
+      tok="$(openssl rand -hex 24 2>/dev/null || true)"
+    fi
+  fi
+  if [[ -z "$tok" ]] && [[ ! -s "$token_file" ]]; then
+    py="$(command -v python3 || true)"
+    if [[ -n "$py" ]]; then
+      tok="$("$py" -c 'import secrets; print(secrets.token_urlsafe(24))' 2>/dev/null || true)"
+    fi
+  fi
+  if [[ -s "$token_file" ]]; then
+    chmod 600 "$token_file" 2>/dev/null || true
+    return 0
+  fi
+  if [[ -z "$tok" || ${#tok} -lt 16 ]]; then
+    fail_soft "Failed to generate backup setup token (need openssl or python3)"
+    return 1
+  fi
+  (
+    umask 077
+    printf '%s\n' "$tok" > "$token_file"
+  ) 2>/dev/null || {
+    fail_soft "Cannot write setup token to ${token_file}"
+    return 1
+  }
+  chmod 600 "$token_file" 2>/dev/null || true
+  ok "Backup setup token created at ${token_file}"
+  return 0
+}
+
+read_backup_setup_token() {
+  local f="${BACKUP_INSTALL_DIR}/backup_panel/.setup_token"
+  [[ -s "$f" ]] || return 1
+  head -n1 "$f" | tr -d '[:space:]'
 }
 
 # Write /opt/pg-migrator/.access_token (0600) if missing. Keep an existing token
@@ -941,23 +1074,19 @@ print_success() {
   log "${C_GREEN}  ╚══════════════════════════════════════════════════════════╝${C_RESET}"
   log ""
   log "   ${C_BOLD}Web panel${C_RESET}   ${C_GREEN}${url}${C_RESET}"
-  log "   ${C_BOLD}Backup panel${C_RESET} ${C_GREEN}http://${ip}:${BACKUP_PORT}/${C_RESET}"
-  log "   ${C_DIM}Wizard port${C_RESET} ${WEB_PORT}"
-  log "   ${C_DIM}Backup port${C_RESET} ${BACKUP_PORT}"
+  log "   ${C_DIM}Port${C_RESET}        ${WEB_PORT}"
   log "   ${C_DIM}Version${C_RESET}     ${app_ver}"
   log "   ${C_DIM}Path${C_RESET}        ${INSTALL_DIR}"
   log "   ${C_DIM}Service${C_RESET}     systemctl status ${SERVICE_NAME}"
-  log "   ${C_DIM}Backup svc${C_RESET}  systemctl status ${BACKUP_SERVICE_NAME}"
   log "   ${C_DIM}Token file${C_RESET}  ${INSTALL_DIR}/.access_token"
   log ""
   if [[ -n "$token" ]]; then
     log "   ${C_YELLOW}Next:${C_RESET} open the wizard URL above — the access token is already in the link."
-    log "   ${C_YELLOW}Backup:${C_RESET} open the backup panel URL and set a strong password on first visit."
     log "   ${C_DIM}The wizard is protected: without that token nobody can reach it.${C_RESET}"
     log "   ${C_DIM}Recovery:${C_RESET} cat ${INSTALL_DIR}/.access_token"
   else
     fail_soft "Access token was not created — open ${url} and check ${INSTALL_DIR}/.access_token"
-    log "   ${C_DIM}Re-run Install / update, or: openssl rand -hex 24 > ${INSTALL_DIR}/.access_token && chmod 600 ${INSTALL_DIR}/.access_token${C_RESET}"
+    log "   ${C_DIM}Re-run Install / update PGClockMG, or: openssl rand -hex 24 > ${INSTALL_DIR}/.access_token && chmod 600 ${INSTALL_DIR}/.access_token${C_RESET}"
   fi
   if ! pasarguard_installed; then
     log "   ${C_YELLOW}Note:${C_RESET} PasarGuard is not installed yet — install the panel before migrating."
@@ -965,35 +1094,74 @@ print_success() {
   log ""
 }
 
-run_install() {
+print_backup_success() {
+  local ip app_ver token="" url
+  ip="$(server_ip)"
+  app_ver="$(read_app_version "$BACKUP_INSTALL_DIR" backup_main.py)"
+  ensure_backup_setup_token || true
+  token="$(read_backup_setup_token 2>/dev/null || true)"
+  url="http://${ip}:${BACKUP_PORT}/"
+  log ""
+  log "${C_GREEN}  ╔══════════════════════════════════════════════════════════╗${C_RESET}"
+  log "${C_GREEN}  ║${C_RESET}   ${C_BOLD}${C_WHITE}PGClockBackup is installed and running${C_RESET}                 ${C_GREEN}║${C_RESET}"
+  log "${C_GREEN}  ╚══════════════════════════════════════════════════════════╝${C_RESET}"
+  log ""
+  log "   ${C_BOLD}Backup panel${C_RESET}  ${C_GREEN}${url}${C_RESET}"
+  log "   ${C_DIM}Port${C_RESET}         ${BACKUP_PORT}"
+  log "   ${C_DIM}Version${C_RESET}      ${app_ver}"
+  log "   ${C_DIM}Path${C_RESET}         ${BACKUP_INSTALL_DIR}"
+  log "   ${C_DIM}Service${C_RESET}      systemctl status ${BACKUP_SERVICE_NAME}"
+  if [[ -n "$token" ]]; then
+    log "   ${C_BOLD}Setup token${C_RESET}  ${C_YELLOW}${token}${C_RESET}"
+    log "   ${C_DIM}Token file${C_RESET}   ${BACKUP_INSTALL_DIR}/backup_panel/.setup_token"
+    log ""
+    log "   ${C_YELLOW}Next:${C_RESET} open the backup panel and set a strong password."
+    log "   ${C_YELLOW}Required:${C_RESET} paste the setup token above on first password setup."
+    log "   ${C_DIM}Recovery:${C_RESET} cat ${BACKUP_INSTALL_DIR}/backup_panel/.setup_token"
+  else
+    fail_soft "Setup token was not created — check ${BACKUP_INSTALL_DIR}/backup_panel/.setup_token"
+  fi
+  log ""
+}
+
+run_install_wizard() {
   check_ubuntu
   install_packages
   install_uv
-  copy_app_files
+  copy_app_files "$INSTALL_DIR"
   clone_migration_tools
-  setup_python_env
-  create_systemd_service
-  open_firewall
+  setup_python_env "$INSTALL_DIR"
+  create_wizard_systemd_service
+  open_firewall "$WEB_PORT" "$PREVIOUS_WEB_PORT"
 }
 
-action_install() {
+run_install_backup() {
+  check_ubuntu
+  install_packages
+  install_uv
+  copy_app_files "$BACKUP_INSTALL_DIR"
+  setup_python_env "$BACKUP_INSTALL_DIR"
+  migrate_legacy_backup_data
+  mkdir -p "${BACKUP_INSTALL_DIR}/backup_panel" "${BACKUP_INSTALL_DIR}/backups"
+  chmod 700 "${BACKUP_INSTALL_DIR}/backup_panel" 2>/dev/null || true
+  ensure_backup_setup_token
+  create_backup_systemd_service
+  open_firewall "$BACKUP_PORT" "$PREVIOUS_BACKUP_PORT"
+}
+
+action_install_wizard() {
   local rc=0 errexit_was_on=""
 
   log ""
-  log "  ${C_BOLD}INSTALL / UPDATE${C_RESET}"
+  log "  ${C_BOLD}INSTALL / UPDATE PGClockMG${C_RESET}"
   rule
   select_web_port
-  select_backup_port
-  info "Starting installation — this takes a few minutes."
+  info "Starting wizard installation — this takes a few minutes."
   log ""
 
-  # Steps run in a subshell so `fail` inside one of them returns here instead
-  # of ending the script; `set -e` is re-armed inside it so the install stops
-  # at the first failing step (callers go through run_action, see above).
-  # Restore — never force — errexit, or returning non-zero would end the script.
   case "$-" in *e*) errexit_was_on=1 ;; esac
   set +e
-  ( set -e; run_install )
+  ( set -e; run_install_wizard )
   rc=$?
   [[ -n "$errexit_was_on" ]] && set -e
 
@@ -1007,13 +1175,81 @@ action_install() {
   return 1
 }
 
-# ── uninstall ─────────────────────────────────────────────────────────────────
+# Alias kept for older callers / tests.
+action_install() { action_install_wizard "$@"; }
 
-action_uninstall() {
-  local port bport backup_dir keep_dir
+action_install_backup() {
+  local rc=0 errexit_was_on=""
 
   log ""
-  log "  ${C_BOLD}UNINSTALL${C_RESET}"
+  log "  ${C_BOLD}INSTALL / UPDATE PGClockBackup${C_RESET}"
+  rule
+  select_backup_port
+  info "Starting backup panel installation — this takes a few minutes."
+  log ""
+
+  case "$-" in *e*) errexit_was_on=1 ;; esac
+  set +e
+  ( set -e; run_install_backup )
+  rc=$?
+  [[ -n "$errexit_was_on" ]] && set -e
+
+  if (( rc == 0 )); then
+    ensure_backup_setup_token
+    print_backup_success
+    return 0
+  fi
+  log ""
+  fail_soft "Backup installation failed. Fix the error above and run the installer again."
+  return 1
+}
+
+# ── uninstall ─────────────────────────────────────────────────────────────────
+
+remove_wizard_only_files() {
+  # When INSTALL_DIR still hosts the backup panel, strip wizard-only artefacts.
+  rm -rf "${INSTALL_DIR}/uploads" "${INSTALL_DIR}/work" 2>/dev/null || true
+  rm -f "${INSTALL_DIR}/.access_token" 2>/dev/null || true
+  # tools/ left in place (optional) — operator can remove manually if unused.
+}
+
+migrate_combined_backup_out_of_install_dir() {
+  # Move backup_panel + backups + app + venv from INSTALL_DIR → BACKUP_INSTALL_DIR
+  # and rewrite pg-backup.service. Returns 0 on success.
+  local item
+  [[ "$BACKUP_INSTALL_DIR" != "$INSTALL_DIR" ]] || return 1
+  mkdir -p "$BACKUP_INSTALL_DIR" || return 1
+  for item in backup_panel backups app venv requirements.txt; do
+    if [[ -e "${INSTALL_DIR}/${item}" ]]; then
+      if [[ -e "${BACKUP_INSTALL_DIR}/${item}" ]]; then
+        # Prefer keeping existing target; still try to merge directories lightly.
+        if [[ -d "${INSTALL_DIR}/${item}" && -d "${BACKUP_INSTALL_DIR}/${item}" ]]; then
+          cp -a "${INSTALL_DIR}/${item}/." "${BACKUP_INSTALL_DIR}/${item}/" 2>/dev/null || return 1
+        fi
+      else
+        cp -a "${INSTALL_DIR}/${item}" "${BACKUP_INSTALL_DIR}/" 2>/dev/null || return 1
+      fi
+    fi
+  done
+  mkdir -p "${BACKUP_INSTALL_DIR}/logs" "${BACKUP_INSTALL_DIR}/backup_panel" "${BACKUP_INSTALL_DIR}/backups"
+  chmod 700 "${BACKUP_INSTALL_DIR}/backup_panel" 2>/dev/null || true
+  BACKUP_PORT="$(detect_installed_port "$BACKUP_SERVICE_FILE")"
+  [[ -z "$BACKUP_PORT" ]] && BACKUP_PORT="$DEFAULT_BACKUP_PORT"
+  write_backup_unit
+  have_systemd && systemctl daemon-reload >/dev/null 2>&1 || true
+  if have_systemd; then
+    systemctl enable "${BACKUP_SERVICE_NAME}" >/dev/null 2>&1 || true
+    systemctl restart "${BACKUP_SERVICE_NAME}" >/dev/null 2>&1 || true
+  fi
+  ok "Backup data migrated to ${BACKUP_INSTALL_DIR}"
+  return 0
+}
+
+action_uninstall_wizard() {
+  local port backup_dir keep_dir backup_wd
+
+  log ""
+  log "  ${C_BOLD}UNINSTALL PGClockMG${C_RESET}"
   rule
 
   if ! pgclockmg_installed; then
@@ -1022,23 +1258,97 @@ action_uninstall() {
   fi
 
   port="$(detect_installed_port)"
+  backup_wd="$(detect_service_workdir "$BACKUP_SERVICE_FILE")"
   log "   This removes:"
   log "     ${C_DIM}•${C_RESET} systemd service ${SERVICE_NAME}"
-  log "     ${C_DIM}•${C_RESET} systemd service ${BACKUP_SERVICE_NAME}"
-  log "     ${C_DIM}•${C_RESET} ${INSTALL_DIR} (app, uploads, backups, logs)"
+  log "     ${C_DIM}•${C_RESET} ${INSTALL_DIR} (wizard app, uploads, logs)"
   [[ -n "$port" ]] && log "     ${C_DIM}•${C_RESET} firewall rule for wizard port ${port}"
-  bport="$(detect_installed_port "$BACKUP_SERVICE_FILE")"
-  [[ -n "$bport" ]] && log "     ${C_DIM}•${C_RESET} firewall rule for backup port ${bport}"
   log ""
-  log "   ${C_GREEN}Kept untouched:${C_RESET} PasarGuard, your databases and the redirect server."
+  log "   ${C_GREEN}Kept untouched:${C_RESET} PGClockBackup, PasarGuard, databases and the redirect server."
   log ""
 
   confirm "Remove PGClockMG now?" N || { info "Cancelled — nothing was removed."; return 0; }
 
-  backup_dir="${INSTALL_DIR}/backups"
+  # Stop/disable ONLY the wizard — never touch pg-backup.
+  if have_systemd; then
+    systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+    systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
+  fi
+  rm -f "$SERVICE_FILE"
+  have_systemd && systemctl daemon-reload >/dev/null 2>&1 || true
+
+  if [[ -f "$BACKUP_SERVICE_FILE" ]] && [[ "$backup_wd" == "$INSTALL_DIR" ]]; then
+    # Legacy combined install: migrate backup out, then remove INSTALL_DIR.
+    if migrate_combined_backup_out_of_install_dir; then
+      rm -rf "$INSTALL_DIR"
+    else
+      warn "Could not migrate backup data out of ${INSTALL_DIR}."
+      warn "Removing wizard-only files and leaving the directory for PGClockBackup."
+      remove_wizard_only_files
+    fi
+  else
+    # Backup is separate (or absent) — optional keep-copy of legacy wizard backups.
+    backup_dir="${INSTALL_DIR}/backups"
+    if [[ -d "$backup_dir" ]] && [[ -n "$(ls -A "$backup_dir" 2>/dev/null || true)" ]]; then
+      if confirm "Keep a copy of the backups folder?" Y; then
+        keep_dir="${PG_MIGRATOR_BACKUP_DIR:-/root}/pgclockmg-backups-$(date +%Y%m%d-%H%M%S)"
+        if mkdir -p "$keep_dir" 2>/dev/null && cp -a "${backup_dir}/." "${keep_dir}/" 2>/dev/null; then
+          ok "Backups copied to ${keep_dir}"
+        else
+          warn "Could not copy the backups to ${keep_dir}"
+          confirm "Continue and delete them with the app?" N \
+            || { info "Cancelled — wizard service was removed but files were kept."; return 0; }
+        fi
+      fi
+    fi
+    rm -rf "$INSTALL_DIR"
+  fi
+
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "active"; then
+    if [[ -n "$port" ]]; then
+      ufw delete allow "${port}/tcp" >/dev/null 2>&1 || true
+      info "Firewall rule for wizard port ${port} removed"
+    fi
+  fi
+
+  ok "PGClockMG removed."
+  if redirect_configured; then
+    log "   ${C_DIM}The redirect server (${REDIRECT_SERVICE}) is still installed and untouched.${C_RESET}"
+  fi
+  if pgbackup_installed; then
+    log "   ${C_DIM}PGClockBackup is still installed and untouched.${C_RESET}"
+  fi
+}
+
+action_uninstall() { action_uninstall_wizard "$@"; }
+
+action_uninstall_backup() {
+  local port backup_dir keep_dir
+
+  log ""
+  log "  ${C_BOLD}UNINSTALL PGClockBackup${C_RESET}"
+  rule
+
+  if ! pgbackup_installed; then
+    warn "PGClockBackup is not installed on this server — nothing to remove."
+    return 0
+  fi
+
+  port="$(detect_installed_port "$BACKUP_SERVICE_FILE")"
+  log "   This removes:"
+  log "     ${C_DIM}•${C_RESET} systemd service ${BACKUP_SERVICE_NAME}"
+  log "     ${C_DIM}•${C_RESET} ${BACKUP_INSTALL_DIR} (backup panel, backups, logs)"
+  [[ -n "$port" ]] && log "     ${C_DIM}•${C_RESET} firewall rule for backup port ${port}"
+  log ""
+  log "   ${C_GREEN}Kept untouched:${C_RESET} PGClockMG (wizard), PasarGuard, databases and the redirect server."
+  log ""
+
+  confirm "Remove PGClockBackup now?" N || { info "Cancelled — nothing was removed."; return 0; }
+
+  backup_dir="${BACKUP_INSTALL_DIR}/backups"
   if [[ -d "$backup_dir" ]] && [[ -n "$(ls -A "$backup_dir" 2>/dev/null || true)" ]]; then
     if confirm "Keep a copy of the backups folder?" Y; then
-      keep_dir="${PG_MIGRATOR_BACKUP_DIR:-/root}/pgclockmg-backups-$(date +%Y%m%d-%H%M%S)"
+      keep_dir="${PG_MIGRATOR_BACKUP_DIR:-/root}/pgclockbackup-backups-$(date +%Y%m%d-%H%M%S)"
       if mkdir -p "$keep_dir" 2>/dev/null && cp -a "${backup_dir}/." "${keep_dir}/" 2>/dev/null; then
         ok "Backups copied to ${keep_dir}"
       else
@@ -1050,29 +1360,23 @@ action_uninstall() {
   fi
 
   if have_systemd; then
-    systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
-    systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
     systemctl stop "$BACKUP_SERVICE_NAME" >/dev/null 2>&1 || true
     systemctl disable "$BACKUP_SERVICE_NAME" >/dev/null 2>&1 || true
   fi
-  rm -f "$SERVICE_FILE" "$BACKUP_SERVICE_FILE"
+  rm -f "$BACKUP_SERVICE_FILE"
   have_systemd && systemctl daemon-reload >/dev/null 2>&1 || true
-  rm -rf "$INSTALL_DIR"
+  rm -rf "$BACKUP_INSTALL_DIR"
 
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "active"; then
     if [[ -n "$port" ]]; then
       ufw delete allow "${port}/tcp" >/dev/null 2>&1 || true
-      info "Firewall rule for wizard port ${port} removed"
-    fi
-    if [[ -n "${bport:-}" ]]; then
-      ufw delete allow "${bport}/tcp" >/dev/null 2>&1 || true
-      info "Firewall rule for backup port ${bport} removed"
+      info "Firewall rule for backup port ${port} removed"
     fi
   fi
 
-  ok "PGClockMG removed."
-  if redirect_configured; then
-    log "   ${C_DIM}The redirect server (${REDIRECT_SERVICE}) is still installed and untouched.${C_RESET}"
+  ok "PGClockBackup removed."
+  if pgclockmg_installed; then
+    log "   ${C_DIM}PGClockMG (wizard) is still installed and untouched.${C_RESET}"
   fi
 }
 
@@ -1338,7 +1642,7 @@ menu_loop() {
     tries=0
     # A single failed read (EOF / flaky console) used to drop straight back to
     # the shell. Retry a few times before giving up.
-    while ! ask_tty "  Select an option [1-4]: " choice; do
+    while ! ask_tty "  Select an option [1-6]: " choice; do
       tries=$((tries + 1))
       if (( tries >= 3 )); then
         log ""
@@ -1354,16 +1658,18 @@ menu_loop() {
     choice="${choice//[[:space:]]/}"
 
     case "$choice" in
-      1) clear_screen; print_banner; run_action action_install; pause_menu ;;
-      2) clear_screen; print_banner; run_action action_uninstall; pause_menu ;;
-      3) redirect_menu ;;
-      4|q|Q|e|E)
+      1) clear_screen; print_banner; run_action action_install_wizard; pause_menu ;;
+      2) clear_screen; print_banner; run_action action_install_backup; pause_menu ;;
+      3) clear_screen; print_banner; run_action action_uninstall_wizard; pause_menu ;;
+      4) clear_screen; print_banner; run_action action_uninstall_backup; pause_menu ;;
+      5) redirect_menu ;;
+      6|q|Q|e|E)
         log ""
         log "  ${C_DIM}Bye.${C_RESET}"
         log ""
         return 0
         ;;
-      *) warn "Unknown option '${choice}' — choose 1, 2, 3 or 4"; sleep 1 ;;
+      *) warn "Unknown option '${choice}' — choose 1-6"; sleep 1 ;;
     esac
   done
 }
@@ -1372,21 +1678,31 @@ main() {
   local action="${1:-${PG_MIGRATOR_ACTION:-}}"
 
   case "$action" in
-    install|uninstall|redirect|redirect-restart|menu|"") ;;
-    *) fail "Unknown command '${action}' — use: install | uninstall | redirect-restart | menu" ;;
+    install|install-wizard|install-backup|uninstall|uninstall-wizard|uninstall-backup|redirect|redirect-restart|menu|"") ;;
+    *) fail "Unknown command '${action}' — use: install-wizard | install-backup | uninstall-wizard | uninstall-backup | redirect-restart | menu" ;;
   esac
 
   require_root
 
   case "$action" in
-    install)
+    install|install-wizard)
       clear_screen; print_banner
-      run_action action_install
+      run_action action_install_wizard
       return "$LAST_ACTION_RC"
       ;;
-    uninstall)
+    install-backup)
       clear_screen; print_banner
-      run_action action_uninstall
+      run_action action_install_backup
+      return "$LAST_ACTION_RC"
+      ;;
+    uninstall|uninstall-wizard)
+      clear_screen; print_banner
+      run_action action_uninstall_wizard
+      return "$LAST_ACTION_RC"
+      ;;
+    uninstall-backup)
+      clear_screen; print_banner
+      run_action action_uninstall_backup
       return "$LAST_ACTION_RC"
       ;;
     redirect-restart|redirect)
@@ -1398,12 +1714,11 @@ main() {
   esac
 
   if ! tty_available; then
-    # curl | bash with no terminal attached keeps the classic behaviour: install.
     print_banner
-    info "No interactive terminal detected — running an unattended install."
-    info "To use the menu, run the installer from an SSH session (not a pipe-only console)."
-    run_action action_install
-    return "$LAST_ACTION_RC"
+    warn "No interactive terminal detected — refusing unattended install."
+    log "   ${C_DIM}Set PG_MIGRATOR_ACTION=install-wizard or install-backup (or pass that as argv[1]).${C_RESET}"
+    log "   ${C_DIM}To use the menu, run the installer from an SSH session.${C_RESET}"
+    return 1
   fi
 
   menu_loop

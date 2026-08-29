@@ -28,6 +28,9 @@ const I18N = {
     tabSettings: "تنظیمات",
     authSetupTitle: "رمز پنل بکاپ",
     authSetupDesc: "اولین ورود: یک رمز قوی برای پنل بکاپ بگذارید.",
+    lblSetupToken: "توکن نصب (یک‌بارمصرف)",
+    authSetupTokenHint: "همان توکنی که نصب‌کننده در پایان چاپ کرد.",
+    lblCurrentPass: "رمز فعلی",
     authLoginTitle: "ورود به پنل بکاپ",
     authLoginDesc: "با رمز پنل بکاپ وارد شوید.",
     lblPassword: "رمز عبور",
@@ -144,6 +147,9 @@ const I18N = {
     tabSettings: "Settings",
     authSetupTitle: "Backup panel password",
     authSetupDesc: "First run: set a strong password for the backup panel.",
+    lblSetupToken: "Install setup token (one-time)",
+    authSetupTokenHint: "Use the token printed by the installer at the end.",
+    lblCurrentPass: "Current password",
     authLoginTitle: "Backup panel login",
     authLoginDesc: "Sign in with your backup panel password.",
     lblPassword: "Password",
@@ -260,6 +266,9 @@ const I18N = {
     tabSettings: "Настройки",
     authSetupTitle: "Пароль панели бэкапа",
     authSetupDesc: "Первый запуск: задайте надёжный пароль.",
+    lblSetupToken: "Токен установки (одноразовый)",
+    authSetupTokenHint: "Тот же токен, который установщик напечатал в конце.",
+    lblCurrentPass: "Текущий пароль",
     authLoginTitle: "Вход в панель бэкапа",
     authLoginDesc: "Войдите с паролем панели бэкапа.",
     lblPassword: "Пароль",
@@ -415,7 +424,9 @@ function applyI18n() {
     ["lblProxyType", "lblProxyType"], ["lblProxyHost", "lblProxyHost"], ["lblProxyPort", "lblProxyPort"],
     ["lblProxyUser", "lblProxyUser"], ["lblProxyPass", "lblProxyPass"],
     ["setStreamTitle", "setStreamTitle"], ["lblStreamDest", "lblStreamDest"], ["streamDestHint", "streamDestHint"],
-    ["setPassTitle", "setPassTitle"], ["setPassHint", "setPassHint"], ["lblNewPass", "lblNewPass"], ["lblNewPassConfirm", "lblNewPassConfirm"],
+    ["setPassTitle", "setPassTitle"], ["setPassHint", "setPassHint"],
+    ["lblCurrentPass", "lblCurrentPass"], ["lblNewPass", "lblNewPass"], ["lblNewPassConfirm", "lblNewPassConfirm"],
+    ["lblSetupToken", "lblSetupToken"], ["authSetupTokenHint", "authSetupTokenHint"],
     ["btnSaveSettings", "btnSaveSettings"],
     ["streamH2", "streamH2"], ["streamDesc", "streamDesc"], ["lblStreamUrl", "lblStreamUrl"],
     ["lblStreamToken", "lblStreamToken"], ["btnStreamSend", "btnStreamSend"], ["btnStreamBack", "btnStreamBack"],
@@ -489,19 +500,33 @@ function metricCard({ tone, icon, value, label, sub }) {
       <span class="choice-icon ${tone}" aria-hidden="true">${icon}</span>
     </div>
     <div>
-      <strong>${value}</strong>
-      <div class="metric-label">${label}</div>
-      ${sub ? `<div class="metric-sub">${sub}</div>` : ""}
+      <strong>${esc(value)}</strong>
+      <div class="metric-label">${esc(label)}</div>
+      ${sub ? `<div class="metric-sub">${esc(sub)}</div>` : ""}
     </div>
   </div>`;
+}
+
+function esc(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 async function boot() {
   setBackupLang(lang);
   const st = await api("/api/setup/status");
-  document.getElementById("appVersion").textContent = "v" + (st.version || "4.0.0");
+  document.getElementById("appVersion").textContent = "v" + (st.version || "4.0.1");
   setupMode = !st.password_set;
+  window.__setupTokenRequired = !!st.setup_token_required;
   document.getElementById("authConfirmWrap").classList.toggle("hidden", !setupMode);
+  document.getElementById("authSetupTokenWrap").classList.toggle(
+    "hidden",
+    !(setupMode && window.__setupTokenRequired)
+  );
   applyI18n();
 
   if (!setupMode) {
@@ -525,9 +550,13 @@ async function submitAuth() {
   try {
     if (setupMode) {
       const password_confirm = document.getElementById("authPasswordConfirm").value;
+      const body = { password, password_confirm };
+      if (window.__setupTokenRequired) {
+        body.setup_token = document.getElementById("authSetupToken").value.trim();
+      }
       await api("/api/setup/password", {
         method: "POST",
-        body: JSON.stringify({ password, password_confirm }),
+        body: JSON.stringify(body),
       });
     } else {
       await api("/api/login", { method: "POST", body: JSON.stringify({ password }) });
@@ -568,8 +597,8 @@ async function refreshDashboard() {
     ["Docker", sys.docker ? "OK" : "—"],
   ].map(([label, value]) => `
     <div class="specs-item">
-      <span class="specs-label">${label}</span>
-      <span class="specs-value" title="${String(value).replace(/"/g, "&quot;")}">${value}</span>
+      <span class="specs-label">${esc(label)}</span>
+      <span class="specs-value" title="${esc(value)}">${esc(value)}</span>
     </div>
   `).join("");
 
@@ -644,20 +673,20 @@ async function refreshDashboard() {
   if (!last) {
     lastBox.innerHTML = `<div class="backup-section-head">
       <span class="choice-icon icon-tone-yellow" aria-hidden="true">${ICONS.archive}</span>
-      <div><h3 style="margin:0 0 4px;font-size:1rem">${t("lastBackup")}</h3>
-      <p class="desc-sm" style="margin:0">${t("noLast")}</p></div></div>`;
+      <div><h3 style="margin:0 0 4px;font-size:1rem">${esc(t("lastBackup"))}</h3>
+      <p class="desc-sm" style="margin:0">${esc(t("noLast"))}</p></div></div>`;
   } else {
     const c = last.counts || {};
     lastBox.innerHTML = `<div class="backup-section-head">
       <span class="choice-icon icon-tone-green" aria-hidden="true">${ICONS.archive}</span>
-      <div><h3 style="margin:0 0 4px;font-size:1rem">${t("lastBackup")}</h3>
-      <p class="desc-sm" style="margin:0;word-break:break-all">${last.filename || last.backup_id}</p></div></div>
+      <div><h3 style="margin:0 0 4px;font-size:1rem">${esc(t("lastBackup"))}</h3>
+      <p class="desc-sm" style="margin:0;word-break:break-all">${esc(last.filename || last.backup_id)}</p></div></div>
       <div class="specs-grid">
-        <div class="specs-item"><span class="specs-label">${t("size")}</span><span class="specs-value">${humanSize(last.size_bytes)}</span></div>
-        <div class="specs-item"><span class="specs-label">${t("db")}</span><span class="specs-value">${last.db_type || "—"}</span></div>
-        <div class="specs-item"><span class="specs-label">${t("users")}</span><span class="specs-value">${c.users ?? "—"}</span></div>
-        <div class="specs-item"><span class="specs-label">${t("nodes")}</span><span class="specs-value">${c.nodes ?? "—"}</span></div>
-        <div class="specs-item"><span class="specs-label">UTC</span><span class="specs-value">${last.created_at || "—"}</span></div>
+        <div class="specs-item"><span class="specs-label">${esc(t("size"))}</span><span class="specs-value">${esc(humanSize(last.size_bytes))}</span></div>
+        <div class="specs-item"><span class="specs-label">${esc(t("db"))}</span><span class="specs-value">${esc(last.db_type || "—")}</span></div>
+        <div class="specs-item"><span class="specs-label">${esc(t("users"))}</span><span class="specs-value">${esc(c.users ?? "—")}</span></div>
+        <div class="specs-item"><span class="specs-label">${esc(t("nodes"))}</span><span class="specs-value">${esc(c.nodes ?? "—")}</span></div>
+        <div class="specs-item"><span class="specs-label">UTC</span><span class="specs-value">${esc(last.created_at || "—")}</span></div>
       </div>`;
   }
 
@@ -672,21 +701,21 @@ async function refreshDashboard() {
   const tgTagLabel = tgLive.connected ? t("tgConnected") : t("tgDisconnected");
   delivery.innerHTML = `<div class="backup-section-head">
       <span class="choice-icon icon-tone-cyan" aria-hidden="true">${ICONS.send}</span>
-      <div><h3 style="margin:0 0 4px;font-size:1rem">${t("deliveryTitle")} <span class="backup-status-tag ${tgTagClass}">${tgTagLabel}</span></h3>
-      <p class="desc-sm" style="margin:0">${tg.enabled ? t("telegramOn") : t("telegramOff")} · ${tg.configured ? t("telegramReady") : t("telegramNeedConfig")}</p></div></div>
+      <div><h3 style="margin:0 0 4px;font-size:1rem">${esc(t("deliveryTitle"))} <span class="backup-status-tag ${tgTagClass}">${esc(tgTagLabel)}</span></h3>
+      <p class="desc-sm" style="margin:0">${esc(tg.enabled ? t("telegramOn") : t("telegramOff"))} · ${esc(tg.configured ? t("telegramReady") : t("telegramNeedConfig"))}</p></div></div>
       <div class="backup-item-chips">
-        <span class="backup-chip">${sched.enabled ? t("scheduleOn") : t("scheduleOff")}</span>
-        <span class="backup-chip">${tg.proxy_enabled ? t("proxyOn") : "Proxy —"}</span>
-        <span class="backup-chip">${data.stream_dest ? t("streamSet") : t("streamUnset")}</span>
+        <span class="backup-chip">${esc(sched.enabled ? t("scheduleOn") : t("scheduleOff"))}</span>
+        <span class="backup-chip">${esc(tg.proxy_enabled ? t("proxyOn") : "Proxy —")}</span>
+        <span class="backup-chip">${esc(data.stream_dest ? t("streamSet") : t("streamUnset"))}</span>
       </div>
-      ${data.stream_dest ? `<p class="desc-sm" style="margin-top:10px;word-break:break-all">${data.stream_dest}</p>` : ""}`;
+      ${data.stream_dest ? `<p class="desc-sm" style="margin-top:10px;word-break:break-all">${esc(data.stream_dest)}</p>` : ""}`;
 
   setTelegramStatusTag({ connected: !!tgLive.connected });
 
   const errBox = document.getElementById("dashError");
   if (data.last_error && data.last_error.message) {
     errBox.classList.remove("hidden");
-    errBox.innerHTML = `<strong>${t("lastError")}</strong><br>${data.last_error.at || ""} · ${data.last_error.message}`;
+    errBox.innerHTML = `<strong>${esc(t("lastError"))}</strong><br>${esc(data.last_error.at || "")} · ${esc(data.last_error.message)}`;
   } else {
     errBox.classList.add("hidden");
     errBox.textContent = "";
@@ -915,11 +944,17 @@ async function saveSettings() {
 
   const np = document.getElementById("newPassword").value;
   const npc = document.getElementById("newPasswordConfirm").value;
-  if (np || npc) {
+  const cur = document.getElementById("currentPassword").value;
+  if (np || npc || cur) {
     await api("/api/password/change", {
       method: "POST",
-      body: JSON.stringify({ password: np, password_confirm: npc }),
+      body: JSON.stringify({
+        current_password: cur,
+        password: np,
+        password_confirm: npc,
+      }),
     });
+    document.getElementById("currentPassword").value = "";
     document.getElementById("newPassword").value = "";
     document.getElementById("newPasswordConfirm").value = "";
   }

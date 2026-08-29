@@ -11,6 +11,7 @@ from urllib.parse import quote
 import httpx
 
 from app.config import TELEGRAM_BOT_MAX_BYTES
+from app.services.backup_net import UnsafeDestinationError, assert_proxy_host
 from app.services.backup_settings import DEFAULT_TELEGRAM_CAPTION, load_settings
 
 
@@ -21,6 +22,10 @@ def _proxy_url(tg: dict) -> str | None:
     port = int(tg.get("proxy_port") or 0)
     if not host or not (1 <= port <= 65535):
         return None
+    try:
+        assert_proxy_host(host)
+    except UnsafeDestinationError as exc:
+        raise ValueError("proxy_host_invalid") from exc
     kind = (tg.get("proxy_type") or "socks5").lower()
     if kind not in ("socks5", "socks5h", "http", "https"):
         kind = "socks5"
@@ -36,7 +41,7 @@ def _proxy_url(tg: dict) -> str | None:
 
 def _client(tg: dict, timeout: float = 120.0) -> httpx.Client:
     proxy = _proxy_url(tg)
-    kwargs: dict[str, Any] = {"timeout": timeout, "follow_redirects": True}
+    kwargs: dict[str, Any] = {"timeout": timeout, "follow_redirects": False}
     if proxy:
         kwargs["proxy"] = proxy
     return httpx.Client(**kwargs)

@@ -24,13 +24,14 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 class Sandbox:
-    """Fake server layout: PasarGuard, systemd units, wizard install, redirect."""
+    """Fake server layout: PasarGuard, systemd units, wizard/backup install, redirect."""
 
     def __init__(self, tmp: str):
         self.root = Path(tmp)
         self.pasarguard = self.root / "pasarguard"
         self.systemd = self.root / "systemd"
         self.install = self.root / "install"
+        self.backup = self.root / "backup"
         self.redirect = self.root / "redirect"
         self.keep = self.root / "keep"
         for path in (self.pasarguard, self.systemd, self.install, self.redirect):
@@ -38,11 +39,16 @@ class Sandbox:
 
     @property
     def env(self) -> dict:
-        base = {k: v for k, v in os.environ.items() if not k.startswith("PG_MIGRATOR_")}
+        base = {
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith("PG_MIGRATOR_") and not k.startswith("PG_BACKUP_")
+        }
         return {
             **base,
             "PG_MIGRATOR_INSTALL_LIB": "1",
             "PG_MIGRATOR_INSTALL_DIR": str(self.install),
+            "PG_BACKUP_INSTALL_DIR": str(self.backup),
             "PG_MIGRATOR_SYSTEMD_DIR": str(self.systemd),
             "PG_MIGRATOR_PASARGUARD_DIR": str(self.pasarguard),
             "PG_MIGRATOR_REDIRECT_DIR": str(self.redirect),
@@ -61,7 +67,26 @@ class Sandbox:
         )
         (self.systemd / "pg-migrator.service").write_text(
             "[Service]\n"
+            f"WorkingDirectory={self.install}\n"
             "ExecStart=/opt/pg-migrator/venv/bin/python -m uvicorn app.main:app "
+            f"--host 0.0.0.0 --port {port}\n",
+            encoding="utf-8",
+        )
+
+    def write_backup(self, version: str = "9.9.9", port: int = 7001, workdir: Path | None = None) -> None:
+        root = workdir or self.backup
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "app").mkdir(parents=True, exist_ok=True)
+        (root / "app" / "backup_main.py").write_text(
+            f'APP_VERSION = "{version}"\n', encoding="utf-8"
+        )
+        (root / "backup_panel").mkdir(parents=True, exist_ok=True)
+        (root / "backups").mkdir(parents=True, exist_ok=True)
+        (self.systemd / "pg-backup.service").write_text(
+            "[Service]\n"
+            f"WorkingDirectory={root}\n"
+            f"Environment=PG_BACKUP_HOME={root}\n"
+            "ExecStart=/opt/pg-backup/venv/bin/python -m uvicorn app.backup_main:app "
             f"--host 0.0.0.0 --port {port}\n",
             encoding="utf-8",
         )
@@ -218,17 +243,19 @@ def test_status_panel_warns_when_pasarguard_missing():
     print("OK: missing PasarGuard is reported in English with an install hint")
 
 
-def test_menu_lists_the_four_entries():
+def test_menu_lists_the_six_entries():
     with sandbox() as tmp:
         out = plain(Sandbox(tmp).run("print_menu").stdout)
         for entry in (
-            "1)  Install / update the web panel",
-            "2)  Uninstall the web panel",
-            "3)  Redirect server",
-            "4)  Exit",
+            "1)  Install / update PGClockMG",
+            "2)  Install / update PGClockBackup",
+            "3)  Uninstall PGClockMG",
+            "4)  Uninstall PGClockBackup",
+            "5)  Redirect server",
+            "6)  Exit",
         ):
             assert entry in out, out
-    print("OK: main menu shows install / uninstall / redirect / exit")
+    print("OK: main menu shows install / uninstall for wizard + backup / redirect / exit")
 
 
 # ── install action ────────────────────────────────────────────────────────────
@@ -296,12 +323,12 @@ def test_print_success_survives_missing_token():
 
 
 def test_install_asks_the_port_then_installs_and_prints_the_url():
-    """run_install is stubbed out — this covers the question → install → URL flow."""
+    """run_install_wizard is stubbed out — this covers the question → install → URL flow."""
     with sandbox() as tmp:
         box = Sandbox(tmp)
         box.write_wizard(version="3.2.8", port=7000)
         code, out = box.run_on_tty(
-            "run_install() { echo '[fake] installing...'; }\naction_install",
+            "run_install_wizard() { echo '[fake] installing...'; }\naction_install",
             ["8443\n"],
         )
         assert code == 0, out
@@ -314,6 +341,8 @@ def test_install_asks_the_port_then_installs_and_prints_the_url():
         token = (box.install / ".access_token").read_text(encoding="utf-8").strip()
         assert len(token) >= 32
         assert f"?token={token}" in out
+        # Wizard install must not ask for the backup port.
+        assert "BACKUP panel" not in out, out
     print("OK: install asks the port, installs, then shows the panel URL with token")
 
 
@@ -321,7 +350,7 @@ def test_install_failure_is_reported_without_killing_the_menu():
     with sandbox() as tmp:
         box = Sandbox(tmp)
         res = box.run(
-            "run_install() { echo boom >&2; return 1; }\n"
+            "run_install_wizard() { echo boom >&2; return 1; }\n"
             "action_install || echo 'RETURNED-TO-MENU'",
             {"PG_MIGRATOR_PORT": "9099"},
         )
@@ -338,7 +367,7 @@ def test_install_stops_at_the_first_failing_step():
     with sandbox() as tmp:
         box = Sandbox(tmp)
         res = box.run(
-            "run_install() { echo 'step one'; false; echo 'step two'; }\n"
+            "run_install_wizard() { echo 'step one'; false; echo 'step two'; }\n"
             "run_action action_install\n"
             'echo "rc=$LAST_ACTION_RC"',
             {"PG_MIGRATOR_PORT": "9098"},
@@ -507,6 +536,27 @@ def test_uninstall_removes_service_and_keeps_backups():
     print("OK: uninstall removes the wizard, keeps backups and the redirect server")
 
 
+def test_uninstall_wizard_keeps_backup_service_when_both_present():
+    with sandbox() as tmp:
+        box = Sandbox(tmp)
+        box.write_wizard(port=8443)
+        box.write_backup(port=7001)
+        (box.backup / "backups" / "keep-me.tar").write_text("data", encoding="utf-8")
+
+        res = box.run("action_uninstall_wizard", {"PG_MIGRATOR_YES": "1"})
+        out = plain(res.stdout)
+        assert res.returncode == 0, out + res.stderr
+        assert "PGClockMG removed." in out, out
+        assert not (box.systemd / "pg-migrator.service").exists()
+        assert not box.install.exists()
+        # Backup must remain completely untouched.
+        assert (box.systemd / "pg-backup.service").exists()
+        assert box.backup.exists()
+        assert (box.backup / "backups" / "keep-me.tar").exists()
+        assert "PGClockBackup is still installed" in out
+    print("OK: uninstall wizard does not remove the backup service or install dir")
+
+
 def test_uninstall_is_a_noop_when_not_installed():
     with sandbox() as tmp:
         box = Sandbox(tmp)
@@ -529,13 +579,24 @@ def test_uninstall_can_be_declined():
     print("OK: uninstall requires an explicit yes")
 
 
+def test_status_panel_shows_backup_row():
+    with sandbox() as tmp:
+        box = Sandbox(tmp)
+        box.write_wizard(version="3.2.8", port=8443)
+        box.write_backup(version="4.0.1", port=7001)
+        out = plain(box.run("print_status").stdout)
+        assert "Wizard" in out and "3.2.8" in out and "8443" in out
+        assert "Backup" in out and "4.0.1" in out and "7001" in out
+    print("OK: status panel lists wizard and backup separately")
+
+
 # ── menu loop & dispatch ──────────────────────────────────────────────────────
 
 
 def test_menu_loop_rejects_unknown_option_then_exits():
     with sandbox() as tmp:
         box = Sandbox(tmp)
-        code, out = box.run_on_tty("menu_loop", ["x\n", "4\n"], settle=2.0)
+        code, out = box.run_on_tty("menu_loop", ["x\n", "6\n"], settle=2.0)
         assert code == 0, out
         assert "Unknown option 'x'" in out, out
         assert "Bye." in out, out
@@ -546,11 +607,11 @@ def test_menu_loop_opens_the_redirect_screen():
     with sandbox() as tmp:
         box = Sandbox(tmp)
         box.write_redirect(port=59982, panel="x-ui")
-        code, out = box.run_on_tty("menu_loop", ["3\n", "5\n", "4\n"], settle=1.5)
+        code, out = box.run_on_tty("menu_loop", ["5\n", "5\n", "6\n"], settle=1.5)
         assert code == 0, out
         assert "REDIRECT SERVER" in out, out
         assert "SYSTEM STATUS" in out, out
-    print("OK: option 3 opens and leaves the redirect screen")
+    print("OK: option 5 opens and leaves the redirect screen")
 
 
 def test_menu_install_flow_end_to_end():
@@ -558,8 +619,8 @@ def test_menu_install_flow_end_to_end():
     with sandbox() as tmp:
         box = Sandbox(tmp)
         code, out = box.run_on_tty(
-            "run_install() { echo '[fake] installing...'; }\nmenu_loop",
-            ["1\n", "8443\n", "\n", "4\n"],
+            "run_install_wizard() { echo '[fake] installing...'; }\nmenu_loop",
+            ["1\n", "8443\n", "\n", "6\n"],
             settle=1.5,
         )
         assert code == 0, out
@@ -621,7 +682,8 @@ if __name__ == "__main__":
     test_pasarguard_version_from_compose()
     test_status_panel_reports_installed_stack()
     test_status_panel_warns_when_pasarguard_missing()
-    test_menu_lists_the_four_entries()
+    test_status_panel_shows_backup_row()
+    test_menu_lists_the_six_entries()
     test_install_asks_the_port_then_installs_and_prints_the_url()
     test_install_failure_is_reported_without_killing_the_menu()
     test_install_stops_at_the_first_failing_step()
@@ -633,6 +695,7 @@ if __name__ == "__main__":
     test_free_ports_kills_a_process_holding_the_port()
     test_healthz_probe_reports_dead_port()
     test_uninstall_removes_service_and_keeps_backups()
+    test_uninstall_wizard_keeps_backup_service_when_both_present()
     test_uninstall_is_a_noop_when_not_installed()
     test_uninstall_can_be_declined()
     test_menu_loop_rejects_unknown_option_then_exits()

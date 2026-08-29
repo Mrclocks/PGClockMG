@@ -28,6 +28,7 @@ from app.services.backup_settings import (
     public_settings,
     update_settings,
 )
+from app.services.backup_net import UnsafeDestinationError
 from app.services.backup_stream import push_backup_file
 from app.services.backup_telegram import (
     format_caption,
@@ -38,7 +39,7 @@ from app.services.backup_telegram import (
 )
 from app.services.prerequisites import get_system_status, is_pasarguard_installed
 
-APP_VERSION = "4.0.0"
+APP_VERSION = "4.0.1"
 
 
 @asynccontextmanager
@@ -49,7 +50,14 @@ async def _lifespan(_app: FastAPI):
     stop_scheduler()
 
 
-app = FastAPI(title="PGClockMG Backup", version=APP_VERSION, lifespan=_lifespan)
+app = FastAPI(
+    title="PGClockMG Backup",
+    version=APP_VERSION,
+    lifespan=_lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -64,6 +72,13 @@ PUBLIC_PATHS = frozenset({
 
 
 class PasswordSetup(BaseModel):
+    password: str = Field(min_length=12, max_length=200)
+    password_confirm: str = Field(min_length=12, max_length=200)
+    setup_token: str | None = None
+
+
+class PasswordChange(BaseModel):
+    current_password: str = Field(min_length=1, max_length=200)
     password: str = Field(min_length=12, max_length=200)
     password_confirm: str = Field(min_length=12, max_length=200)
 
@@ -91,6 +106,20 @@ class StreamSendBody(BaseModel):
 
 def _unauthorized() -> JSONResponse:
     return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+
+
+def _set_session_cookie(resp: JSONResponse, cookie: str, request: Request) -> None:
+    forwarded = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    secure = request.url.scheme == "https" or forwarded == "https"
+    resp.set_cookie(
+        backup_auth.COOKIE_NAME,
+        cookie,
+        httponly=True,
+        samesite="lax",
+        path="/",
+        max_age=backup_auth.COOKIE_MAX_AGE,
+        secure=secure,
+    )
 
 
 @app.middleware("http")
@@ -145,48 +174,42 @@ async def setup_status():
         "wizard_port": WEB_PORT,
         "version": APP_VERSION,
         "min_password_length": backup_auth.MIN_PASSWORD_LEN,
+        "setup_token_required": backup_auth.setup_token_is_required(),
     }
 
 
 @app.post("/api/setup/password")
-async def setup_password(body: PasswordSetup):
+async def setup_password(body: PasswordSetup, request: Request):
     if backup_auth.password_is_set():
         raise HTTPException(400, "password_already_set")
     if body.password != body.password_confirm:
         raise HTTPException(400, "password_mismatch")
+    if not backup_auth.consume_setup_token(body.setup_token):
+        raise HTTPException(403, "setup_token_invalid")
     try:
-        backup_auth.set_password(body.password)
+        backup_auth.set_password(body.password, exclusive=True)
     except backup_auth.PasswordPolicyError as exc:
         raise HTTPException(400, f"weak_password:{exc}") from exc
     cookie = backup_auth.create_session_cookie()
     resp = JSONResponse({"ok": True})
-    resp.set_cookie(
-        backup_auth.COOKIE_NAME,
-        cookie,
-        httponly=True,
-        samesite="lax",
-        path="/",
-        max_age=backup_auth.COOKIE_MAX_AGE,
-    )
+    _set_session_cookie(resp, cookie, request)
     return resp
 
 
 @app.post("/api/login")
-async def login(body: LoginBody):
+async def login(body: LoginBody, request: Request):
     if not backup_auth.password_is_set():
         raise HTTPException(400, "setup_required")
+    client_key = (request.client.host if request.client else None) or "unknown"
+    if backup_auth.login_is_throttled(client_key):
+        raise HTTPException(429, "too_many_attempts")
     if not backup_auth.check_password(body.password):
+        backup_auth.record_login_failure(client_key)
         raise HTTPException(401, "invalid_password")
+    backup_auth.clear_login_failures(client_key)
     cookie = backup_auth.create_session_cookie()
     resp = JSONResponse({"ok": True})
-    resp.set_cookie(
-        backup_auth.COOKIE_NAME,
-        cookie,
-        httponly=True,
-        samesite="lax",
-        path="/",
-        max_age=backup_auth.COOKIE_MAX_AGE,
-    )
+    _set_session_cookie(resp, cookie, request)
     return resp
 
 
@@ -334,12 +357,15 @@ async def api_stream_send(body: StreamSendBody):
             sha = (meta or {}).get("sha256")
         except Exception:
             pass
-    result = push_backup_file(
-        path,
-        dest_base_url=body.dest_url.strip(),
-        token=body.token.strip(),
-        sha256=sha,
-    )
+    try:
+        result = push_backup_file(
+            path,
+            dest_base_url=body.dest_url.strip(),
+            token=body.token.strip(),
+            sha256=sha,
+        )
+    except UnsafeDestinationError as exc:
+        raise HTTPException(400, str(exc)) from exc
     if not result.get("ok"):
         raise HTTPException(400, result.get("error") or "stream_failed")
     # remember last dest
@@ -433,21 +459,17 @@ async def api_telegram_preview(request: Request):
 
 
 @app.post("/api/password/change")
-async def api_change_password(body: PasswordSetup):
+async def api_change_password(body: PasswordChange, request: Request):
     if body.password != body.password_confirm:
         raise HTTPException(400, "password_mismatch")
+    if not backup_auth.check_password(body.current_password):
+        raise HTTPException(401, "invalid_password")
     try:
         backup_auth.set_password(body.password)
     except backup_auth.PasswordPolicyError as exc:
         raise HTTPException(400, f"weak_password:{exc}") from exc
+    backup_auth.rotate_session_secret()
     cookie = backup_auth.create_session_cookie()
     resp = JSONResponse({"ok": True})
-    resp.set_cookie(
-        backup_auth.COOKIE_NAME,
-        cookie,
-        httponly=True,
-        samesite="lax",
-        path="/",
-        max_age=backup_auth.COOKIE_MAX_AGE,
-    )
+    _set_session_cookie(resp, cookie, request)
     return resp
