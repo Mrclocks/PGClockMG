@@ -220,12 +220,12 @@
 
 /* Page-level captions sit further above their boxes */
 .backup-app .panel > .section-title {
-  margin-top: 32px;
-  margin-bottom: 20px;
+  margin-top: 34px;
+  margin-bottom: 24px;
 }
 
 .backup-app .panel > .backup-page-head + .section-title {
-  margin-top: 16px;
+  margin-top: 18px;
 }
 
 .backup-app .panel > .section-title + .backup-icon-grid,
