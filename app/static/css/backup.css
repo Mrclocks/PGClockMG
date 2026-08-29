@@ -133,6 +133,24 @@
   min-width: 0;
 }
 
+/* When a run is active, span the full row so logs stay readable */
+.backup-page-head:has(.backup-run-box:not(.hidden)) {
+  flex-wrap: wrap;
+}
+
+.backup-page-head:has(.backup-run-box:not(.hidden)) .backup-run-col {
+  flex: 1 1 100%;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+}
+
+.backup-page-head:has(.backup-run-box:not(.hidden)) .backup-run-col > .btn {
+  width: auto;
+  min-width: min(100%, 220px);
+  align-self: flex-end;
+}
+
 .backup-run-box {
   background: var(--bg-card);
   border: 1px solid var(--border-soft);
@@ -202,12 +220,21 @@
 
 /* Page-level captions sit further above their boxes */
 .backup-app .panel > .section-title {
-  margin-top: 30px;
-  margin-bottom: 16px;
+  margin-top: 32px;
+  margin-bottom: 20px;
 }
 
 .backup-app .panel > .backup-page-head + .section-title {
-  margin-top: 12px;
+  margin-top: 16px;
+}
+
+.backup-app .panel > .section-title + .backup-icon-grid,
+.backup-app .panel > .section-title + .backup-section-card,
+.backup-app .panel > .section-title + .backup-split-grid,
+.backup-app .panel > .section-title + .success-card,
+.backup-app .panel > .section-title + .info-box,
+.backup-app .panel > .section-title + .warning-card {
+  margin-top: 0;
 }
 
 .backup-section-head {
