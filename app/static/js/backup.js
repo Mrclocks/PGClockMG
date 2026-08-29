@@ -399,9 +399,9 @@ async function refreshDashboard() {
   const installed = data.pasarguard_installed;
   document.getElementById("dashPgCard").className = installed ? "success-card" : "warning-card";
   specs.innerHTML = `
-    <div class="spec"><span>PasarGuard</span><strong>${installed ? "OK" : "—"}</strong></div>
-    <div class="spec"><span>${t("db")}</span><strong>${sys.pasarguard_db || "—"}</strong></div>
-    <div class="spec"><span>Docker</span><strong>${sys.docker ? "OK" : "—"}</strong></div>
+    <div class="specs-item"><span class="specs-label">PasarGuard</span><span class="specs-value">${installed ? "OK" : "—"}</span></div>
+    <div class="specs-item"><span class="specs-label">${t("db")}</span><span class="specs-value">${sys.pasarguard_db || "—"}</span></div>
+    <div class="specs-item"><span class="specs-label">Docker</span><span class="specs-value">${sys.docker ? "OK" : "—"}</span></div>
   `;
 
   const counts = (data.live_stats && data.live_stats.counts) || {};
