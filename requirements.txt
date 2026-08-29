@@ -5,3 +5,4 @@ aiofiles>=24.1.0
 pydantic>=2.9.0
 pymysql>=1.1.0
 psycopg2-binary>=2.9.9
+httpx[socks]>=0.27.0

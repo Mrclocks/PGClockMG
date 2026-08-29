@@ -484,6 +484,8 @@ function applyPhaseI18n() {
   set('restoreDbTipText', 'restore.tip');
   set('restoreDragText', 'restore.drag');
   set('restoreSelectText', 'restore.select');
+  set('restoreStreamHint', 'restore.streamHint');
+  set('btnStreamListen', 'restore.streamListen');
   set('btnRestoreConfirm', 'restore.confirm');
   set('btnRestoreBack', 'restore.back');
   set('restoreDoneTitle', 'restore.doneTitle');
@@ -1335,3 +1337,85 @@ window.applyUiProgress = applyUiProgress;
 window.resetUiProgress = resetUiProgress;
 window.resetRestoreForm = resetRestoreForm;
 window.setRestoreStage = setRestoreStage;
+window.startStreamListen = startStreamListen;
+
+let _streamPollTimer = null;
+
+async function startStreamListen() {
+  const status = document.getElementById('restoreStreamStatus');
+  const tokenBox = document.getElementById('restoreStreamTokenBox');
+  const tokenEl = document.getElementById('restoreStreamToken');
+  const btn = document.getElementById('btnStreamListen');
+  if (_streamPollTimer) {
+    clearTimeout(_streamPollTimer);
+    _streamPollTimer = null;
+  }
+  try {
+    if (btn) btn.disabled = true;
+    const res = await fetch('/api/stream/listen', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'listen failed');
+    tokenEl.textContent = data.token;
+    tokenBox.classList.remove('hidden');
+    status.classList.remove('hidden');
+    status.textContent = `${t('restore.streamWaiting')} ${data.token}`;
+    const poll = async () => {
+      try {
+        const sres = await fetch(`/api/stream/status/${encodeURIComponent(data.token)}`);
+        const st = await sres.json();
+        if (!sres.ok) throw new Error(st.detail || 'status failed');
+        if (st.status === 'receiving') {
+          status.textContent = `${t('restore.streamReceiving')} (${st.bytes_received || 0} B)`;
+        }
+        if (st.status === 'ready' && st.upload_id) {
+          status.textContent = t('restore.streamReady');
+          await applyStreamedBackup(st.upload_id, st.filename || 'streamed-backup.zip');
+          if (btn) btn.disabled = false;
+          return;
+        }
+        if (st.status === 'error') {
+          status.textContent = `${t('restore.streamError')}: ${st.error || ''}`;
+          if (btn) btn.disabled = false;
+          return;
+        }
+        _streamPollTimer = setTimeout(poll, 1200);
+      } catch (e) {
+        status.textContent = `${t('restore.streamError')}: ${e.message}`;
+        if (btn) btn.disabled = false;
+      }
+    };
+    poll();
+  } catch (e) {
+    if (status) {
+      status.classList.remove('hidden');
+      status.textContent = `${t('restore.streamError')}: ${e.message}`;
+    }
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function applyStreamedBackup(uploadId, fileName) {
+  const btn = document.getElementById('btnRestoreConfirm');
+  state.restoreUploadId = uploadId;
+  const ares = await fetch(`/api/pasarguard/restore/analyze/${uploadId}`);
+  const analysis = await ares.json();
+  if (!ares.ok) throw new Error(analysis.detail || 'analyze failed');
+  state.restoreAnalysis = analysis;
+  await loadCleanupPlan(uploadId);
+  renderRestoreAnalysis(analysis);
+  if (btn) btn.disabled = !analysis.ok;
+  document.getElementById('restoreUploadZone')?.classList.add('hidden');
+  applyUploadSuccessStatus(document.getElementById('restoreUploadStatus'), {
+    ok: !!analysis.ok,
+    message: t('uploadSuccess'),
+    fileName,
+    replaceId: 'restoreUploadReplaceBtn',
+    onReplace: () => {
+      state.restoreUploadId = null;
+      state.restoreAnalysis = null;
+      if (btn) btn.disabled = true;
+      document.getElementById('restoreUploadZone')?.classList.remove('hidden');
+      document.getElementById('restoreStreamTokenBox')?.classList.add('hidden');
+    },
+  });
+}

@@ -36,7 +36,7 @@ from app.services.self_uninstall import uninstall_preview, schedule_self_uninsta
 from app.services.auth import COOKIE_NAME, COOKIE_MAX_AGE, ensure_token, token_matches
 from app.config import WEB_PORT
 
-APP_VERSION = "3.2.8"
+APP_VERSION = "4.0.0"
 
 
 @asynccontextmanager
@@ -52,6 +52,15 @@ STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 PUBLIC_PATHS = frozenset({"/login", "/favicon.ico"})
+
+
+def _is_public_path(path: str) -> bool:
+    if path in PUBLIC_PATHS:
+        return True
+    # One-time stream receive tokens authenticate the request themselves.
+    if path.startswith("/api/stream/receive/"):
+        return True
+    return False
 
 _LOGIN_PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -97,7 +106,7 @@ def _login_page(error: bool = False) -> str:
 @app.middleware("http")
 async def require_access_token(request: Request, call_next):
     path = request.url.path
-    if path in PUBLIC_PATHS:
+    if _is_public_path(path):
         return await call_next(request)
 
     from_query = request.query_params.get("token")
@@ -510,6 +519,66 @@ async def ws_migrate(websocket: WebSocket, job_id: str):
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         pass
+
+
+@app.post("/api/stream/listen")
+async def api_stream_listen():
+    """Destination: prepare a one-time token so a source can push a backup zip."""
+    from app.services.backup_stream import create_listener
+    info = create_listener(label="wizard")
+    return {
+        "token": info["token"],
+        "expires_in_sec": int(info["expires_at"] - info["created_at"]),
+        "receive_path": f"/api/stream/receive/{info['token']}",
+        "hint": {
+            "en": "On the source backup panel: Stream → paste this server URL and token.",
+            "fa": "روی پنل بکاپ مبدأ: استریم → آدرس این سرور و توکن را وارد کنید.",
+            "ru": "На панели бэкапа источника: Stream → URL этого сервера и токен.",
+        },
+    }
+
+
+@app.get("/api/stream/status/{token}")
+async def api_stream_status(token: str):
+    from app.services.backup_stream import get_listener
+    info = get_listener(token)
+    if not info:
+        raise HTTPException(404, "listener_not_found")
+    return {
+        "status": info.get("status"),
+        "bytes_received": info.get("bytes_received") or 0,
+        "upload_id": info.get("upload_id"),
+        "filename": info.get("filename"),
+        "error": info.get("error"),
+        "sha256": info.get("sha256"),
+    }
+
+
+@app.put("/api/stream/receive/{token}")
+@app.post("/api/stream/receive/{token}")
+async def api_stream_receive(token: str, request: Request):
+    """Source pushes the zip body here. Auth = one-time listener token only."""
+    from app.services.backup_stream import receive_stream
+
+    filename = request.headers.get("X-Backup-Filename")
+    sha = request.headers.get("X-Backup-Sha256")
+    size_raw = request.headers.get("X-Backup-Size")
+    expected_size = int(size_raw) if size_raw and size_raw.isdigit() else None
+    try:
+        result = await receive_stream(
+            token,
+            request.stream(),
+            filename=filename,
+            expected_sha256=sha,
+            expected_size=expected_size,
+        )
+        return result
+    except FileNotFoundError:
+        raise HTTPException(404, "listener_not_found")
+    except TimeoutError:
+        raise HTTPException(410, "listener_expired")
+    except Exception as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/self-uninstall")
