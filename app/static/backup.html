@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#0f1218">
   <title>PGClockMG Backup</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=3.3.2">
-  <link rel="stylesheet" href="/static/css/backup.css?v=3.3.2">
+  <link rel="stylesheet" href="/static/css/style.css?v=3.3.3">
+  <link rel="stylesheet" href="/static/css/backup.css?v=3.3.3">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
@@ -41,20 +41,20 @@
       </div>
     </header>
 
-    <nav class="steps backup-tabs hidden" id="backupTabs" aria-label="Backup sections">
-      <button type="button" class="step active" data-tab="dash" onclick="showBackupTab('dash')">
+    <nav class="backup-tabs hidden" id="backupTabs" aria-label="Backup sections">
+      <button type="button" class="backup-tab active" data-tab="dash" onclick="showBackupTab('dash')">
         <span class="backup-tab-ico" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
         </span>
         <span id="tabDash"></span>
       </button>
-      <button type="button" class="step" data-tab="list" onclick="showBackupTab('list')">
+      <button type="button" class="backup-tab" data-tab="list" onclick="showBackupTab('list')">
         <span class="backup-tab-ico" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>
         </span>
         <span id="tabList"></span>
       </button>
-      <button type="button" class="step" data-tab="settings" onclick="showBackupTab('settings')">
+      <button type="button" class="backup-tab" data-tab="settings" onclick="showBackupTab('settings')">
         <span class="backup-tab-ico" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
         </span>
@@ -336,6 +336,6 @@
 
     </main>
   </div>
-  <script src="/static/js/backup.js?v=3.3.2"></script>
+  <script src="/static/js/backup.js?v=3.3.3"></script>
 </body>
 </html>

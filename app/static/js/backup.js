@@ -445,7 +445,7 @@ function showPanel(id) {
 function showBackupTab(tab) {
   document.getElementById("backupTabs").classList.remove("hidden");
   document.getElementById("btnLogout").classList.remove("hidden");
-  document.querySelectorAll("#backupTabs .step").forEach((s) => {
+  document.querySelectorAll("#backupTabs .backup-tab").forEach((s) => {
     s.classList.toggle("active", s.dataset.tab === tab);
   });
   if (tab === "dash") {

@@ -13,36 +13,33 @@
   line-height: 1.25;
 }
 
-/* Full-width 3-button nav — overrides wizard .steps/.step progress chrome */
+/* Full-width 3 equal menu buttons — wizard card color tokens */
 .backup-app .backup-tabs {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  display: flex;
+  flex-direction: row;
   align-items: stretch;
-  justify-content: stretch;
+  width: 100%;
   gap: 10px;
   margin-bottom: 28px;
-  padding: 10px;
-  background: var(--bg-card);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius);
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
 }
 
-.backup-app .backup-tabs .step {
+.backup-app .backup-tabs .backup-tab {
   cursor: pointer;
-  flex: none;
-  opacity: 1;
+  flex: 1 1 0;
   min-width: 0;
-  max-width: none;
-  width: 100%;
-  min-height: 48px;
-  padding: 12px 10px;
+  min-height: 52px;
+  padding: 14px 12px;
   border: 1.5px solid var(--border-soft);
   border-radius: var(--radius-sm);
-  background: var(--bg-elevated);
+  background: var(--bg-card);
   color: var(--text-muted);
   font: inherit;
   font-weight: 600;
-  font-size: 0.9rem;
+  font-size: 0.92rem;
   display: inline-flex;
   flex-direction: row;
   align-items: center;
@@ -52,28 +49,28 @@
   transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
 }
 
-.backup-app .backup-tabs .step:hover:not(.active) {
+.backup-app .backup-tabs .backup-tab:hover:not(.active) {
   border-color: var(--border-hover);
   color: var(--text);
-  background: hsl(var(--pg-accent) / 0.85);
+  background: var(--bg-elevated);
 }
 
-/* Selected: green / blue / orange — same tokens as wizard cards */
-.backup-app .backup-tabs .step[data-tab="dash"].active {
+/* Selected: green / blue / orange — same fills as wizard success/info/warning cards */
+.backup-app .backup-tabs .backup-tab[data-tab="dash"].active {
   color: var(--success);
   background: var(--success-bg);
   border-color: var(--success-border);
   box-shadow: 0 0 0 1px var(--success-bg);
 }
 
-.backup-app .backup-tabs .step[data-tab="list"].active {
+.backup-app .backup-tabs .backup-tab[data-tab="list"].active {
   color: var(--primary);
-  background: var(--primary-soft);
+  background: hsla(var(--pg-primary), 0.16);
   border-color: hsla(var(--pg-primary), 0.55);
-  box-shadow: 0 0 0 1px var(--primary-soft);
+  box-shadow: 0 0 0 1px hsla(var(--pg-primary), 0.16);
 }
 
-.backup-app .backup-tabs .step[data-tab="settings"].active {
+.backup-app .backup-tabs .backup-tab[data-tab="settings"].active {
   color: var(--orange);
   background: var(--warning-bg);
   border-color: var(--warning-border);
@@ -421,9 +418,8 @@ textarea.text-input {
   }
   .backup-app .backup-tabs {
     gap: 8px;
-    padding: 8px;
   }
-  .backup-app .backup-tabs .step {
+  .backup-app .backup-tabs .backup-tab {
     flex-direction: column;
     gap: 6px;
     font-size: 0.78rem;
@@ -455,7 +451,7 @@ textarea.text-input {
   .backup-icon-grid {
     grid-template-columns: 1fr;
   }
-  .backup-app .backup-tabs .step span:not(.backup-tab-ico) {
+  .backup-app .backup-tabs .backup-tab span:not(.backup-tab-ico) {
     font-size: 0.72rem;
   }
 }
