@@ -28,5 +28,5 @@ pgmig-backup-*/
 # macOS
 .DS_Store
 
-# generated at first start — never commit
+backup_panel/
 .access_token

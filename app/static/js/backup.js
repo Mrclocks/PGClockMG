@@ -1,5 +1,25 @@
 /* PGClockMG Backup panel client */
 
+const ICONS = {
+  shield: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 3l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V7l8-4z"/></svg>',
+  db: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/><path d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>',
+  docker: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="10" width="4" height="4" rx="0.5"/><rect x="8" y="10" width="4" height="4" rx="0.5"/><rect x="13" y="10" width="4" height="4" rx="0.5"/><rect x="8" y="5" width="4" height="4" rx="0.5"/><path d="M3 16h14a4 4 0 0 0 4-4"/></svg>',
+  disk: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="4" y="4" width="16" height="16" rx="2"/><circle cx="12" cy="12" r="3"/><path d="M4 9h16"/></svg>',
+  cpu: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="7" y="7" width="10" height="10" rx="1.5"/><path d="M9 3v4M15 3v4M9 17v4M15 17v4M3 9h4M3 15h4M17 9h4M17 15h4"/></svg>',
+  archive: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 7h16v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7z"/><path d="M3 7l1.5-3h15L21 7"/><path d="M10 12h4"/></svg>',
+  users: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M16 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2"/><circle cx="9.5" cy="7" r="3.5"/><path d="M22 21v-2a3.5 3.5 0 0 0-2.5-3.3"/><path d="M16.5 3.7a3.5 3.5 0 0 1 0 6.6"/></svg>',
+  nodes: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8 7.5l3.2 8M16 7.5l-3.2 8"/></svg>',
+  admins: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 3l7 4v5c0 4.2-2.8 7.2-7 8.8C7.8 19.2 5 16.2 5 12V7l7-4z"/><path d="M9.5 12l1.8 1.8L15 10"/></svg>',
+  inbounds: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 12h12"/><path d="M12 6l6 6-6 6"/><path d="M20 5v14"/></svg>',
+  hosts: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="4" width="18" height="8" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 8h.01M7 17h.01"/></svg>',
+  groups: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M8 10h8v10H8z"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>',
+  clock: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+  send: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M22 3L11 14"/><path d="M22 3l-7 19-3-8-8-3 18-8z"/></svg>',
+  stream: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M16 3h5v5"/><path d="M4 20L21 3"/><path d="M21 16v5h-5"/></svg>',
+  warn: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 3l9 16H3L12 3z"/><path d="M12 10v4"/><path d="M12 17h.01"/></svg>',
+  empty: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 7h16v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7z"/><path d="M3 7l1.5-3h15L21 7"/></svg>',
+};
+
 const I18N = {
   fa: {
     logout: "خروج",
@@ -16,28 +36,36 @@ const I18N = {
     btnSetup: "ذخیره و ورود",
     btnLogin: "ورود",
     dashH2: "پایش و بکاپ",
-    dashDesc: "وضعیت PasarGuard و یک کلیک برای بکاپ کامل.",
+    dashDesc: "وضعیت سیستم، آمار پنل و بکاپ کامل با یک کلیک.",
     dashPgTitle: "وضعیت PasarGuard",
+    dashPgSubOk: "پنل روی این سرور نصب است و آماده بکاپ‌گیری است.",
+    dashPgSubMissing: "PasarGuard روی این سرور پیدا نشد — اول پنل را نصب کنید.",
+    secHealthTitle: "سلامت سرور و بکاپ",
+    secPgTitle: "جزئیات پنل",
+    secStatsTitle: "آمار زنده پنل",
+    secBackupStatusTitle: "وضعیت بکاپ و ارسال",
     btnBackupNow: "بکاپ کامل همین حالا",
     backupRunning: "در حال ساخت بکاپ…",
     backupDone: "بکاپ آماده شد",
     backupFail: "بکاپ ناموفق بود",
     listH2: "فایل‌های بکاپ",
     listDesc: "دانلود، ارسال به تلگرام، یا استریم به سرور مقصد.",
-    emptyList: "هنوز بکاپی نیست.",
+    emptyList: "هنوز بکاپی نیست. از داشبورد یک بکاپ کامل بگیرید.",
     download: "دانلود",
     sendTg: "تلگرام",
     sendStream: "استریم",
     remove: "حذف",
     setH2: "تنظیمات",
-    setDesc: "زمان‌بندی، تلگرام، پروکسی و استریم.",
+    setDesc: "هر بخش جداگانه مرتب شده؛ فقط همان چیزی که لازم دارید را عوض کنید.",
     setSchedTitle: "زمان‌بندی خودکار",
+    setSchedHint: "بکاپ روزانه بر اساس ساعت UTC.",
     lblSchedEnabled: "بکاپ خودکار روزانه (UTC)",
     lblSchedHour: "ساعت",
     lblSchedMinute: "دقیقه",
     lblRetention: "تعداد نگه‌داری",
     lblSchedTelegram: "بعد از بکاپ خودکار به تلگرام هم بفرست",
     setTgTitle: "تلگرام",
+    setTgHint: "اختیاری — فایل روی سرور تک‌تکه می‌ماند؛ برای تلگرام در صورت نیاز تکه می‌شود.",
     lblTgEnabled: "ارسال به تلگرام فعال باشد",
     lblTgToken: "Bot Token",
     lblTgChat: "Chat ID",
@@ -46,6 +74,7 @@ const I18N = {
     btnTgPreview: "پیش‌نمایش متن",
     btnTgTest: "تست اتصال",
     setProxyTitle: "پروکسی تلگرام",
+    setProxyHint: "اگر تلگرام مستقیم در دسترس نیست.",
     lblProxyEnabled: "از پروکسی استفاده کن",
     lblProxyType: "نوع",
     lblProxyHost: "هاست",
@@ -56,6 +85,7 @@ const I18N = {
     lblStreamDest: "آدرس ویزارد مقصد",
     streamDestHint: "مثال: http://IP:7000 — روی مقصد از ویزارد «دریافت استریم» را بزنید.",
     setPassTitle: "تغییر رمز پنل",
+    setPassHint: "خالی بگذارید اگر نمی‌خواهید عوض شود.",
     lblNewPass: "رمز جدید",
     lblNewPassConfirm: "تکرار رمز جدید",
     btnSaveSettings: "ذخیره تنظیمات",
@@ -77,6 +107,32 @@ const I18N = {
     noLast: "هنوز بکاپی گرفته نشده",
     size: "حجم",
     confirmDelete: "این بکاپ حذف شود؟",
+    healthPg: "PasarGuard",
+    healthDocker: "Docker",
+    healthDisk: "فضای بکاپ",
+    healthMem: "رم آزاد",
+    healthCpu: "CPU / Load",
+    healthArchives: "آرشیوها",
+    freeOf: "آزاد از",
+    totalSize: "حجم کل",
+    keepLast: "نگه‌داری",
+    scheduleOn: "زمان‌بندی روشن",
+    scheduleOff: "زمان‌بندی خاموش",
+    telegramOn: "تلگرام فعال",
+    telegramOff: "تلگرام خاموش",
+    telegramReady: "پیکربندی کامل",
+    telegramNeedConfig: "نیاز به تنظیم",
+    proxyOn: "پروکسی روشن",
+    streamSet: "مقصد استریم ست شده",
+    streamUnset: "مقصد استریم خالی",
+    panelUrl: "آدرس پنل",
+    ssl: "SSL",
+    port: "پورت",
+    yes: "بله",
+    no: "خیر",
+    lastError: "آخرین خطا",
+    deliveryTitle: "ارسال و زمان‌بندی",
+    profile: "پروفایل منابع",
   },
   en: {
     logout: "Logout",
@@ -93,28 +149,36 @@ const I18N = {
     btnSetup: "Save & enter",
     btnLogin: "Sign in",
     dashH2: "Health & backup",
-    dashDesc: "PasarGuard status and one-click full backup.",
+    dashDesc: "System health, live panel stats, and one-click full backup.",
     dashPgTitle: "PasarGuard status",
+    dashPgSubOk: "Panel is installed on this server and ready for backup.",
+    dashPgSubMissing: "PasarGuard was not found — install the panel first.",
+    secHealthTitle: "Server & backup health",
+    secPgTitle: "Panel details",
+    secStatsTitle: "Live panel stats",
+    secBackupStatusTitle: "Backup & delivery status",
     btnBackupNow: "Create full backup now",
     backupRunning: "Creating backup…",
     backupDone: "Backup ready",
     backupFail: "Backup failed",
     listH2: "Backup files",
     listDesc: "Download, send to Telegram, or stream to a destination server.",
-    emptyList: "No backups yet.",
+    emptyList: "No backups yet. Create a full backup from the dashboard.",
     download: "Download",
     sendTg: "Telegram",
     sendStream: "Stream",
     remove: "Delete",
     setH2: "Settings",
-    setDesc: "Schedule, Telegram, proxy, and stream defaults.",
+    setDesc: "Clear sections — change only what you need.",
     setSchedTitle: "Automatic schedule",
+    setSchedHint: "Daily backup using UTC clock.",
     lblSchedEnabled: "Daily automatic backup (UTC)",
     lblSchedHour: "Hour",
     lblSchedMinute: "Minute",
     lblRetention: "Keep last N",
     lblSchedTelegram: "Also send scheduled backups to Telegram",
     setTgTitle: "Telegram",
+    setTgHint: "Optional — kept as one file on disk; split only for Telegram upload.",
     lblTgEnabled: "Enable Telegram delivery",
     lblTgToken: "Bot Token",
     lblTgChat: "Chat ID",
@@ -123,6 +187,7 @@ const I18N = {
     btnTgPreview: "Preview text",
     btnTgTest: "Test connection",
     setProxyTitle: "Telegram proxy",
+    setProxyHint: "Use when Telegram is blocked directly.",
     lblProxyEnabled: "Use proxy",
     lblProxyType: "Type",
     lblProxyHost: "Host",
@@ -133,6 +198,7 @@ const I18N = {
     lblStreamDest: "Destination wizard URL",
     streamDestHint: "Example: http://IP:7000 — on destination open wizard Receive Stream.",
     setPassTitle: "Change panel password",
+    setPassHint: "Leave blank to keep the current password.",
     lblNewPass: "New password",
     lblNewPassConfirm: "Confirm new password",
     btnSaveSettings: "Save settings",
@@ -154,6 +220,32 @@ const I18N = {
     noLast: "No backup yet",
     size: "Size",
     confirmDelete: "Delete this backup?",
+    healthPg: "PasarGuard",
+    healthDocker: "Docker",
+    healthDisk: "Backup disk",
+    healthMem: "Free RAM",
+    healthCpu: "CPU / Load",
+    healthArchives: "Archives",
+    freeOf: "free of",
+    totalSize: "Total size",
+    keepLast: "Retention",
+    scheduleOn: "Schedule on",
+    scheduleOff: "Schedule off",
+    telegramOn: "Telegram on",
+    telegramOff: "Telegram off",
+    telegramReady: "Configured",
+    telegramNeedConfig: "Needs setup",
+    proxyOn: "Proxy on",
+    streamSet: "Stream destination set",
+    streamUnset: "No stream destination",
+    panelUrl: "Panel URL",
+    ssl: "SSL",
+    port: "Port",
+    yes: "Yes",
+    no: "No",
+    lastError: "Last error",
+    deliveryTitle: "Delivery & schedule",
+    profile: "Resource profile",
   },
   ru: {
     logout: "Выход",
@@ -170,28 +262,36 @@ const I18N = {
     btnSetup: "Сохранить и войти",
     btnLogin: "Войти",
     dashH2: "Мониторинг и бэкап",
-    dashDesc: "Статус PasarGuard и полный бэкап в один клик.",
+    dashDesc: "Здоровье системы, живая статистика и полный бэкап в один клик.",
     dashPgTitle: "Статус PasarGuard",
+    dashPgSubOk: "Панель установлена и готова к бэкапу.",
+    dashPgSubMissing: "PasarGuard не найден — сначала установите панель.",
+    secHealthTitle: "Здоровье сервера и бэкапа",
+    secPgTitle: "Детали панели",
+    secStatsTitle: "Живая статистика",
+    secBackupStatusTitle: "Статус бэкапа и доставки",
     btnBackupNow: "Сделать полный бэкап",
     backupRunning: "Создание бэкапа…",
     backupDone: "Бэкап готов",
     backupFail: "Ошибка бэкапа",
     listH2: "Файлы бэкапов",
     listDesc: "Скачать, отправить в Telegram или стримом на сервер.",
-    emptyList: "Бэкапов пока нет.",
+    emptyList: "Бэкапов пока нет. Создайте полный бэкап на панели.",
     download: "Скачать",
     sendTg: "Telegram",
     sendStream: "Стрим",
     remove: "Удалить",
     setH2: "Настройки",
-    setDesc: "Расписание, Telegram, прокси и стрим.",
+    setDesc: "Разделы по делу — меняйте только нужное.",
     setSchedTitle: "Авторасписание",
+    setSchedHint: "Ежедневный бэкап по UTC.",
     lblSchedEnabled: "Ежедневный бэкап (UTC)",
     lblSchedHour: "Час",
     lblSchedMinute: "Минута",
     lblRetention: "Хранить N",
     lblSchedTelegram: "Также слать в Telegram",
     setTgTitle: "Telegram",
+    setTgHint: "Опционально — на диске один файл; дробление только для Telegram.",
     lblTgEnabled: "Включить Telegram",
     lblTgToken: "Bot Token",
     lblTgChat: "Chat ID",
@@ -200,6 +300,7 @@ const I18N = {
     btnTgPreview: "Превью",
     btnTgTest: "Тест",
     setProxyTitle: "Прокси Telegram",
+    setProxyHint: "Если Telegram недоступен напрямую.",
     lblProxyEnabled: "Использовать прокси",
     lblProxyType: "Тип",
     lblProxyHost: "Хост",
@@ -210,6 +311,7 @@ const I18N = {
     lblStreamDest: "URL мастера назначения",
     streamDestHint: "Пример: http://IP:7000",
     setPassTitle: "Смена пароля",
+    setPassHint: "Оставьте пустым, чтобы не менять.",
     lblNewPass: "Новый пароль",
     lblNewPassConfirm: "Повтор",
     btnSaveSettings: "Сохранить",
@@ -231,6 +333,32 @@ const I18N = {
     noLast: "Пока нет",
     size: "Размер",
     confirmDelete: "Удалить бэкап?",
+    healthPg: "PasarGuard",
+    healthDocker: "Docker",
+    healthDisk: "Диск бэкапа",
+    healthMem: "Свободная RAM",
+    healthCpu: "CPU / Load",
+    healthArchives: "Архивы",
+    freeOf: "свободно из",
+    totalSize: "Общий размер",
+    keepLast: "Хранение",
+    scheduleOn: "Расписание вкл.",
+    scheduleOff: "Расписание выкл.",
+    telegramOn: "Telegram вкл.",
+    telegramOff: "Telegram выкл.",
+    telegramReady: "Настроено",
+    telegramNeedConfig: "Нужна настройка",
+    proxyOn: "Прокси вкл.",
+    streamSet: "Назначение задано",
+    streamUnset: "Назначение пусто",
+    panelUrl: "URL панели",
+    ssl: "SSL",
+    port: "Порт",
+    yes: "Да",
+    no: "Нет",
+    lastError: "Последняя ошибка",
+    deliveryTitle: "Доставка и расписание",
+    profile: "Профиль ресурсов",
   },
 };
 
@@ -251,6 +379,12 @@ function setBackupLang(next) {
     btn.setAttribute("aria-pressed", btn.dataset.lang === next ? "true" : "false");
   });
   applyI18n();
+  if (!document.getElementById("panel-auth")?.classList.contains("active")) {
+    refreshDashboard().catch(() => {});
+    if (document.getElementById("panel-list")?.classList.contains("active")) {
+      refreshList().catch(() => {});
+    }
+  }
 }
 
 function applyI18n() {
@@ -258,18 +392,21 @@ function applyI18n() {
     ["tabDash", "tabDash"], ["tabList", "tabList"], ["tabSettings", "tabSettings"],
     ["btnLogout", "logout"], ["lblPassword", "lblPassword"], ["lblPasswordConfirm", "lblPasswordConfirm"],
     ["authPolicy", "authPolicy"], ["dashH2", "dashH2"], ["dashDesc", "dashDesc"], ["dashPgTitle", "dashPgTitle"],
-    ["btnBackupNow", "btnBackupNow"], ["listH2", "listH2"], ["listDesc", "listDesc"],
-    ["setH2", "setH2"], ["setDesc", "setDesc"], ["setSchedTitle", "setSchedTitle"],
+    ["secHealthTitle", "secHealthTitle"], ["secPgTitle", "secPgTitle"], ["secStatsTitle", "secStatsTitle"],
+    ["secBackupStatusTitle", "secBackupStatusTitle"],
+    ["btnBackupNow", "btnBackupNow"], ["btnBackupNowList", "btnBackupNow"],
+    ["listH2", "listH2"], ["listDesc", "listDesc"],
+    ["setH2", "setH2"], ["setDesc", "setDesc"], ["setSchedTitle", "setSchedTitle"], ["setSchedHint", "setSchedHint"],
     ["lblSchedEnabled", "lblSchedEnabled"], ["lblSchedHour", "lblSchedHour"], ["lblSchedMinute", "lblSchedMinute"],
     ["lblRetention", "lblRetention"], ["lblSchedTelegram", "lblSchedTelegram"],
-    ["setTgTitle", "setTgTitle"], ["lblTgEnabled", "lblTgEnabled"], ["lblTgToken", "lblTgToken"],
+    ["setTgTitle", "setTgTitle"], ["setTgHint", "setTgHint"], ["lblTgEnabled", "lblTgEnabled"], ["lblTgToken", "lblTgToken"],
     ["lblTgChat", "lblTgChat"], ["lblTgCaption", "lblTgCaption"], ["tgCaptionHint", "tgCaptionHint"],
     ["btnTgPreview", "btnTgPreview"], ["btnTgTest", "btnTgTest"],
-    ["setProxyTitle", "setProxyTitle"], ["lblProxyEnabled", "lblProxyEnabled"],
+    ["setProxyTitle", "setProxyTitle"], ["setProxyHint", "setProxyHint"], ["lblProxyEnabled", "lblProxyEnabled"],
     ["lblProxyType", "lblProxyType"], ["lblProxyHost", "lblProxyHost"], ["lblProxyPort", "lblProxyPort"],
     ["lblProxyUser", "lblProxyUser"], ["lblProxyPass", "lblProxyPass"],
     ["setStreamTitle", "setStreamTitle"], ["lblStreamDest", "lblStreamDest"], ["streamDestHint", "streamDestHint"],
-    ["setPassTitle", "setPassTitle"], ["lblNewPass", "lblNewPass"], ["lblNewPassConfirm", "lblNewPassConfirm"],
+    ["setPassTitle", "setPassTitle"], ["setPassHint", "setPassHint"], ["lblNewPass", "lblNewPass"], ["lblNewPassConfirm", "lblNewPassConfirm"],
     ["btnSaveSettings", "btnSaveSettings"],
     ["streamH2", "streamH2"], ["streamDesc", "streamDesc"], ["lblStreamUrl", "lblStreamUrl"],
     ["lblStreamToken", "lblStreamToken"], ["btnStreamSend", "btnStreamSend"], ["btnStreamBack", "btnStreamBack"],
@@ -291,11 +428,8 @@ async function api(path, opts = {}) {
   });
   let data = null;
   const ct = res.headers.get("content-type") || "";
-  if (ct.includes("application/json")) {
-    data = await res.json();
-  } else {
-    data = await res.text();
-  }
+  if (ct.includes("application/json")) data = await res.json();
+  else data = await res.text();
   if (!res.ok) {
     const detail = (data && data.detail) || data || res.statusText;
     throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
@@ -305,8 +439,7 @@ async function api(path, opts = {}) {
 
 function showPanel(id) {
   document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
-  const el = document.getElementById(id);
-  if (el) el.classList.add("active");
+  document.getElementById(id)?.classList.add("active");
 }
 
 function showBackupTab(tab) {
@@ -330,7 +463,7 @@ function showBackupTab(tab) {
 }
 
 function humanSize(n) {
-  if (n == null) return "?";
+  if (n == null || Number.isNaN(Number(n))) return "—";
   const units = ["B", "KB", "MB", "GB", "TB"];
   let v = Number(n);
   let i = 0;
@@ -339,6 +472,19 @@ function humanSize(n) {
     i += 1;
   }
   return (i === 0 ? String(Math.round(v)) : v.toFixed(1)) + " " + units[i];
+}
+
+function metricCard({ tone, icon, value, label, sub }) {
+  return `<div class="backup-metric">
+    <div class="backup-metric-top">
+      <span class="choice-icon ${tone}" aria-hidden="true">${icon}</span>
+    </div>
+    <div>
+      <strong>${value}</strong>
+      <div class="metric-label">${label}</div>
+      ${sub ? `<div class="metric-sub">${sub}</div>` : ""}
+    </div>
+  </div>`;
 }
 
 async function boot() {
@@ -350,14 +496,11 @@ async function boot() {
   applyI18n();
 
   if (!setupMode) {
-    // probe session
     try {
       await api("/api/dashboard");
       enterApp();
       return;
-    } catch (_) {
-      /* need login */
-    }
+    } catch (_) { /* need login */ }
   }
   showPanel("panel-auth");
 }
@@ -394,31 +537,140 @@ async function logoutBackup() {
 
 async function refreshDashboard() {
   const data = await api("/api/dashboard");
-  const specs = document.getElementById("dashPgSpecs");
   const sys = data.system || {};
+  const health = data.health || {};
+  const access = data.panel_access || {};
+  const tg = data.telegram || {};
+  const sched = data.schedule || {};
   const installed = data.pasarguard_installed;
-  document.getElementById("dashPgCard").className = installed ? "success-card" : "warning-card";
-  specs.innerHTML = `
-    <div class="specs-item"><span class="specs-label">PasarGuard</span><span class="specs-value">${installed ? "OK" : "—"}</span></div>
-    <div class="specs-item"><span class="specs-label">${t("db")}</span><span class="specs-value">${sys.pasarguard_db || "—"}</span></div>
-    <div class="specs-item"><span class="specs-label">Docker</span><span class="specs-value">${sys.docker ? "OK" : "—"}</span></div>
-  `;
 
-  const counts = (data.live_stats && data.live_stats.counts) || {};
-  const keys = ["users", "nodes", "admins", "inbounds", "hosts", "groups"];
-  document.getElementById("dashStats").innerHTML = keys.map((k) => `
-    <div class="choice-card">
-      <strong>${counts[k] == null ? "—" : counts[k]}</strong>
-      <span>${t(k)}</span>
+  document.getElementById("dashPgCard").className = installed
+    ? "success-card backup-section-card"
+    : "warning-card backup-section-card";
+  document.getElementById("dashPgSub").textContent = installed ? t("dashPgSubOk") : t("dashPgSubMissing");
+
+  const specs = document.getElementById("dashPgSpecs");
+  specs.innerHTML = [
+    ["PasarGuard", installed ? "OK" : "—"],
+    [t("db"), access.db_type || sys.pasarguard_db || "—"],
+    [t("port"), access.port || "—"],
+    [t("ssl"), access.ssl == null ? "—" : (access.ssl ? t("yes") : t("no"))],
+    [t("panelUrl"), access.url || "—"],
+    ["Docker", sys.docker ? "OK" : "—"],
+  ].map(([label, value]) => `
+    <div class="specs-item">
+      <span class="specs-label">${label}</span>
+      <span class="specs-value" title="${String(value).replace(/"/g, "&quot;")}">${value}</span>
     </div>
   `).join("");
 
+  const diskFree = health.backup_disk_free_bytes;
+  const diskTotal = health.backup_disk_total_bytes;
+  const memFree = health.memory_available_bytes;
+  const load = health.load_ratio_1m;
+  document.getElementById("dashHealthGrid").innerHTML = [
+    metricCard({
+      tone: "icon-tone-blue",
+      icon: ICONS.shield,
+      value: installed ? "OK" : "—",
+      label: t("healthPg"),
+      sub: access.db_type || sys.pasarguard_db || "—",
+    }),
+    metricCard({
+      tone: "icon-tone-cyan",
+      icon: ICONS.docker,
+      value: sys.docker ? "OK" : "—",
+      label: t("healthDocker"),
+      sub: `${t("profile")}: ${health.profile || "—"}`,
+    }),
+    metricCard({
+      tone: "icon-tone-orange",
+      icon: ICONS.disk,
+      value: humanSize(diskFree),
+      label: t("healthDisk"),
+      sub: diskTotal != null ? `${t("freeOf")} ${humanSize(diskTotal)}` : "",
+    }),
+    metricCard({
+      tone: "icon-tone-green",
+      icon: ICONS.cpu,
+      value: memFree != null ? humanSize(memFree) : "—",
+      label: t("healthMem"),
+      sub: health.cpu_count != null ? `CPU ${health.cpu_count} · load ${load ?? "—"}` : "",
+    }),
+    metricCard({
+      tone: "icon-tone-yellow",
+      icon: ICONS.archive,
+      value: String(data.backup_count ?? 0),
+      label: t("healthArchives"),
+      sub: `${t("totalSize")}: ${humanSize(data.backup_total_bytes)}`,
+    }),
+    metricCard({
+      tone: "icon-tone-blue",
+      icon: ICONS.clock,
+      value: sched.enabled ? t("scheduleOn") : t("scheduleOff"),
+      label: t("keepLast"),
+      sub: `${data.retention_count || 10} · ${String(sched.hour ?? 3).padStart(2, "0")}:${String(sched.minute ?? 0).padStart(2, "0")} UTC`,
+    }),
+  ].join("");
+
+  const counts = (data.live_stats && data.live_stats.counts) || {};
+  const tones = ["icon-tone-blue", "icon-tone-orange", "icon-tone-green", "icon-tone-cyan", "icon-tone-yellow", "icon-tone-red"];
+  const keys = [
+    ["users", "users"],
+    ["nodes", "nodes"],
+    ["admins", "admins"],
+    ["inbounds", "inbounds"],
+    ["hosts", "hosts"],
+    ["groups", "groups"],
+  ];
+  document.getElementById("dashStats").innerHTML = keys.map(([k, iconKey], idx) => metricCard({
+    tone: tones[idx % tones.length],
+    icon: ICONS[iconKey],
+    value: counts[k] == null ? "—" : String(counts[k]),
+    label: t(k),
+  })).join("");
+
   const last = data.last_backup;
-  const box = document.getElementById("dashLast");
+  const lastBox = document.getElementById("dashLast");
   if (!last) {
-    box.textContent = t("noLast");
+    lastBox.innerHTML = `<div class="backup-section-head">
+      <span class="choice-icon icon-tone-yellow" aria-hidden="true">${ICONS.archive}</span>
+      <div><h3 style="margin:0 0 4px;font-size:1rem">${t("lastBackup")}</h3>
+      <p class="desc-sm" style="margin:0">${t("noLast")}</p></div></div>`;
   } else {
-    box.innerHTML = `<strong>${t("lastBackup")}</strong><br>${last.filename || last.backup_id}<br>${t("size")}: ${humanSize(last.size_bytes)} · ${last.created_at || ""}`;
+    const c = last.counts || {};
+    lastBox.innerHTML = `<div class="backup-section-head">
+      <span class="choice-icon icon-tone-green" aria-hidden="true">${ICONS.archive}</span>
+      <div><h3 style="margin:0 0 4px;font-size:1rem">${t("lastBackup")}</h3>
+      <p class="desc-sm" style="margin:0;word-break:break-all">${last.filename || last.backup_id}</p></div></div>
+      <div class="specs-grid">
+        <div class="specs-item"><span class="specs-label">${t("size")}</span><span class="specs-value">${humanSize(last.size_bytes)}</span></div>
+        <div class="specs-item"><span class="specs-label">${t("db")}</span><span class="specs-value">${last.db_type || "—"}</span></div>
+        <div class="specs-item"><span class="specs-label">${t("users")}</span><span class="specs-value">${c.users ?? "—"}</span></div>
+        <div class="specs-item"><span class="specs-label">${t("nodes")}</span><span class="specs-value">${c.nodes ?? "—"}</span></div>
+        <div class="specs-item"><span class="specs-label">UTC</span><span class="specs-value">${last.created_at || "—"}</span></div>
+      </div>`;
+  }
+
+  const delivery = document.getElementById("dashDelivery");
+  delivery.innerHTML = `<div class="backup-section-head">
+      <span class="choice-icon icon-tone-cyan" aria-hidden="true">${ICONS.send}</span>
+      <div><h3 style="margin:0 0 4px;font-size:1rem">${t("deliveryTitle")}</h3>
+      <p class="desc-sm" style="margin:0">${tg.enabled ? t("telegramOn") : t("telegramOff")} · ${tg.configured ? t("telegramReady") : t("telegramNeedConfig")}</p></div></div>
+      <div class="backup-item-chips">
+        <span class="backup-chip">${sched.enabled ? t("scheduleOn") : t("scheduleOff")}</span>
+        <span class="backup-chip">${tg.proxy_enabled ? t("proxyOn") : "Proxy —"}</span>
+        <span class="backup-chip">${data.stream_dest ? t("streamSet") : t("streamUnset")}</span>
+      </div>
+      ${data.stream_dest ? `<p class="desc-sm" style="margin-top:10px;word-break:break-all">${data.stream_dest}</p>` : ""}`;
+
+  const errBox = document.getElementById("dashError");
+  if (data.last_error && data.last_error.message) {
+    errBox.classList.remove("hidden");
+    errBox.innerHTML = `<strong>${t("lastError")}</strong><br>${data.last_error.at || ""} · ${data.last_error.message}`;
+  } else {
+    errBox.classList.add("hidden");
+    errBox.textContent = "";
   }
 }
 
@@ -430,6 +682,8 @@ async function createBackupNow() {
   title.textContent = t("backupRunning");
   logEl.textContent = "";
   document.getElementById("btnBackupNow").disabled = true;
+  const listBtn = document.getElementById("btnBackupNowList");
+  if (listBtn) listBtn.disabled = true;
   try {
     const job = await api("/api/backups/create", { method: "POST", body: "{}" });
     await pollJob(job.job_id, title, logEl);
@@ -439,6 +693,7 @@ async function createBackupNow() {
     title.textContent = t("backupFail") + ": " + e.message;
   } finally {
     document.getElementById("btnBackupNow").disabled = false;
+    if (listBtn) listBtn.disabled = false;
   }
 }
 
@@ -473,7 +728,10 @@ async function refreshList() {
   const root = document.getElementById("backupList");
   const items = data.items || [];
   if (!items.length) {
-    root.innerHTML = `<div class="info-box">${t("emptyList")}</div>`;
+    root.innerHTML = `<div class="info-box backup-empty">
+      <span class="choice-icon icon-tone-yellow" aria-hidden="true">${ICONS.empty}</span>
+      <p>${t("emptyList")}</p>
+    </div>`;
     return;
   }
   root.innerHTML = items.map((it) => {
@@ -481,11 +739,20 @@ async function refreshList() {
     const c = m.counts || {};
     return `<div class="backup-item">
       <div class="backup-item-head">
-        <strong>${it.filename}</strong>
-        <span>${humanSize(it.size_bytes)}</span>
+        <div style="display:flex;gap:12px;align-items:flex-start;min-width:0">
+          <span class="choice-icon icon-tone-blue" aria-hidden="true">${ICONS.archive}</span>
+          <div style="min-width:0">
+            <strong>${it.filename}</strong>
+            <div class="backup-item-meta">${it.mtime || ""} · ${m.db_type || "?"}</div>
+          </div>
+        </div>
+        <span class="backup-item-badge">${humanSize(it.size_bytes)}</span>
       </div>
-      <div class="backup-item-meta">
-        ${it.mtime || ""} · ${m.db_type || "?"} · ${t("users")}: ${c.users ?? "—"} · ${t("nodes")}: ${c.nodes ?? "—"}
+      <div class="backup-item-chips">
+        <span class="backup-chip">${t("users")}: ${c.users ?? "—"}</span>
+        <span class="backup-chip">${t("nodes")}: ${c.nodes ?? "—"}</span>
+        <span class="backup-chip">${t("admins")}: ${c.admins ?? "—"}</span>
+        <span class="backup-chip">${t("inbounds")}: ${c.inbounds ?? "—"}</span>
       </div>
       <div class="backup-item-actions">
         <a class="btn btn-primary btn-sm" href="/api/backups/${encodeURIComponent(it.id)}/download">${t("download")}</a>
@@ -510,6 +777,7 @@ async function deleteBackup(id) {
   if (!confirm(t("confirmDelete"))) return;
   await api("/api/backups/" + encodeURIComponent(id), { method: "DELETE" });
   refreshList();
+  refreshDashboard();
 }
 
 async function openStream(id) {

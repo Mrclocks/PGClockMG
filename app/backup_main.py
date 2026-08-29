@@ -198,25 +198,66 @@ async def logout():
 
 @app.get("/api/dashboard")
 async def dashboard():
+    from app.config import BACKUP_PORT, WEB_PORT
+    from app.services.pg_access import get_panel_access_info
+
     system = get_system_status()
     stats = live_panel_stats()
     cfg = load_settings()
     backups = list_backup_files()
+    total_bytes = sum(int(b.get("size_bytes") or 0) for b in backups)
+    resources = (system.get("resources") or {})
+    storage = (resources.get("storage") or {})
+    backup_disk = storage.get("backup") or {}
+    memory = resources.get("memory") or {}
+    tg = cfg.get("telegram") or {}
+    sched = cfg.get("schedule") or {}
+    access = {}
+    try:
+        access = get_panel_access_info() or {}
+    except Exception:
+        access = {}
+
     return {
         "version": APP_VERSION,
         "pasarguard_installed": is_pasarguard_installed(),
+        "ports": {"wizard": WEB_PORT, "backup": BACKUP_PORT},
         "system": {
             "pasarguard": system.get("pasarguard"),
             "pasarguard_db": system.get("pasarguard_db"),
+            "pasarguard_env": system.get("pasarguard_env"),
             "docker": system.get("docker"),
-            "resources": system.get("resources"),
+            "root": system.get("root"),
+            "resources": resources,
+        },
+        "panel_access": {
+            "url": access.get("url") or access.get("login_url") or access.get("dashboard_url"),
+            "ssl": access.get("ssl"),
+            "port": access.get("port"),
+            "db_type": access.get("db_type") or system.get("pasarguard_db"),
         },
         "live_stats": stats,
         "last_backup": cfg.get("last_backup"),
         "last_error": cfg.get("last_error"),
         "backup_count": len(backups),
-        "schedule": cfg.get("schedule"),
-        "telegram_enabled": bool((cfg.get("telegram") or {}).get("enabled")),
+        "backup_total_bytes": total_bytes,
+        "retention_count": cfg.get("retention_count") or 10,
+        "schedule": sched,
+        "telegram": {
+            "enabled": bool(tg.get("enabled")),
+            "configured": bool((tg.get("bot_token") or "").strip() and (tg.get("chat_id") or "").strip()),
+            "proxy_enabled": bool(tg.get("proxy_enabled")),
+        },
+        "stream_dest": ((cfg.get("stream") or {}).get("default_dest_url") or ""),
+        "health": {
+            "backup_disk_free_bytes": backup_disk.get("free_bytes"),
+            "backup_disk_total_bytes": backup_disk.get("total_bytes"),
+            "memory_available_bytes": memory.get("available_bytes"),
+            "memory_total_bytes": memory.get("total_bytes"),
+            "cpu_count": resources.get("cpu_count"),
+            "load_ratio_1m": resources.get("load_ratio_1m"),
+            "profile": resources.get("profile"),
+        },
     }
 
 
