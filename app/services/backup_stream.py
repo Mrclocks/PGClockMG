@@ -10,11 +10,11 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 import httpx
 
 from app.config import UPLOAD_DIR
+from app.services.backup_net import UnsafeDestinationError, normalize_public_http_url
 
 _LOCK = threading.RLock()
 _LISTENERS: dict[str, dict[str, Any]] = {}
@@ -22,6 +22,7 @@ _LISTENERS: dict[str, dict[str, Any]] = {}
 LISTENER_TTL_SEC = 30 * 60
 STREAM_CHUNK = 8 * 1024 * 1024  # 8 MiB — fewer syscalls for large zips
 PROGRESS_EVERY = 16 * 1024 * 1024  # update listener progress every 16 MiB
+MAX_STREAM_BYTES = 20 * 1024 * 1024 * 1024  # 20 GiB hard cap even without expected_size
 
 
 def _purge_expired() -> None:
@@ -74,17 +75,10 @@ def mark_listener_consumed(token: str) -> None:
 
 
 def _normalize_dest_url(dest_base_url: str) -> str:
-    raw = (dest_base_url or "").strip().rstrip("/")
-    if not raw:
-        raise ValueError("dest_url_empty")
-    if "://" not in raw:
-        raw = "http://" + raw
-    parsed = urlparse(raw)
-    if parsed.scheme not in ("http", "https"):
-        raise ValueError("dest_url_scheme")
-    if not parsed.netloc:
-        raise ValueError("dest_url_host")
-    return raw
+    try:
+        return normalize_public_http_url(dest_base_url)
+    except UnsafeDestinationError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 async def receive_stream(
@@ -133,6 +127,8 @@ async def receive_stream(
                 fh.write(chunk)
                 hasher.update(chunk)
                 received += len(chunk)
+                if received > MAX_STREAM_BYTES:
+                    raise RuntimeError("stream_too_large")
                 if received - last_progress >= PROGRESS_EVERY or (expected_size and received >= expected_size):
                     last_progress = received
                     with _LOCK:
@@ -243,11 +239,11 @@ def push_backup_file(
     try:
         timeout_cfg = httpx.Timeout(timeout, connect=30.0, read=timeout, write=timeout)
         limits = httpx.Limits(max_connections=2, max_keepalive_connections=0)
-        with httpx.Client(timeout=timeout_cfg, follow_redirects=True, limits=limits) as client:
+        with httpx.Client(timeout=timeout_cfg, follow_redirects=False, limits=limits) as client:
             # Generator body streams without loading the whole zip into RAM
             resp = client.put(url, content=_iter_file(), headers=headers)
         if resp.status_code >= 400:
-            return {"ok": False, "error": resp.text[:800], "status_code": resp.status_code}
+            return {"ok": False, "error": "http_error", "status_code": resp.status_code}
         try:
             body = resp.json()
         except Exception:
