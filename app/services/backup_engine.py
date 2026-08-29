@@ -217,7 +217,8 @@ def live_panel_stats() -> dict:
     result["db_type"] = db_type
     try:
         if db_type == "sqlite":
-            path = PASARGUARD_DATA / "db.sqlite3"
+            env_text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.is_file() else ""
+            path = _resolve_sqlite_path(env_text)
             if not path.is_file():
                 result["error"] = "sqlite_missing"
                 return result
@@ -299,22 +300,36 @@ def _docker_sql_counts(db_type: str) -> dict[str, int | None]:
     return out
 
 
-def _dump_sqlite(dest: Path, job: dict) -> None:
-    src = PASARGUARD_DATA / "db.sqlite3"
+def _resolve_sqlite_path(env_text: str = "") -> Path:
+    """Prefer SQLALCHEMY sqlite path from .env; fall back to official data dir."""
+    url = read_env_var(env_text, "SQLALCHEMY_DATABASE_URL") or ""
+    # sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3  or sqlite:////path
+    m = re.search(r"sqlite(?:\+\w+)?:(?:///)?(/[^\s\"']+)", url, re.I)
+    if m:
+        p = Path(m.group(1))
+        if p.is_file() or p.parent.is_dir():
+            return p
+    return PASARGUARD_DATA / "db.sqlite3"
+
+
+def _dump_sqlite(dest: Path, job: dict, *, env_text: str = "") -> None:
+    src = _resolve_sqlite_path(env_text)
     if not src.is_file():
-        raise RuntimeError("SQLite database not found at /var/lib/pasarguard/db.sqlite3")
-    _log(job, "Copying SQLite database…")
-    # Consistent online copy
+        raise RuntimeError(f"SQLite database not found at {src}")
+    _log(job, f"Copying SQLite database from {src}…")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    src_conn = sqlite3.connect(str(src), timeout=60)
+    src_conn = sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=120)
     try:
         dst_conn = sqlite3.connect(str(dest))
         try:
-            src_conn.backup(dst_conn)
+            with dst_conn:
+                src_conn.backup(dst_conn)
         finally:
             dst_conn.close()
     finally:
         src_conn.close()
+    if dest.stat().st_size < 64:
+        raise RuntimeError("SQLite backup copy is empty")
 
 
 def _dump_postgres(db_type: str, dest: Path, job: dict) -> None:
@@ -322,67 +337,33 @@ def _dump_postgres(db_type: str, dest: Path, job: dict) -> None:
     if not svc:
         raise RuntimeError(f"No Docker DB service found for {db_type}")
     conn = get_pasarguard_admin_connection(db_type)
-    user = conn.get("user") or "postgres"
+    users = []
+    for cand in (
+        conn.get("user"),
+        "postgres",
+        read_env_var(PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.is_file() else "", "DB_USER"),
+        "pasarguard",
+    ):
+        if cand and cand not in users:
+            users.append(cand)
     password = conn.get("password") or ""
     database = conn.get("database") or "pasarguard"
-    _log(job, f"Running pg_dump via {svc}…")
-    # Prefer custom-compatible plain SQL that restore accepts as db_backup.sql
-    cmd = [
-        "docker", "compose", "exec", "-T",
-        "-e", f"PGPASSWORD={password}",
-        svc, "pg_dump",
-        "-U", user,
-        "-d", database,
-        "--clean",
-        "--if-exists",
-        "--no-owner",
-        "--no-acl",
-    ]
-    try:
-        with dest.open("wb") as out:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(PASARGUARD_DIR),
-                stdout=out,
-                stderr=subprocess.PIPE,
-            )
-            _, err = proc.communicate(timeout=1800)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        raise RuntimeError("pg_dump timed out")
-    if proc.returncode != 0:
-        raise RuntimeError((err or b"").decode("utf-8", errors="replace")[-1500:] or "pg_dump failed")
-    if dest.stat().st_size < 64:
-        raise RuntimeError("pg_dump produced an empty file")
-
-
-def _dump_mysql(db_type: str, dest: Path, job: dict) -> None:
-    svc = resolve_db_service(db_type)
-    if not svc:
-        raise RuntimeError(f"No Docker DB service found for {db_type}")
-    conn = get_pasarguard_admin_connection(db_type)
-    user = conn.get("user") or "root"
-    password = conn.get("password") or ""
-    database = conn.get("database") or "pasarguard"
-    _log(job, f"Running mysqldump via {svc}…")
-    dump_bins = ["mysqldump", "mariadb-dump"]
-    if "maria" in (svc or "").lower() or db_type == "mariadb":
-        dump_bins = ["mariadb-dump", "mysqldump"]
     last_err = ""
-    for binary in dump_bins:
+    for user in users:
+        _log(job, f"Running pg_dump via {svc} as {user}…")
         cmd = [
             "docker", "compose", "exec", "-T",
-            "-e", f"MYSQL_PWD={password}",
-            svc, binary,
-            "-u", user,
-            "--single-transaction",
-            "--routines",
-            "--triggers",
-            "--events",
-            "--hex-blob",
-            "--default-character-set=utf8mb4",
-            database,
+            "-e", f"PGPASSWORD={password}",
+            svc, "pg_dump",
+            "-U", user,
+            "-d", database,
+            "--clean",
+            "--if-exists",
+            "--no-owner",
+            "--no-acl",
+            "--encoding=UTF8",
         ]
+        # Keep TimescaleDB extension DDL in the dump for native Timescale restores.
         try:
             with dest.open("wb") as out:
                 proc = subprocess.Popen(
@@ -392,62 +373,217 @@ def _dump_mysql(db_type: str, dest: Path, job: dict) -> None:
                     stderr=subprocess.PIPE,
                 )
                 _, err = proc.communicate(timeout=1800)
-        except FileNotFoundError:
-            continue
         except subprocess.TimeoutExpired:
             proc.kill()
-            raise RuntimeError("mysqldump timed out")
-        if proc.returncode == 0 and dest.stat().st_size >= 64:
+            raise RuntimeError("pg_dump timed out")
+        if proc.returncode == 0 and dest.is_file() and dest.stat().st_size >= 64:
+            # Best-effort globals (roles) — used by some restore paths; safe to ignore failure
+            globals_path = dest.parent / "globals.sql"
+            try:
+                gcmd = [
+                    "docker", "compose", "exec", "-T",
+                    "-e", f"PGPASSWORD={password}",
+                    svc, "pg_dumpall",
+                    "-U", user,
+                    "--globals-only",
+                    "--no-role-passwords",
+                ]
+                with globals_path.open("wb") as gout:
+                    gproc = subprocess.Popen(
+                        gcmd,
+                        cwd=str(PASARGUARD_DIR),
+                        stdout=gout,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    gproc.communicate(timeout=120)
+                if not globals_path.is_file() or globals_path.stat().st_size < 16:
+                    globals_path.unlink(missing_ok=True)
+                else:
+                    _log(job, "Included globals.sql (roles)")
+            except Exception:
+                try:
+                    globals_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
             return
         last_err = (err or b"").decode("utf-8", errors="replace")[-1500:]
-        # binary missing inside container
-        if "executable file not found" in last_err.lower() or "no such file" in last_err.lower():
+        if "password authentication failed" in last_err.lower() or "role" in last_err.lower():
             continue
+    raise RuntimeError(last_err or "pg_dump failed")
+
+
+def _dump_mysql(db_type: str, dest: Path, job: dict) -> None:
+    svc = resolve_db_service(db_type)
+    if not svc:
+        raise RuntimeError(f"No Docker DB service found for {db_type}")
+    conn = get_pasarguard_admin_connection(db_type)
+    env_text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.is_file() else ""
+    users = []
+    for cand in (
+        conn.get("user"),
+        "root",
+        read_env_var(env_text, "MYSQL_USER"),
+        read_env_var(env_text, "DB_USER"),
+        "pasarguard",
+    ):
+        if cand and cand not in users:
+            users.append(cand)
+    password = conn.get("password") or ""
+    database = conn.get("database") or "pasarguard"
+    _log(job, f"Running mysqldump via {svc}…")
+    dump_bins = ["mysqldump", "mariadb-dump"]
+    if "maria" in (svc or "").lower() or db_type == "mariadb":
+        dump_bins = ["mariadb-dump", "mysqldump"]
+    last_err = ""
+    for user in users:
+        for binary in dump_bins:
+            cmd = [
+                "docker", "compose", "exec", "-T",
+                "-e", f"MYSQL_PWD={password}",
+                svc, binary,
+                "-u", user,
+                "--single-transaction",
+                "--quick",
+                "--routines",
+                "--triggers",
+                "--events",
+                "--hex-blob",
+                "--default-character-set=utf8mb4",
+                "--set-gtid-purged=OFF",
+                "--column-statistics=0",
+                database,
+            ]
+            try:
+                with dest.open("wb") as out:
+                    proc = subprocess.Popen(
+                        cmd,
+                        cwd=str(PASARGUARD_DIR),
+                        stdout=out,
+                        stderr=subprocess.PIPE,
+                    )
+                    _, err = proc.communicate(timeout=1800)
+            except FileNotFoundError:
+                continue
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                raise RuntimeError("mysqldump timed out")
+            if proc.returncode == 0 and dest.is_file() and dest.stat().st_size >= 64:
+                _log(job, f"mysqldump ok ({binary} as {user})")
+                return
+            last_err = (err or b"").decode("utf-8", errors="replace")[-1500:]
+            # Retry without flags some servers reject
+            if "unknown variable" in last_err.lower() or "unknown option" in last_err.lower():
+                cmd2 = [
+                    "docker", "compose", "exec", "-T",
+                    "-e", f"MYSQL_PWD={password}",
+                    svc, binary,
+                    "-u", user,
+                    "--single-transaction",
+                    "--routines",
+                    "--triggers",
+                    "--events",
+                    "--hex-blob",
+                    "--default-character-set=utf8mb4",
+                    database,
+                ]
+                with dest.open("wb") as out:
+                    proc = subprocess.Popen(
+                        cmd2,
+                        cwd=str(PASARGUARD_DIR),
+                        stdout=out,
+                        stderr=subprocess.PIPE,
+                    )
+                    _, err = proc.communicate(timeout=1800)
+                if proc.returncode == 0 and dest.is_file() and dest.stat().st_size >= 64:
+                    return
+                last_err = (err or b"").decode("utf-8", errors="replace")[-1500:]
+            if "executable file not found" in last_err.lower() or "no such file" in last_err.lower():
+                continue
+            if "access denied" in last_err.lower():
+                break  # try next user
     raise RuntimeError(last_err or "mysqldump failed")
 
 
 def _collect_extra_files(staging: Path, job: dict) -> None:
-    """Copy .env, compose, certs, templates, and light data files into staging."""
+    """Copy panel assets into a restore-compatible layout.
+
+    Layout matches what ``pg_restore._restore_data_files`` expects:
+      .env, docker-compose.yml, certs/, templates/, xray_config.json,
+      and other /var/lib/pasarguard files under var/lib/pasarguard/.
+    """
     if PASARGUARD_ENV.is_file():
         shutil.copy2(PASARGUARD_ENV, staging / ".env")
-        _log(job, "Included .env")
-    compose = PASARGUARD_DIR / "docker-compose.yml"
-    if compose.is_file():
-        shutil.copy2(compose, staging / "docker-compose.yml")
-        _log(job, "Included docker-compose.yml")
-    for name in ("docker-compose.yaml", "compose.yml", "compose.yaml"):
+        _log(job, f"Included .env from {PASARGUARD_ENV}")
+    else:
+        raise RuntimeError(f"Missing PasarGuard .env at {PASARGUARD_ENV}")
+
+    compose_copied = False
+    for name in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"):
         p = PASARGUARD_DIR / name
-        if p.is_file() and not (staging / name).exists():
+        if p.is_file():
             shutil.copy2(p, staging / name)
+            _log(job, f"Included {name} from {PASARGUARD_DIR}")
+            compose_copied = True
+            break
+    if not compose_copied:
+        _log(job, "WARN: no docker-compose.yml found under /opt/pasarguard")
+
+    # Official data root used by restore
+    data_root = staging / "var" / "lib" / "pasarguard"
+    data_root.mkdir(parents=True, exist_ok=True)
 
     certs = PASARGUARD_DATA / "certs"
     if certs.is_dir():
         _copy_tree_filtered(certs, staging / "certs")
-        _log(job, "Included certs/")
+        _copy_tree_filtered(certs, data_root / "certs")
+        _log(job, f"Included certs/ from {certs}")
 
     templates = PASARGUARD_DATA / "templates"
     if templates.is_dir():
         _copy_tree_filtered(templates, staging / "templates")
-        _log(job, "Included templates/")
+        _copy_tree_filtered(templates, data_root / "templates")
+        _log(job, f"Included templates/ from {templates}")
 
-    # Light config / xray files from data dir (skip the live sqlite we dump separately)
+    # Skip live DB files / engine datadirs — dumps are produced separately
+    skip_files = {
+        "db.sqlite3", "db.sqlite3-wal", "db.sqlite3-shm",
+    }
+    skip_dirs = {
+        "mysql", "mariadb", "postgresql", "postgres", "timescaledb",
+        "pgdata", "pgbouncer",
+    }
+
     if PASARGUARD_DATA.is_dir():
-        data_staging = staging / "pasarguard_data"
-        data_staging.mkdir(parents=True, exist_ok=True)
-        skip = {"db.sqlite3", "db.sqlite3-wal", "db.sqlite3-shm", "mysql", "postgresql", "postgres"}
         for child in PASARGUARD_DATA.iterdir():
-            if child.name in skip:
+            if child.name in skip_files or child.name in skip_dirs:
                 continue
             if child.name in ("certs", "templates"):
-                continue  # already copied at zip root for restore compatibility
+                continue  # already mirrored at zip root + data tree
             if child.is_file():
-                if child.suffix.lower() in {".json", ".yml", ".yaml", ".conf", ".toml", ".pem", ".key", ".crt"}:
-                    try:
-                        shutil.copy2(child, data_staging / child.name)
-                    except OSError:
-                        pass
-            elif child.is_dir() and child.name in ("xray", "configs", "custom"):
-                _copy_tree_filtered(child, data_staging / child.name)
+                # Prefer restore hot-paths at zip root for xray_config.json
+                if child.name == "xray_config.json":
+                    shutil.copy2(child, staging / "xray_config.json")
+                    shutil.copy2(child, data_root / "xray_config.json")
+                    _log(job, "Included xray_config.json")
+                    continue
+                try:
+                    shutil.copy2(child, data_root / child.name)
+                except OSError as exc:
+                    _log(job, f"Skip data file {child.name}: {exc}")
+            elif child.is_dir():
+                try:
+                    _copy_tree_filtered(child, data_root / child.name)
+                    _log(job, f"Included data/{child.name}/ from {PASARGUARD_DATA}")
+                except OSError as exc:
+                    _log(job, f"Skip data dir {child.name}: {exc}")
+
+    # Light extras from /opt/pasarguard (not the whole tree)
+    for name in ("xray_config.json", "config.json"):
+        p = PASARGUARD_DIR / name
+        if p.is_file() and not (staging / name).exists():
+            shutil.copy2(p, staging / name)
+            _log(job, f"Included {name} from {PASARGUARD_DIR}")
+
 
 
 def create_backup_bundle(*, trigger: str = "manual") -> dict:
@@ -558,13 +694,22 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
         _collect_extra_files(staging, job)
 
         if db_type == "sqlite":
-            _dump_sqlite(staging / "db.sqlite3", job)
+            _dump_sqlite(staging / "db.sqlite3", job, env_text=env_text)
         elif db_type in ("postgresql", "timescaledb"):
             _dump_postgres(db_type, staging / "db_backup.sql", job)
         elif db_type in ("mysql", "mariadb"):
             _dump_mysql(db_type, staging / "db_backup.sql", job)
         else:
             raise RuntimeError(f"Unsupported database type: {db_type}")
+
+        # Verify dump artifact before zipping
+        if db_type == "sqlite":
+            dump_path = staging / "db.sqlite3"
+        else:
+            dump_path = staging / "db_backup.sql"
+        if not dump_path.is_file() or dump_path.stat().st_size < 64:
+            raise RuntimeError(f"Database dump missing or empty: {dump_path.name}")
+        _log(job, f"Dump ready: {dump_path.name} ({dump_path.stat().st_size} bytes)")
 
         stats = live_panel_stats()
         counts = stats.get("counts") or {}

@@ -153,6 +153,9 @@ def test_backup_bundle_sqlite_layout(tmp_path, monkeypatch):
     conn.close()
     (pg_data / "certs").mkdir()
     (pg_data / "certs" / "fullchain.pem").write_text("CERT", encoding="utf-8")
+    (pg_data / "xray_config.json").write_text('{"inbounds":[]}', encoding="utf-8")
+    (pg_data / "templates").mkdir()
+    (pg_data / "templates" / "user.html").write_text("hi", encoding="utf-8")
 
     monkeypatch.setattr(eng, "PASARGUARD_DIR", pg_dir)
     monkeypatch.setattr(eng, "PASARGUARD_ENV", pg_dir / ".env")
@@ -181,8 +184,70 @@ def test_backup_bundle_sqlite_layout(tmp_path, monkeypatch):
     assert "db.sqlite3" in names
     assert "pgclockmg-manifest.json" in names
     assert "certs/fullchain.pem" in names
+    assert "templates/user.html" in names
+    assert "xray_config.json" in names
+    assert "var/lib/pasarguard/xray_config.json" in names
+    assert "docker-compose.yml" in names
     assert job["manifest"]["counts"]["users"] == 2
-    print("OK: sqlite full-bundle layout")
+    # Restore discoverer must find sqlite + env in this layout
+    from app.services.pg_restore import discover_backup_artifacts, _find_env
+    import tempfile, shutil
+    extract = Path(tempfile.mkdtemp(prefix="pg-bak-check-"))
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            zf.extractall(extract)
+        assert _find_env(extract) is not None
+        art = discover_backup_artifacts(extract, env_db="sqlite")
+        assert art.get("layout") == "sqlite_file"
+        assert art.get("sqlite_path")
+    finally:
+        shutil.rmtree(extract, ignore_errors=True)
+    print("OK: sqlite full-bundle layout + restore-compatible paths")
+
+
+def test_resolve_sqlite_path_from_env(tmp_path, monkeypatch):
+    import app.services.backup_engine as eng
+    custom = tmp_path / "custom.sqlite3"
+    custom.write_bytes(b"SQLite format 3\x00" + b"\x00" * 80)
+    env = f'SQLALCHEMY_DATABASE_URL="sqlite+aiosqlite:///{custom.as_posix()}"\n'
+    monkeypatch.setattr(eng, "PASARGUARD_DATA", tmp_path / "missing")
+    assert eng._resolve_sqlite_path(env) == custom
+    print("OK: sqlite path from .env")
+
+
+def test_stream_push_receive_roundtrip(tmp_path, monkeypatch):
+    """Chunked receive reconstructs the exact zip bytes."""
+    import asyncio
+    from app.services import backup_stream as stream
+
+    monkeypatch.setattr(stream, "UPLOAD_DIR", tmp_path / "uploads")
+    (tmp_path / "uploads").mkdir()
+    stream._LISTENERS.clear()
+
+    src = tmp_path / "pgclockmg-test.zip"
+    with zipfile.ZipFile(src, "w") as zf:
+        zf.writestr(".env", 'SQLALCHEMY_DATABASE_URL="sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3"\n')
+        zf.writestr("db.sqlite3", b"SQLite format 3\x00" + b"\x00" * 200)
+
+    payload = src.read_bytes()
+    digest = stream._file_sha256(src)
+
+    async def gen():
+        step = 32 * 1024
+        for i in range(0, len(payload), step):
+            yield payload[i:i + step]
+
+    token = stream.create_listener()["token"]
+    received = asyncio.run(stream.receive_stream(
+        token, gen(), filename=src.name, expected_size=len(payload),
+        expected_sha256=digest,
+    ))
+    assert received["ok"]
+    out = tmp_path / "uploads" / received["upload_id"] / "backup.zip"
+    assert out.is_file()
+    assert out.read_bytes() == payload
+    assert received["sha256"] == digest
+    print("OK: stream receive roundtrip chunked")
 
 
 def test_backup_api_setup_login(tmp_path, monkeypatch):

@@ -6,20 +6,22 @@ import hashlib
 import json
 import os
 import secrets
-import shutil
 import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
-from app.config import UPLOAD_DIR, WORK_DIR
+from app.config import UPLOAD_DIR
 
 _LOCK = threading.RLock()
 _LISTENERS: dict[str, dict[str, Any]] = {}
 
 LISTENER_TTL_SEC = 30 * 60
+STREAM_CHUNK = 8 * 1024 * 1024  # 8 MiB — fewer syscalls for large zips
+PROGRESS_EVERY = 16 * 1024 * 1024  # update listener progress every 16 MiB
 
 
 def _purge_expired() -> None:
@@ -71,6 +73,20 @@ def mark_listener_consumed(token: str) -> None:
             info["status"] = "consumed"
 
 
+def _normalize_dest_url(dest_base_url: str) -> str:
+    raw = (dest_base_url or "").strip().rstrip("/")
+    if not raw:
+        raise ValueError("dest_url_empty")
+    if "://" not in raw:
+        raw = "http://" + raw
+    parsed = urlparse(raw)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("dest_url_scheme")
+    if not parsed.netloc:
+        raise ValueError("dest_url_host")
+    return raw
+
+
 async def receive_stream(
     token: str,
     request_stream,
@@ -101,6 +117,7 @@ async def receive_stream(
     partial = dest.with_suffix(".partial")
     hasher = hashlib.sha256()
     received = 0
+    last_progress = 0
 
     with _LOCK:
         if token in _LISTENERS:
@@ -108,18 +125,26 @@ async def receive_stream(
             _LISTENERS[token]["upload_id"] = upload_id
 
     try:
-        with partial.open("wb") as fh:
+        # Larger buffer reduces write syscalls on big archives
+        with partial.open("wb", buffering=STREAM_CHUNK) as fh:
             async for chunk in request_stream:
                 if not chunk:
                     continue
                 fh.write(chunk)
                 hasher.update(chunk)
                 received += len(chunk)
-                with _LOCK:
-                    if token in _LISTENERS:
-                        _LISTENERS[token]["bytes_received"] = received
-                if expected_size and received > expected_size + 1024:
+                if received - last_progress >= PROGRESS_EVERY or (expected_size and received >= expected_size):
+                    last_progress = received
+                    with _LOCK:
+                        if token in _LISTENERS:
+                            _LISTENERS[token]["bytes_received"] = received
+                if expected_size and received > expected_size + (1024 * 1024):
                     raise RuntimeError("stream_too_large")
+
+        # final progress
+        with _LOCK:
+            if token in _LISTENERS:
+                _LISTENERS[token]["bytes_received"] = received
 
         digest = hasher.hexdigest()
         if expected_sha256 and digest.lower() != expected_sha256.lower():
@@ -163,6 +188,17 @@ async def receive_stream(
         raise
 
 
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(STREAM_CHUNK)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def push_backup_file(
     path: Path,
     *,
@@ -174,18 +210,18 @@ def push_backup_file(
     """Source side: stream a local zip to destination /api/stream/receive/{token}."""
     if not path.is_file():
         return {"ok": False, "error": "file_missing"}
-    base = dest_base_url.rstrip("/")
-    url = f"{base}/api/stream/receive/{token}"
+    try:
+        base = _normalize_dest_url(dest_base_url)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    if not token or not str(token).strip():
+        return {"ok": False, "error": "token_missing"}
+    url = f"{base}/api/stream/receive/{token.strip()}"
     size = path.stat().st_size
+    if size < 64:
+        return {"ok": False, "error": "file_too_small"}
     if not sha256:
-        h = hashlib.sha256()
-        with path.open("rb") as fh:
-            while True:
-                chunk = fh.read(1024 * 1024)
-                if not chunk:
-                    break
-                h.update(chunk)
-        sha256 = h.hexdigest()
+        sha256 = _file_sha256(path)
 
     headers = {
         "Content-Type": "application/octet-stream",
@@ -193,16 +229,29 @@ def push_backup_file(
         "X-Backup-Filename": path.name,
         "X-Backup-Sha256": sha256,
         "X-Backup-Size": str(size),
+        "Connection": "close",
     }
+
+    def _iter_file():
+        with path.open("rb") as fh:
+            while True:
+                chunk = fh.read(STREAM_CHUNK)
+                if not chunk:
+                    break
+                yield chunk
+
     try:
-        with path.open("rb") as fh, httpx.Client(timeout=timeout, follow_redirects=True) as client:
-            resp = client.put(url, content=fh, headers=headers)
+        timeout_cfg = httpx.Timeout(timeout, connect=30.0, read=timeout, write=timeout)
+        limits = httpx.Limits(max_connections=2, max_keepalive_connections=0)
+        with httpx.Client(timeout=timeout_cfg, follow_redirects=True, limits=limits) as client:
+            # Generator body streams without loading the whole zip into RAM
+            resp = client.put(url, content=_iter_file(), headers=headers)
         if resp.status_code >= 400:
             return {"ok": False, "error": resp.text[:800], "status_code": resp.status_code}
         try:
             body = resp.json()
         except Exception:
             body = {"raw": resp.text[:400]}
-        return {"ok": True, "response": body, "sha256": sha256, "size_bytes": size}
+        return {"ok": True, "response": body, "sha256": sha256, "size_bytes": size, "dest": url}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
