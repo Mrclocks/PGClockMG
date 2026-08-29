@@ -12,7 +12,7 @@ import secrets
 import time
 from pathlib import Path
 
-from app.config import BACKUP_PASSWORD_FILE, BACKUP_SECRET_FILE
+from app.config import BACKUP_PASSWORD_FILE, BACKUP_SECRET_FILE, BACKUP_SETUP_TOKEN_FILE
 
 COOKIE_NAME = "pgclockmg_backup_session"
 COOKIE_MAX_AGE = 12 * 60 * 60
@@ -89,10 +89,28 @@ def password_is_set() -> bool:
         return False
 
 
-def set_password(password: str) -> None:
+def set_password(password: str, *, exclusive: bool = False) -> None:
+    """Write password hash. If exclusive=True, fail if a password file already exists."""
     validate_password_strength(password)
     BACKUP_PASSWORD_FILE.parent.mkdir(parents=True, exist_ok=True)
     encoded = _hash_password(password)
+    if exclusive:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        try:
+            fd = os.open(BACKUP_PASSWORD_FILE, flags, 0o600)
+        except FileExistsError as exc:
+            raise PasswordPolicyError("password_already_set") from exc
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(encoded + "\n")
+            os.chmod(BACKUP_PASSWORD_FILE, 0o600)
+        except Exception:
+            try:
+                BACKUP_PASSWORD_FILE.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        return
     tmp = BACKUP_PASSWORD_FILE.with_suffix(".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
@@ -124,10 +142,18 @@ def get_session_secret() -> bytes:
         raw = BACKUP_SECRET_FILE.read_bytes().strip()
         if len(raw) >= 32:
             return raw
+    return rotate_session_secret()
+
+
+def rotate_session_secret() -> bytes:
+    """Issue a new HMAC secret — invalidates all existing session cookies."""
+    BACKUP_SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
     secret = secrets.token_bytes(32)
-    fd = os.open(BACKUP_SECRET_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    tmp = BACKUP_SECRET_FILE.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as fh:
         fh.write(secret)
+    os.replace(tmp, BACKUP_SECRET_FILE)
     try:
         os.chmod(BACKUP_SECRET_FILE, 0o600)
     except OSError:
@@ -161,5 +187,69 @@ def session_cookie_valid(value: str | None) -> bool:
     return exp >= int(time.time())
 
 
+def issue_setup_token() -> str:
+    """One-time token required for first password setup (printed by installer)."""
+    BACKUP_SETUP_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_urlsafe(24)
+    fd = os.open(BACKUP_SETUP_TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(token + "\n")
+    try:
+        os.chmod(BACKUP_SETUP_TOKEN_FILE, 0o600)
+    except OSError:
+        pass
+    return token
+
+
+def setup_token_is_required() -> bool:
+    return BACKUP_SETUP_TOKEN_FILE.is_file() and bool(
+        BACKUP_SETUP_TOKEN_FILE.read_text(encoding="utf-8").strip()
+    )
+
+
+def consume_setup_token(provided: str | None) -> bool:
+    """Validate and delete the setup token. Returns False on mismatch/missing."""
+    if not setup_token_is_required():
+        # Legacy installs without a setup token file still allow first-run setup.
+        return True
+    expected = BACKUP_SETUP_TOKEN_FILE.read_text(encoding="utf-8").strip()
+    if not provided or not hmac.compare_digest(provided.strip(), expected):
+        return False
+    try:
+        BACKUP_SETUP_TOKEN_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return True
+
+
 def password_file_path() -> Path:
     return BACKUP_PASSWORD_FILE
+
+
+# Simple in-memory login throttle (per-process; good enough for single uvicorn worker).
+_LOGIN_HITS: dict[str, list[float]] = {}
+_LOGIN_LOCK_UNTIL: dict[str, float] = {}
+
+
+def login_is_throttled(key: str, *, max_hits: int = 8, window_sec: int = 300, lock_sec: int = 600) -> bool:
+    now = time.time()
+    until = _LOGIN_LOCK_UNTIL.get(key) or 0
+    if until > now:
+        return True
+    hits = [t for t in _LOGIN_HITS.get(key, []) if now - t < window_sec]
+    _LOGIN_HITS[key] = hits
+    return len(hits) >= max_hits
+
+
+def record_login_failure(key: str, *, max_hits: int = 8, window_sec: int = 300, lock_sec: int = 600) -> None:
+    now = time.time()
+    hits = [t for t in _LOGIN_HITS.get(key, []) if now - t < window_sec]
+    hits.append(now)
+    _LOGIN_HITS[key] = hits
+    if len(hits) >= max_hits:
+        _LOGIN_LOCK_UNTIL[key] = now + lock_sec
+
+
+def clear_login_failures(key: str) -> None:
+    _LOGIN_HITS.pop(key, None)
+    _LOGIN_LOCK_UNTIL.pop(key, None)

@@ -75,10 +75,7 @@ def mark_listener_consumed(token: str) -> None:
 
 
 def _normalize_dest_url(dest_base_url: str) -> str:
-    try:
-        return normalize_public_http_url(dest_base_url)
-    except UnsafeDestinationError as exc:
-        raise ValueError(str(exc)) from exc
+    return normalize_public_http_url(dest_base_url)
 
 
 async def receive_stream(
@@ -208,6 +205,8 @@ def push_backup_file(
         return {"ok": False, "error": "file_missing"}
     try:
         base = _normalize_dest_url(dest_base_url)
+    except UnsafeDestinationError:
+        raise
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     if not token or not str(token).strip():
