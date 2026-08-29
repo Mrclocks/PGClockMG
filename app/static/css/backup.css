@@ -13,33 +13,71 @@
   line-height: 1.25;
 }
 
+/* Full-width 3-button nav — overrides wizard .steps/.step progress chrome */
 .backup-app .backup-tabs {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  padding: 8px;
+  align-items: stretch;
+  justify-content: stretch;
+  gap: 10px;
+  margin-bottom: 28px;
+  padding: 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
 }
 
 .backup-app .backup-tabs .step {
   cursor: pointer;
-  border: 1px solid transparent;
-  background: transparent;
+  flex: none;
+  opacity: 1;
+  min-width: 0;
+  max-width: none;
+  width: 100%;
+  min-height: 48px;
+  padding: 12px 10px;
+  border: 1.5px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
   color: var(--text-muted);
   font: inherit;
+  font-weight: 600;
+  font-size: 0.9rem;
   display: inline-flex;
+  flex-direction: row;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  min-height: 44px;
-  padding: 10px 8px;
-  border-radius: 12px;
   white-space: nowrap;
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
 }
 
-.backup-app .backup-tabs .step.active {
+.backup-app .backup-tabs .step:hover:not(.active) {
+  border-color: var(--border-hover);
   color: var(--text);
-  background: var(--bg-card);
-  border-color: var(--border-soft);
+  background: hsl(var(--pg-accent) / 0.85);
+}
+
+/* Selected: green / blue / orange — same tokens as wizard cards */
+.backup-app .backup-tabs .step[data-tab="dash"].active {
+  color: var(--success);
+  background: var(--success-bg);
+  border-color: var(--success-border);
+  box-shadow: 0 0 0 1px var(--success-bg);
+}
+
+.backup-app .backup-tabs .step[data-tab="list"].active {
+  color: var(--primary);
+  background: var(--primary-soft);
+  border-color: hsla(var(--pg-primary), 0.55);
+  box-shadow: 0 0 0 1px var(--primary-soft);
+}
+
+.backup-app .backup-tabs .step[data-tab="settings"].active {
+  color: var(--orange);
+  background: var(--warning-bg);
+  border-color: var(--warning-border);
+  box-shadow: 0 0 0 1px var(--warning-bg);
 }
 
 .backup-tab-ico {
@@ -382,15 +420,15 @@ textarea.text-input {
     width: min(100%, 220px);
   }
   .backup-app .backup-tabs {
-    gap: 6px;
-    padding: 6px;
+    gap: 8px;
+    padding: 8px;
   }
   .backup-app .backup-tabs .step {
     flex-direction: column;
-    gap: 4px;
-    font-size: 0.8rem;
-    padding: 8px 4px;
-    min-height: 56px;
+    gap: 6px;
+    font-size: 0.78rem;
+    padding: 10px 6px;
+    min-height: 64px;
   }
   .backup-page-head {
     flex-direction: column;
