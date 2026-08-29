@@ -1,4 +1,4 @@
-> 🚀 **`v4.0.2`** — Separate wizard & backup installs + security hardening  
+> 🚀 **`v4.0.3`** — Separate wizard & backup installs + security hardening  
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
@@ -24,7 +24,7 @@
 | 🧭 **PGClockMG** (wizard) | `/opt/pg-migrator` | `7000` | `pg-migrator` |
 | 💾 **PGClockBackup** | `/opt/pg-backup` | `7001` | `pg-backup` |
 
-From **v4.0.2** they install and uninstall **independently**. Removing the wizard after restore does **not** remove the backup panel.
+From **v4.0.3** they install and uninstall **independently**. Removing the wizard after restore does **not** remove the backup panel.
 
 > 📌 Install PasarGuard yourself — this tool does not install the panel.
 

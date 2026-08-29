@@ -58,7 +58,7 @@
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-html { font-size: 16px; }
+html { font-size: 16px; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 
 body {
   font-family: var(--font);
@@ -71,10 +71,17 @@ body {
   text-rendering: optimizeLegibility;
 }
 
-/* All controls inherit UI font (fixes broken Persian on buttons) */
+/* All controls inherit UI font (fixes broken Persian on buttons).
+   Keep form fields at ≥16px so iOS Safari does not zoom on focus. */
 button, input, select, textarea {
   font-family: inherit;
   font-size: inherit;
+}
+
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+select,
+textarea {
+  font-size: 16px;
 }
 
 html[lang="en"], html[lang="ru"] {

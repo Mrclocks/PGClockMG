@@ -373,6 +373,7 @@ textarea.text-input {
   border: 1px solid var(--border);
   background: var(--bg);
   color: var(--text);
+  font-size: 16px; /* prevent iOS focus-zoom */
 }
 
 textarea.text-input {
