@@ -2382,39 +2382,16 @@ def _backup_sql_mentions_timescale(root: Path) -> bool:
 
 def _estimate_sql_table_counts(sql_text: str) -> dict[str, int]:
     """Best-effort row estimates from pg_dump / mysqldump text."""
-    from app.services.native_migration.copy_core import VERIFY_TABLES
+    from app.services.sql_dump_counts import RESTORE_COUNT_TABLES, estimate_sql_dump_counts_from_text
 
-    out: dict[str, int] = {}
-    if not sql_text:
-        return out
-    for table in VERIFY_TABLES:
-        n = 0
-        # pg_dump COPY … FROM stdin; … \.
-        copy_re = re.compile(
-            rf"(?is)COPY\s+(?:public\.)?[`\"]?{re.escape(table)}[`\"]?\s*\([^;]*?\)\s+FROM\s+stdin;\s*(.*?)\\.\s*"
-        )
-        for m in copy_re.finditer(sql_text):
-            block = m.group(1).strip()
-            if block:
-                n += sum(1 for ln in block.splitlines() if ln.strip())
-        # INSERT INTO table / `table` / "table"
-        insert_re = re.compile(
-            rf"(?i)INSERT\s+INTO\s+[`\"\[]?{re.escape(table)}[`\"\]]?\s*(?:\([^)]*\))?\s*VALUES\s*",
-        )
-        for m in insert_re.finditer(sql_text):
-            # Count value tuples after VALUES — approximate by top-level '(' groups until ';'
-            rest = sql_text[m.end(): m.end() + 500_000]
-            end = rest.find(";")
-            chunk = rest if end < 0 else rest[:end]
-            tuples = len(re.findall(r"\(", chunk))
-            n += max(tuples, 1)
-        if n > 0:
-            out[table] = n
-    return out
+    raw = estimate_sql_dump_counts_from_text(sql_text, tables=RESTORE_COUNT_TABLES)
+    return {k: v for k, v in raw.items() if isinstance(v, int) and v > 0}
 
 
 def _estimate_backup_table_counts(root: Path, layout: str | None = None) -> dict[str, int]:
     """Estimate critical table row counts from backup files before restore."""
+    from app.services.sql_dump_counts import RESTORE_COUNT_TABLES, scan_sql_dump_file
+
     art = discover_backup_artifacts(root)
     sqlite_src = art.get("sqlite_path")
     if layout == "sqlite_file" or sqlite_src:
@@ -2429,12 +2406,13 @@ def _estimate_backup_table_counts(root: Path, layout: str | None = None) -> dict
     merged: dict[str, int] = {}
     for path in paths:
         try:
-            text = _read_sql_head(path, 2_000_000)
+            meta = scan_sql_dump_file(path, tables=RESTORE_COUNT_TABLES)
         except Exception:
             continue
-        for k, v in _estimate_sql_table_counts(text).items():
-            merged[k] = merged.get(k, 0) + v
-        del text
+        counts = meta.get("counts") or {}
+        for k, v in counts.items():
+            if isinstance(v, int) and v > 0:
+                merged[k] = merged.get(k, 0) + v
     return merged
 
 

@@ -1,4 +1,4 @@
-> 🚀 **`v4.2.1`** — Orange update banner, full-width progress row, reliable in-panel updates
+> 🚀 **`v4.2.2`** — Correct large Timescale dump counts; no false empty-backup rejects
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
