@@ -54,6 +54,7 @@ def test_settings_mask_secrets(tmp_path, monkeypatch):
     assert pub["telegram"]["bot_token_set"] is True
     assert pub["telegram"]["proxy_password"] == ""
     assert pub["telegram"]["chat_id"] == "-1001"
+    assert pub["telegram"]["admin_id"] == "-1001"
     # reload keeps secrets on disk
     loaded = settings.load_settings()
     assert loaded["telegram"]["bot_token"] == "123456:ABC-DEF"
@@ -61,7 +62,7 @@ def test_settings_mask_secrets(tmp_path, monkeypatch):
 
 
 def test_telegram_caption_and_chunk_math():
-    from app.services.backup_telegram import format_caption, human_size
+    from app.services.backup_telegram import clip_caption, format_caption, human_size, resolve_admin_chat_id
     import math
     from app.config import TELEGRAM_BOT_MAX_BYTES
 
@@ -75,7 +76,97 @@ def test_telegram_caption_and_chunk_math():
     size = 120 * 1024 * 1024
     parts = math.ceil(size / TELEGRAM_BOT_MAX_BYTES)
     assert parts >= 3
+    assert resolve_admin_chat_id({"admin_id": "42"}) == "42"
+    assert resolve_admin_chat_id({"chat_id": "99", "admin_id": "42"}) == "99"
+    clipped = clip_caption("x" * 2000, 1024)
+    assert len(clipped) == 1024
+    assert clipped.endswith("…")
     print("OK: telegram caption + chunk sizing")
+
+
+def test_send_backup_uses_sendDocument_with_caption(tmp_path, monkeypatch):
+    """Regression: connection-test text-only messages must not replace document delivery."""
+    import app.services.backup_telegram as tg
+
+    zip_path = tmp_path / "pgclockmg-sqlite-test.zip"
+    zip_path.write_bytes(b"PK\x03\x04" + b"0" * 2048)
+
+    monkeypatch.setattr(
+        tg,
+        "load_settings",
+        lambda: {
+            "telegram": {
+                "enabled": True,
+                "bot_token": "123:ABC",
+                "admin_id": "777",
+                "caption_template": "PGClockMG backup\nDate: {date}\nSize: {size}\nStatus: {status}",
+            }
+        },
+    )
+
+    posts: list[dict] = []
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"ok": True, "result": {"message_id": 9}}
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, url, data=None, files=None, json=None):
+            posts.append({"url": url, "data": data, "files": files, "json": json})
+            return _Resp()
+
+    monkeypatch.setattr(tg, "_client", lambda *a, **k: _Client())
+
+    result = tg.send_backup_to_telegram(
+        zip_path,
+        manifest={"created_at": "2026-01-01", "db_type": "sqlite", "counts": {"users": 3, "nodes": 1}},
+    )
+    assert result["ok"] is True
+    assert len(posts) == 1
+    assert posts[0]["url"].endswith("/sendDocument")
+    assert posts[0]["json"] is None
+    assert str(posts[0]["data"]["chat_id"]) == "777"
+    assert "document" in posts[0]["files"]
+    caption = posts[0]["data"]["caption"]
+    assert "PGClockMG backup" in caption
+    assert "connection test" not in caption
+    assert "Date: test" not in caption
+    print("OK: sendDocument carries real caption + file")
+
+
+def test_maybe_auto_send_only_manual(monkeypatch, tmp_path):
+    import app.services.backup_engine as engine
+    import app.services.backup_telegram as tg
+
+    calls = []
+    zip_path = tmp_path / "manual.zip"
+    zip_path.write_bytes(b"x")
+
+    monkeypatch.setattr(
+        tg,
+        "load_settings",
+        lambda: {"telegram": {"enabled": True, "bot_token": "t", "chat_id": "1"}},
+    )
+    monkeypatch.setattr(tg, "send_backup_to_telegram", lambda *a, **k: calls.append(1) or {"ok": True})
+    monkeypatch.setattr(engine, "resolve_backup_path", lambda backup_id: zip_path)
+
+    assert tg.maybe_auto_send_backup({"status": "success", "trigger": "schedule", "backup_id": "a"}) is None
+    assert tg.maybe_auto_send_backup({"status": "success", "trigger": "telegram_connect", "backup_id": "a"}) is None
+    out = tg.maybe_auto_send_backup({"status": "success", "trigger": "manual", "backup_id": "a", "manifest": {}})
+    assert out and out["ok"]
+    assert calls == [1]
+    print("OK: auto telegram only for manual backups")
 
 
 def test_stream_listener_lifecycle():

@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#0f1218">
   <title>PGClockMG Backup</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=4.1.5">
-  <link rel="stylesheet" href="/static/css/backup.css?v=4.1.5">
+  <link rel="stylesheet" href="/static/css/style.css?v=4.1.6">
+  <link rel="stylesheet" href="/static/css/backup.css?v=4.1.6">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
@@ -28,7 +28,7 @@
         </div>
         <div class="header-titles">
           <h1>PGClockMG Backup</h1>
-          <p class="header-version" id="appVersion">v4.1.5</p>
+          <p class="header-version" id="appVersion">v4.1.6</p>
         </div>
       </div>
       <div class="header-meta">
@@ -46,6 +46,8 @@
         <button type="button" class="btn btn-back btn-sm backup-logout-btn hidden" id="btnLogout" onclick="logoutBackup()"></button>
       </div>
     </header>
+
+    <div id="backupToastHost" class="backup-toast-host" aria-live="polite" aria-relevant="additions"></div>
 
     <nav class="backup-tabs hidden" id="backupTabs" aria-label="Backup sections">
       <button type="button" class="backup-tab active" data-tab="dash" onclick="showBackupTab('dash')">
@@ -403,6 +405,6 @@
     </div>
   </div>
 
-  <script src="/static/js/backup.js?v=4.1.5"></script>
+  <script src="/static/js/backup.js?v=4.1.6"></script>
 </body>
 </html>

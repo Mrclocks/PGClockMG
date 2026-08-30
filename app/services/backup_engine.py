@@ -1140,12 +1140,10 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
         if not has_dump:
             raise RuntimeError("Backup zip missing database dump")
 
-        job["status"] = "success"
         job["backup_id"] = out_path.stem
         job["filename"] = filename
         job["size_bytes"] = out_path.stat().st_size
         job["manifest"] = manifest
-        job["finished_at"] = _utc_now()
         _log(job, f"Backup ready ({job['size_bytes']} bytes)")
 
         from app.services.backup_settings import update_settings
@@ -1161,6 +1159,25 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
             },
             "last_error": None,
         })
+
+        # Web-panel manual backups: auto-send to Telegram while job is still running
+        # so the UI poll does not resolve before the document is uploaded.
+        try:
+            from app.services.backup_telegram import maybe_auto_send_backup
+
+            tg_send = maybe_auto_send_backup({**dict(job), "status": "success", "trigger": trigger})
+            if tg_send is not None:
+                job["telegram"] = tg_send
+                if tg_send.get("ok"):
+                    _log(job, "Telegram: backup document sent")
+                else:
+                    _log(job, f"Telegram send failed: {tg_send.get('error') or 'unknown'}")
+        except Exception as tg_exc:
+            job["telegram"] = {"ok": False, "error": str(tg_exc)}
+            _log(job, f"Telegram send failed: {tg_exc}")
+
+        job["status"] = "success"
+        job["finished_at"] = _utc_now()
         return dict(job)
     except Exception as exc:
         job["status"] = "error"
