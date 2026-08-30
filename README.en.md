@@ -1,4 +1,4 @@
-> 🚀 **`v4.0.6`** — Drop Telegram preview + custom proxy select + clear last error
+> 🚀 **`v4.0.7`** — Backup panel layout polish (actions, stream, dashboard)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

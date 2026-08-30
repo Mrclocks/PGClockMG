@@ -16,6 +16,8 @@ const ICONS = {
   clock: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
   send: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M22 3L11 14"/><path d="M22 3l-7 19-3-8-8-3 18-8z"/></svg>',
   stream: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M16 3h5v5"/><path d="M4 20L21 3"/><path d="M21 16v5h-5"/></svg>',
+  download: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 19h14"/></svg>',
+  trash: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M7 7l1 12h8l1-12"/></svg>',
   warn: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 3l9 16H3L12 3z"/><path d="M12 10v4"/><path d="M12 17h.01"/></svg>',
   empty: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 7h16v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7z"/><path d="M3 7l1.5-3h15L21 7"/></svg>',
 };
@@ -45,8 +47,8 @@ const I18N = {
     authPolicy: "حداقل ۱۲ کاراکتر، شامل حرف بزرگ، کوچک، عدد و نماد.",
     btnSetup: "ذخیره و ورود",
     btnLogin: "ورود",
-    dashH2: "پایش و بکاپ",
-    dashDesc: "وضعیت سیستم و بکاپ کامل با یک کلیک.",
+    dashH2: "پایش",
+    dashDesc: "وضعیت سرور، پنل و آخرین بکاپ.",
     dashPgTitle: "وضعیت PasarGuard",
     dashPgSubOk: "پنل روی این سرور نصب است و آماده بکاپ‌گیری است.",
     dashPgSubMissing: "PasarGuard روی این سرور پیدا نشد — اول پنل را نصب کنید.",
@@ -60,7 +62,7 @@ const I18N = {
     backupFail: "بکاپ ناموفق بود",
     listH2: "فایل‌های بکاپ",
     listDesc: "دانلود، ارسال به تلگرام، یا استریم به سرور مقصد.",
-    emptyList: "هنوز بکاپی نیست. از داشبورد یک بکاپ کامل بگیرید.",
+    emptyList: "هنوز بکاپی نیست. از دکمه بالا یک بکاپ کامل بگیرید.",
     download: "دانلود",
     sendTg: "تلگرام",
     sendStream: "استریم",
@@ -126,6 +128,7 @@ const I18N = {
     lastBackup: "آخرین بکاپ",
     noLast: "هنوز بکاپی گرفته نشده",
     size: "حجم",
+    time: "زمان",
     confirmDelete: "این بکاپ حذف شود؟",
     healthPg: "PasarGuard",
     healthDocker: "Docker",
@@ -182,8 +185,8 @@ const I18N = {
     authPolicy: "At least 12 chars, with upper, lower, digit, and symbol.",
     btnSetup: "Save & enter",
     btnLogin: "Sign in",
-    dashH2: "Health & backup",
-    dashDesc: "System health and one-click full backup.",
+    dashH2: "Health",
+    dashDesc: "Server, panel, and last backup status.",
     dashPgTitle: "PasarGuard status",
     dashPgSubOk: "Panel is installed on this server and ready for backup.",
     dashPgSubMissing: "PasarGuard was not found — install the panel first.",
@@ -197,7 +200,7 @@ const I18N = {
     backupFail: "Backup failed",
     listH2: "Backup files",
     listDesc: "Download, send to Telegram, or stream to a destination server.",
-    emptyList: "No backups yet. Create a full backup from the dashboard.",
+    emptyList: "No backups yet. Create a full backup with the button above.",
     download: "Download",
     sendTg: "Telegram",
     sendStream: "Stream",
@@ -263,6 +266,7 @@ const I18N = {
     lastBackup: "Last backup",
     noLast: "No backup yet",
     size: "Size",
+    time: "Time",
     confirmDelete: "Delete this backup?",
     healthPg: "PasarGuard",
     healthDocker: "Docker",
@@ -319,8 +323,8 @@ const I18N = {
     authPolicy: "Минимум 12 символов: заглавные, строчные, цифра и спецсимвол.",
     btnSetup: "Сохранить и войти",
     btnLogin: "Войти",
-    dashH2: "Мониторинг и бэкап",
-    dashDesc: "Здоровье системы и полный бэкап в один клик.",
+    dashH2: "Мониторинг",
+    dashDesc: "Статус сервера, панели и последнего бэкапа.",
     dashPgTitle: "Статус PasarGuard",
     dashPgSubOk: "Панель установлена и готова к бэкапу.",
     dashPgSubMissing: "PasarGuard не найден — сначала установите панель.",
@@ -334,7 +338,7 @@ const I18N = {
     backupFail: "Ошибка бэкапа",
     listH2: "Файлы бэкапов",
     listDesc: "Скачать, отправить в Telegram или стримом на сервер.",
-    emptyList: "Бэкапов пока нет. Создайте полный бэкап на панели.",
+    emptyList: "Бэкапов пока нет. Создайте полный бэкап кнопкой выше.",
     download: "Скачать",
     sendTg: "Telegram",
     sendStream: "Стрим",
@@ -400,6 +404,7 @@ const I18N = {
     lastBackup: "Последний бэкап",
     noLast: "Пока нет",
     size: "Размер",
+    time: "Время",
     confirmDelete: "Удалить бэкап?",
     healthPg: "PasarGuard",
     healthDocker: "Docker",
@@ -466,7 +471,7 @@ function applyI18n() {
     ["authPolicy", "authPolicy"], ["dashH2", "dashH2"], ["dashDesc", "dashDesc"], ["dashPgTitle", "dashPgTitle"],
     ["secHealthTitle", "secHealthTitle"], ["secPgTitle", "secPgTitle"],
     ["secBackupStatusTitle", "secBackupStatusTitle"],
-    ["btnBackupNow", "btnBackupNow"], ["btnBackupNowList", "btnBackupNow"],
+    ["btnBackupNowList", "btnBackupNow"],
     ["listH2", "listH2"], ["listDesc", "listDesc"],
     ["setH2", "setH2"], ["setDesc", "setDesc"], ["setSchedTitle", "setSchedTitle"], ["setSchedHint", "setSchedHint"],
     ["lblSchedHour", "lblSchedHour"], ["lblSchedMinute", "lblSchedMinute"],
@@ -577,6 +582,15 @@ function humanSize(n) {
   return (i === 0 ? String(Math.round(v)) : v.toFixed(1)) + " " + units[i];
 }
 
+/** Simplify ISO/UTC timestamps like 2026-08-29T12:34:56Z → 2026/08/29 12:34 */
+function formatSimpleTime(iso) {
+  if (!iso) return "—";
+  const s = String(iso).trim();
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  if (m) return `${m[1]}/${m[2]}/${m[3]} ${m[4]}:${m[5]}`;
+  return s.replace("T", " ").replace(/Z$/, "").replace(/\.\d+/, "").slice(0, 16);
+}
+
 function metricCard({ tone, icon, value, label, sub }) {
   return `<div class="backup-metric">
     <div class="backup-metric-top">
@@ -666,8 +680,8 @@ async function refreshDashboard() {
   const installed = data.pasarguard_installed;
 
   document.getElementById("dashPgCard").className = installed
-    ? "success-card backup-section-card"
-    : "warning-card backup-section-card";
+    ? "success-card backup-section-card backup-pg-card"
+    : "warning-card backup-section-card backup-pg-card";
   document.getElementById("dashPgSub").textContent = installed ? t("dashPgSubOk") : t("dashPgSubMissing");
 
   const specs = document.getElementById("dashPgSpecs");
@@ -747,12 +761,12 @@ async function refreshDashboard() {
       <span class="choice-icon icon-tone-green" aria-hidden="true">${ICONS.archive}</span>
       <div><h3 style="margin:0;font-size:1rem;line-height:1.35">${esc(t("lastBackup"))}</h3>
       <p class="desc-sm" style="margin:2px 0 0;word-break:break-all">${esc(last.filename || last.backup_id)}</p></div></div>
-      <div class="specs-grid">
+      <div class="specs-grid backup-last-specs">
         <div class="specs-item"><span class="specs-label">${esc(t("size"))}</span><span class="specs-value">${esc(humanSize(last.size_bytes))}</span></div>
         <div class="specs-item"><span class="specs-label">${esc(t("db"))}</span><span class="specs-value">${esc(last.db_type || "—")}</span></div>
         <div class="specs-item"><span class="specs-label">${esc(t("users"))}</span><span class="specs-value">${esc(c.users ?? "—")}</span></div>
         <div class="specs-item"><span class="specs-label">${esc(t("nodes"))}</span><span class="specs-value">${esc(c.nodes ?? "—")}</span></div>
-        <div class="specs-item"><span class="specs-label">UTC</span><span class="specs-value">${esc(last.created_at || "—")}</span></div>
+        <div class="specs-item"><span class="specs-label">${esc(t("time"))}</span><span class="specs-value">${esc(formatSimpleTime(last.created_at))}</span></div>
       </div>`;
   }
 
@@ -798,18 +812,19 @@ async function createBackupNow() {
   const box = document.getElementById("backupProgress");
   const title = document.getElementById("backupProgressTitle");
   const logEl = document.getElementById("backupProgressLog");
+  const listBtn = document.getElementById("btnBackupNowList");
+  showBackupTab("list");
   box.classList.remove("hidden", "is-success", "is-error");
   box.classList.add("is-running");
   title.textContent = t("backupRunning");
   logEl.textContent = "";
-  document.getElementById("btnBackupNow").disabled = true;
-  const listBtn = document.getElementById("btnBackupNowList");
   if (listBtn) listBtn.disabled = true;
   try {
     const job = await api("/api/backups/create", { method: "POST", body: "{}" });
-    await pollJob(job.job_id, title, logEl, box);
+    const done = await pollJob(job.job_id, title, logEl, box);
     box.classList.remove("is-running");
     box.classList.add("is-success");
+    title.textContent = t("backupDone") + (done.filename ? ": " + done.filename : "");
     await refreshDashboard();
     await refreshList();
   } catch (e) {
@@ -817,7 +832,6 @@ async function createBackupNow() {
     box.classList.add("is-error");
     title.textContent = t("backupFail") + ": " + e.message;
   } finally {
-    document.getElementById("btnBackupNow").disabled = false;
     if (listBtn) listBtn.disabled = false;
   }
 }
@@ -872,7 +886,7 @@ async function refreshList() {
           <span class="choice-icon icon-tone-blue" aria-hidden="true">${ICONS.archive}</span>
           <div style="min-width:0">
             <strong>${it.filename}</strong>
-            <div class="backup-item-meta">${it.mtime || ""} · ${m.db_type || "?"}</div>
+            <div class="backup-item-meta">${esc(formatSimpleTime(it.mtime) || it.mtime || "")} · ${esc(m.db_type || "?")}</div>
           </div>
         </div>
         <span class="backup-item-badge">${humanSize(it.size_bytes)}</span>
@@ -884,10 +898,10 @@ async function refreshList() {
         <span class="backup-chip">${t("inbounds")}: ${c.inbounds ?? "—"}</span>
       </div>
       <div class="backup-item-actions">
-        <a class="btn btn-primary btn-sm" href="/api/backups/${encodeURIComponent(it.id)}/download">${t("download")}</a>
-        <button type="button" class="btn btn-back btn-sm" onclick="sendTelegram('${it.id}')">${t("sendTg")}</button>
-        <button type="button" class="btn btn-back btn-sm" onclick="openStream('${it.id}')">${t("sendStream")}</button>
-        <button type="button" class="btn btn-back btn-sm" onclick="deleteBackup('${it.id}')">${t("remove")}</button>
+        <a class="btn-list-action" href="/api/backups/${encodeURIComponent(it.id)}/download">${ICONS.download}<span>${t("download")}</span></a>
+        <button type="button" class="btn-list-action" onclick="sendTelegram('${it.id}')">${ICONS.send}<span>${t("sendTg")}</span></button>
+        <button type="button" class="btn-list-action" onclick="openStream('${it.id}')">${ICONS.stream}<span>${t("sendStream")}</span></button>
+        <button type="button" class="btn-list-action" onclick="deleteBackup('${it.id}')">${ICONS.trash}<span>${t("remove")}</span></button>
       </div>
     </div>`;
   }).join("");

@@ -126,14 +126,32 @@
   border-radius: var(--radius);
   padding: 14px 14px 12px;
   min-width: 0;
-  margin: 0 0 20px;
+  margin: 0 0 24px;
 }
 
-.backup-run-box.is-running,
-.backup-run-box.is-success,
-.backup-run-box.is-error {
+.backup-run-box.is-running {
   border-color: var(--border-soft);
   background: var(--bg-card);
+}
+
+.backup-run-box.is-success {
+  border-color: var(--success-border);
+  background: var(--success-bg);
+}
+
+.backup-run-box.is-error {
+  border-color: var(--error-border);
+  background: var(--error-bg);
+}
+
+.backup-run-box.is-success #backupProgressTitle,
+.backup-run-box.is-success #streamProgressTitle {
+  color: var(--success);
+}
+
+.backup-run-box.is-error #backupProgressTitle,
+.backup-run-box.is-error #streamProgressTitle {
+  color: var(--error);
 }
 
 .backup-run-box .backup-section-head {
@@ -177,10 +195,15 @@
   animation: backup-progress-pulse 1.1s ease-in-out infinite;
 }
 
-.backup-run-box.is-success .backup-progress-bar,
+.backup-run-box.is-success .backup-progress-bar {
+  width: 100%;
+  background: var(--success);
+  animation: none;
+}
+
 .backup-run-box.is-error .backup-progress-bar {
   width: 100%;
-  background: hsla(0, 0%, 100%, 0.45);
+  background: var(--error);
   animation: none;
 }
 
@@ -196,13 +219,14 @@
 
 /* Page-level captions sit further above their boxes */
 .backup-app .panel > .section-title {
-  margin-top: 34px;
-  margin-bottom: 24px;
+  margin-top: 40px;
+  margin-bottom: 28px;
 }
 
 .backup-app .panel > .backup-page-head + .section-title,
-.backup-app .panel > .backup-run-box + .section-title {
-  margin-top: 18px;
+.backup-app .panel > .backup-run-box + .section-title,
+.backup-app .panel > .backup-top-error + .section-title {
+  margin-top: 24px;
 }
 
 .backup-app .panel > .section-title + .backup-icon-grid,
@@ -223,26 +247,35 @@
 
 .backup-section-head .choice-icon {
   margin-bottom: 0;
+  flex-shrink: 0;
+}
+
+.backup-section-head-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: start;
 }
 
 .backup-section-head .section-title,
 .backup-section-head h3 {
   margin: 0 0 4px;
+  text-align: start;
 }
 
 .backup-section-head .desc-sm {
   margin: 0;
+  text-align: start;
 }
 
 .backup-section-card {
-  margin-bottom: 4px;
+  margin-bottom: 16px;
 }
 
 .backup-icon-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-  margin: 0 0 18px;
+  gap: 16px;
+  margin: 0 0 28px;
 }
 
 .backup-stat-grid {
@@ -296,13 +329,13 @@
 .backup-split-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: 20px;
 }
 
 .backup-settings-stack {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 24px;
 }
 
 .backup-settings-card {
@@ -390,13 +423,29 @@
   margin-bottom: 10px;
 }
 
-.backup-status-card .specs-grid {
+.backup-status-card .specs-grid,
+.backup-last-specs {
   margin: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .backup-pg-specs {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   margin-top: 12px;
+}
+
+/* PasarGuard status card: icon tones + start-aligned title (RTL = right) */
+.backup-pg-card,
+.backup-pg-card.success-card,
+.backup-pg-card.warning-card {
+  text-align: start;
+}
+
+.backup-pg-card .backup-section-head,
+.backup-pg-card .backup-section-head-body,
+.backup-pg-card .backup-section-head h3,
+.backup-pg-card .backup-section-head .desc-sm {
+  text-align: start;
 }
 
 .backup-actions-wrap {
@@ -424,7 +473,7 @@
 .backup-list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 20px;
 }
 
 .backup-item {
@@ -540,10 +589,62 @@
   margin-top: 14px;
 }
 
+.btn-list-action,
+a.btn-list-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 6px 12px;
+  font-size: 0.88rem;
+  font-weight: 550;
+  line-height: 1.2;
+  color: var(--text-muted);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  text-decoration: none !important;
+  box-shadow: none;
+  cursor: pointer;
+  box-sizing: border-box;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.btn-list-action:hover,
+a.btn-list-action:hover {
+  color: var(--text);
+  border-color: var(--border-hover);
+  background: hsla(0, 0%, 100%, 0.06);
+  text-decoration: none !important;
+}
+
+.btn-list-action .icon,
+a.btn-list-action .icon,
+.btn-list-action svg,
+a.btn-list-action svg {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+}
+
+.btn-list-action span,
+a.btn-list-action span {
+  text-decoration: none !important;
+}
+
 .form-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 12px;
+}
+
+.backup-field-caption,
+.form-group > input + .desc-sm,
+.form-group > .text-input + .desc-sm,
+.form-group > .backup-select + .desc-sm {
+  margin-top: 12px;
+  margin-bottom: 0;
 }
 
 .text-input,
@@ -700,7 +801,9 @@ textarea.text-input {
     gap: 10px;
   }
   .backup-item-actions .btn,
-  .backup-item-actions a.btn {
+  .backup-item-actions a.btn,
+  .backup-item-actions .btn-list-action,
+  .backup-item-actions a.btn-list-action {
     flex: 1 1 calc(50% - 8px);
     justify-content: center;
     text-align: center;
@@ -732,15 +835,32 @@ textarea.text-input {
 }
 
 .backup-top-error {
-  margin: 0 0 18px;
+  margin: 0 0 24px;
+}
+
+.backup-stream-help {
+  margin-bottom: 24px;
+  text-align: start;
+}
+
+.backup-stream-help .desc {
+  margin: 0 0 14px;
+  text-align: start;
 }
 
 .backup-stream-steps {
-  margin: 0 0 16px;
+  margin: 0;
   padding: 0 0 0 1.25rem;
   color: var(--text-muted);
   font-size: 0.9rem;
   line-height: 1.65;
+  text-align: start;
+}
+
+html[dir="rtl"] .backup-stream-help,
+html[dir="rtl"] .backup-stream-help .desc,
+html[dir="rtl"] .backup-stream-steps {
+  text-align: right;
 }
 
 html[dir="rtl"] .backup-stream-steps {
@@ -748,11 +868,16 @@ html[dir="rtl"] .backup-stream-steps {
 }
 
 .backup-stream-steps li {
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 
 .backup-stream-steps li:last-child {
   margin-bottom: 0;
+}
+
+.backup-app .panel > .backup-page-head + .backup-settings-card,
+.backup-app .panel > .backup-stream-help + .backup-settings-card {
+  margin-top: 0;
 }
 
 .backup-run-box.is-running .backup-progress-bar,

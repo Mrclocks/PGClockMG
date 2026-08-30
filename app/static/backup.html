@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#0f1218">
   <title>PGClockMG Backup</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=4.0.6">
-  <link rel="stylesheet" href="/static/css/backup.css?v=4.0.6">
+  <link rel="stylesheet" href="/static/css/style.css?v=4.0.7">
+  <link rel="stylesheet" href="/static/css/backup.css?v=4.0.7">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
@@ -102,19 +102,6 @@
             <h2 id="dashH2"></h2>
             <p class="desc" id="dashDesc"></p>
           </div>
-          <button type="button" class="btn btn-primary" id="btnBackupNow" onclick="createBackupNow()"></button>
-        </div>
-        <div id="backupProgress" class="backup-run-box hidden" role="status" aria-live="polite">
-          <div class="backup-section-head">
-            <span class="choice-icon icon-tone-neutral" id="backupProgressIcon" aria-hidden="true">
-              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 3v4"/><path d="M12 17v4"/><path d="M3 12h4"/><path d="M17 12h4"/><circle cx="12" cy="12" r="3"/></svg>
-            </span>
-            <p id="backupProgressTitle" class="desc-sm" style="margin:0"></p>
-          </div>
-          <div class="backup-progress-track" aria-hidden="true">
-            <div class="backup-progress-bar" id="backupProgressBar"></div>
-          </div>
-          <pre id="backupProgressLog" class="backup-log"></pre>
         </div>
         <div id="dashError" class="warning-card hidden backup-top-error" role="alert">
           <div class="backup-error-row">
@@ -127,12 +114,12 @@
         <div class="backup-icon-grid" id="dashHealthGrid"></div>
 
         <h3 class="section-title" id="secPgTitle"></h3>
-        <div id="dashPgCard" class="success-card backup-section-card">
+        <div id="dashPgCard" class="success-card backup-section-card backup-pg-card">
           <div class="backup-section-head">
-            <span class="choice-icon icon-tone-white" aria-hidden="true">
+            <span class="choice-icon icon-tone-blue" aria-hidden="true">
               <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 3l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V7l8-4z"/></svg>
             </span>
-            <div>
+            <div class="backup-section-head-body">
               <h3 id="dashPgTitle"></h3>
               <p class="desc-sm" id="dashPgSub"></p>
             </div>
@@ -153,7 +140,19 @@
             <h2 id="listH2"></h2>
             <p class="desc" id="listDesc"></p>
           </div>
-          <button type="button" class="btn btn-primary" id="btnBackupNowList" onclick="showBackupTab('dash'); createBackupNow();"></button>
+          <button type="button" class="btn btn-primary" id="btnBackupNowList" onclick="createBackupNow()"></button>
+        </div>
+        <div id="backupProgress" class="backup-run-box hidden" role="status" aria-live="polite">
+          <div class="backup-section-head">
+            <span class="choice-icon icon-tone-neutral" id="backupProgressIcon" aria-hidden="true">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 3v4"/><path d="M12 17v4"/><path d="M3 12h4"/><path d="M17 12h4"/><circle cx="12" cy="12" r="3"/></svg>
+            </span>
+            <p id="backupProgressTitle" class="desc-sm" style="margin:0"></p>
+          </div>
+          <div class="backup-progress-track" aria-hidden="true">
+            <div class="backup-progress-bar" id="backupProgressBar"></div>
+          </div>
+          <pre id="backupProgressLog" class="backup-log"></pre>
         </div>
         <div id="backupList" class="backup-list"></div>
       </section>
@@ -260,21 +259,21 @@
                 <p class="desc-sm" id="setProxyHint"></p>
               </div>
             </div>
-            <div class="form-row">
-              <div class="form-group">
-                <label id="lblProxyType"></label>
-                <div class="backup-select" id="proxyTypeSelect">
-                  <button type="button" class="backup-select-trigger" id="proxyTypeTrigger" aria-haspopup="listbox" aria-expanded="false">
-                    <span id="proxyTypeLabel">SOCKS5</span>
-                    <svg class="backup-select-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
-                  </button>
-                  <ul class="backup-select-menu hidden" id="proxyTypeMenu" role="listbox">
-                    <li role="option" tabindex="-1" data-value="socks5" aria-selected="true">SOCKS5</li>
-                    <li role="option" tabindex="-1" data-value="http" aria-selected="false">HTTP</li>
-                  </ul>
-                  <input type="hidden" id="proxyType" value="socks5">
-                </div>
+            <div class="form-group">
+              <label id="lblProxyType"></label>
+              <div class="backup-select" id="proxyTypeSelect">
+                <button type="button" class="backup-select-trigger" id="proxyTypeTrigger" aria-haspopup="listbox" aria-expanded="false">
+                  <span id="proxyTypeLabel">SOCKS5</span>
+                  <svg class="backup-select-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+                </button>
+                <ul class="backup-select-menu hidden" id="proxyTypeMenu" role="listbox">
+                  <li role="option" tabindex="-1" data-value="socks5" aria-selected="true">SOCKS5</li>
+                  <li role="option" tabindex="-1" data-value="http" aria-selected="false">HTTP</li>
+                </ul>
+                <input type="hidden" id="proxyType" value="socks5">
               </div>
+            </div>
+            <div class="form-row">
               <div class="form-group">
                 <label id="lblProxyHost"></label>
                 <input type="text" id="proxyHost" class="text-input">
@@ -347,10 +346,12 @@
         <div class="backup-page-head">
           <div>
             <h2 id="streamH2"></h2>
-            <p class="desc" id="streamDesc"></p>
           </div>
         </div>
-        <ol class="backup-stream-steps" id="streamSteps"></ol>
+        <div class="backup-settings-card backup-stream-help">
+          <p class="desc" id="streamDesc"></p>
+          <ol class="backup-stream-steps" id="streamSteps"></ol>
+        </div>
         <div class="backup-settings-card">
           <div class="backup-switch-row" style="margin-bottom:14px">
             <h3 class="section-title" id="streamConnTitle" style="margin:0"></h3>
@@ -359,12 +360,12 @@
           <div class="form-group">
             <label id="lblStreamUrl"></label>
             <input type="text" id="streamUrl" class="text-input" placeholder="http://DEST_IP:7000">
-            <p class="desc-sm" id="streamUrlHint"></p>
+            <p class="desc-sm backup-field-caption" id="streamUrlHint"></p>
           </div>
           <div class="form-group">
             <label id="lblStreamToken"></label>
             <input type="text" id="streamToken" class="text-input" autocomplete="off">
-            <p class="desc-sm" id="streamTokenHint"></p>
+            <p class="desc-sm backup-field-caption" id="streamTokenHint"></p>
           </div>
           <input type="hidden" id="streamBackupId">
           <div class="actions backup-actions-wrap">
@@ -389,6 +390,6 @@
 
     </main>
   </div>
-  <script src="/static/js/backup.js?v=4.0.6"></script>
+  <script src="/static/js/backup.js?v=4.0.7"></script>
 </body>
 </html>
