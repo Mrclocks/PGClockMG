@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#0f1218">
   <title>PGClockMG Backup</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=4.3.2">
-  <link rel="stylesheet" href="/static/css/backup.css?v=4.3.2">
+  <link rel="stylesheet" href="/static/css/style.css?v=4.3.4">
+  <link rel="stylesheet" href="/static/css/backup.css?v=4.3.4">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
@@ -35,7 +35,7 @@
         </div>
         <div class="header-titles">
           <h1>PGClockMG Backup</h1>
-          <p class="header-version" id="appVersion">v4.3.2</p>
+          <p class="header-version" id="appVersion">v4.3.4</p>
         </div>
       </div>
       <div class="header-meta">
@@ -203,21 +203,22 @@
         </div>
 
         <div class="backup-settings-stack">
-          <article class="backup-settings-card">
+          <article class="backup-settings-card" id="setSchedCard">
             <div class="backup-settings-head">
               <span class="choice-icon icon-tone-blue" aria-hidden="true">
                 <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
               </span>
               <div class="backup-settings-head-body">
-                <div class="backup-switch-row">
-                  <h3 class="section-title" id="setSchedTitle"></h3>
-                  <label class="ios-toggle" for="schedEnabled" id="lblSchedEnabledWrap">
-                    <input type="checkbox" id="schedEnabled" role="switch">
-                    <span class="ios-toggle-track"><span class="ios-toggle-thumb"></span></span>
-                  </label>
-                </div>
+                <h3 class="section-title" id="setSchedTitle"></h3>
                 <p class="desc-sm" id="setSchedHint"></p>
               </div>
+            </div>
+            <div class="backup-switch-row backup-switch-row-inset backup-enable-box">
+              <span class="backup-switch-label" id="lblSchedEnabled"></span>
+              <label class="ios-toggle" for="schedEnabled" id="lblSchedEnabledWrap">
+                <input type="checkbox" id="schedEnabled" role="switch">
+                <span class="ios-toggle-track"><span class="ios-toggle-thumb"></span></span>
+              </label>
             </div>
             <div class="form-row">
               <div class="form-group">
@@ -228,9 +229,12 @@
                     <svg class="backup-select-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
                   </button>
                   <ul class="backup-select-menu hidden" id="schedIntervalMenu" role="listbox">
+                    <li role="option" tabindex="-1" data-value="0.5" aria-selected="false">0.5</li>
                     <li role="option" tabindex="-1" data-value="1" aria-selected="false">1</li>
+                    <li role="option" tabindex="-1" data-value="2" aria-selected="false">2</li>
                     <li role="option" tabindex="-1" data-value="3" aria-selected="false">3</li>
                     <li role="option" tabindex="-1" data-value="6" aria-selected="false">6</li>
+                    <li role="option" tabindex="-1" data-value="8" aria-selected="false">8</li>
                     <li role="option" tabindex="-1" data-value="12" aria-selected="false">12</li>
                     <li role="option" tabindex="-1" data-value="24" aria-selected="true">24</li>
                   </ul>
@@ -245,16 +249,9 @@
                     <svg class="backup-select-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
                   </button>
                   <ul class="backup-select-menu hidden" id="schedTimezoneMenu" role="listbox">
-                    <li role="option" tabindex="-1" data-value="UTC" aria-selected="true">UTC</li>
                     <li role="option" tabindex="-1" data-value="Asia/Tehran" aria-selected="false">Asia/Tehran</li>
-                    <li role="option" tabindex="-1" data-value="Asia/Dubai" aria-selected="false">Asia/Dubai</li>
-                    <li role="option" tabindex="-1" data-value="Asia/Istanbul" aria-selected="false">Asia/Istanbul</li>
                     <li role="option" tabindex="-1" data-value="Europe/Moscow" aria-selected="false">Europe/Moscow</li>
-                    <li role="option" tabindex="-1" data-value="Europe/London" aria-selected="false">Europe/London</li>
-                    <li role="option" tabindex="-1" data-value="Europe/Berlin" aria-selected="false">Europe/Berlin</li>
-                    <li role="option" tabindex="-1" data-value="America/New_York" aria-selected="false">America/New_York</li>
-                    <li role="option" tabindex="-1" data-value="Asia/Shanghai" aria-selected="false">Asia/Shanghai</li>
-                    <li role="option" tabindex="-1" data-value="Asia/Tokyo" aria-selected="false">Asia/Tokyo</li>
+                    <li role="option" tabindex="-1" data-value="UTC" aria-selected="true">UTC</li>
                   </ul>
                   <input type="hidden" id="schedTimezone" value="UTC">
                 </div>
@@ -293,26 +290,30 @@
               </label>
             </div>
             <p class="desc-sm" id="schedNextHint" style="margin-top:10px"></p>
+            <div class="actions backup-actions-wrap backup-section-save">
+              <button type="button" class="btn btn-primary" id="btnSaveSched" onclick="saveSettingsSection('schedule')"></button>
+            </div>
           </article>
 
-          <article class="backup-settings-card">
+          <article class="backup-settings-card" id="setTgCard">
             <div class="backup-settings-head">
               <span class="choice-icon icon-tone-cyan" aria-hidden="true">
                 <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M22 3L11 14"/><path d="M22 3l-7 19-3-8-8-3 18-8z"/></svg>
               </span>
               <div class="backup-settings-head-body">
-                <div class="backup-switch-row">
-                  <div class="backup-tg-title-row">
-                    <h3 class="section-title" id="setTgTitle"></h3>
-                    <span id="tgStatusTag" class="backup-status-tag is-unknown" role="status">…</span>
-                  </div>
-                  <label class="ios-toggle" for="tgEnabled">
-                    <input type="checkbox" id="tgEnabled" role="switch">
-                    <span class="ios-toggle-track"><span class="ios-toggle-thumb"></span></span>
-                  </label>
+                <div class="backup-tg-title-row">
+                  <h3 class="section-title" id="setTgTitle"></h3>
+                  <span id="tgStatusTag" class="backup-status-tag is-unknown" role="status">…</span>
                 </div>
                 <p class="desc-sm" id="setTgHint"></p>
               </div>
+            </div>
+            <div class="backup-switch-row backup-switch-row-inset backup-enable-box">
+              <span class="backup-switch-label" id="lblTgEnabled"></span>
+              <label class="ios-toggle" for="tgEnabled">
+                <input type="checkbox" id="tgEnabled" role="switch">
+                <span class="ios-toggle-track"><span class="ios-toggle-thumb"></span></span>
+              </label>
             </div>
             <div class="form-group">
               <label id="lblTgToken"></label>
@@ -346,46 +347,52 @@
             </div>
             <div class="actions backup-actions-wrap">
               <button type="button" class="btn btn-primary" id="btnTgTest" onclick="testTelegram()"></button>
+              <button type="button" class="btn btn-primary" id="btnSaveTg" onclick="saveSettingsSection('telegram')"></button>
             </div>
           </article>
 
-          <article class="backup-settings-card">
+          <article class="backup-settings-card" id="setWebhookCard">
             <div class="backup-settings-head">
               <span class="choice-icon icon-tone-green" aria-hidden="true">
                 <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M10 13a5 5 0 0 0 7.07 0l2.12-2.12a5 5 0 0 0-7.07-7.07L10.7 5.2"/><path d="M14 11a5 5 0 0 0-7.07 0L4.8 13.12a5 5 0 0 0 7.07 7.07L13.3 18.8"/></svg>
               </span>
               <div class="backup-settings-head-body">
-                <div class="backup-switch-row">
-                  <h3 class="section-title" id="setWebhookTitle"></h3>
-                  <label class="ios-toggle" for="webhookEnabled">
-                    <input type="checkbox" id="webhookEnabled" role="switch">
-                    <span class="ios-toggle-track"><span class="ios-toggle-thumb"></span></span>
-                  </label>
-                </div>
+                <h3 class="section-title" id="setWebhookTitle"></h3>
                 <p class="desc-sm" id="setWebhookHint"></p>
               </div>
+            </div>
+            <div class="backup-switch-row backup-switch-row-inset backup-enable-box">
+              <span class="backup-switch-label" id="lblWebhookEnabled"></span>
+              <label class="ios-toggle" for="webhookEnabled">
+                <input type="checkbox" id="webhookEnabled" role="switch">
+                <span class="ios-toggle-track"><span class="ios-toggle-thumb"></span></span>
+              </label>
             </div>
             <div class="form-group">
               <label id="lblWebhookUrl"></label>
               <input type="url" id="webhookUrl" class="text-input" placeholder="https://example.com/hooks/backup" autocomplete="off">
             </div>
+            <div class="actions backup-actions-wrap backup-section-save">
+              <button type="button" class="btn btn-primary" id="btnSaveWebhook" onclick="saveSettingsSection('webhook')"></button>
+            </div>
           </article>
 
-          <article class="backup-settings-card">
+          <article class="backup-settings-card" id="setProxyCard">
             <div class="backup-settings-head">
               <span class="choice-icon icon-tone-orange" aria-hidden="true">
                 <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 12h16"/><path d="M12 4v16"/><circle cx="12" cy="12" r="9"/></svg>
               </span>
               <div class="backup-settings-head-body">
-                <div class="backup-switch-row">
-                  <h3 class="section-title" id="setProxyTitle"></h3>
-                  <label class="ios-toggle" for="proxyEnabled">
-                    <input type="checkbox" id="proxyEnabled" role="switch">
-                    <span class="ios-toggle-track"><span class="ios-toggle-thumb"></span></span>
-                  </label>
-                </div>
+                <h3 class="section-title" id="setProxyTitle"></h3>
                 <p class="desc-sm" id="setProxyHint"></p>
               </div>
+            </div>
+            <div class="backup-switch-row backup-switch-row-inset backup-enable-box">
+              <span class="backup-switch-label" id="lblProxyEnabled"></span>
+              <label class="ios-toggle" for="proxyEnabled">
+                <input type="checkbox" id="proxyEnabled" role="switch">
+                <span class="ios-toggle-track"><span class="ios-toggle-thumb"></span></span>
+              </label>
             </div>
             <div class="form-group">
               <label id="lblProxyType"></label>
@@ -421,6 +428,9 @@
                 <input type="password" id="proxyPass" class="text-input" autocomplete="off">
               </div>
             </div>
+            <div class="actions backup-actions-wrap backup-section-save">
+              <button type="button" class="btn btn-primary" id="btnSaveProxy" onclick="saveSettingsSection('proxy')"></button>
+            </div>
           </article>
 
           <article class="backup-settings-card" id="setUpdateCard">
@@ -444,7 +454,6 @@
                   <span class="specs-value" id="updateLatestVer" dir="ltr">—</span>
                 </div>
               </div>
-              <p class="desc-sm" id="updateStatusText"></p>
             </div>
             <div class="backup-changelog hidden" id="updateChangelogWrap">
               <h4 class="backup-changelog-title" id="lblUpdateChangelog"></h4>
@@ -466,7 +475,7 @@
             </div>
           </article>
 
-          <article class="backup-settings-card">
+          <article class="backup-settings-card" id="setPassCard">
             <div class="backup-settings-head">
               <span class="choice-icon icon-tone-red" aria-hidden="true">
                 <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
@@ -488,11 +497,10 @@
               <label id="lblNewPassConfirm"></label>
               <input type="password" id="newPasswordConfirm" class="text-input" autocomplete="new-password">
             </div>
+            <div class="actions backup-actions-wrap backup-section-save">
+              <button type="button" class="btn btn-primary" id="btnSavePass" onclick="saveSettingsSection('password')"></button>
+            </div>
           </article>
-        </div>
-
-        <div class="actions actions-center" style="margin-top:20px">
-          <button type="button" class="btn btn-primary btn-lg" id="btnSaveSettings" onclick="saveSettings()"></button>
         </div>
       </section>
 
@@ -556,6 +564,6 @@
     </div>
   </div>
 
-  <script src="/static/js/backup.js?v=4.3.2"></script>
+  <script src="/static/js/backup.js?v=4.3.4"></script>
 </body>
 </html>

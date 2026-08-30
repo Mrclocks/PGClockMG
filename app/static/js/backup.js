@@ -108,14 +108,26 @@ const I18N = {
     setDesc: "هر بخش جداست؛ فقط همان چیزی که لازم دارید را تغییر دهید.",
     setSchedTitle: "زمان‌بندی خودکار",
     setSchedHint: "بازه و منطقهٔ زمانی بکاپ خودکار را تنظیم کنید.",
-    lblSchedEnabled: "بکاپ خودکار فعال باشد",
+    lblEnable: "فعالسازی",
+    lblSchedEnabled: "فعالسازی",
     lblSchedInterval: "بازهٔ زمانی",
     lblSchedTimezone: "منطقهٔ زمانی",
+    tzTehran: "تهران",
+    tzMoscow: "مسکو",
+    tzUtc: "ساعت جهانی (UTC)",
+    schedInterval30m: "هر ۳۰ دقیقه",
+    schedInterval0_5: "هر ۳۰ دقیقه",
     schedInterval1: "هر ۱ ساعت",
+    schedInterval2: "هر ۲ ساعت",
     schedInterval3: "هر ۳ ساعت",
     schedInterval6: "هر ۶ ساعت",
+    schedInterval8: "هر ۸ ساعت",
     schedInterval12: "هر ۱۲ ساعت",
     schedInterval24: "هر ۲۴ ساعت",
+    btnSaveSection: "ذخیره",
+    btnGoBackups: "بکاپ‌ها",
+    btnGoSettings: "تنظیمات",
+    saveFail: "ذخیره نشد",
     lblRetention: "تعداد نگه‌داری",
     lblRetentionDays: "حداکثر سن (روز)",
     retentionDaysHint: "۰ = فقط بر اساس تعداد. مثلاً ۷ یعنی فایل‌های قدیمی‌تر از ۷ روز حذف شوند.",
@@ -126,7 +138,7 @@ const I18N = {
     schedNextHint: "اجرای بعدی: {time}",
     setTgTitle: "تلگرام",
     setTgHint: "اختیاری است. فایل روی سرور یک‌تکه می‌ماند و فقط هنگام ارسال به تلگرام در صورت نیاز تکه‌تکه می‌شود.",
-    lblTgEnabled: "ارسال به تلگرام فعال باشد",
+    lblTgEnabled: "فعالسازی",
     lblTgToken: "Bot Token",
     lblTgChat: "Admin ID / Chat ID",
     lblTgTopic: "Topic ID (اختیاری)",
@@ -140,10 +152,10 @@ const I18N = {
     setWebhookTitle: "وب‌هوک اعلان شکست",
     setWebhookHint: "در صورت شکست بکاپ زمان‌بندی‌شده، یک JSON به این آدرس POST می‌شود.",
     lblWebhookUrl: "آدرس وب‌هوک (HTTPS/HTTP عمومی)",
-    lblWebhookEnabled: "وب‌هوک فعال باشد",
+    lblWebhookEnabled: "فعالسازی",
     setProxyTitle: "پروکسی تلگرام",
     setProxyHint: "اگر تلگرام مستقیم در دسترس نیست، پروکسی بگذارید.",
-    lblProxyEnabled: "از پروکسی استفاده کن",
+    lblProxyEnabled: "فعالسازی",
     lblProxyType: "نوع",
     lblProxyHost: "هاست",
     lblProxyPort: "پورت",
@@ -153,7 +165,7 @@ const I18N = {
     setPassHint: "اگر نمی‌خواهید رمز عوض شود، این بخش را خالی بگذارید.",
     lblNewPass: "رمز جدید",
     lblNewPassConfirm: "تکرار رمز جدید",
-    btnSaveSettings: "ذخیره تنظیمات",
+    btnSaveSettings: "ذخیره",
     saved: "ذخیره شد",
     streamH2: "ارسال استریم به ویزارد",
     streamDesc: "فایل بکاپ روی همین سرور می‌ماند؛ فقط یک کپی به ویزارد مقصد فرستاده می‌شود. اول مقصد را در حالت دریافت بگذارید، بعد از اینجا ارسال کنید.",
@@ -301,14 +313,26 @@ const I18N = {
     setDesc: "Each section stands alone — change only what you need.",
     setSchedTitle: "Automatic schedule",
     setSchedHint: "Choose interval and timezone for automatic backups.",
-    lblSchedEnabled: "Enable automatic backups",
+    lblEnable: "Enable",
+    lblSchedEnabled: "Enable",
     lblSchedInterval: "Interval",
     lblSchedTimezone: "Timezone",
+    tzTehran: "Tehran",
+    tzMoscow: "Moscow",
+    tzUtc: "UTC (Universal)",
+    schedInterval30m: "Every 30 minutes",
+    schedInterval0_5: "Every 30 minutes",
     schedInterval1: "Every 1 hour",
+    schedInterval2: "Every 2 hours",
     schedInterval3: "Every 3 hours",
     schedInterval6: "Every 6 hours",
+    schedInterval8: "Every 8 hours",
     schedInterval12: "Every 12 hours",
     schedInterval24: "Every 24 hours",
+    btnSaveSection: "Save",
+    btnGoBackups: "Backups",
+    btnGoSettings: "Settings",
+    saveFail: "Save failed",
     lblRetention: "Keep last N backups",
     lblRetentionDays: "Max age (days)",
     retentionDaysHint: "0 = count only. Example: 7 deletes archives older than 7 days.",
@@ -319,7 +343,7 @@ const I18N = {
     schedNextHint: "Next run: {time}",
     setTgTitle: "Telegram",
     setTgHint: "Optional. The file stays whole on disk and is split only when Telegram needs smaller parts.",
-    lblTgEnabled: "Enable Telegram delivery",
+    lblTgEnabled: "Enable",
     lblTgToken: "Bot Token",
     lblTgChat: "Admin ID / Chat ID",
     lblTgTopic: "Topic ID (optional)",
@@ -333,10 +357,10 @@ const I18N = {
     setWebhookTitle: "Failure webhook",
     setWebhookHint: "On scheduled backup failure, POST a small JSON payload to this URL.",
     lblWebhookUrl: "Webhook URL (public HTTPS/HTTP)",
-    lblWebhookEnabled: "Enable webhook",
+    lblWebhookEnabled: "Enable",
     setProxyTitle: "Telegram proxy",
     setProxyHint: "Use a proxy when Telegram is blocked directly.",
-    lblProxyEnabled: "Use proxy",
+    lblProxyEnabled: "Enable",
     lblProxyType: "Type",
     lblProxyHost: "Host",
     lblProxyPort: "Port",
@@ -346,7 +370,7 @@ const I18N = {
     setPassHint: "Leave blank if you don’t want to change the password.",
     lblNewPass: "New password",
     lblNewPassConfirm: "Confirm new password",
-    btnSaveSettings: "Save settings",
+    btnSaveSettings: "Save",
     saved: "Saved",
     streamH2: "Stream to wizard",
     streamDesc: "The zip stays on this server; only a copy is sent to the destination wizard. Put the destination in receive mode first, then send from here.",
@@ -494,14 +518,26 @@ const I18N = {
     setDesc: "Каждый блок отдельный — меняйте только то, что нужно.",
     setSchedTitle: "Авторасписание",
     setSchedHint: "Интервал и часовой пояс автоматического бэкапа.",
-    lblSchedEnabled: "Включить автоматический бэкап",
+    lblEnable: "Включение",
+    lblSchedEnabled: "Включение",
     lblSchedInterval: "Интервал",
     lblSchedTimezone: "Часовой пояс",
+    tzTehran: "Тегеран",
+    tzMoscow: "Москва",
+    tzUtc: "UTC (мировое)",
+    schedInterval30m: "Каждые 30 минут",
+    schedInterval0_5: "Каждые 30 минут",
     schedInterval1: "Каждый 1 час",
+    schedInterval2: "Каждые 2 часа",
     schedInterval3: "Каждые 3 часа",
     schedInterval6: "Каждые 6 часов",
+    schedInterval8: "Каждые 8 часов",
     schedInterval12: "Каждые 12 часов",
     schedInterval24: "Каждые 24 часа",
+    btnSaveSection: "Сохранить",
+    btnGoBackups: "Бэкапы",
+    btnGoSettings: "Настройки",
+    saveFail: "Не сохранено",
     lblRetention: "Хранить последние N",
     lblRetentionDays: "Макс. возраст (дни)",
     retentionDaysHint: "0 = только по количеству. Например 7 — удалять старше 7 дней.",
@@ -512,7 +548,7 @@ const I18N = {
     schedNextHint: "Следующий запуск: {time}",
     setTgTitle: "Telegram",
     setTgHint: "По желанию. На диске файл остаётся целым; дробится только при отправке в Telegram, если нужно.",
-    lblTgEnabled: "Включить отправку в Telegram",
+    lblTgEnabled: "Включение",
     lblTgToken: "Bot Token",
     lblTgChat: "Admin ID / Chat ID",
     lblTgTopic: "Topic ID (опционально)",
@@ -526,10 +562,10 @@ const I18N = {
     setWebhookTitle: "Webhook при сбое",
     setWebhookHint: "При сбое автобэкапа отправится JSON POST на этот URL.",
     lblWebhookUrl: "URL webhook (публичный HTTPS/HTTP)",
-    lblWebhookEnabled: "Включить webhook",
+    lblWebhookEnabled: "Включение",
     setProxyTitle: "Прокси Telegram",
     setProxyHint: "Если Telegram недоступен напрямую, укажите прокси.",
-    lblProxyEnabled: "Использовать прокси",
+    lblProxyEnabled: "Включение",
     lblProxyType: "Тип",
     lblProxyHost: "Хост",
     lblProxyPort: "Порт",
@@ -539,7 +575,7 @@ const I18N = {
     setPassHint: "Оставьте пустым, если пароль менять не нужно.",
     lblNewPass: "Новый пароль",
     lblNewPassConfirm: "Повтор нового пароля",
-    btnSaveSettings: "Сохранить настройки",
+    btnSaveSettings: "Сохранить",
     saved: "Сохранено",
     streamH2: "Стрим в мастер",
     streamDesc: "ZIP остаётся на этом сервере; на мастер назначения уходит только копия. Сначала включите приём на назначении, потом отправляйте отсюда.",
@@ -641,6 +677,12 @@ function showToast(message, type = "success", opts = {}) {
   if (ttl > 0) setTimeout(remove, ttl);
   // Keep sticky host from stacking forever
   while (host.children.length > 4) host.lastElementChild?.remove();
+  if (opts.scroll !== false) {
+    requestAnimationFrame(() => {
+      try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch (_) { window.scrollTo(0, 0); }
+      try { host.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (_) { host.scrollIntoView(true); }
+    });
+  }
 }
 
 function showBackupModal({ title, body, okText, cancelText, danger = false, showCancel = false }) {
@@ -808,7 +850,10 @@ function applyI18n() {
     ["setPassTitle", "setPassTitle"], ["setPassHint", "setPassHint"],
     ["lblCurrentPass", "lblCurrentPass"], ["lblNewPass", "lblNewPass"], ["lblNewPassConfirm", "lblNewPassConfirm"],
     ["lblSetupToken", "lblSetupToken"], ["authSetupTokenHint", "authSetupTokenHint"],
-    ["btnSaveSettings", "btnSaveSettings"],
+    ["btnSaveSched", "btnSaveSection"], ["btnSaveTg", "btnSaveSection"],
+    ["btnSaveWebhook", "btnSaveSection"], ["btnSaveProxy", "btnSaveSection"], ["btnSavePass", "btnSaveSection"],
+    ["lblSchedEnabled", "lblSchedEnabled"], ["lblTgEnabled", "lblTgEnabled"],
+    ["lblWebhookEnabled", "lblWebhookEnabled"], ["lblProxyEnabled", "lblProxyEnabled"],
     ["streamH2", "streamH2"], ["streamDesc", "streamDesc"], ["lblStreamUrl", "lblStreamUrl"],
     ["lblStreamToken", "lblStreamToken"], ["btnStreamSend", "btnStreamSend"], ["btnStreamBack", "btnStreamBack"],
     ["streamConnTitle", "streamConnTitle"], ["streamUrlHint", "streamUrlHint"], ["streamTokenHint", "streamTokenHint"],
@@ -1091,10 +1136,8 @@ async function refreshDashboard() {
   const diskTotal = health.backup_disk_total_bytes;
   const memFree = health.memory_available_bytes;
   const load = health.load_ratio_1m;
-  const schedInterval = [1, 3, 6, 12, 24].includes(Number(sched.interval_hours))
-    ? Number(sched.interval_hours)
-    : 24;
-  const schedLabel = t(`schedInterval${schedInterval}`);
+  const schedInterval = normalizeSchedInterval(sched.interval_hours);
+  const schedLabel = schedIntervalLabel(schedInterval);
   const nextLocal = (sched.next_run && sched.next_run.at_local) || sched.last_success_local || "";
   const tz = sched.timezone || "UTC";
   document.getElementById("dashHealthGrid").innerHTML = [
@@ -1157,12 +1200,15 @@ async function refreshDashboard() {
 
   const last = data.last_backup;
   const lastBox = document.getElementById("dashLast");
+  const goBackupsBtn = `<div class="actions backup-actions-wrap" style="margin-top:12px">
+      <button type="button" class="btn btn-primary btn-sm" onclick="showBackupTab('list')">${esc(t("btnGoBackups"))}</button>
+    </div>`;
   if (!last) {
     lastBox.classList.remove("is-detailed");
     lastBox.innerHTML = `<div class="backup-section-head">
       <span class="choice-icon icon-tone-yellow" aria-hidden="true">${ICONS.archive}</span>
       <div><h3 style="margin:0;font-size:1rem;line-height:1.35">${esc(t("lastBackup"))}</h3>
-      <p class="desc-sm" style="margin:2px 0 0">${esc(t("noLast"))}</p></div></div>`;
+      <p class="desc-sm" style="margin:2px 0 0">${esc(t("noLast"))}</p></div></div>${goBackupsBtn}`;
   } else {
     const c = last.counts || {};
     lastBox.classList.add("is-detailed");
@@ -1178,7 +1224,7 @@ async function refreshDashboard() {
         <div class="specs-item"><span class="specs-label">${esc(t("admins"))}</span><span class="specs-value" dir="ltr">${esc(c.admins ?? "—")}</span></div>
         <div class="specs-item"><span class="specs-label">${esc(t("inbounds"))}</span><span class="specs-value" dir="ltr">${esc(c.inbounds ?? "—")}</span></div>
         <div class="specs-item"><span class="specs-label">${esc(t("time"))}</span><span class="specs-value" dir="ltr">${esc(formatSimpleTime(last.created_at))}</span></div>
-      </div>`;
+      </div>${goBackupsBtn}`;
   }
 
   const delivery = document.getElementById("dashDelivery");
@@ -1186,6 +1232,9 @@ async function refreshDashboard() {
   // Paint immediately with config-only status; probe Telegram in the background.
   const tgTagClass = "is-unknown";
   const tgTagLabel = t("tgChecking");
+  const goSettingsBtn = `<div class="actions backup-actions-wrap" style="margin-top:12px">
+      <button type="button" class="btn btn-primary btn-sm" onclick="showBackupTab('settings')">${esc(t("btnGoSettings"))}</button>
+    </div>`;
   delivery.innerHTML = `<div class="backup-section-head">
       <span class="choice-icon icon-tone-cyan" aria-hidden="true">${ICONS.send}</span>
       <div><h3 style="margin:0;font-size:1rem;line-height:1.35">${esc(t("deliveryTitle"))} <span class="backup-status-tag ${tgTagClass}" id="dashTgStatusTag">${esc(tgTagLabel)}</span></h3>
@@ -1194,7 +1243,7 @@ async function refreshDashboard() {
         <span class="backup-chip">${esc(sched.enabled ? t("scheduleOn") : t("scheduleOff"))}</span>
         ${sched.enabled ? `<span class="backup-chip">${esc(schedLabel)}</span>` : ""}
         <span class="backup-chip">${esc(tg.proxy_enabled ? t("proxyOn") : "Proxy —")}</span>
-      </div>`;
+      </div>${goSettingsBtn}`;
 
   setTelegramStatusTag({ checking: true });
   refreshTelegramStatusTag()
@@ -1650,7 +1699,10 @@ async function refreshTelegramStatusTag() {
 }
 
 async function saveSettings(opts = {}) {
-  const quiet = !!opts.quiet;
+  return saveSettingsSection("all", opts);
+}
+
+function collectTelegramPatch() {
   const tokenVal = document.getElementById("tgToken").value.trim();
   const adminId = document.getElementById("tgChat").value.trim();
   const extraChat = document.getElementById("tgChat2").value.trim();
@@ -1662,59 +1714,141 @@ async function saveSettings(opts = {}) {
     destinations.push(item);
   }
   const topicRaw = document.getElementById("tgTopic").value.trim();
-  const patch = {
-    retention_count: Number(document.getElementById("retentionCount").value || 10),
-    retention_days: Number(document.getElementById("retentionDays").value || 0),
-    schedule: {
+  return {
+    enabled: document.getElementById("tgEnabled").checked,
+    bot_token: tokenVal,
+    chat_id: adminId,
+    admin_id: adminId,
+    message_thread_id: topicRaw ? Number(topicRaw) : null,
+    destinations,
+    caption_template: document.getElementById("tgCaption").value,
+    proxy_enabled: document.getElementById("proxyEnabled").checked,
+    proxy_type: document.getElementById("proxyType").value,
+    proxy_host: document.getElementById("proxyHost").value.trim(),
+    proxy_port: Number(document.getElementById("proxyPort").value || 1080),
+    proxy_user: document.getElementById("proxyUser").value.trim(),
+    proxy_password: document.getElementById("proxyPass").value,
+  };
+}
+
+function buildSettingsPatch(section) {
+  const all = section === "all";
+  const patch = {};
+  if (all || section === "schedule") {
+    patch.retention_count = Number(document.getElementById("retentionCount").value || 10);
+    patch.retention_days = Number(document.getElementById("retentionDays").value || 0);
+    patch.schedule = {
       enabled: document.getElementById("schedEnabled").checked,
-      interval_hours: Number(document.getElementById("schedInterval").value || 24),
+      interval_hours: normalizeSchedInterval(document.getElementById("schedInterval").value || 24),
       timezone: document.getElementById("schedTimezone").value || "UTC",
       send_telegram: document.getElementById("schedTelegram").checked,
       notify_on_failure: document.getElementById("schedNotifyFail").checked,
-    },
-    integrity: {
+    };
+    patch.integrity = {
       verify_after_create: document.getElementById("integrityVerify").checked,
-    },
-    notify: {
+    };
+  }
+  if (all || section === "telegram") {
+    const tg = collectTelegramPatch();
+    // Telegram section saves bot fields; proxy has its own section but token path needs proxy flags from form.
+    patch.telegram = {
+      enabled: tg.enabled,
+      bot_token: tg.bot_token,
+      chat_id: tg.chat_id,
+      admin_id: tg.admin_id,
+      message_thread_id: tg.message_thread_id,
+      destinations: tg.destinations,
+      caption_template: tg.caption_template,
+    };
+    // If enabling Telegram, also enable schedule→Telegram so auto backups deliver.
+    if (tg.enabled) {
+      patch.schedule = {
+        ...(patch.schedule || {}),
+        send_telegram: true,
+      };
+      const el = document.getElementById("schedTelegram");
+      if (el) el.checked = true;
+    }
+  }
+  if (all || section === "proxy") {
+    const tg = collectTelegramPatch();
+    patch.telegram = {
+      ...(patch.telegram || {}),
+      proxy_enabled: tg.proxy_enabled,
+      proxy_type: tg.proxy_type,
+      proxy_host: tg.proxy_host,
+      proxy_port: tg.proxy_port,
+      proxy_user: tg.proxy_user,
+      proxy_password: tg.proxy_password,
+    };
+  }
+  if (all || section === "webhook") {
+    patch.notify = {
       webhook_enabled: document.getElementById("webhookEnabled").checked,
       webhook_url: document.getElementById("webhookUrl").value.trim(),
-    },
-    telegram: {
-      enabled: document.getElementById("tgEnabled").checked,
-      bot_token: tokenVal,
-      chat_id: adminId,
-      admin_id: adminId,
-      message_thread_id: topicRaw ? Number(topicRaw) : null,
-      destinations,
-      caption_template: document.getElementById("tgCaption").value,
-      proxy_enabled: document.getElementById("proxyEnabled").checked,
-      proxy_type: document.getElementById("proxyType").value,
-      proxy_host: document.getElementById("proxyHost").value.trim(),
-      proxy_port: Number(document.getElementById("proxyPort").value || 1080),
-      proxy_user: document.getElementById("proxyUser").value.trim(),
-      proxy_password: document.getElementById("proxyPass").value,
-    },
-  };
-  await api("/api/settings", { method: "PUT", body: JSON.stringify(patch) });
+    };
+  }
+  return patch;
+}
 
+async function savePasswordOnly() {
   const np = document.getElementById("newPassword").value;
   const npc = document.getElementById("newPasswordConfirm").value;
   const cur = document.getElementById("currentPassword").value;
-  if (np || npc || cur) {
-    await api("/api/password/change", {
-      method: "POST",
-      body: JSON.stringify({
-        current_password: cur,
-        password: np,
-        password_confirm: npc,
-      }),
-    });
-    document.getElementById("currentPassword").value = "";
-    document.getElementById("newPassword").value = "";
-    document.getElementById("newPasswordConfirm").value = "";
+  if (!(np || npc || cur)) {
+    throw new Error(t("saveFail"));
   }
-  if (!quiet) showToast(t("saved"), "success");
-  refreshTelegramStatusTag().catch(() => {});
+  await api("/api/password/change", {
+    method: "POST",
+    body: JSON.stringify({
+      current_password: cur,
+      password: np,
+      password_confirm: npc,
+    }),
+  });
+  document.getElementById("currentPassword").value = "";
+  document.getElementById("newPassword").value = "";
+  document.getElementById("newPasswordConfirm").value = "";
+}
+
+async function saveSettingsSection(section = "all", opts = {}) {
+  const quiet = !!opts.quiet;
+  try {
+    if (section === "password") {
+      await savePasswordOnly();
+    } else if (section === "all") {
+      const patch = {
+        ...buildSettingsPatch("schedule"),
+        notify: {
+          webhook_enabled: document.getElementById("webhookEnabled").checked,
+          webhook_url: document.getElementById("webhookUrl").value.trim(),
+        },
+        telegram: collectTelegramPatch(),
+      };
+      if (patch.telegram.enabled) {
+        patch.schedule = { ...(patch.schedule || {}), send_telegram: true };
+        const el = document.getElementById("schedTelegram");
+        if (el) el.checked = true;
+      }
+      await api("/api/settings", { method: "PUT", body: JSON.stringify(patch) });
+      const np = document.getElementById("newPassword").value;
+      const npc = document.getElementById("newPasswordConfirm").value;
+      const cur = document.getElementById("currentPassword").value;
+      if (np || npc || cur) await savePasswordOnly();
+    } else {
+      const patch = buildSettingsPatch(section);
+      await api("/api/settings", { method: "PUT", body: JSON.stringify(patch) });
+    }
+    if (!quiet) showToast(t("saved"), "success");
+    refreshTelegramStatusTag().catch(() => {});
+    if (section === "schedule" || section === "telegram" || section === "all") {
+      // Refresh next-run hint without wiping unsaved fields in other cards when possible.
+      if (section !== "all") loadSettingsForm().catch(() => {});
+    }
+  } catch (e) {
+    if (!quiet) showToast(t("saveFail") + ": " + (e.message || e), "error");
+    throw e;
+  }
 }
 
 async function testTelegram() {
@@ -1757,15 +1891,25 @@ function setProxyTypeValue(value) {
   }
 }
 
-const SCHED_INTERVALS = [1, 3, 6, 12, 24];
+const SCHED_INTERVALS = [0.5, 1, 2, 3, 6, 8, 12, 24];
+
+function normalizeSchedInterval(value) {
+  const n = Number(value);
+  return SCHED_INTERVALS.includes(n) ? n : 24;
+}
+
+function schedIntervalI18nKey(hours) {
+  const n = normalizeSchedInterval(hours);
+  if (n === 0.5) return "schedInterval30m";
+  return `schedInterval${n}`;
+}
 
 function schedIntervalLabel(hours) {
-  const n = SCHED_INTERVALS.includes(Number(hours)) ? Number(hours) : 24;
-  return t(`schedInterval${n}`);
+  return t(schedIntervalI18nKey(hours));
 }
 
 function setSchedIntervalValue(value) {
-  const n = SCHED_INTERVALS.includes(Number(value)) ? Number(value) : 24;
+  const n = normalizeSchedInterval(value);
   const hidden = document.getElementById("schedInterval");
   const label = document.getElementById("schedIntervalLabel");
   const menu = document.getElementById("schedIntervalMenu");
@@ -1782,22 +1926,30 @@ function setSchedIntervalValue(value) {
 }
 
 const SCHED_TIMEZONES = [
-  "UTC", "Asia/Tehran", "Asia/Dubai", "Asia/Istanbul", "Europe/Moscow",
-  "Europe/London", "Europe/Berlin", "America/New_York", "Asia/Shanghai", "Asia/Tokyo",
+  { value: "Asia/Tehran", key: "tzTehran" },
+  { value: "Europe/Moscow", key: "tzMoscow" },
+  { value: "UTC", key: "tzUtc" },
 ];
 
+function schedTimezoneLabel(value) {
+  const hit = SCHED_TIMEZONES.find((z) => z.value === value);
+  return hit ? t(hit.key) : t("tzUtc");
+}
+
 function setSchedTimezoneValue(value) {
-  const v = SCHED_TIMEZONES.includes(value) ? value : "UTC";
+  const allowed = SCHED_TIMEZONES.map((z) => z.value);
+  const v = allowed.includes(value) ? value : "UTC";
   const hidden = document.getElementById("schedTimezone");
   const label = document.getElementById("schedTimezoneLabel");
   const menu = document.getElementById("schedTimezoneMenu");
   if (hidden) hidden.value = v;
-  if (label) label.textContent = v;
+  if (label) label.textContent = schedTimezoneLabel(v);
   if (menu) {
     menu.querySelectorAll("[role=option]").forEach((li) => {
       const on = li.getAttribute("data-value") === v;
       li.setAttribute("aria-selected", on ? "true" : "false");
       li.classList.toggle("is-active", on);
+      li.textContent = schedTimezoneLabel(li.getAttribute("data-value"));
     });
   }
 }
@@ -1911,26 +2063,19 @@ function goUpdateSettings() {
   checkForUpdate(true).catch(() => {});
 }
 
+let _updateCheckResetTimer = null;
+
 function renderUpdatePanel(info) {
   const cur = document.getElementById("updateCurrentVer");
   const lat = document.getElementById("updateLatestVer");
-  const status = document.getElementById("updateStatusText");
-  const wrap = document.getElementById("updateChangelogWrap");
-  const body = document.getElementById("updateChangelog");
   const applyBtn = document.getElementById("btnUpdateApply");
   if (cur) cur.textContent = info.current ? ("v" + String(info.current).replace(/^v/i, "")) : "—";
   if (lat) lat.textContent = info.latest ? ("v" + String(info.latest).replace(/^v/i, "")) : "—";
-  if (status) {
-    if (info.error && !info.available) status.textContent = t("updateCheckFail") + ": " + info.error;
-    else if (info.available) status.textContent = t("updateAvailable");
-    else status.textContent = t("updateUpToDate");
-  }
+  const wrap = document.getElementById("updateChangelogWrap");
+  const body = document.getElementById("updateChangelog");
   if (wrap && body) {
     const text = (info.body || "").trim();
-    if (text && info.available) {
-      wrap.classList.remove("hidden");
-      body.textContent = text;
-    } else if (text) {
+    if (text) {
       wrap.classList.remove("hidden");
       body.textContent = text;
     } else {
@@ -1938,19 +2083,53 @@ function renderUpdatePanel(info) {
       body.textContent = "";
     }
   }
-  if (applyBtn) applyBtn.disabled = !info.available;
+  if (applyBtn) {
+    const ready = !!info.available;
+    applyBtn.disabled = !ready;
+    applyBtn.classList.toggle("btn-success", ready);
+    applyBtn.classList.toggle("btn-primary", !ready);
+  }
 }
 
 async function checkForUpdate(force = false) {
-  const status = document.getElementById("updateStatusText");
-  if (status) status.textContent = t("updateChecking");
+  const checkBtn = document.getElementById("btnUpdateCheck");
+  const defaultLabel = t("btnUpdateCheck");
+  clearTimeout(_updateCheckResetTimer);
+  if (checkBtn) {
+    checkBtn.disabled = true;
+    checkBtn.textContent = t("updateChecking");
+  }
   try {
     const info = await api("/api/update/status" + (force ? "?force=true" : ""));
-    renderUpdatePanel(info);
-    renderUpdateBanner(info);
+    renderUpdatePanel(info || {});
+    renderUpdateBanner(info || {});
+    if (checkBtn) {
+      if (info && info.available) {
+        checkBtn.textContent = defaultLabel;
+        checkBtn.disabled = false;
+      } else if (info && info.error) {
+        checkBtn.textContent = t("updateCheckFail");
+        _updateCheckResetTimer = setTimeout(() => {
+          checkBtn.textContent = defaultLabel;
+          checkBtn.disabled = false;
+        }, 3500);
+      } else {
+        checkBtn.textContent = t("updateUpToDate");
+        _updateCheckResetTimer = setTimeout(() => {
+          checkBtn.textContent = defaultLabel;
+          checkBtn.disabled = false;
+        }, 3500);
+      }
+    }
     return info;
   } catch (e) {
-    if (status) status.textContent = t("updateCheckFail") + ": " + e.message;
+    if (checkBtn) {
+      checkBtn.textContent = t("updateCheckFail");
+      _updateCheckResetTimer = setTimeout(() => {
+        checkBtn.textContent = defaultLabel;
+        checkBtn.disabled = false;
+      }, 3500);
+    }
     showToast(t("updateCheckFail") + ": " + e.message, "error");
     return null;
   }

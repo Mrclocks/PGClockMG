@@ -143,6 +143,35 @@
   transform: none;
 }
 
+/* Success CTA — same geometry as primary, green tone (install update) */
+.backup-app .btn-success {
+  background: hsla(142, 70%, 40%, 0.12);
+  color: hsl(142, 70%, 62%);
+  border: 1.5px solid hsla(142, 65%, 45%, 0.75);
+  box-shadow: none;
+}
+
+.backup-app .btn-success:hover:not(:disabled) {
+  background: hsla(142, 70%, 40%, 0.2);
+  border-color: hsla(142, 65%, 52%, 0.9);
+  color: hsl(142, 70%, 72%);
+  transform: none;
+}
+
+.backup-app .btn-success:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.backup-section-save {
+  margin-top: 16px;
+}
+
+.backup-enable-box {
+  margin-top: 0;
+  margin-bottom: 14px;
+}
+
 /* Full-width 3 equal menu buttons — wizard card color tokens */
 .backup-app .backup-tabs {
   display: flex;
@@ -607,6 +636,7 @@
   margin: 0 0 18px;
   padding: 0;
   pointer-events: none;
+  scroll-margin-top: 12px;
 }
 
 .backup-toast-host:empty {
