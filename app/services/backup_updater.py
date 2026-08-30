@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,6 @@ log = logging.getLogger("pgclockmg.backup_updater")
 GITHUB_OWNER = "Mrclocks"
 GITHUB_REPO = "PGClockMG"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
-GITHUB_API_RELEASE = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/tags/{{tag}}"
 GITHUB_REPO_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}.git"
 SERVICE_NAME = os.environ.get("PG_BACKUP_SERVICE", "pg-backup")
 
@@ -152,8 +152,9 @@ def _set_update_job(**fields: Any) -> dict:
 
 
 def _append_log(msg: str) -> None:
+    global _UPDATE_JOB
     with _LOCK:
-        job = _UPDATE_JOB or {}
+        job = dict(_UPDATE_JOB or {})
         logs = list(job.get("logs") or [])
         logs.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
         job["logs"] = logs[-200:]
@@ -190,43 +191,103 @@ def _schedule_restart() -> bool:
     return True
 
 
+def _find_app_dir(extracted_root: Path) -> Path:
+    """GitHub zipball extracts to a single top-level folder containing app/."""
+    direct = extracted_root / "app"
+    if direct.is_dir():
+        return direct
+    for child in sorted(extracted_root.iterdir()):
+        if child.is_dir() and (child / "app").is_dir():
+            return child / "app"
+    raise RuntimeError("release archive missing app/")
+
+
+def _download_release_archive(tag: str, dest_zip: Path, *, timeout: float = 120.0) -> None:
+    """Download release sources as zip (preferred over git clone — works without git)."""
+    urls = [
+        f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/zipball/{tag}",
+        f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/archive/refs/tags/{tag}.zip",
+    ]
+    last_err: Exception | None = None
+    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+        for url in urls:
+            try:
+                _append_log(f"Downloading {tag}…")
+                with client.stream("GET", url, headers=_headers()) as resp:
+                    if resp.status_code >= 400:
+                        raise RuntimeError(f"HTTP {resp.status_code} for {url}")
+                    with open(dest_zip, "wb") as fh:
+                        for chunk in resp.iter_bytes(chunk_size=1024 * 64):
+                            if chunk:
+                                fh.write(chunk)
+                if dest_zip.stat().st_size < 1000:
+                    raise RuntimeError("downloaded archive too small")
+                return
+            except Exception as exc:
+                last_err = exc
+                _append_log(f"Download failed via {url.split('/')[2]} — retrying…")
+                dest_zip.unlink(missing_ok=True)
+    raise RuntimeError(f"download_failed: {last_err}")
+
+
+def _extract_zip(archive: Path, dest_dir: Path) -> Path:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive, "r") as zf:
+        zf.extractall(dest_dir)
+    return _find_app_dir(dest_dir)
+
+
+def _clone_release_fallback(tag: str, src: Path) -> Path:
+    """Last-resort git clone when zip download is unavailable."""
+    if not shutil.which("git"):
+        raise RuntimeError("git_not_found_and_zip_download_failed")
+    _append_log("Falling back to git clone…")
+    clone = _run(
+        ["git", "clone", "--depth", "1", "--branch", tag, GITHUB_REPO_URL, str(src)],
+        timeout=180,
+    )
+    if clone.returncode != 0:
+        shutil.rmtree(src, ignore_errors=True)
+        clone = _run(
+            ["git", "clone", "--depth", "50", GITHUB_REPO_URL, str(src)],
+            timeout=180,
+        )
+        if clone.returncode != 0:
+            raise RuntimeError((clone.stderr or clone.stdout or "git_clone_failed")[:800])
+        co = _run(["git", "checkout", tag], cwd=str(src), timeout=60)
+        if co.returncode != 0:
+            raise RuntimeError((co.stderr or co.stdout or "git_checkout_failed")[:800])
+    app_dir = src / "app"
+    if not app_dir.is_dir():
+        raise RuntimeError("release missing app/")
+    return app_dir
+
+
 def apply_update(*, current: str, target_tag: str | None = None) -> dict:
     """
     Pull the target release into BACKUP_HOME, replace app/, refresh deps, restart service.
     Preserves backup_panel/, backups/, logs/, and venv/.
+
+    Returns immediately with a running job; work continues in a background thread so the
+    HTTP handler (and progress polling) are never blocked on GitHub I/O.
     """
     global _UPDATE_JOB
     with _LOCK:
         if _UPDATE_JOB and _UPDATE_JOB.get("status") in ("running", "queued"):
             return dict(_UPDATE_JOB)
 
-    info = check_for_update(current=current, force=True)
-    tag = _normalize_tag(target_tag or info.get("latest_tag") or "")
-    if not tag:
-        return {"ok": False, "status": "error", "error": "no_release_found"}
-    if not version_lt(current, tag) and not target_tag:
-        return {
+        job = {
             "ok": True,
-            "status": "success",
-            "updated": False,
+            "status": "running",
             "current": current,
-            "target": tag,
-            "message": "already_up_to_date",
+            "target": _normalize_tag(target_tag) or "",
+            "progress": 5,
+            "logs": [f"[{time.strftime('%H:%M:%S')}] Update started…"],
+            "restart_scheduled": False,
+            "error": None,
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "finished_at": None,
         }
-
-    job = {
-        "ok": True,
-        "status": "running",
-        "current": current,
-        "target": tag,
-        "progress": 5,
-        "logs": [],
-        "restart_scheduled": False,
-        "error": None,
-        "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "finished_at": None,
-    }
-    with _LOCK:
         _UPDATE_JOB = dict(job)
 
     def _worker():
@@ -237,44 +298,59 @@ def apply_update(*, current: str, target_tag: str | None = None) -> dict:
             if not app_dst.is_dir():
                 raise RuntimeError(f"app directory missing: {app_dst}")
 
-            _append_log(f"Fetching {tag} from GitHub…")
-            _set_update_job(progress=15)
-            tmp = Path(tempfile.mkdtemp(prefix="pg-backup-update-", dir="/tmp"))
-            src = tmp / "src"
-            clone = _run(
-                ["git", "clone", "--depth", "1", "--branch", tag, GITHUB_REPO_URL, str(src)],
-                timeout=180,
-            )
-            if clone.returncode != 0:
-                # Fallback: clone default branch then checkout tag if shallow branch clone fails
-                _append_log("Shallow tag clone failed — trying full fetch…")
-                shutil.rmtree(src, ignore_errors=True)
-                clone = _run(
-                    ["git", "clone", "--depth", "50", GITHUB_REPO_URL, str(src)],
-                    timeout=180,
+            _set_update_job(progress=12)
+            _append_log("Resolving target release…")
+            info = check_for_update(current=current, force=True, timeout=15.0)
+            if info.get("error") and not info.get("latest_tag") and not target_tag:
+                raise RuntimeError(f"release_check_failed: {info.get('error')}")
+
+            tag = _normalize_tag(target_tag or info.get("latest_tag") or "")
+            if not tag:
+                raise RuntimeError("no_release_found")
+            _set_update_job(target=tag, progress=18)
+
+            if not version_lt(current, tag) and not target_tag:
+                _append_log("Already up to date")
+                _set_update_job(
+                    status="success",
+                    progress=100,
+                    updated=False,
+                    message="already_up_to_date",
+                    finished_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 )
-                if clone.returncode != 0:
-                    raise RuntimeError((clone.stderr or clone.stdout or "git_clone_failed")[:800])
-                co = _run(["git", "checkout", tag], cwd=str(src), timeout=60)
-                if co.returncode != 0:
-                    raise RuntimeError((co.stderr or co.stdout or "git_checkout_failed")[:800])
+                return
 
-            src_app = src / "app"
-            if not src_app.is_dir():
-                raise RuntimeError("release missing app/")
+            tmp = Path(tempfile.mkdtemp(prefix="pg-backup-update-", dir="/tmp"))
+            archive = tmp / "release.zip"
+            extract_dir = tmp / "extracted"
+            src_app: Path | None = None
 
+            _set_update_job(progress=25)
+            try:
+                _download_release_archive(tag, archive)
+                _set_update_job(progress=40)
+                _append_log("Extracting archive…")
+                src_app = _extract_zip(archive, extract_dir)
+            except Exception as dl_exc:
+                _append_log(f"Zip download failed ({dl_exc})")
+                src = tmp / "src"
+                src_app = _clone_release_fallback(tag, src)
+
+            assert src_app is not None
+            _set_update_job(progress=50)
             _append_log("Replacing application files…")
-            _set_update_job(progress=45)
-            backup_app = tmp / "app-prev"
-            if backup_app.exists():
-                shutil.rmtree(backup_app, ignore_errors=True)
-            shutil.copytree(app_dst, backup_app)
-            # Swap in new app via staging directory
+
             staging = tmp / "app-new"
             if staging.exists():
                 shutil.rmtree(staging, ignore_errors=True)
             shutil.copytree(src_app, staging)
-            # Preserve nothing inside app — full replace
+
+            req_src = src_app.parent / "requirements.txt"
+            if not req_src.is_file() and extract_dir.exists():
+                for cand in extract_dir.glob("*/requirements.txt"):
+                    req_src = cand
+                    break
+
             replaced = home / "app.next"
             if replaced.exists():
                 shutil.rmtree(replaced, ignore_errors=True)
@@ -286,12 +362,11 @@ def apply_update(*, current: str, target_tag: str | None = None) -> dict:
             shutil.move(str(replaced), str(app_dst))
             shutil.rmtree(old, ignore_errors=True)
 
-            req_src = src / "requirements.txt"
             if req_src.is_file():
                 shutil.copy2(req_src, home / "requirements.txt")
 
-            _append_log("Refreshing Python dependencies…")
             _set_update_job(progress=70)
+            _append_log("Refreshing Python dependencies…")
             venv_pip = home / "venv" / "bin" / "pip"
             if venv_pip.is_file() and (home / "requirements.txt").is_file():
                 pip = _run(
@@ -304,8 +379,8 @@ def apply_update(*, current: str, target_tag: str | None = None) -> dict:
             else:
                 _append_log("venv/pip not found — skipped dependency refresh")
 
-            _append_log("Scheduling service restart…")
             _set_update_job(progress=90)
+            _append_log("Scheduling service restart…")
             restarted = _schedule_restart()
             _append_log("Update applied" + (" — restarting…" if restarted else ""))
             _set_update_job(
@@ -315,7 +390,6 @@ def apply_update(*, current: str, target_tag: str | None = None) -> dict:
                 finished_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 updated=True,
             )
-            # Invalidate cache so next boot reports new version
             with _LOCK:
                 _CHECK_CACHE["payload"] = None
                 _CHECK_CACHE["at"] = 0.0

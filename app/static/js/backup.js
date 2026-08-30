@@ -897,7 +897,7 @@ function esc(s) {
 async function boot() {
   setBackupLang(lang);
   const st = await api("/api/setup/status");
-  document.getElementById("appVersion").textContent = "v" + (st.version || "4.2.0");
+  document.getElementById("appVersion").textContent = "v" + (st.version || "4.2.1");
   setupMode = !st.password_set;
   window.__setupTokenRequired = !!st.setup_token_required;
   document.getElementById("authConfirmWrap").classList.toggle("hidden", !setupMode);
@@ -1709,7 +1709,9 @@ function setUpdateProgressUI(pct, title, logs) {
   if (!box) return;
   box.classList.remove("hidden");
   const n = Math.max(0, Math.min(100, Number(pct) || 0));
-  if (bar) bar.style.width = n + "%";
+  if (bar) {
+    bar.style.setProperty("width", n + "%", "important");
+  }
   if (pctEl) pctEl.textContent = Math.round(n) + "%";
   if (titleEl && title) titleEl.textContent = title;
   if (logEl && logs) {
@@ -1728,15 +1730,22 @@ async function applyPanelUpdate() {
   box?.classList.add("is-running");
   setUpdateProgressUI(5, t("updateApplying"), []);
   try {
+    // Backend returns a running job immediately (work is backgrounded).
     let job = await api("/api/update/apply", { method: "POST", body: "{}" });
     while (job && (job.status === "running" || job.status === "queued")) {
-      setUpdateProgressUI(job.progress || 10, t("updateApplying"), job.logs || []);
-      await new Promise((r) => setTimeout(r, 900));
+      const pct = Number(job.progress);
+      setUpdateProgressUI(Number.isFinite(pct) ? pct : 5, t("updateApplying"), job.logs || []);
+      await new Promise((r) => setTimeout(r, 700));
       try {
         job = await api("/api/update/job");
       } catch (_) {
         // service may be restarting — treat as success path
-        job = { status: "success", progress: 100, restart_scheduled: true, logs: job.logs || [] };
+        job = {
+          status: "success",
+          progress: 100,
+          restart_scheduled: true,
+          logs: (job && job.logs) || [],
+        };
         break;
       }
     }

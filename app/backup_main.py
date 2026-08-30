@@ -36,7 +36,7 @@ from app.services.backup_telegram import (
 )
 from app.services.prerequisites import get_system_status, is_pasarguard_installed
 
-APP_VERSION = "4.2.0"
+APP_VERSION = "4.2.1"
 
 
 def _dashboard_update_info() -> dict:
@@ -531,12 +531,14 @@ async def api_update_status(force: bool = False):
 @app.post("/api/update/apply")
 async def api_update_apply():
     import asyncio
-    from app.services.backup_updater import apply_update, check_for_update
+    from app.services.backup_updater import apply_update, get_update_job
 
-    info = check_for_update(current=APP_VERSION, force=True)
-    if not info.get("available"):
-        raise HTTPException(400, info.get("error") or "already_up_to_date")
-    job = await asyncio.to_thread(apply_update, current=APP_VERSION, target_tag=info.get("latest_tag"))
+    # Do not block the event loop on GitHub I/O — apply_update returns a running
+    # job immediately and does network/file work in a background thread.
+    existing = get_update_job()
+    if existing and existing.get("status") in ("running", "queued"):
+        return existing
+    job = await asyncio.to_thread(apply_update, current=APP_VERSION)
     return job
 
 

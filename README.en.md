@@ -1,4 +1,4 @@
-> 🚀 **`v4.2.0`** — Backup panel copy polish, soft-blue Backups tab, panel-styled toasts
+> 🚀 **`v4.2.1`** — Orange update banner, full-width progress row, reliable in-panel updates
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
