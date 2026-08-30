@@ -52,6 +52,25 @@ const I18N = {
     dashPgTitle: "وضعیت PasarGuard",
     dashPgSubOk: "پنل روی این سرور نصب است و آماده بکاپ‌گیری است.",
     dashPgSubMissing: "PasarGuard روی این سرور پیدا نشد — اول پنل را نصب کنید.",
+    btnOpenPanel: "ورود به پنل PasarGuard",
+    updateBannerTitle: "نسخه جدید آماده است",
+    updateBannerSub: "نسخه {latest} منتشر شده — از تنظیمات می‌توانید به‌روزرسانی کنید.",
+    btnUpdateGo: "رفتن به آپدیت",
+    setUpdateTitle: "به‌روزرسانی پنل بکاپ",
+    setUpdateHint: "بررسی نسخه از GitHub و نصب مستقیم روی همین سرور (تنظیمات و بکاپ‌ها حفظ می‌شوند).",
+    lblUpdateCurrent: "نسخه فعلی",
+    lblUpdateLatest: "آخرین نسخه",
+    lblUpdateChangelog: "تغییرات این نسخه",
+    btnUpdateCheck: "بررسی آپدیت",
+    btnUpdateApply: "نصب به‌روزرسانی",
+    updateAvailable: "نسخه جدید در دسترس است.",
+    updateUpToDate: "پنل به‌روز است.",
+    updateChecking: "در حال بررسی…",
+    updateApplying: "در حال نصب به‌روزرسانی…",
+    updateDone: "به‌روزرسانی نصب شد — سرویس در حال ری‌استارت است.",
+    updateFail: "به‌روزرسانی ناموفق بود",
+    updateCheckFail: "بررسی آپدیت ناموفق بود",
+    errorCleared: "خطا پاک شد",
     secHealthTitle: "سلامت سرور و بکاپ",
     secPgTitle: "جزئیات پنل",
     secStatsTitle: "آمار زنده پنل",
@@ -210,6 +229,25 @@ const I18N = {
     dashPgTitle: "PasarGuard status",
     dashPgSubOk: "Panel is installed on this server and ready for backup.",
     dashPgSubMissing: "PasarGuard was not found — install the panel first.",
+    btnOpenPanel: "Open PasarGuard panel",
+    updateBannerTitle: "Update available",
+    updateBannerSub: "Version {latest} is out — update from Settings.",
+    btnUpdateGo: "Go to update",
+    setUpdateTitle: "Backup panel updates",
+    setUpdateHint: "Check GitHub for a newer release and install it here (settings & backups are kept).",
+    lblUpdateCurrent: "Current",
+    lblUpdateLatest: "Latest",
+    lblUpdateChangelog: "Changelog",
+    btnUpdateCheck: "Check for updates",
+    btnUpdateApply: "Install update",
+    updateAvailable: "A newer version is available.",
+    updateUpToDate: "You are up to date.",
+    updateChecking: "Checking…",
+    updateApplying: "Installing update…",
+    updateDone: "Update installed — service is restarting.",
+    updateFail: "Update failed",
+    updateCheckFail: "Update check failed",
+    errorCleared: "Error cleared",
     secHealthTitle: "Server & backup health",
     secPgTitle: "Panel details",
     secStatsTitle: "Live panel stats",
@@ -368,6 +406,25 @@ const I18N = {
     dashPgTitle: "Статус PasarGuard",
     dashPgSubOk: "Панель установлена и готова к бэкапу.",
     dashPgSubMissing: "PasarGuard не найден — сначала установите панель.",
+    btnOpenPanel: "Открыть панель PasarGuard",
+    updateBannerTitle: "Доступно обновление",
+    updateBannerSub: "Вышла версия {latest} — обновите в Настройках.",
+    btnUpdateGo: "К обновлению",
+    setUpdateTitle: "Обновление панели бэкапа",
+    setUpdateHint: "Проверка GitHub и установка здесь (настройки и бэкапы сохраняются).",
+    lblUpdateCurrent: "Текущая",
+    lblUpdateLatest: "Последняя",
+    lblUpdateChangelog: "Список изменений",
+    btnUpdateCheck: "Проверить",
+    btnUpdateApply: "Установить обновление",
+    updateAvailable: "Доступна новая версия.",
+    updateUpToDate: "У вас актуальная версия.",
+    updateChecking: "Проверка…",
+    updateApplying: "Установка обновления…",
+    updateDone: "Обновление установлено — сервис перезапускается.",
+    updateFail: "Ошибка обновления",
+    updateCheckFail: "Не удалось проверить обновление",
+    errorCleared: "Ошибка удалена",
     secHealthTitle: "Здоровье сервера и бэкапа",
     secPgTitle: "Детали панели",
     secStatsTitle: "Живая статистика",
@@ -692,6 +749,11 @@ function applyI18n() {
     ["lblProxyType", "lblProxyType"], ["lblProxyHost", "lblProxyHost"], ["lblProxyPort", "lblProxyPort"],
     ["lblProxyUser", "lblProxyUser"], ["lblProxyPass", "lblProxyPass"],
     ["setStreamTitle", "setStreamTitle"], ["lblStreamDest", "lblStreamDest"], ["streamDestHint", "streamDestHint"],
+    ["setUpdateTitle", "setUpdateTitle"], ["setUpdateHint", "setUpdateHint"],
+    ["lblUpdateCurrent", "lblUpdateCurrent"], ["lblUpdateLatest", "lblUpdateLatest"],
+    ["lblUpdateChangelog", "lblUpdateChangelog"],
+    ["btnUpdateCheck", "btnUpdateCheck"], ["btnUpdateApply", "btnUpdateApply"],
+    ["btnDashUpdateGo", "btnUpdateGo"], ["btnOpenPanel", "btnOpenPanel"],
     ["setPassTitle", "setPassTitle"], ["setPassHint", "setPassHint"],
     ["lblCurrentPass", "lblCurrentPass"], ["lblNewPass", "lblNewPass"], ["lblNewPassConfirm", "lblNewPassConfirm"],
     ["lblSetupToken", "lblSetupToken"], ["authSetupTokenHint", "authSetupTokenHint"],
@@ -904,11 +966,14 @@ async function refreshDashboard() {
   document.getElementById("dashPgSub").textContent = installed ? t("dashPgSubOk") : t("dashPgSubMissing");
 
   const specs = document.getElementById("dashPgSpecs");
+  const rootPath = access.root_path || "/";
   specs.innerHTML = [
     ["PasarGuard", installed ? "OK" : "—"],
     [t("db"), access.db_type || sys.pasarguard_db || "—"],
     [t("port"), access.port || "—"],
+    ["Path", rootPath],
     [t("ssl"), access.ssl == null ? "—" : (access.ssl ? t("yes") : t("no"))],
+    ["Host", access.host || access.domain || access.ip || "—"],
   ].map(([label, value]) => `
     <div class="specs-item">
       <span class="specs-label">${esc(label)}</span>
@@ -916,6 +981,24 @@ async function refreshDashboard() {
     </div>
   `).join("");
 
+  const actions = document.getElementById("dashPgActions");
+  const btnPanel = document.getElementById("btnOpenPanel");
+  const urlEl = document.getElementById("dashPgUrl");
+  const panelUrl = access.login_url || access.url || access.public_url || access.public_http_url || "";
+  if (actions && btnPanel && urlEl) {
+    if (installed && panelUrl) {
+      actions.hidden = false;
+      btnPanel.href = panelUrl;
+      btnPanel.textContent = t("btnOpenPanel");
+      urlEl.textContent = panelUrl;
+    } else {
+      actions.hidden = true;
+      btnPanel.removeAttribute("href");
+      urlEl.textContent = "";
+    }
+  }
+
+  renderUpdateBanner(data.update || {});
   const diskFree = health.backup_disk_free_bytes;
   const diskTotal = health.backup_disk_total_bytes;
   const memFree = health.memory_available_bytes;
@@ -1046,6 +1129,8 @@ async function createBackupNow() {
   const title = document.getElementById("backupProgressTitle");
   const logEl = document.getElementById("backupProgressLog");
   const track = box?.querySelector(".backup-progress-track");
+  const bar = document.getElementById("backupProgressBar");
+  const pctEl = document.getElementById("backupProgressPct");
   const listBtn = document.getElementById("btnBackupNowList");
   showBackupTab("list");
   clearTimeout(backupProgressFadeTimer);
@@ -1056,15 +1141,18 @@ async function createBackupNow() {
   logEl.classList.remove("hidden");
   track?.classList.remove("hidden");
   logEl.textContent = "";
+  setBackupProgressUI(0);
   if (listBtn) listBtn.disabled = true;
   try {
     const job = await api("/api/backups/create", { method: "POST", body: "{}" });
     const done = await pollJob(job.job_id, title, logEl, box);
     box.classList.remove("is-running");
     box.classList.add("is-success", "is-success-compact");
+    setBackupProgressUI(100);
     title.textContent = t("backupDone") + (done.filename ? ": " + done.filename : "");
     logEl.classList.add("hidden");
     track?.classList.add("hidden");
+    if (pctEl) pctEl.classList.add("hidden");
     const tg = done.telegram;
     if (tg && tg.ok) {
       showToast(t("backupDone") + (done.filename ? ": " + done.filename : "") + "\n" + t("tgAutoSent"), "success");
@@ -1082,6 +1170,8 @@ async function createBackupNow() {
         box.classList.remove("is-fading", "is-success", "is-success-compact", "is-error", "is-running");
         logEl.classList.remove("hidden");
         track?.classList.remove("hidden");
+        pctEl?.classList.remove("hidden");
+        setBackupProgressUI(0);
       }, 550);
     }, 4200);
   } catch (e) {
@@ -1090,10 +1180,22 @@ async function createBackupNow() {
     title.textContent = t("backupFail") + ": " + e.message;
     logEl.classList.remove("hidden");
     track?.classList.remove("hidden");
+    pctEl?.classList.remove("hidden");
     showToast(t("backupFail") + ": " + e.message, "error");
   } finally {
     if (listBtn) listBtn.disabled = false;
   }
+}
+
+function setBackupProgressUI(pct) {
+  const bar = document.getElementById("backupProgressBar");
+  const pctEl = document.getElementById("backupProgressPct");
+  const n = Math.max(0, Math.min(100, Number(pct) || 0));
+  if (bar) {
+    bar.style.width = n + "%";
+    bar.classList.add("is-green");
+  }
+  if (pctEl) pctEl.textContent = Math.round(n) + "%";
 }
 
 async function pollJob(jobId, title, logEl, box) {
@@ -1103,7 +1205,13 @@ async function pollJob(jobId, title, logEl, box) {
         const job = await api("/api/backups/jobs/" + jobId);
         logEl.textContent = (job.logs || []).join("\n");
         logEl.scrollTop = logEl.scrollHeight;
+        const pct = Number(job.progress);
+        if (!Number.isNaN(pct)) setBackupProgressUI(pct);
+        if (job.phase && job.status === "running") {
+          title.textContent = t("backupRunning") + " · " + job.phase;
+        }
         if (job.status === "success") {
+          setBackupProgressUI(100);
           title.textContent = t("backupDone") + (job.filename ? ": " + job.filename : "");
           resolve(job);
           return;
@@ -1117,7 +1225,7 @@ async function pollJob(jobId, title, logEl, box) {
           reject(new Error(job.error || "error"));
           return;
         }
-        pollTimer = setTimeout(tick, 1000);
+        pollTimer = setTimeout(tick, 700);
       } catch (e) {
         reject(e);
       }
@@ -1347,6 +1455,7 @@ async function loadSettingsForm() {
   document.getElementById("streamDest").value = (s.stream && s.stream.default_dest_url) || "";
   setTelegramStatusTag({ checking: true });
   refreshTelegramStatusTag().catch(() => setTelegramStatusTag({ connected: false }));
+  checkForUpdate(false).catch(() => {});
 }
 
 function setTelegramStatusTag({ connected, checking } = {}) {
@@ -1428,8 +1537,8 @@ async function saveSettings(opts = {}) {
   }
   const msg = document.getElementById("settingsMsg");
   if (msg) {
-    msg.textContent = t("saved");
-    msg.classList.remove("hidden");
+    msg.textContent = "";
+    msg.classList.add("hidden");
   }
   if (!quiet) showToast(t("saved"), "success");
   refreshTelegramStatusTag().catch(() => {});
@@ -1522,9 +1631,141 @@ async function clearLastError() {
     const errBody = document.getElementById("dashErrorBody");
     if (errBox) errBox.classList.add("hidden");
     if (errBody) errBody.textContent = "";
-    showToast(t("saved"), "success");
+    showToast(t("errorCleared"), "success");
   } catch (e) {
     showToast(t("clearErrorFailTitle") + ": " + e.message, "error");
+  }
+}
+
+function renderUpdateBanner(info) {
+  const banner = document.getElementById("dashUpdateBanner");
+  if (!banner) return;
+  if (!info || !info.available) {
+    banner.classList.add("hidden");
+    return;
+  }
+  const latest = info.latest || info.latest_tag || "";
+  document.getElementById("dashUpdateTitle").textContent = t("updateBannerTitle");
+  document.getElementById("dashUpdateSub").textContent = t("updateBannerSub").replace("{latest}", latest);
+  document.getElementById("btnDashUpdateGo").textContent = t("btnUpdateGo");
+  banner.classList.remove("hidden");
+}
+
+function goUpdateSettings() {
+  showBackupTab("settings");
+  const card = document.getElementById("setUpdateCard");
+  if (card) {
+    setTimeout(() => card.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+  }
+  checkForUpdate(true).catch(() => {});
+}
+
+function renderUpdatePanel(info) {
+  const cur = document.getElementById("updateCurrentVer");
+  const lat = document.getElementById("updateLatestVer");
+  const status = document.getElementById("updateStatusText");
+  const wrap = document.getElementById("updateChangelogWrap");
+  const body = document.getElementById("updateChangelog");
+  const applyBtn = document.getElementById("btnUpdateApply");
+  if (cur) cur.textContent = info.current ? ("v" + String(info.current).replace(/^v/i, "")) : "—";
+  if (lat) lat.textContent = info.latest ? ("v" + String(info.latest).replace(/^v/i, "")) : "—";
+  if (status) {
+    if (info.error && !info.available) status.textContent = t("updateCheckFail") + ": " + info.error;
+    else if (info.available) status.textContent = t("updateAvailable");
+    else status.textContent = t("updateUpToDate");
+  }
+  if (wrap && body) {
+    const text = (info.body || "").trim();
+    if (text && info.available) {
+      wrap.classList.remove("hidden");
+      body.textContent = text;
+    } else if (text) {
+      wrap.classList.remove("hidden");
+      body.textContent = text;
+    } else {
+      wrap.classList.add("hidden");
+      body.textContent = "";
+    }
+  }
+  if (applyBtn) applyBtn.disabled = !info.available;
+}
+
+async function checkForUpdate(force = false) {
+  const status = document.getElementById("updateStatusText");
+  if (status) status.textContent = t("updateChecking");
+  try {
+    const info = await api("/api/update/status" + (force ? "?force=true" : ""));
+    renderUpdatePanel(info);
+    renderUpdateBanner(info);
+    return info;
+  } catch (e) {
+    if (status) status.textContent = t("updateCheckFail") + ": " + e.message;
+    showToast(t("updateCheckFail") + ": " + e.message, "error");
+    return null;
+  }
+}
+
+function setUpdateProgressUI(pct, title, logs) {
+  const box = document.getElementById("updateProgress");
+  const bar = document.getElementById("updateProgressBar");
+  const pctEl = document.getElementById("updateProgressPct");
+  const titleEl = document.getElementById("updateProgressTitle");
+  const logEl = document.getElementById("updateProgressLog");
+  if (!box) return;
+  box.classList.remove("hidden");
+  const n = Math.max(0, Math.min(100, Number(pct) || 0));
+  if (bar) bar.style.width = n + "%";
+  if (pctEl) pctEl.textContent = Math.round(n) + "%";
+  if (titleEl && title) titleEl.textContent = title;
+  if (logEl && logs) {
+    logEl.textContent = (logs || []).join("\n");
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+}
+
+async function applyPanelUpdate() {
+  const applyBtn = document.getElementById("btnUpdateApply");
+  const checkBtn = document.getElementById("btnUpdateCheck");
+  if (applyBtn) applyBtn.disabled = true;
+  if (checkBtn) checkBtn.disabled = true;
+  const box = document.getElementById("updateProgress");
+  box?.classList.remove("hidden", "is-success", "is-error");
+  box?.classList.add("is-running");
+  setUpdateProgressUI(5, t("updateApplying"), []);
+  try {
+    let job = await api("/api/update/apply", { method: "POST", body: "{}" });
+    while (job && (job.status === "running" || job.status === "queued")) {
+      setUpdateProgressUI(job.progress || 10, t("updateApplying"), job.logs || []);
+      await new Promise((r) => setTimeout(r, 900));
+      try {
+        job = await api("/api/update/job");
+      } catch (_) {
+        // service may be restarting — treat as success path
+        job = { status: "success", progress: 100, restart_scheduled: true, logs: job.logs || [] };
+        break;
+      }
+    }
+    box?.classList.remove("is-running");
+    if (job && job.status === "success") {
+      box?.classList.add("is-success");
+      setUpdateProgressUI(100, t("updateDone"), job.logs || []);
+      showToast(t("updateDone"), "success", { ttl: 10000 });
+      setTimeout(() => location.reload(), 3500);
+    } else {
+      box?.classList.add("is-error");
+      const err = (job && job.error) || "update_failed";
+      setUpdateProgressUI(100, t("updateFail") + ": " + err, (job && job.logs) || []);
+      showToast(t("updateFail") + ": " + err, "error");
+      if (applyBtn) applyBtn.disabled = false;
+    }
+  } catch (e) {
+    box?.classList.remove("is-running");
+    box?.classList.add("is-error");
+    setUpdateProgressUI(100, t("updateFail") + ": " + e.message, []);
+    showToast(t("updateFail") + ": " + e.message, "error");
+    if (applyBtn) applyBtn.disabled = false;
+  } finally {
+    if (checkBtn) checkBtn.disabled = false;
   }
 }
 
