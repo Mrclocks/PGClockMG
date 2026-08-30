@@ -535,7 +535,7 @@ function applyI18n() {
   const map = [
     ["tabDash", "tabDash"], ["tabList", "tabList"], ["tabSettings", "tabSettings"],
     ["btnLogout", "logout"], ["lblPassword", "lblPassword"], ["lblPasswordConfirm", "lblPasswordConfirm"],
-    ["authPolicy", "authPolicy"], ["dashH2", "dashH2"], ["dashDesc", "dashDesc"], ["dashPgTitle", "dashPgTitle"],
+    ["authPolicy", "authPolicy"], ["dashPgTitle", "dashPgTitle"],
     ["secHealthTitle", "secHealthTitle"], ["secPgTitle", "secPgTitle"],
     ["secBackupStatusTitle", "secBackupStatusTitle"],
     ["btnBackupNowList", "btnBackupNow"],
@@ -986,10 +986,10 @@ async function refreshList() {
         <span class="backup-chip">${t("inbounds")}: ${c.inbounds ?? "—"}</span>
       </div>
       <div class="backup-item-actions">
-        <a class="btn-list-action" href="/api/backups/${encodeURIComponent(it.id)}/download">${ICONS.download}<span>${t("download")}</span></a>
-        <button type="button" class="btn-list-action" onclick="sendTelegram('${it.id}')">${ICONS.send}<span>${t("sendTg")}</span></button>
-        <button type="button" class="btn-list-action" onclick="openStream('${it.id}')">${ICONS.stream}<span>${t("sendStream")}</span></button>
-        <button type="button" class="btn-list-action" onclick="deleteBackup('${it.id}')">${ICONS.trash}<span>${t("remove")}</span></button>
+        <a class="btn-list-action is-download" href="/api/backups/${encodeURIComponent(it.id)}/download">${ICONS.download}<span>${t("download")}</span></a>
+        <button type="button" class="btn-list-action is-tg" onclick="sendTelegram('${it.id}')">${ICONS.send}<span>${t("sendTg")}</span></button>
+        <button type="button" class="btn-list-action is-stream" onclick="openStream('${it.id}')">${ICONS.stream}<span>${t("sendStream")}</span></button>
+        <button type="button" class="btn-list-action is-delete" onclick="deleteBackup('${it.id}')">${ICONS.trash}<span>${t("remove")}</span></button>
       </div>
     </div>`;
   }).join("");
