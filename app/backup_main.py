@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app.config import BACKUP_PORT, WEB_PORT
+from app.config import BACKUP_DIR, BACKUP_PORT, WEB_PORT
 from app.services import backup_auth
 from app.services.backup_engine import (
     apply_retention,
@@ -36,7 +36,7 @@ from app.services.backup_telegram import (
 )
 from app.services.prerequisites import get_system_status, is_pasarguard_installed
 
-APP_VERSION = "4.1.1"
+APP_VERSION = "4.1.2"
 
 
 @asynccontextmanager
@@ -288,7 +288,7 @@ async def dashboard():
 
 @app.get("/api/backups")
 async def api_list_backups():
-    return {"items": list_backup_files()}
+    return {"items": list_backup_files(), "backups_path": str(BACKUP_DIR)}
 
 
 @app.post("/api/backups/create")

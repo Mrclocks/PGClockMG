@@ -560,6 +560,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // looks "empty" until a refresh when the first system-check is slow).
   setLang(state.lang);
   if (typeof bindFinishModal === 'function') bindFinishModal();
+  if (typeof bindAppModal === 'function') bindAppModal();
   const drag = document.getElementById('uploadDragText');
   const sel = document.getElementById('uploadSelectText');
   if (drag) drag.textContent = t('step2.uploadDrag');

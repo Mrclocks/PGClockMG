@@ -415,3 +415,152 @@ def test_setup_token_length_mismatch_no_500(tmp_path, monkeypatch):
     )
     assert r2.status_code == 200, r2.text
     print("OK: setup token mismatch + empty password file")
+
+
+def _prep_pg_tree(tmp_path, env_url: str):
+    pg_dir = tmp_path / "opt" / "pasarguard"
+    pg_data = tmp_path / "var" / "lib" / "pasarguard"
+    pg_dir.mkdir(parents=True)
+    pg_data.mkdir(parents=True)
+    (pg_dir / ".env").write_text(f'SQLALCHEMY_DATABASE_URL="{env_url}"\nAPP_VERSION="1.2.3"\n', encoding="utf-8")
+    (pg_dir / "docker-compose.yml").write_text("services:\n  pasarguard:\n    image: x\n", encoding="utf-8")
+    (pg_data / "certs").mkdir()
+    (pg_data / "certs" / "fullchain.pem").write_text("CERT", encoding="utf-8")
+    (pg_data / "xray_config.json").write_text('{"inbounds":[]}', encoding="utf-8")
+    (pg_data / "templates").mkdir()
+    (pg_data / "templates" / "user.html").write_text("hi", encoding="utf-8")
+    return pg_dir, pg_data
+
+
+def _assert_sql_bundle(path, db_type: str, *, expect_globals: bool = False):
+    import json
+    import zipfile
+    from app.services.pg_restore import discover_backup_artifacts, _find_env
+    import tempfile, shutil
+
+    assert path and path.is_file()
+    with zipfile.ZipFile(path, "r") as zf:
+        names = set(zf.namelist())
+        manifest = json.loads(zf.read("pgclockmg-manifest.json"))
+    assert ".env" in names
+    assert "db_backup.sql" in names
+    assert "pgclockmg-manifest.json" in names
+    assert "certs/fullchain.pem" in names
+    assert "docker-compose.yml" in names
+    assert "xray_config.json" in names
+    assert manifest["db_type"] == db_type
+    assert manifest["format"] == "pgclockmg-full-bundle"
+    if expect_globals:
+        assert "globals.sql" in names
+
+    extract = Path(tempfile.mkdtemp(prefix="pg-bak-sql-"))
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            zf.extractall(extract)
+        assert _find_env(extract) is not None
+        art = discover_backup_artifacts(extract, env_db=db_type)
+        assert art.get("layout") == "single"
+        assert art.get("dump_path")
+        assert Path(art["dump_path"]).name == "db_backup.sql"
+    finally:
+        shutil.rmtree(extract, ignore_errors=True)
+
+
+def test_backup_bundle_all_sql_engines(tmp_path, monkeypatch):
+    """Postgres/Timescale/MySQL/MariaDB dumps produce restore-compatible full bundles."""
+    import app.services.backup_engine as eng
+
+    cases = [
+        ("postgresql", "postgresql+asyncpg://pasarguard:x@db:5432/pasarguard", True),
+        ("timescaledb", "postgresql+asyncpg://pasarguard:x@db:5432/pasarguard", True),
+        ("mysql", "mysql+aiomysql://pasarguard:x@db:3306/pasarguard", False),
+        ("mariadb", "mysql+aiomysql://pasarguard:x@db:3306/pasarguard", False),
+    ]
+
+    for db_type, url, with_globals in cases:
+        case_root = tmp_path / db_type
+        case_root.mkdir()
+        pg_dir, pg_data = _prep_pg_tree(case_root, url)
+
+        monkeypatch.setattr(eng, "PASARGUARD_DIR", pg_dir)
+        monkeypatch.setattr(eng, "PASARGUARD_ENV", pg_dir / ".env")
+        monkeypatch.setattr(eng, "PASARGUARD_DATA", pg_data)
+        monkeypatch.setattr(eng, "BACKUP_DIR", case_root / "backups")
+        monkeypatch.setattr(eng, "WORK_DIR", case_root / "work")
+        monkeypatch.setattr(eng, "BACKUP_JOBS_DIR", case_root / "jobs")
+        (case_root / "backups").mkdir()
+        (case_root / "work").mkdir()
+        (case_root / "jobs").mkdir()
+        monkeypatch.setattr(eng, "is_pasarguard_installed", lambda: True)
+        monkeypatch.setattr(eng, "get_pasarguard_db_type", lambda dt=db_type: dt)
+        monkeypatch.setattr(eng, "live_panel_stats", lambda: {"counts": {"users": 3, "nodes": 1, "admins": 1, "inbounds": 2, "hosts": 0, "groups": 0}})
+
+        import app.services.backup_settings as settings
+        monkeypatch.setattr(settings, "BACKUP_SETTINGS_FILE", case_root / "settings.json")
+
+        def _fake_pg(dt, dest, job, *, expect_g=with_globals):
+            dest.write_text(
+                "--\n-- PostgreSQL database dump\n--\n"
+                "SET statement_timeout = 0;\n"
+                "CREATE TABLE users(id int);\n"
+                "INSERT INTO users VALUES (1),(2),(3);\n",
+                encoding="utf-8",
+            )
+            if expect_g:
+                (dest.parent / "globals.sql").write_text(
+                    "--\n-- PostgreSQL database cluster dump\n--\n"
+                    "CREATE ROLE pasarguard WITH LOGIN PASSWORD 'x';\n",
+                    encoding="utf-8",
+                )
+            job.setdefault("logs", []).append(f"fake dump {dt}")
+
+        def _fake_mysql(dt, dest, job):
+            dest.write_text(
+                "-- MySQL dump 10.13\n"
+                "/*!40101 SET NAMES utf8mb4 */;\n"
+                "CREATE TABLE users(id int);\n"
+                "INSERT INTO users VALUES (1),(2),(3);\n",
+                encoding="utf-8",
+            )
+            job.setdefault("logs", []).append(f"fake dump {dt}")
+
+        if db_type in ("postgresql", "timescaledb"):
+            monkeypatch.setattr(eng, "_dump_postgres", _fake_pg)
+        else:
+            monkeypatch.setattr(eng, "_dump_mysql", _fake_mysql)
+
+        job = eng.create_backup_bundle(trigger="test")
+        assert job["status"] == "success", (db_type, job.get("error"), job.get("logs"))
+        path = eng.resolve_backup_path(job["backup_id"])
+        _assert_sql_bundle(path, db_type, expect_globals=with_globals)
+        assert job["manifest"]["counts"]["users"] == 3
+        assert f"pgclockmg-{db_type}-" in (job.get("filename") or "")
+
+    print("OK: postgresql/timescaledb/mysql/mariadb full-bundle layouts")
+
+
+def test_list_backups_api_includes_path(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    import app.services.backup_auth as auth
+    import app.services.backup_settings as settings
+    import app.backup_main as bm
+    from app.config import BACKUP_DIR
+
+    monkeypatch.setattr(auth, "BACKUP_PASSWORD_FILE", tmp_path / ".password")
+    monkeypatch.setattr(auth, "BACKUP_SECRET_FILE", tmp_path / ".session_secret")
+    monkeypatch.setattr(settings, "BACKUP_SETTINGS_FILE", tmp_path / "settings.json")
+    monkeypatch.setattr(bm, "start_scheduler", lambda: None)
+    monkeypatch.setattr(bm, "stop_scheduler", lambda: None)
+    monkeypatch.setattr(bm, "is_pasarguard_installed", lambda: False)
+    monkeypatch.setattr(bm, "list_backup_files", lambda: [{"id": "x", "filename": "x.zip"}])
+
+    auth.set_password("StrongPass123!")
+    client = TestClient(bm.app)
+    login = client.post("/api/login", json={"password": "StrongPass123!"})
+    assert login.status_code == 200
+    r = client.get("/api/backups")
+    assert r.status_code == 200
+    data = r.json()
+    assert "items" in data
+    assert data.get("backups_path") == str(BACKUP_DIR)
+    print("OK: /api/backups returns backups_path")

@@ -1,4 +1,4 @@
-> 🚀 **`v4.1.1`** — Dashboard redesign + colored outline actions + box padding
+> 🚀 **`v4.1.2`** — Custom modals (no native dialogs), latest-backup tag, preserve backups on uninstall
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

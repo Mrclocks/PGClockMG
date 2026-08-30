@@ -22,7 +22,7 @@
 #
 set -eo pipefail
 
-readonly SCRIPT_VERSION="4.1.1"
+readonly SCRIPT_VERSION="4.1.2"
 readonly INSTALL_DIR="${PG_MIGRATOR_INSTALL_DIR:-/opt/pg-migrator}"
 readonly BACKUP_INSTALL_DIR="${PG_BACKUP_INSTALL_DIR:-/opt/pg-backup}"
 readonly SERVICE_NAME="pg-migrator"
@@ -1265,6 +1265,7 @@ action_uninstall_wizard() {
   [[ -n "$port" ]] && log "     ${C_DIM}•${C_RESET} firewall rule for wizard port ${port}"
   log ""
   log "   ${C_GREEN}Kept untouched:${C_RESET} PGClockBackup, PasarGuard, databases and the redirect server."
+  log "   ${C_GREEN}Backups:${C_RESET} any local backup files under the wizard install are copied out before deletion."
   log ""
 
   confirm "Remove PGClockMG now?" N || { info "Cancelled — nothing was removed."; return 0; }
@@ -1287,18 +1288,16 @@ action_uninstall_wizard() {
       remove_wizard_only_files
     fi
   else
-    # Backup is separate (or absent) — optional keep-copy of legacy wizard backups.
+    # Backup is separate (or absent) — always preserve legacy wizard backups.
     backup_dir="${INSTALL_DIR}/backups"
     if [[ -d "$backup_dir" ]] && [[ -n "$(ls -A "$backup_dir" 2>/dev/null || true)" ]]; then
-      if confirm "Keep a copy of the backups folder?" Y; then
-        keep_dir="${PG_MIGRATOR_BACKUP_DIR:-/root}/pgclockmg-backups-$(date +%Y%m%d-%H%M%S)"
-        if mkdir -p "$keep_dir" 2>/dev/null && cp -a "${backup_dir}/." "${keep_dir}/" 2>/dev/null; then
-          ok "Backups copied to ${keep_dir}"
-        else
-          warn "Could not copy the backups to ${keep_dir}"
-          confirm "Continue and delete them with the app?" N \
-            || { info "Cancelled — wizard service was removed but files were kept."; return 0; }
-        fi
+      keep_dir="${PG_MIGRATOR_BACKUP_DIR:-/var/lib/pgclockbackup}/pgclockmg-backups-$(date +%Y%m%d-%H%M%S)"
+      if mkdir -p "$keep_dir" 2>/dev/null && cp -a "${backup_dir}/." "${keep_dir}/" 2>/dev/null; then
+        ok "Backups preserved at ${keep_dir}"
+      else
+        warn "Could not preserve backups at ${keep_dir}"
+        fail_soft "Aborting uninstall so backup files are not deleted."
+        return 1
       fi
     fi
     rm -rf "$INSTALL_DIR"
@@ -1337,25 +1336,24 @@ action_uninstall_backup() {
   port="$(detect_installed_port "$BACKUP_SERVICE_FILE")"
   log "   This removes:"
   log "     ${C_DIM}•${C_RESET} systemd service ${BACKUP_SERVICE_NAME}"
-  log "     ${C_DIM}•${C_RESET} ${BACKUP_INSTALL_DIR} (backup panel, backups, logs)"
+  log "     ${C_DIM}•${C_RESET} ${BACKUP_INSTALL_DIR} (backup panel, settings, logs)"
   [[ -n "$port" ]] && log "     ${C_DIM}•${C_RESET} firewall rule for backup port ${port}"
   log ""
   log "   ${C_GREEN}Kept untouched:${C_RESET} PGClockMG (wizard), PasarGuard, databases and the redirect server."
+  log "   ${C_GREEN}Backups:${C_RESET} archive files are always copied out before the install dir is removed."
   log ""
 
   confirm "Remove PGClockBackup now?" N || { info "Cancelled — nothing was removed."; return 0; }
 
   backup_dir="${BACKUP_INSTALL_DIR}/backups"
   if [[ -d "$backup_dir" ]] && [[ -n "$(ls -A "$backup_dir" 2>/dev/null || true)" ]]; then
-    if confirm "Keep a copy of the backups folder?" Y; then
-      keep_dir="${PG_MIGRATOR_BACKUP_DIR:-/root}/pgclockbackup-backups-$(date +%Y%m%d-%H%M%S)"
-      if mkdir -p "$keep_dir" 2>/dev/null && cp -a "${backup_dir}/." "${keep_dir}/" 2>/dev/null; then
-        ok "Backups copied to ${keep_dir}"
-      else
-        warn "Could not copy the backups to ${keep_dir}"
-        confirm "Continue and delete them with the app?" N \
-          || { info "Cancelled — nothing was removed."; return 0; }
-      fi
+    keep_dir="${PG_BACKUP_KEEP_DIR:-${PG_MIGRATOR_BACKUP_DIR:-/var/lib/pgclockbackup}}/pgclockbackup-backups-$(date +%Y%m%d-%H%M%S)"
+    if mkdir -p "$keep_dir" 2>/dev/null && cp -a "${backup_dir}/." "${keep_dir}/" 2>/dev/null; then
+      ok "Backups preserved at ${keep_dir}"
+    else
+      warn "Could not preserve backups at ${keep_dir}"
+      fail_soft "Aborting uninstall so backup files are not deleted."
+      return 1
     fi
   fi
 
@@ -1375,6 +1373,9 @@ action_uninstall_backup() {
   fi
 
   ok "PGClockBackup removed."
+  if [[ -n "${keep_dir:-}" ]]; then
+    log "   ${C_DIM}Backup archives kept at:${C_RESET} ${keep_dir}"
+  fi
   if pgclockmg_installed; then
     log "   ${C_DIM}PGClockMG (wizard) is still installed and untouched.${C_RESET}"
   fi
