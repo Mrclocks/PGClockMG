@@ -36,7 +36,7 @@ from app.services.backup_telegram import (
 )
 from app.services.prerequisites import get_system_status, is_pasarguard_installed
 
-APP_VERSION = "4.0.8"
+APP_VERSION = "4.1.0"
 
 
 @asynccontextmanager

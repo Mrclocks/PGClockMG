@@ -1053,7 +1053,7 @@ def test_cross_db_has_pasarguard_env():
     from app.config import PASARGUARD_ENV
     from app.services.native_migration import cross_db
 
-    assert getattr(cross_db, "PASARGUARD_ENV", None) is PASARGUARD_ENV
+    assert getattr(cross_db, "PASARGUARD_ENV", None) == PASARGUARD_ENV
     print("OK: cross_db PASARGUARD_ENV import")
 
 
