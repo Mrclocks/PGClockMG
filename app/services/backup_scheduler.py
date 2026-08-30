@@ -49,7 +49,7 @@ def due_for_scheduled_run(
     if not enabled:
         return False
     interval = normalize_interval_hours(interval_hours)
-    interval_sec = interval * 3600
+    interval_sec = float(interval) * 3600.0
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
@@ -72,6 +72,93 @@ def due_for_scheduled_run(
     if elapsed < interval_sec:
         return False
     return not _in_failure_backoff()
+
+
+def should_send_scheduled_telegram(cfg: dict | None, sched: dict | None = None) -> bool:
+    """
+    Decide whether a successful scheduled backup should be uploaded to Telegram.
+
+    Rules (robust for real-world configs):
+    - Bot must be ready (token + destination).
+    - Send when schedule.send_telegram is on, OR when Telegram itself is enabled
+      (many users turn on Telegram for manual sends and expect schedule to follow).
+    - Explicit send_telegram=False with telegram.enabled=False → no send.
+    """
+    from app.services.backup_telegram import telegram_config, telegram_ready
+
+    settings = cfg or {}
+    schedule = sched if sched is not None else (settings.get("schedule") or {})
+    tg = telegram_config(settings)
+    if not telegram_ready(tg):
+        return False
+    if bool(schedule.get("send_telegram")):
+        return True
+    return bool(tg.get("enabled"))
+
+
+async def _deliver_scheduled_telegram(result: dict, cfg: dict, *, interval: float, tz_name: str) -> dict:
+    """Send scheduled backup to Telegram with one retry; never raise to caller."""
+    from app.services.backup_engine import resolve_backup_path
+    from app.services.backup_telegram import send_backup_to_telegram
+
+    path = resolve_backup_path(str(result.get("backup_id") or ""))
+    if not path:
+        out = {"ok": False, "error": "backup_path_missing"}
+        log.error("scheduled telegram skipped: backup path missing for %s", result.get("backup_id"))
+        return out
+
+    last: dict = {"ok": False, "error": "not_attempted"}
+    for attempt in range(1, 3):
+        try:
+            last = await asyncio.to_thread(
+                send_backup_to_telegram,
+                path,
+                manifest=result.get("manifest") or {},
+                settings=cfg,
+            )
+        except Exception as exc:
+            log.exception("scheduled telegram send raised (attempt %s)", attempt)
+            last = {"ok": False, "error": str(exc)}
+        if last.get("ok"):
+            log.info(
+                "scheduled telegram send ok (attempt %s): %s",
+                attempt,
+                path.name,
+            )
+            return last
+        log.warning(
+            "scheduled telegram send failed (attempt %s): %s",
+            attempt,
+            last.get("error") or "unknown",
+        )
+        if attempt < 2:
+            await asyncio.sleep(2)
+
+    # Soft error only — backup itself already succeeded.
+    try:
+        update_settings({
+            "last_error": {
+                "at": utc_now_iso(),
+                "message": f"telegram_send_failed: {last.get('error') or 'unknown'}",
+                "trigger": "schedule_telegram",
+            },
+        })
+    except Exception:
+        log.exception("failed to record telegram send error")
+    try:
+        from app.services.backup_notify import notify_backup_failure
+
+        await asyncio.to_thread(
+            notify_backup_failure,
+            message=f"Telegram send failed after scheduled backup: {last.get('error') or 'unknown'}",
+            trigger="schedule_telegram",
+            at=utc_now_iso(),
+            settings=cfg,
+            extra={"interval_hours": interval, "timezone": tz_name, "filename": path.name},
+        )
+    except Exception:
+        log.exception("telegram failure notify crashed")
+    return last
 
 
 async def _maybe_run_scheduled() -> None:
@@ -98,9 +185,8 @@ async def _maybe_run_scheduled() -> None:
     update_settings({"schedule": {"last_attempt_at": stamp}})
     log.info("Starting scheduled backup (every %sh, tz=%s) at %s", interval, tz_name, stamp)
 
-    from app.services.backup_engine import create_backup_bundle, resolve_backup_path
+    from app.services.backup_engine import create_backup_bundle
     from app.services.backup_notify import notify_backup_failure
-    from app.services.backup_telegram import send_backup_to_telegram
 
     try:
         result = await asyncio.to_thread(create_backup_bundle, trigger="schedule")
@@ -127,16 +213,18 @@ async def _maybe_run_scheduled() -> None:
             "last_error": None,
         })
         # Retention already runs inside create_backup_bundle on success.
-        if sched.get("send_telegram"):
-            cfg2 = load_settings()
-            path = resolve_backup_path(result.get("backup_id") or "")
-            if path:
-                await asyncio.to_thread(
-                    send_backup_to_telegram,
-                    path,
-                    manifest=result.get("manifest") or {},
-                    settings=cfg2,
-                )
+        # Telegram: awaited here (not via maybe_auto_send) so delivery is reliable.
+        cfg2 = load_settings()
+        sched2 = cfg2.get("schedule") or {}
+        if should_send_scheduled_telegram(cfg2, sched2):
+            await _deliver_scheduled_telegram(
+                result,
+                cfg2,
+                interval=interval,
+                tz_name=tz_name,
+            )
+        else:
+            log.info("scheduled telegram skipped (not enabled / not configured)")
     except Exception as exc:
         log.exception("scheduled backup crashed")
         message = str(exc) or "schedule_exception"

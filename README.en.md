@@ -1,4 +1,4 @@
-> 🚀 **`v4.3.3`** — Backup decoupled from Telegram + PasarGuard status card style match
+> 🚀 **`v4.3.4`** — Per-section settings + hardened scheduled Telegram + more intervals
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

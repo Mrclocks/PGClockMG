@@ -14,21 +14,27 @@ from app.config import BACKUP_SETTINGS_FILE, TELEGRAM_BOT_MAX_BYTES
 
 _LOCK = threading.RLock()
 
-SCHEDULE_INTERVALS = (1, 3, 6, 12, 24)
+# Hours (0.5 = 30 minutes). Stored as interval_hours for backward compatibility.
+SCHEDULE_INTERVALS = (0.5, 1, 2, 3, 6, 8, 12, 24)
 
-# Common IANA zones for the panel dropdown (plus UTC).
+# Panel timezone choices only (IANA).
 SCHEDULE_TIMEZONES = (
-    "UTC",
     "Asia/Tehran",
-    "Asia/Dubai",
-    "Asia/Istanbul",
     "Europe/Moscow",
-    "Europe/London",
-    "Europe/Berlin",
-    "America/New_York",
-    "Asia/Shanghai",
-    "Asia/Tokyo",
+    "UTC",
 )
+
+_TIMEZONE_ALIASES = {
+    "gmt": "UTC",
+    "etc/utc": "UTC",
+    "etc/gmt": "UTC",
+    "tehran": "Asia/Tehran",
+    "iran": "Asia/Tehran",
+    "asia/tehran": "Asia/Tehran",
+    "moscow": "Europe/Moscow",
+    "europe/moscow": "Europe/Moscow",
+    "utc": "UTC",
+}
 
 DEFAULT_TELEGRAM_CAPTION = (
     "PGClockMG backup\n"
@@ -50,7 +56,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         # Legacy daily clock fields (ignored by the interval scheduler).
         "hour": 3,
         "minute": 0,
-        "send_telegram": False,
+        # Default on so scheduled backups reach Telegram when the bot is configured.
+        "send_telegram": True,
         "notify_on_failure": True,
         "last_success_at": None,
         "last_attempt_at": None,
@@ -87,21 +94,29 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 }
 
 
-def normalize_interval_hours(value: object) -> int:
+def normalize_interval_hours(value: object) -> float:
+    """Return a allowed interval in hours (0.5 = 30 minutes)."""
     try:
-        iv = int(value)  # type: ignore[arg-type]
+        raw = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
-        return 24
-    return iv if iv in SCHEDULE_INTERVALS else 24
+        return 24.0
+    for allowed in SCHEDULE_INTERVALS:
+        if abs(raw - float(allowed)) < 1e-9:
+            return float(allowed)
+    return 24.0
 
 
 def normalize_timezone(value: object) -> str:
     text = (str(value).strip() if value is not None else "") or "UTC"
-    try:
-        ZoneInfo(text)
-    except (ZoneInfoNotFoundError, ValueError, KeyError):
+    mapped = _TIMEZONE_ALIASES.get(text.lower(), text)
+    if mapped not in SCHEDULE_TIMEZONES:
+        try:
+            ZoneInfo(mapped)
+        except (ZoneInfoNotFoundError, ValueError, KeyError):
+            return "UTC"
+        # Valid IANA but not in the panel list → pin to UTC.
         return "UTC"
-    return text
+    return mapped
 
 
 def get_zoneinfo(name: object) -> ZoneInfo:
@@ -152,14 +167,14 @@ def next_run_after(
     if last is None:
         due = current
     else:
-        due = last + timedelta(hours=interval)
+        due = last + timedelta(hours=float(interval))
         if due < current:
             due = current
     return {
         "at_utc": due.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "at_local": format_in_timezone(due, timezone_name),
         "timezone": normalize_timezone(timezone_name),
-        "interval_hours": interval,
+        "interval_hours": float(interval),
     }
 
 

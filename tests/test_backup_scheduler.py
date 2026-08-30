@@ -5,7 +5,11 @@ from pathlib import Path
 import zipfile
 
 from app.services.backup_engine import apply_retention, verify_backup_archive
-from app.services.backup_scheduler import FAILURE_RETRY_SECONDS, due_for_scheduled_run
+from app.services.backup_scheduler import (
+    FAILURE_RETRY_SECONDS,
+    due_for_scheduled_run,
+    should_send_scheduled_telegram,
+)
 from app.services.backup_settings import (
     normalize_destinations,
     normalize_interval_hours,
@@ -17,19 +21,29 @@ from app.services.backup_telegram import resolve_destinations
 
 
 def test_normalize_interval_hours():
-    assert normalize_interval_hours(1) == 1
-    assert normalize_interval_hours(3) == 3
-    assert normalize_interval_hours(6) == 6
-    assert normalize_interval_hours(12) == 12
-    assert normalize_interval_hours(24) == 24
-    assert normalize_interval_hours(2) == 24
-    assert normalize_interval_hours("3") == 3
-    assert normalize_interval_hours(None) == 24
-    assert normalize_interval_hours("nope") == 24
+    assert normalize_interval_hours(0.5) == 0.5
+    assert normalize_interval_hours("0.5") == 0.5
+    assert normalize_interval_hours(1) == 1.0
+    assert normalize_interval_hours(2) == 2.0
+    assert normalize_interval_hours(3) == 3.0
+    assert normalize_interval_hours(6) == 6.0
+    assert normalize_interval_hours(8) == 8.0
+    assert normalize_interval_hours(12) == 12.0
+    assert normalize_interval_hours(24) == 24.0
+    assert normalize_interval_hours(7) == 24.0
+    assert normalize_interval_hours("3") == 3.0
+    assert normalize_interval_hours(None) == 24.0
+    assert normalize_interval_hours("nope") == 24.0
 
 
 def test_normalize_timezone():
     assert normalize_timezone("Asia/Tehran") == "Asia/Tehran"
+    assert normalize_timezone("Europe/Moscow") == "Europe/Moscow"
+    assert normalize_timezone("UTC") == "UTC"
+    assert normalize_timezone("tehran") == "Asia/Tehran"
+    assert normalize_timezone("Moscow") == "Europe/Moscow"
+    # Outside the panel whitelist → UTC
+    assert normalize_timezone("Asia/Dubai") == "UTC"
     assert normalize_timezone("Not/AZone") == "UTC"
     assert normalize_timezone("") == "UTC"
 
@@ -43,11 +57,14 @@ def test_normalize_schedule_sanitizes():
         "notify_on_failure": 0,
     })
     assert out["enabled"] is True
-    assert out["interval_hours"] == 24
+    assert out["interval_hours"] == 24.0
     assert out["timezone"] == "Asia/Tehran"
     assert out["send_telegram"] is True
     assert out["notify_on_failure"] is False
     assert "last_run_at" not in out
+
+    half = normalize_schedule({"enabled": True, "interval_hours": 0.5, "timezone": "UTC"})
+    assert half["interval_hours"] == 0.5
 
 
 def test_parse_last_run_at():
@@ -72,6 +89,16 @@ def test_due_for_scheduled_run_interval():
     old = (now - timedelta(hours=3, minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     assert due_for_scheduled_run(
         enabled=True, interval_hours=3, last_success_at=old, now=now
+    ) is True
+
+    # 30-minute interval
+    almost = (now - timedelta(minutes=29)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert due_for_scheduled_run(
+        enabled=True, interval_hours=0.5, last_success_at=almost, now=now
+    ) is False
+    ready = (now - timedelta(minutes=31)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert due_for_scheduled_run(
+        enabled=True, interval_hours=0.5, last_success_at=ready, now=now
     ) is True
 
 
@@ -105,6 +132,43 @@ def test_legacy_last_run_at_counts_as_success():
         interval_hours=3,
         last_run_at=legacy,
         now=now,
+    ) is False
+
+
+def test_should_send_scheduled_telegram(monkeypatch):
+    import app.services.backup_telegram as tg
+
+    monkeypatch.setattr(tg, "telegram_ready", lambda cfg: True)
+    monkeypatch.setattr(
+        tg,
+        "telegram_config",
+        lambda settings=None: {"enabled": True, "bot_token": "t", "chat_id": "1"},
+    )
+
+    assert should_send_scheduled_telegram(
+        {"telegram": {"enabled": True}},
+        {"send_telegram": False},
+    ) is True  # telegram.enabled fallback
+
+    assert should_send_scheduled_telegram(
+        {"telegram": {"enabled": False}},
+        {"send_telegram": True},
+    ) is True
+
+    monkeypatch.setattr(
+        tg,
+        "telegram_config",
+        lambda settings=None: {"enabled": False, "bot_token": "t", "chat_id": "1"},
+    )
+    assert should_send_scheduled_telegram(
+        {"telegram": {"enabled": False}},
+        {"send_telegram": False},
+    ) is False
+
+    monkeypatch.setattr(tg, "telegram_ready", lambda cfg: False)
+    assert should_send_scheduled_telegram(
+        {"telegram": {"enabled": True}},
+        {"send_telegram": True},
     ) is False
 
 
