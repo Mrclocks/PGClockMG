@@ -264,6 +264,73 @@ def _parse_db_user_from_url(url: str) -> str | None:
     return m.group(1) if m else None
 
 
+def sqlite_fs_path_from_url(url: str) -> str | None:
+    """Extract a normalized filesystem path from a SQLAlchemy SQLite URL.
+
+    Handles the common PasarGuard / SQLAlchemy forms without producing a leading
+    double-slash path (``//var/...``), which breaks ``sqlite3`` URI mode
+    (``file://var/...`` → ``invalid uri authority: var``):
+
+    - ``sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3`` (4+ slashes, absolute)
+    - ``sqlite://///var/lib/...`` (extra slash from bad rebuilds)
+    - ``sqlite:///relative.db`` (3 slashes, relative)
+    - ``sqlite:///var/lib/...`` (3 slashes but absolute-looking — treat as abs)
+    - ``sqlite://var/lib/...`` (mistaken host form)
+    - query strings / fragments are stripped; percent-encoding is decoded
+    """
+    from urllib.parse import unquote
+
+    raw = (url or "").strip()
+    if not raw or "sqlite" not in raw.lower():
+        return None
+    m = re.search(r"(?i)sqlite(?:\+\w+)?:(.+)$", raw)
+    if not m:
+        return None
+    body = unquote(m.group(1).split("#", 1)[0].split("?", 1)[0].strip())
+    if not body:
+        return None
+
+    if body.startswith("////"):
+        # Absolute: sqlite:////abs or sqlite://///abs (normalize extra slashes)
+        path = "/" + body.lstrip("/")
+    elif body.startswith("///"):
+        # SQLAlchemy relative (sqlite:///foo.db) — but many installs write
+        # sqlite:///var/lib/... meaning an absolute Unix path.
+        rel = body[3:]
+        if rel.startswith("/"):
+            path = "/" + rel.lstrip("/")
+        elif rel.startswith(("var/", "opt/", "home/", "tmp/", "usr/", "data/")) or (
+            "/" in rel and not rel.startswith((".", "./"))
+        ):
+            path = "/" + rel.lstrip("/")
+        else:
+            path = rel
+    elif body.startswith("//"):
+        # Host form: sqlite://localhost/tmp/x or mistaken sqlite://var/lib/...
+        rest = body[2:]
+        if "/" in rest:
+            host, _, tail = rest.partition("/")
+            if host in ("", "localhost", "127.0.0.1", "."):
+                path = "/" + tail.lstrip("/")
+            else:
+                # Treat host as first path segment (fixes //var/lib/...)
+                path = "/" + rest.lstrip("/")
+        else:
+            path = "/" + rest.lstrip("/")
+    elif body.startswith("/"):
+        path = "/" + body.lstrip("/")
+    else:
+        path = body
+
+    path = path.strip()
+    if not path:
+        return None
+    # Final collapse of accidental UNC-style leading slashes on Unix paths
+    if path.startswith("//"):
+        path = "/" + path.lstrip("/")
+    return path
+
+
 def parse_sqlalchemy_url(url: str, env_text: str | None = None) -> dict:
     """Parse SQLALCHEMY_DATABASE_URL into user, password, host, port, database."""
     result: dict = {
@@ -279,11 +346,8 @@ def parse_sqlalchemy_url(url: str, env_text: str | None = None) -> dict:
 
     low = url.lower()
     if "sqlite" in low:
-        if "///" in url:
-            result["sqlite_path"] = url.split("///", 1)[1].split("?")[0]
-        else:
-            result["sqlite_path"] = url.split("//", 1)[-1].split("?")[0]
-        result["database"] = Path(result["sqlite_path"]).stem or "pasarguard"
+        result["sqlite_path"] = sqlite_fs_path_from_url(url)
+        result["database"] = Path(result["sqlite_path"] or "pasarguard").stem or "pasarguard"
         return result
 
     m = re.match(
@@ -536,7 +600,11 @@ def build_db_migration_target_url(
     pwd = conn.get("password") or "password"
     if target_db == "sqlite":
         path = conn.get("sqlite_path") or (PASARGUARD_DATA / "db.sqlite3").as_posix()
-        return f"sqlite:///{path}"
+        path_s = str(path)
+        if path_s.startswith("/"):
+            path_s = "/" + path_s.lstrip("/")
+            return f"sqlite:///{path_s}"
+        return f"sqlite:///{path_s}"
     if target_db in ("mysql", "mariadb"):
         user = conn.get("user") or "root"
         host = conn.get("host") or "127.0.0.1"
@@ -560,6 +628,8 @@ def build_sqlalchemy_url_for_target(
     pwd = conn.get("password") or "password"
     if target_db == "sqlite":
         path = conn.get("sqlite_path") or "/var/lib/pasarguard/db.sqlite3"
+        # Absolute Unix path → exactly four slashes after scheme (never //var authority)
+        path = "/" + str(path).lstrip("/")
         return f"sqlite+aiosqlite:///{path}"
     if target_db in ("mysql", "mariadb"):
         user = conn.get("user") or "root"

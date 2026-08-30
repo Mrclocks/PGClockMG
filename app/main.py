@@ -36,7 +36,7 @@ from app.services.self_uninstall import uninstall_preview, schedule_self_uninsta
 from app.services.auth import COOKIE_NAME, COOKIE_MAX_AGE, ensure_token, token_matches
 from app.config import WEB_PORT
 
-APP_VERSION = "4.0.3"
+APP_VERSION = "4.0.5"
 
 
 @asynccontextmanager
@@ -547,6 +547,7 @@ async def api_stream_status(token: str):
     return {
         "status": info.get("status"),
         "bytes_received": info.get("bytes_received") or 0,
+        "expected_size": info.get("expected_size"),
         "upload_id": info.get("upload_id"),
         "filename": info.get("filename"),
         "error": info.get("error"),
