@@ -1535,11 +1535,6 @@ async function saveSettings(opts = {}) {
     document.getElementById("newPassword").value = "";
     document.getElementById("newPasswordConfirm").value = "";
   }
-  const msg = document.getElementById("settingsMsg");
-  if (msg) {
-    msg.textContent = "";
-    msg.classList.add("hidden");
-  }
   if (!quiet) showToast(t("saved"), "success");
   refreshTelegramStatusTag().catch(() => {});
 }
