@@ -1125,6 +1125,14 @@ html[dir="rtl"] .backup-app .specs-item .specs-value[dir="ltr"] {
   margin-top: 12px;
 }
 
+#dashPgSpecs .specs-value {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 /* PasarGuard status card — same neutral info-box look as other dash cards */
 #dashPgCard.backup-pg-card {
   text-align: start !important;

@@ -43,7 +43,7 @@ from app.services.backup_telegram import (
 )
 from app.services.prerequisites import get_system_status, is_pasarguard_installed
 
-APP_VERSION = "4.3.6"
+APP_VERSION = "4.3.7"
 
 
 def _dashboard_update_info() -> dict:
@@ -316,6 +316,8 @@ async def dashboard():
             "localhost_url": access.get("localhost_url"),
             "ssl": access.get("ssl"),
             "port": access.get("port"),
+            # Panel UI path is DASHBOARD_PATH (not UVICORN_ROOT_PATH, which is often empty → "/").
+            "dashboard_path": access.get("dashboard_path") or "/dashboard/",
             "root_path": access.get("root_path") or "/",
             "host": access.get("host"),
             "domain": access.get("domain"),
