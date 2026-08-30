@@ -1,4 +1,4 @@
-> 🚀 **`v4.1.6`** — Telegram backup delivery fixed (file + Admin ID + auto-send)
+> 🚀 **`v4.1.7`** — Open panel button, in-app updates, accurate backup progress
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

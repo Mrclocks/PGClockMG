@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#0f1218">
   <title>PGClockMG Backup</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=4.1.6">
-  <link rel="stylesheet" href="/static/css/backup.css?v=4.1.6">
+  <link rel="stylesheet" href="/static/css/style.css?v=4.1.7">
+  <link rel="stylesheet" href="/static/css/backup.css?v=4.1.7">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
@@ -28,7 +28,7 @@
         </div>
         <div class="header-titles">
           <h1>PGClockMG Backup</h1>
-          <p class="header-version" id="appVersion">v4.1.6</p>
+          <p class="header-version" id="appVersion">v4.1.7</p>
         </div>
       </div>
       <div class="header-meta">
@@ -105,6 +105,21 @@
       </section>
 
       <section class="panel" id="panel-dash">
+        <div id="dashUpdateBanner" class="backup-update-banner hidden" role="status">
+          <div class="backup-update-banner-main">
+            <span class="choice-icon icon-tone-blue" aria-hidden="true">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 19h14"/></svg>
+            </span>
+            <div class="backup-update-banner-copy">
+              <strong id="dashUpdateTitle"></strong>
+              <p class="desc-sm" id="dashUpdateSub"></p>
+            </div>
+          </div>
+          <div class="backup-update-banner-actions">
+            <button type="button" class="btn btn-primary btn-sm" id="btnDashUpdateGo" onclick="goUpdateSettings()"></button>
+          </div>
+        </div>
+
         <div id="dashError" class="warning-card hidden backup-top-error" role="alert">
           <div class="backup-error-row">
             <div class="backup-error-body" id="dashErrorBody"></div>
@@ -127,6 +142,10 @@
             </div>
           </div>
           <div id="dashPgSpecs" class="specs-grid backup-pg-specs"></div>
+          <div class="backup-pg-actions" id="dashPgActions" hidden>
+            <a class="btn btn-primary" id="btnOpenPanel" href="#" target="_blank" rel="noopener"></a>
+            <p class="desc-sm backup-panel-url" id="dashPgUrl" dir="ltr"></p>
+          </div>
         </div>
 
         <h3 class="section-title" id="secBackupStatusTitle"></h3>
@@ -152,8 +171,11 @@
             </span>
             <p id="backupProgressTitle" class="desc-sm" style="margin:0"></p>
           </div>
-          <div class="backup-progress-track" aria-hidden="true">
-            <div class="backup-progress-bar" id="backupProgressBar"></div>
+          <div class="backup-progress-meta">
+            <div class="backup-progress-track" aria-hidden="true">
+              <div class="backup-progress-bar" id="backupProgressBar" style="width:0%"></div>
+            </div>
+            <span class="backup-progress-pct" id="backupProgressPct" dir="ltr">0%</span>
           </div>
           <pre id="backupProgressLog" class="backup-log"></pre>
         </div>
@@ -314,6 +336,49 @@
             </div>
           </article>
 
+          <article class="backup-settings-card" id="setUpdateCard">
+            <div class="backup-settings-head">
+              <span class="choice-icon icon-tone-blue" aria-hidden="true">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 19h14"/></svg>
+              </span>
+              <div class="backup-settings-head-body">
+                <h3 class="section-title" id="setUpdateTitle"></h3>
+                <p class="desc-sm" id="setUpdateHint"></p>
+              </div>
+            </div>
+            <div class="backup-update-meta" id="updateMeta">
+              <div class="specs-grid backup-pg-specs">
+                <div class="specs-item">
+                  <span class="specs-label" id="lblUpdateCurrent"></span>
+                  <span class="specs-value" id="updateCurrentVer" dir="ltr">—</span>
+                </div>
+                <div class="specs-item">
+                  <span class="specs-label" id="lblUpdateLatest"></span>
+                  <span class="specs-value" id="updateLatestVer" dir="ltr">—</span>
+                </div>
+              </div>
+              <p class="desc-sm" id="updateStatusText"></p>
+            </div>
+            <div class="backup-changelog hidden" id="updateChangelogWrap">
+              <h4 class="backup-changelog-title" id="lblUpdateChangelog"></h4>
+              <pre class="backup-changelog-body" id="updateChangelog"></pre>
+            </div>
+            <div id="updateProgress" class="backup-run-box hidden" style="margin-top:12px;margin-bottom:0" role="status">
+              <p id="updateProgressTitle" class="desc-sm" style="margin:0 0 8px"></p>
+              <div class="backup-progress-meta">
+                <div class="backup-progress-track" aria-hidden="true">
+                  <div class="backup-progress-bar is-green" id="updateProgressBar" style="width:0%"></div>
+                </div>
+                <span class="backup-progress-pct" id="updateProgressPct" dir="ltr">0%</span>
+              </div>
+              <pre id="updateProgressLog" class="backup-log"></pre>
+            </div>
+            <div class="actions backup-actions-wrap">
+              <button type="button" class="btn btn-back" id="btnUpdateCheck" onclick="checkForUpdate(true)"></button>
+              <button type="button" class="btn btn-primary" id="btnUpdateApply" onclick="applyPanelUpdate()" disabled></button>
+            </div>
+          </article>
+
           <article class="backup-settings-card">
             <div class="backup-settings-head">
               <span class="choice-icon icon-tone-red" aria-hidden="true">
@@ -342,7 +407,6 @@
         <div class="actions actions-center" style="margin-top:20px">
           <button type="button" class="btn btn-primary btn-lg" id="btnSaveSettings" onclick="saveSettings()"></button>
         </div>
-        <div id="settingsMsg" class="success-card hidden" style="margin-top:12px"></div>
       </section>
 
       <section class="panel" id="panel-stream">
@@ -405,6 +469,6 @@
     </div>
   </div>
 
-  <script src="/static/js/backup.js?v=4.1.6"></script>
+  <script src="/static/js/backup.js?v=4.1.7"></script>
 </body>
 </html>

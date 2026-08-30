@@ -36,7 +36,22 @@ from app.services.backup_telegram import (
 )
 from app.services.prerequisites import get_system_status, is_pasarguard_installed
 
-APP_VERSION = "4.1.6"
+APP_VERSION = "4.1.7"
+
+
+def _dashboard_update_info() -> dict:
+    """Best-effort cached update check for dashboard banner (never raises)."""
+    try:
+        from app.services.backup_updater import check_for_update
+
+        return check_for_update(current=APP_VERSION, force=False, timeout=4.0)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "current": APP_VERSION,
+            "available": False,
+            "error": str(exc),
+        }
 
 
 @asynccontextmanager
@@ -280,11 +295,20 @@ async def dashboard():
             "resources": resources,
         },
         "panel_access": {
-            "url": access.get("url") or access.get("login_url") or access.get("dashboard_url"),
+            "url": access.get("login_url") or access.get("panel_url") or access.get("public_url"),
+            "login_url": access.get("login_url") or access.get("panel_url"),
+            "public_url": access.get("public_url"),
+            "public_http_url": access.get("public_http_url"),
+            "localhost_url": access.get("localhost_url"),
             "ssl": access.get("ssl"),
             "port": access.get("port"),
+            "root_path": access.get("root_path") or "/",
+            "host": access.get("host"),
+            "domain": access.get("domain"),
+            "ip": access.get("ip"),
             "db_type": access.get("db_type") or system.get("pasarguard_db"),
         },
+        "update": _dashboard_update_info(),
         "live_stats": live,
         "last_backup": last,
         "last_error": cfg.get("last_error"),
@@ -493,6 +517,37 @@ async def api_telegram_test(body: TelegramTestBody | None = None):
 async def api_clear_last_error():
     update_settings({"last_error": None})
     return {"ok": True}
+
+
+@app.get("/api/update/status")
+async def api_update_status(force: bool = False):
+    from app.services.backup_updater import check_for_update, get_update_job
+
+    info = check_for_update(current=APP_VERSION, force=force)
+    job = get_update_job()
+    return {**info, "job": job}
+
+
+@app.post("/api/update/apply")
+async def api_update_apply():
+    import asyncio
+    from app.services.backup_updater import apply_update, check_for_update
+
+    info = check_for_update(current=APP_VERSION, force=True)
+    if not info.get("available"):
+        raise HTTPException(400, info.get("error") or "already_up_to_date")
+    job = await asyncio.to_thread(apply_update, current=APP_VERSION, target_tag=info.get("latest_tag"))
+    return job
+
+
+@app.get("/api/update/job")
+async def api_update_job():
+    from app.services.backup_updater import get_update_job
+
+    job = get_update_job()
+    if not job:
+        raise HTTPException(404, "no_update_job")
+    return job
 
 
 @app.post("/api/password/change")

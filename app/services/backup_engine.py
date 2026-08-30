@@ -60,6 +60,13 @@ def _log(job: dict, msg: str) -> None:
         job["logs"] = job["logs"][-400:]
 
 
+def _set_progress(job: dict, pct: int, phase: str | None = None) -> None:
+    job["progress"] = max(0, min(100, int(pct)))
+    if phase:
+        job["phase"] = phase
+        _log(job, phase)
+
+
 def get_backup_job(job_id: str) -> dict | None:
     with _jobs_lock:
         job = _jobs.get(job_id)
@@ -927,6 +934,8 @@ def create_backup_bundle(*, trigger: str = "manual") -> dict:
             "status": "running",
             "trigger": trigger,
             "logs": [],
+            "progress": 0,
+            "phase": "starting",
             "started_at": _utc_now(),
             "finished_at": None,
             "backup_id": None,
@@ -955,6 +964,8 @@ def start_backup_async(*, trigger: str = "manual") -> dict:
         "status": "queued",
         "trigger": trigger,
         "logs": [],
+        "progress": 0,
+        "phase": "queued",
         "started_at": _utc_now(),
         "finished_at": None,
         "backup_id": None,
@@ -994,6 +1005,8 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
             "status": "running",
             "trigger": trigger,
             "logs": [],
+            "progress": 0,
+            "phase": "starting",
             "started_at": _utc_now(),
             "finished_at": None,
             "backup_id": None,
@@ -1003,6 +1016,8 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
             "error": None,
         })
         job["status"] = "running"
+        job["progress"] = max(int(job.get("progress") or 0), 2)
+        job["phase"] = "starting"
 
     if not _CREATE_LOCK.acquire(blocking=False):
         job["status"] = "error"
@@ -1018,13 +1033,16 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
         if not PASARGUARD_ENV.is_file():
             raise RuntimeError("PasarGuard .env not found")
 
+        _set_progress(job, 8, "Reading PasarGuard environment…")
         env_text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
         db_type = get_pasarguard_db_type() or detect_db_type_from_env(env_text, prefer_compose=True) or "sqlite"
-        _log(job, f"Detected database: {db_type}")
+        _set_progress(job, 14, f"Detected database: {db_type}")
 
         staging = Path(tempfile.mkdtemp(prefix="pg-backup-", dir=str(WORK_DIR)))
+        _set_progress(job, 22, "Collecting panel files…")
         _collect_extra_files(staging, job)
 
+        _set_progress(job, 35, f"Dumping {db_type} database…")
         if db_type == "sqlite":
             _dump_sqlite(staging / "db.sqlite3", job, env_text=env_text)
         elif db_type in ("postgresql", "timescaledb"):
@@ -1041,7 +1059,7 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
             dump_path = staging / "db_backup.sql"
         if not dump_path.is_file() or dump_path.stat().st_size < 64:
             raise RuntimeError(f"Database dump missing or empty: {dump_path.name}")
-        _log(job, f"Dump ready: {dump_path.name} ({dump_path.stat().st_size} bytes)")
+        _set_progress(job, 55, f"Dump ready: {dump_path.name} ({dump_path.stat().st_size} bytes)")
 
         stats = live_panel_stats()
         counts = stats.get("counts") or {}
@@ -1050,13 +1068,14 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
         dump_counts = _counts_from_dump_artifact(dump_path, db_type)
         counts = _merge_counts(counts, dump_counts)
         if any(isinstance(counts.get(t), int) for t in STAT_TABLES):
-            _log(
+            _set_progress(
                 job,
+                62,
                 "Panel counts: "
                 + ", ".join(f"{k}={counts.get(k)}" for k in STAT_TABLES if counts.get(k) is not None),
             )
         else:
-            _log(job, "Panel counts unavailable (live query + dump estimate both empty)")
+            _set_progress(job, 62, "Panel counts unavailable (live query + dump estimate both empty)")
 
         # Refuse zip when live/dump panel has data but the dump looks empty.
         live_users = counts.get("users")
@@ -1116,7 +1135,7 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
         BACKUP_DIR.mkdir(parents=True, exist_ok=True)
         filename = f"pgclockmg-{db_type}-{_stamp()}.zip"
         out_path = BACKUP_DIR / filename
-        _log(job, f"Writing zip {filename}…")
+        _set_progress(job, 72, f"Writing zip {filename}…")
         with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
             for path in staging.rglob("*"):
                 if path.is_file():
@@ -1127,6 +1146,7 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
         manifest["size_bytes"] = out_path.stat().st_size
         manifest["filename"] = filename
         _write_sidecar_meta(out_path, manifest)
+        _set_progress(job, 86, "Verifying backup archive…")
 
         with zipfile.ZipFile(out_path, "r") as zf:
             names = set(zf.namelist())
@@ -1144,7 +1164,7 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
         job["filename"] = filename
         job["size_bytes"] = out_path.stat().st_size
         job["manifest"] = manifest
-        _log(job, f"Backup ready ({job['size_bytes']} bytes)")
+        _set_progress(job, 90, f"Backup ready ({job['size_bytes']} bytes)")
 
         from app.services.backup_settings import update_settings
         update_settings({
@@ -1165,18 +1185,23 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
         try:
             from app.services.backup_telegram import maybe_auto_send_backup
 
+            _set_progress(job, 93, "Checking Telegram delivery…")
             tg_send = maybe_auto_send_backup({**dict(job), "status": "success", "trigger": trigger})
             if tg_send is not None:
                 job["telegram"] = tg_send
                 if tg_send.get("ok"):
-                    _log(job, "Telegram: backup document sent")
+                    _set_progress(job, 98, "Telegram: backup document sent")
                 else:
-                    _log(job, f"Telegram send failed: {tg_send.get('error') or 'unknown'}")
+                    _set_progress(job, 98, f"Telegram send failed: {tg_send.get('error') or 'unknown'}")
+            else:
+                _set_progress(job, 98, "Telegram auto-send skipped")
         except Exception as tg_exc:
             job["telegram"] = {"ok": False, "error": str(tg_exc)}
-            _log(job, f"Telegram send failed: {tg_exc}")
+            _set_progress(job, 98, f"Telegram send failed: {tg_exc}")
 
         job["status"] = "success"
+        job["progress"] = 100
+        job["phase"] = "done"
         job["finished_at"] = _utc_now()
         return dict(job)
     except Exception as exc:
