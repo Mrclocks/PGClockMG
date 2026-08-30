@@ -887,6 +887,16 @@ function applyI18n() {
   initSchedTimezoneSelect();
   initLangMenu();
   initBackupModal();
+  const tgEnableEl = document.getElementById("tgEnabled");
+  if (tgEnableEl && !tgEnableEl.dataset.syncReady) {
+    tgEnableEl.dataset.syncReady = "1";
+    tgEnableEl.addEventListener("change", () => {
+      if (tgEnableEl.checked) {
+        const schedTg = document.getElementById("schedTelegram");
+        if (schedTg) schedTg.checked = true;
+      }
+    });
+  }
   syncLangMenu(lang);
   const clearBtn = document.getElementById("btnClearLastError");
   if (clearBtn) clearBtn.textContent = t("clearError");
