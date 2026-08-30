@@ -231,6 +231,27 @@ def normalize_destinations(
     return out
 
 
+def enrich_schedule(sched: dict | None) -> dict:
+    """Attach timezone-normalized fields and next-run labels for API/UI."""
+    out = dict(sched or {})
+    out["timezone"] = normalize_timezone(out.get("timezone"))
+    out["interval_hours"] = normalize_interval_hours(out.get("interval_hours"))
+    success = out.get("last_success_at") or out.get("last_run_at")
+    if out.get("enabled"):
+        out["next_run"] = next_run_after(
+            last_success_at=success,
+            interval_hours=out.get("interval_hours"),
+            timezone_name=out.get("timezone"),
+        )
+    else:
+        out["next_run"] = None
+    out["last_success_local"] = format_in_timezone(
+        parse_last_run_at(success),
+        out.get("timezone"),
+    )
+    return out
+
+
 def normalize_schedule(patch: dict | None) -> dict:
     """Sanitize a schedule patch from the API/UI (does not wipe runtime stamps)."""
     src = dict(patch or {})
@@ -358,20 +379,7 @@ def public_settings(data: dict | None = None) -> dict:
     sched = cfg.get("schedule") or {}
     sched["timezone"] = normalize_timezone(sched.get("timezone"))
     sched["interval_hours"] = normalize_interval_hours(sched.get("interval_hours"))
-    success = sched.get("last_success_at") or sched.get("last_run_at")
-    if sched.get("enabled"):
-        sched["next_run"] = next_run_after(
-            last_success_at=success,
-            interval_hours=sched.get("interval_hours"),
-            timezone_name=sched.get("timezone"),
-        )
-    else:
-        sched["next_run"] = None
-    sched["last_success_local"] = format_in_timezone(
-        parse_last_run_at(success),
-        sched.get("timezone"),
-    )
-    cfg["schedule"] = sched
+    cfg["schedule"] = enrich_schedule(sched)
     cfg["retention_count"] = normalize_retention_count(cfg.get("retention_count"))
     cfg["retention_days"] = normalize_retention_days(cfg.get("retention_days"))
     return cfg

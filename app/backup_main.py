@@ -43,15 +43,25 @@ from app.services.backup_telegram import (
 )
 from app.services.prerequisites import get_system_status, is_pasarguard_installed
 
-APP_VERSION = "4.3.0"
+APP_VERSION = "4.3.1"
 
 
 def _dashboard_update_info() -> dict:
-    """Best-effort cached update check for dashboard banner (never raises)."""
+    """Non-blocking update banner: serve cache immediately, refresh in background."""
     try:
-        from app.services.backup_updater import check_for_update
+        from app.services.backup_updater import peek_cached_update, schedule_background_update_check
 
-        return check_for_update(current=APP_VERSION, force=False, timeout=4.0)
+        cached = peek_cached_update(APP_VERSION)
+        if cached is not None:
+            return cached
+        schedule_background_update_check(APP_VERSION)
+        return {
+            "ok": True,
+            "current": APP_VERSION,
+            "available": False,
+            "pending": True,
+            "error": None,
+        }
     except Exception as exc:
         return {
             "ok": False,
@@ -254,10 +264,10 @@ async def dashboard():
     from app.services.pg_access import get_panel_access_info
     from app.services.backup_engine import (
         _merge_counts,
-        live_panel_stats,
         resolve_backup_manifest,
         resolve_backup_path,
     )
+    from app.services.backup_settings import enrich_schedule
 
     system = get_system_status()
     cfg = load_settings()
@@ -268,23 +278,7 @@ async def dashboard():
     backup_disk = storage.get("backup") or {}
     memory = resources.get("memory") or {}
     tg = cfg.get("telegram") or {}
-    sched = cfg.get("schedule") or {}
-    try:
-        from app.services.backup_settings import next_run_after, normalize_timezone, format_in_timezone, parse_last_run_at
-
-        success = sched.get("last_success_at") or sched.get("last_run_at")
-        sched = {
-            **sched,
-            "timezone": normalize_timezone(sched.get("timezone")),
-            "last_success_local": format_in_timezone(parse_last_run_at(success), sched.get("timezone")),
-            "next_run": next_run_after(
-                last_success_at=success,
-                interval_hours=sched.get("interval_hours"),
-                timezone_name=sched.get("timezone"),
-            ) if sched.get("enabled") else None,
-        }
-    except Exception:
-        pass
+    sched = enrich_schedule(cfg.get("schedule") or {})
     access = {}
     try:
         access = get_panel_access_info() or {}
@@ -301,12 +295,6 @@ async def dashboard():
                 "db_type": last.get("db_type") or meta.get("db_type"),
                 "counts": _merge_counts(last.get("counts") or {}, meta.get("counts") or {}),
             }
-
-    live = {}
-    try:
-        live = live_panel_stats()
-    except Exception:
-        live = {}
 
     return {
         "version": APP_VERSION,
@@ -335,7 +323,6 @@ async def dashboard():
             "db_type": access.get("db_type") or system.get("pasarguard_db"),
         },
         "update": _dashboard_update_info(),
-        "live_stats": live,
         "last_backup": last,
         "last_error": cfg.get("last_error"),
         "backup_count": len(backups),
@@ -373,6 +360,12 @@ async def dashboard():
             "profile": resources.get("profile"),
         },
     }
+
+
+@app.get("/api/session")
+async def api_session():
+    """Lightweight auth probe used during boot (avoids a full dashboard load)."""
+    return {"ok": True, "version": APP_VERSION}
 
 
 @app.get("/api/backups")

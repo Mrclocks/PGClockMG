@@ -142,7 +142,11 @@ def find_xui_db() -> Path | None:
 
 
 def is_docker_running() -> bool:
-    ok, _ = _run(["docker", "info"])
+    # Prefer a cheap probe — full `docker info` can stall several seconds under load.
+    ok, _ = _run(["docker", "version", "--format", "{{.Server.Version}}"], timeout=2)
+    if ok:
+        return True
+    ok, _ = _run(["docker", "info", "-f", "{{.ServerVersion}}"], timeout=3)
     return ok
 
 

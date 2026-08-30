@@ -98,7 +98,7 @@ async def _maybe_run_scheduled() -> None:
     update_settings({"schedule": {"last_attempt_at": stamp}})
     log.info("Starting scheduled backup (every %sh, tz=%s) at %s", interval, tz_name, stamp)
 
-    from app.services.backup_engine import apply_retention, create_backup_bundle, resolve_backup_path
+    from app.services.backup_engine import create_backup_bundle, resolve_backup_path
     from app.services.backup_notify import notify_backup_failure
     from app.services.backup_telegram import send_backup_to_telegram
 
@@ -126,13 +126,9 @@ async def _maybe_run_scheduled() -> None:
             },
             "last_error": None,
         })
-        # Re-read settings so retention uses latest UI values.
-        cfg2 = load_settings()
-        apply_retention(
-            keep_count=int(cfg2.get("retention_count") or 10),
-            keep_days=int(cfg2.get("retention_days") or 0),
-        )
+        # Retention already runs inside create_backup_bundle on success.
         if sched.get("send_telegram"):
+            cfg2 = load_settings()
             path = resolve_backup_path(result.get("backup_id") or "")
             if path:
                 await asyncio.to_thread(

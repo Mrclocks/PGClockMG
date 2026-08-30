@@ -738,7 +738,23 @@
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
-  margin: 0 0 28px;
+  margin: 0;
+}
+
+.backup-dash-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.backup-dash-stack > .backup-section-card,
+.backup-dash-stack > .backup-split-grid,
+.backup-dash-stack > .backup-icon-grid {
+  margin-bottom: 0;
+}
+
+.backup-dash-head {
+  margin-bottom: 4px;
 }
 
 .backup-stat-grid {
@@ -887,6 +903,14 @@ html[dir="rtl"] .backup-app .specs-item .specs-value[dir="ltr"] {
   gap: 20px;
 }
 
+@media (min-width: 900px) {
+  .backup-split-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    align-items: stretch;
+  }
+}
+
 .backup-settings-stack {
   display: flex;
   flex-direction: column;
@@ -942,11 +966,15 @@ html[dir="rtl"] .backup-app .specs-item .specs-value[dir="ltr"] {
 }
 
 .backup-switch-row-inset {
-  margin-top: 4px;
+  margin-top: 12px;
   padding: 12px 14px;
   border-radius: var(--radius-sm);
   background: var(--bg-elevated);
   border: 1px solid var(--border-soft);
+}
+
+.backup-settings-card .backup-switch-row-inset + .backup-switch-row-inset {
+  margin-top: 12px;
 }
 
 .backup-switch-label {
