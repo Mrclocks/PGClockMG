@@ -1117,18 +1117,18 @@ async function refreshDashboard() {
   document.getElementById("dashPgSub").textContent = installed ? t("dashPgSubOk") : t("dashPgSubMissing");
 
   const specs = document.getElementById("dashPgSpecs");
-  const rootPath = access.root_path || "/";
+  const panelPath = access.dashboard_path || access.root_path || "/dashboard/";
   specs.innerHTML = [
     ["PasarGuard", installed ? "OK" : "—"],
     [t("db"), access.db_type || sys.pasarguard_db || "—"],
     [t("port"), access.port || "—"],
-    ["Path", rootPath],
+    ["Path", panelPath],
     [t("ssl"), access.ssl == null ? "—" : (access.ssl ? t("yes") : t("no"))],
     ["Host", access.host || access.domain || access.ip || "—"],
   ].map(([label, value]) => `
     <div class="specs-item">
       <span class="specs-label">${esc(label)}</span>
-      <span class="specs-value" title="${esc(value)}">${esc(value)}</span>
+      <span class="specs-value" dir="ltr" title="${esc(value)}">${esc(value)}</span>
     </div>
   `).join("");
 
@@ -2081,6 +2081,17 @@ function goUpdateSettings() {
 }
 
 let _updateCheckResetTimer = null;
+let _updateCheckGen = 0;
+
+function resetUpdateCheckButton() {
+  const checkBtn = document.getElementById("btnUpdateCheck");
+  if (!checkBtn) return;
+  checkBtn.disabled = false;
+  checkBtn.removeAttribute("aria-busy");
+  checkBtn.classList.remove("is-checking", "is-status");
+  checkBtn.textContent = t("btnUpdateCheck");
+  try { checkBtn.blur(); } catch (_) {}
+}
 
 function renderUpdatePanel(info) {
   const cur = document.getElementById("updateCurrentVer");
@@ -2110,42 +2121,56 @@ function renderUpdatePanel(info) {
 
 async function checkForUpdate(force = false) {
   const checkBtn = document.getElementById("btnUpdateCheck");
-  const defaultLabel = t("btnUpdateCheck");
   clearTimeout(_updateCheckResetTimer);
+  const gen = ++_updateCheckGen;
 
-  const restoreCheckBtn = (label = defaultLabel) => {
-    if (!checkBtn) return;
-    checkBtn.textContent = label;
-    checkBtn.disabled = false;
-    // Drop sticky :focus/:active after click so it looks idle again.
-    try { checkBtn.blur(); } catch (_) {}
+  const scheduleRestore = (delayMs) => {
+    clearTimeout(_updateCheckResetTimer);
+    _updateCheckResetTimer = setTimeout(() => {
+      if (gen !== _updateCheckGen) return;
+      resetUpdateCheckButton();
+    }, delayMs);
   };
 
   if (checkBtn) {
     checkBtn.disabled = true;
+    checkBtn.setAttribute("aria-busy", "true");
+    checkBtn.classList.add("is-checking");
+    checkBtn.classList.remove("is-status");
     checkBtn.textContent = t("updateChecking");
     try { checkBtn.blur(); } catch (_) {}
   }
   try {
     const info = await api("/api/update/status" + (force ? "?force=true" : ""));
+    if (gen !== _updateCheckGen) return info;
     renderUpdatePanel(info || {});
     renderUpdateBanner(info || {});
     if (checkBtn) {
+      checkBtn.classList.remove("is-checking");
       if (info && info.available) {
-        restoreCheckBtn(defaultLabel);
+        // New update ready — restore the check label immediately; apply button is the CTA.
+        resetUpdateCheckButton();
       } else if (info && info.error) {
+        checkBtn.disabled = true;
+        checkBtn.classList.add("is-status");
         checkBtn.textContent = t("updateCheckFail");
-        _updateCheckResetTimer = setTimeout(() => restoreCheckBtn(defaultLabel), 3500);
+        scheduleRestore(3500);
       } else {
+        checkBtn.disabled = true;
+        checkBtn.classList.add("is-status");
         checkBtn.textContent = t("updateUpToDate");
-        _updateCheckResetTimer = setTimeout(() => restoreCheckBtn(defaultLabel), 3500);
+        scheduleRestore(3500);
       }
     }
     return info;
   } catch (e) {
+    if (gen !== _updateCheckGen) return null;
     if (checkBtn) {
+      checkBtn.disabled = true;
+      checkBtn.classList.remove("is-checking");
+      checkBtn.classList.add("is-status");
       checkBtn.textContent = t("updateCheckFail");
-      _updateCheckResetTimer = setTimeout(() => restoreCheckBtn(defaultLabel), 3500);
+      scheduleRestore(3500);
     }
     showToast(t("updateCheckFail") + ": " + e.message, "error");
     return null;
