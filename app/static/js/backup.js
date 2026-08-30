@@ -155,6 +155,7 @@ const I18N = {
     lblNewPassConfirm: "تکرار رمز جدید",
     btnSaveSettings: "ذخیره تنظیمات",
     saved: "ذخیره شد",
+    saveFail: "ذخیره نشد",
     streamH2: "ارسال استریم به ویزارد",
     streamDesc: "فایل بکاپ روی همین سرور می‌ماند؛ فقط یک کپی به ویزارد مقصد فرستاده می‌شود. اول مقصد را در حالت دریافت بگذارید، بعد از اینجا ارسال کنید.",
     streamStep1: "روی سرور مقصد: ویزارد → ریستور → آماده‌سازی دریافت استریم",
@@ -348,6 +349,7 @@ const I18N = {
     lblNewPassConfirm: "Confirm new password",
     btnSaveSettings: "Save settings",
     saved: "Saved",
+    saveFail: "Save failed",
     streamH2: "Stream to wizard",
     streamDesc: "The zip stays on this server; only a copy is sent to the destination wizard. Put the destination in receive mode first, then send from here.",
     streamStep1: "On destination: Wizard → Restore → Ready to receive stream",
@@ -541,6 +543,7 @@ const I18N = {
     lblNewPassConfirm: "Повтор нового пароля",
     btnSaveSettings: "Сохранить настройки",
     saved: "Сохранено",
+    saveFail: "Не сохранено",
     streamH2: "Стрим в мастер",
     streamDesc: "ZIP остаётся на этом сервере; на мастер назначения уходит только копия. Сначала включите приём на назначении, потом отправляйте отсюда.",
     streamStep1: "На назначении: Мастер → Restore → Готов принимать стрим",
@@ -641,6 +644,21 @@ function showToast(message, type = "success", opts = {}) {
   if (ttl > 0) setTimeout(remove, ttl);
   // Keep sticky host from stacking forever
   while (host.children.length > 4) host.lastElementChild?.remove();
+  // Toasts sit at the top of main — scroll there so Save / ops aren't missed.
+  if (opts.scroll !== false) {
+    requestAnimationFrame(() => {
+      try {
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      } catch (_) {
+        window.scrollTo(0, 0);
+      }
+      try {
+        host.scrollIntoView({ behavior: "smooth", block: "start" });
+      } catch (_) {
+        host.scrollIntoView(true);
+      }
+    });
+  }
 }
 
 function showBackupModal({ title, body, okText, cancelText, danger = false, showCancel = false }) {
@@ -1651,6 +1669,7 @@ async function refreshTelegramStatusTag() {
 
 async function saveSettings(opts = {}) {
   const quiet = !!opts.quiet;
+  try {
   const tokenVal = document.getElementById("tgToken").value.trim();
   const adminId = document.getElementById("tgChat").value.trim();
   const extraChat = document.getElementById("tgChat2").value.trim();
@@ -1715,6 +1734,10 @@ async function saveSettings(opts = {}) {
   }
   if (!quiet) showToast(t("saved"), "success");
   refreshTelegramStatusTag().catch(() => {});
+  } catch (e) {
+    if (!quiet) showToast(t("saveFail") + ": " + (e.message || e), "error");
+    throw e;
+  }
 }
 
 async function testTelegram() {

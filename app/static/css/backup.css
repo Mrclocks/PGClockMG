@@ -607,6 +607,7 @@
   margin: 0 0 18px;
   padding: 0;
   pointer-events: none;
+  scroll-margin-top: 12px;
 }
 
 .backup-toast-host:empty {
