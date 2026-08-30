@@ -266,6 +266,7 @@
   display: flex;
   flex-direction: column;
   align-items: stretch;
+  overflow: hidden; /* keep progress row & log the same width */
 }
 
 .backup-run-box > .backup-progress-meta,
@@ -274,12 +275,15 @@
   max-width: 100%;
   box-sizing: border-box;
   align-self: stretch;
+  margin-inline: 0;
 }
 
+/* Track + percent share one full-width row matching the log box below */
 .backup-progress-meta {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
+  column-gap: 10px;
   margin: 0 0 8px;
   width: 100%;
   max-width: 100%;
@@ -294,8 +298,20 @@
   overflow: hidden;
   margin: 0;
   width: 100%;
-  flex: 1 1 auto;
   min-width: 0;
+  grid-column: 1;
+}
+
+.backup-progress-pct {
+  grid-column: 2;
+  flex-shrink: 0;
+  min-width: 3.2em;
+  text-align: end;
+  font-size: 0.82rem;
+  font-weight: 650;
+  color: var(--success);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
 
 .backup-log {
@@ -309,6 +325,8 @@
   font-family: var(--font-mono);
   font-size: 0.78rem;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   direction: ltr;
   text-align: left;
   width: 100%;
@@ -378,16 +396,6 @@
   align-items: center;
 }
 
-.backup-progress-pct {
-  flex-shrink: 0;
-  min-width: 3.2em;
-  text-align: end;
-  font-size: 0.82rem;
-  font-weight: 650;
-  color: var(--success);
-  font-variant-numeric: tabular-nums;
-}
-
 .backup-progress-bar {
   height: 100%;
   width: 0%;
@@ -441,7 +449,7 @@
   50% { opacity: 1; transform: scaleX(1); }
 }
 
-/* Update banner — solid orange, no gradient */
+/* Update banner — solid orange; title+caption vertically centered with icon/CTA */
 .backup-update-banner {
   display: flex;
   flex-wrap: wrap;
@@ -462,29 +470,41 @@
 
 .backup-update-banner-main {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 12px;
   min-width: 0;
   flex: 1;
 }
 
+.backup-update-banner-main .choice-icon {
+  margin-bottom: 0;
+}
+
 .backup-update-banner-copy {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
 }
 
 .backup-update-banner-copy strong {
   display: block;
-  margin-bottom: 2px;
+  margin: 0;
   color: hsl(24, 95%, 62%);
+  line-height: 1.35;
+  font-size: 0.98rem;
 }
 
 .backup-update-banner-copy .desc-sm {
   color: var(--text-muted);
   margin: 0;
+  line-height: 1.45;
 }
 
 .backup-update-banner-actions {
   display: flex;
+  align-items: center;
   gap: 8px;
   flex-shrink: 0;
 }
@@ -574,30 +594,37 @@
   margin-top: 0;
 }
 
-/* Global top-of-page toasts — same tokens as success/warning/error cards */
+/* In-flow alerts at top of main content — not sticky/floating */
 .backup-toast-host {
-  position: sticky;
-  top: 0;
-  z-index: 1200;
+  position: static;
+  z-index: auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 0;
-  margin: 0 0 4px;
+  gap: 10px;
   width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 18px;
+  padding: 0;
   pointer-events: none;
 }
 
 .backup-toast-host:empty {
   display: none;
+  margin: 0;
+}
+
+.backup-app .main > .backup-toast-host:not(:empty) {
+  margin-top: 0;
+  margin-bottom: 18px;
 }
 
 .backup-toast {
   pointer-events: auto;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 12px;
-  margin-top: 0;
+  margin: 0;
   padding: 14px 16px;
   border-radius: var(--radius-sm);
   border: 1.5px solid var(--border-soft);
@@ -605,12 +632,12 @@
   color: var(--text);
   font-size: 0.92rem;
   line-height: 1.45;
-  box-shadow: 0 10px 28px hsla(0, 0%, 0%, 0.28);
-  animation: backup-toast-in 0.28s ease-out;
+  box-shadow: none;
+  animation: backup-toast-in 0.2s ease-out;
 }
 
 .backup-toast.is-leaving {
-  animation: backup-toast-out 0.28s ease-in forwards;
+  animation: backup-toast-out 0.2s ease-in forwards;
 }
 
 .backup-toast.is-success {
@@ -663,13 +690,13 @@
 }
 
 @keyframes backup-toast-in {
-  from { opacity: 0; transform: translateY(-8px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 @keyframes backup-toast-out {
-  from { opacity: 1; transform: translateY(0); }
-  to { opacity: 0; transform: translateY(-6px); }
+  from { opacity: 1; }
+  to { opacity: 0; }
 }
 
 .backup-section-head {

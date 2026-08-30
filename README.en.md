@@ -1,4 +1,4 @@
-> 🚀 **`v4.2.2`** — Correct large Timescale dump counts; no false empty-backup rejects
+> 🚀 **`v4.2.3`** — In-flow toasts, update banner centering, progress row width
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
