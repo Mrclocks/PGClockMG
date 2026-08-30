@@ -1,4 +1,4 @@
-> 🚀 **`v4.2.3`** — In-flow toasts, update banner centering, progress row width
+> 🚀 **`v4.3.0`** — Interval schedule, timezone, retention days, integrity verify, multi-Telegram, failure notify
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
