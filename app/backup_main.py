@@ -36,7 +36,7 @@ from app.services.backup_telegram import (
 )
 from app.services.prerequisites import get_system_status, is_pasarguard_installed
 
-APP_VERSION = "4.1.5"
+APP_VERSION = "4.1.6"
 
 
 @asynccontextmanager
@@ -294,7 +294,10 @@ async def dashboard():
         "schedule": sched,
         "telegram": {
             "enabled": bool(tg.get("enabled")),
-            "configured": bool((tg.get("bot_token") or "").strip() and (tg.get("chat_id") or "").strip()),
+            "configured": bool(
+                (tg.get("bot_token") or "").strip()
+                and ((tg.get("chat_id") or tg.get("admin_id") or "").strip())
+            ),
             "proxy_enabled": bool(tg.get("proxy_enabled")),
         },
         "stream_dest": ((cfg.get("stream") or {}).get("default_dest_url") or ""),
@@ -426,6 +429,10 @@ async def api_put_settings(body: SettingsPatch):
     if body.telegram is not None:
         current = load_settings().get("telegram") or {}
         tg = dict(body.telegram)
+        # UI/API alias: admin_id → chat_id
+        admin_id = (tg.pop("admin_id", None) or "").strip()
+        if admin_id and not (tg.get("chat_id") or "").strip():
+            tg["chat_id"] = admin_id
         # keep previous secrets when blank
         if not (tg.get("bot_token") or "").strip():
             tg["bot_token"] = current.get("bot_token") or ""
@@ -446,9 +453,11 @@ async def api_put_settings(body: SettingsPatch):
 @app.get("/api/telegram/status")
 async def api_telegram_status():
     cfg = load_settings()
-    tg = cfg.get("telegram") or {}
+    from app.services.backup_telegram import resolve_admin_chat_id, telegram_config
+
+    tg = telegram_config(cfg)
     enabled = bool(tg.get("enabled"))
-    configured = bool((tg.get("bot_token") or "").strip() and (tg.get("chat_id") or "").strip())
+    configured = bool((tg.get("bot_token") or "").strip() and resolve_admin_chat_id(tg))
     if not enabled or not configured:
         return {
             "ok": False,
@@ -470,7 +479,10 @@ async def api_telegram_status():
 
 @app.post("/api/telegram/test")
 async def api_telegram_test(body: TelegramTestBody | None = None):
-    result = test_telegram_connection()
+    """Connect Telegram, create a real backup, and send the zip document to Admin ID."""
+    import asyncio
+
+    result = await asyncio.to_thread(test_telegram_connection)
     if not result.get("ok"):
         raise HTTPException(400, result.get("error") or "telegram_test_failed")
     result["connected"] = True

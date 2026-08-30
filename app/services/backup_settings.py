@@ -128,5 +128,9 @@ def public_settings(data: dict | None = None) -> dict:
         tg["proxy_password"] = ""
     else:
         tg["proxy_password_set"] = False
+    # Expose admin_id as the preferred UI field (same value as Telegram chat_id).
+    chat = (tg.get("chat_id") or tg.get("admin_id") or "").strip()
+    tg["chat_id"] = chat
+    tg["admin_id"] = chat
     cfg["telegram"] = tg
     return cfg

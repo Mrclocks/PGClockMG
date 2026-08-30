@@ -76,6 +76,11 @@ const I18N = {
     confirmDeleteTitle: "حذف بکاپ",
     tgTestOkTitle: "تست تلگرام",
     tgTestFailTitle: "خطای تلگرام",
+    tgTestOkBody: "متصل شد و بکاپ با فایل به تلگرام ارسال شد",
+    tgSendOk: "بکاپ با فایل به تلگرام ارسال شد",
+    tgSendFail: "ارسال به تلگرام ناموفق بود",
+    tgAutoSent: "بکاپ به تلگرام هم ارسال شد",
+    tgAutoFail: "بکاپ ساخته شد ولی ارسال تلگرام ناموفق بود",
     streamFailTitle: "خطای استریم",
     clearErrorFailTitle: "خطا",
     confirmDelete: "این بکاپ حذف شود؟",
@@ -92,10 +97,10 @@ const I18N = {
     setTgHint: "اختیاری — فایل روی سرور تک‌تکه می‌ماند؛ برای تلگرام در صورت نیاز تکه می‌شود.",
     lblTgEnabled: "ارسال به تلگرام فعال باشد",
     lblTgToken: "Bot Token",
-    lblTgChat: "Chat ID",
+    lblTgChat: "Admin ID",
     lblTgCaption: "متن پیام",
     tgCaptionHint: "متغیرها: {date} {size} {db_type} {users} {nodes} {status} {filename} {parts}",
-    btnTgTest: "تست اتصال",
+    btnTgTest: "اتصال و ارسال بکاپ",
     setProxyTitle: "پروکسی تلگرام",
     setProxyHint: "اگر تلگرام مستقیم در دسترس نیست.",
     lblProxyEnabled: "از پروکسی استفاده کن",
@@ -229,6 +234,11 @@ const I18N = {
     confirmDeleteTitle: "Delete backup",
     tgTestOkTitle: "Telegram test",
     tgTestFailTitle: "Telegram error",
+    tgTestOkBody: "Connected — backup file sent to Telegram",
+    tgSendOk: "Backup file sent to Telegram",
+    tgSendFail: "Telegram send failed",
+    tgAutoSent: "Backup also sent to Telegram",
+    tgAutoFail: "Backup created but Telegram send failed",
     streamFailTitle: "Stream error",
     clearErrorFailTitle: "Error",
     confirmDelete: "Delete this backup?",
@@ -245,10 +255,10 @@ const I18N = {
     setTgHint: "Optional — kept as one file on disk; split only for Telegram upload.",
     lblTgEnabled: "Enable Telegram delivery",
     lblTgToken: "Bot Token",
-    lblTgChat: "Chat ID",
+    lblTgChat: "Admin ID",
     lblTgCaption: "Message text",
     tgCaptionHint: "Vars: {date} {size} {db_type} {users} {nodes} {status} {filename} {parts}",
-    btnTgTest: "Test connection",
+    btnTgTest: "Connect & send backup",
     setProxyTitle: "Telegram proxy",
     setProxyHint: "Use when Telegram is blocked directly.",
     lblProxyEnabled: "Use proxy",
@@ -382,6 +392,11 @@ const I18N = {
     confirmDeleteTitle: "Удалить бэкап",
     tgTestOkTitle: "Тест Telegram",
     tgTestFailTitle: "Ошибка Telegram",
+    tgTestOkBody: "Подключено — файл бэкапа отправлен в Telegram",
+    tgSendOk: "Файл бэкапа отправлен в Telegram",
+    tgSendFail: "Не удалось отправить в Telegram",
+    tgAutoSent: "Бэкап также отправлен в Telegram",
+    tgAutoFail: "Бэкап создан, но отправка в Telegram не удалась",
     streamFailTitle: "Ошибка стрима",
     clearErrorFailTitle: "Ошибка",
     confirmDelete: "Удалить бэкап?",
@@ -398,10 +413,10 @@ const I18N = {
     setTgHint: "Опционально — на диске один файл; дробление только для Telegram.",
     lblTgEnabled: "Включить Telegram",
     lblTgToken: "Bot Token",
-    lblTgChat: "Chat ID",
+    lblTgChat: "Admin ID",
     lblTgCaption: "Текст сообщения",
     tgCaptionHint: "Переменные: {date} {size} {db_type} {users} {nodes} {status} {filename} {parts}",
-    btnTgTest: "Тест",
+    btnTgTest: "Подключить и отправить бэкап",
     setProxyTitle: "Прокси Telegram",
     setProxyHint: "Если Telegram недоступен напрямую.",
     lblProxyEnabled: "Использовать прокси",
@@ -490,6 +505,38 @@ let pollTimer = null;
 let backupProgressFadeTimer = null;
 let backupProgressHideTimer = null;
 let _modalResolver = null;
+let _toastSeq = 0;
+
+function showToast(message, type = "success", opts = {}) {
+  const host = document.getElementById("backupToastHost");
+  if (!host || !message) return;
+  const kind = ["success", "error", "warning"].includes(type) ? type : "success";
+  const el = document.createElement("div");
+  el.className = `backup-toast is-${kind}`;
+  el.setAttribute("role", kind === "error" ? "alert" : "status");
+  el.dataset.toastId = String(++_toastSeq);
+  const msg = document.createElement("div");
+  msg.className = "backup-toast-msg";
+  msg.textContent = message;
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "backup-toast-close";
+  close.setAttribute("aria-label", "Close");
+  close.textContent = "×";
+  const remove = () => {
+    if (!el.isConnected) return;
+    el.classList.add("is-leaving");
+    setTimeout(() => el.remove(), 280);
+  };
+  close.addEventListener("click", remove);
+  el.appendChild(msg);
+  el.appendChild(close);
+  host.prepend(el);
+  const ttl = typeof opts.ttl === "number" ? opts.ttl : (kind === "error" ? 9000 : 5200);
+  if (ttl > 0) setTimeout(remove, ttl);
+  // Keep sticky host from stacking forever
+  while (host.children.length > 4) host.lastElementChild?.remove();
+}
 
 function showBackupModal({ title, body, okText, cancelText, danger = false, showCancel = false }) {
   return new Promise((resolve) => {
@@ -1018,6 +1065,14 @@ async function createBackupNow() {
     title.textContent = t("backupDone") + (done.filename ? ": " + done.filename : "");
     logEl.classList.add("hidden");
     track?.classList.add("hidden");
+    const tg = done.telegram;
+    if (tg && tg.ok) {
+      showToast(t("backupDone") + (done.filename ? ": " + done.filename : "") + "\n" + t("tgAutoSent"), "success");
+    } else if (tg && tg.ok === false) {
+      showToast(t("tgAutoFail") + (tg.error ? ": " + tg.error : ""), "warning");
+    } else {
+      showToast(t("backupDone") + (done.filename ? ": " + done.filename : ""), "success");
+    }
     await refreshDashboard();
     await refreshList();
     backupProgressFadeTimer = setTimeout(() => {
@@ -1035,6 +1090,7 @@ async function createBackupNow() {
     title.textContent = t("backupFail") + ": " + e.message;
     logEl.classList.remove("hidden");
     track?.classList.remove("hidden");
+    showToast(t("backupFail") + ": " + e.message, "error");
   } finally {
     if (listBtn) listBtn.disabled = false;
   }
@@ -1128,16 +1184,14 @@ async function refreshList() {
 async function sendTelegram(id) {
   try {
     const r = await api("/api/backups/" + encodeURIComponent(id) + "/telegram", { method: "POST", body: "{}" });
-    await showBackupModal({
-      title: t("tgTestOkTitle"),
-      body: r.ok ? `OK · parts=${r.parts}` : (r.error || "fail"),
-    });
+    showToast(
+      r.ok
+        ? t("tgSendOk") + (r.parts ? ` · parts=${r.parts}` : "")
+        : (r.error || t("tgSendFail")),
+      r.ok ? "success" : "error",
+    );
   } catch (e) {
-    await showBackupModal({
-      title: t("tgTestFailTitle"),
-      body: e.message,
-      danger: true,
-    });
+    showToast(t("tgSendFail") + ": " + e.message, "error");
   }
 }
 
@@ -1223,6 +1277,7 @@ async function sendStream() {
     box.classList.add("is-error");
     msg.classList.remove("hidden");
     msg.textContent = e.message;
+    showToast(t("streamFail") + ": " + e.message, "error");
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -1252,6 +1307,7 @@ async function pollStreamJob(jobId) {
           const msg = document.getElementById("streamMsg");
           msg.classList.remove("hidden");
           msg.textContent = t("streamSuccess") + (job.result && job.result.sha256 ? " · sha256=" + job.result.sha256.slice(0, 12) + "…" : "");
+          showToast(msg.textContent, "success");
           resolve(job);
           return;
         } else if (job.status === "error") {
@@ -1280,7 +1336,7 @@ async function loadSettingsForm() {
   document.getElementById("tgToken").value = "";
   document.getElementById("tgToken").placeholder = tg.bot_token_hint || "";
   document.getElementById("tgTokenHint").textContent = tg.bot_token_set ? (tg.bot_token_hint || "••••") : "";
-  document.getElementById("tgChat").value = tg.chat_id || "";
+  document.getElementById("tgChat").value = tg.admin_id || tg.chat_id || "";
   document.getElementById("tgCaption").value = tg.caption_template || "";
   document.getElementById("proxyEnabled").checked = !!tg.proxy_enabled;
   setProxyTypeValue(tg.proxy_type || "socks5");
@@ -1323,10 +1379,10 @@ async function refreshTelegramStatusTag() {
   }
 }
 
-async function saveSettings() {
-  const msg = document.getElementById("settingsMsg");
-  msg.classList.add("hidden");
+async function saveSettings(opts = {}) {
+  const quiet = !!opts.quiet;
   const tokenVal = document.getElementById("tgToken").value.trim();
+  const adminId = document.getElementById("tgChat").value.trim();
   const patch = {
     retention_count: Number(document.getElementById("retentionCount").value || 10),
     schedule: {
@@ -1338,7 +1394,8 @@ async function saveSettings() {
     telegram: {
       enabled: document.getElementById("tgEnabled").checked,
       bot_token: tokenVal,
-      chat_id: document.getElementById("tgChat").value.trim(),
+      chat_id: adminId,
+      admin_id: adminId,
       caption_template: document.getElementById("tgCaption").value,
       proxy_enabled: document.getElementById("proxyEnabled").checked,
       proxy_type: document.getElementById("proxyType").value,
@@ -1369,27 +1426,35 @@ async function saveSettings() {
     document.getElementById("newPassword").value = "";
     document.getElementById("newPasswordConfirm").value = "";
   }
-  msg.textContent = t("saved");
-  msg.classList.remove("hidden");
+  const msg = document.getElementById("settingsMsg");
+  if (msg) {
+    msg.textContent = t("saved");
+    msg.classList.remove("hidden");
+  }
+  if (!quiet) showToast(t("saved"), "success");
   refreshTelegramStatusTag().catch(() => {});
 }
 
 async function testTelegram() {
+  const btn = document.getElementById("btnTgTest");
+  if (btn) btn.disabled = true;
   try {
-    await saveSettings();
+    document.getElementById("tgEnabled").checked = true;
+    await saveSettings({ quiet: true });
+    showToast(t("backupRunning"), "warning", { ttl: 4000 });
     const r = await api("/api/telegram/test", { method: "POST", body: "{}" });
     setTelegramStatusTag({ connected: true });
-    await showBackupModal({
-      title: t("tgTestOkTitle"),
-      body: "OK · @" + ((r.bot && r.bot.username) || "?"),
-    });
+    const bot = (r.bot && r.bot.username) ? (" @" + r.bot.username) : "";
+    const file = (r.backup && r.backup.filename) ? ("\n" + r.backup.filename) : "";
+    showToast(t("tgTestOkBody") + bot + file, "success", { ttl: 8000 });
+    await refreshList();
+    await refreshDashboard();
+    await loadSettingsForm();
   } catch (e) {
     setTelegramStatusTag({ connected: false });
-    await showBackupModal({
-      title: t("tgTestFailTitle"),
-      body: e.message,
-      danger: true,
-    });
+    showToast(t("tgTestFailTitle") + ": " + e.message, "error");
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -1457,12 +1522,9 @@ async function clearLastError() {
     const errBody = document.getElementById("dashErrorBody");
     if (errBox) errBox.classList.add("hidden");
     if (errBody) errBody.textContent = "";
+    showToast(t("saved"), "success");
   } catch (e) {
-    await showBackupModal({
-      title: t("clearErrorFailTitle"),
-      body: e.message,
-      danger: true,
-    });
+    showToast(t("clearErrorFailTitle") + ": " + e.message, "error");
   }
 }
 
