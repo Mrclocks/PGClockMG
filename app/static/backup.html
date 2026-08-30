@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#0f1218">
   <title>PGClockMG Backup</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=4.0.5">
-  <link rel="stylesheet" href="/static/css/backup.css?v=4.0.5">
+  <link rel="stylesheet" href="/static/css/style.css?v=4.0.6">
+  <link rel="stylesheet" href="/static/css/backup.css?v=4.0.6">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
@@ -116,7 +116,12 @@
           </div>
           <pre id="backupProgressLog" class="backup-log"></pre>
         </div>
-        <div id="dashError" class="warning-card hidden backup-top-error" role="alert"></div>
+        <div id="dashError" class="warning-card hidden backup-top-error" role="alert">
+          <div class="backup-error-row">
+            <div class="backup-error-body" id="dashErrorBody"></div>
+            <button type="button" class="btn btn-back btn-sm" id="btnClearLastError" onclick="clearLastError()"></button>
+          </div>
+        </div>
 
         <h3 class="section-title" id="secHealthTitle"></h3>
         <div class="backup-icon-grid" id="dashHealthGrid"></div>
@@ -235,10 +240,8 @@
               <p class="desc-sm" id="tgCaptionHint"></p>
             </div>
             <div class="actions backup-actions-wrap">
-              <button type="button" class="btn btn-back" id="btnTgPreview" onclick="previewTelegram()"></button>
               <button type="button" class="btn btn-primary" id="btnTgTest" onclick="testTelegram()"></button>
             </div>
-            <pre id="tgPreviewBox" class="backup-log hidden"></pre>
           </article>
 
           <article class="backup-settings-card">
@@ -260,10 +263,17 @@
             <div class="form-row">
               <div class="form-group">
                 <label id="lblProxyType"></label>
-                <select id="proxyType" class="text-input">
-                  <option value="socks5">SOCKS5</option>
-                  <option value="http">HTTP</option>
-                </select>
+                <div class="backup-select" id="proxyTypeSelect">
+                  <button type="button" class="backup-select-trigger" id="proxyTypeTrigger" aria-haspopup="listbox" aria-expanded="false">
+                    <span id="proxyTypeLabel">SOCKS5</span>
+                    <svg class="backup-select-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+                  </button>
+                  <ul class="backup-select-menu hidden" id="proxyTypeMenu" role="listbox">
+                    <li role="option" tabindex="-1" data-value="socks5" aria-selected="true">SOCKS5</li>
+                    <li role="option" tabindex="-1" data-value="http" aria-selected="false">HTTP</li>
+                  </ul>
+                  <input type="hidden" id="proxyType" value="socks5">
+                </div>
               </div>
               <div class="form-group">
                 <label id="lblProxyHost"></label>
@@ -379,6 +389,6 @@
 
     </main>
   </div>
-  <script src="/static/js/backup.js?v=4.0.5"></script>
+  <script src="/static/js/backup.js?v=4.0.6"></script>
 </body>
 </html>

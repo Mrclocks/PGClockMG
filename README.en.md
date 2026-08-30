@@ -1,4 +1,4 @@
-> 🚀 **`v4.0.5`** — Clearer stream UX + DB dump hardening + top-of-page last error  
+> 🚀 **`v4.0.6`** — Drop Telegram preview + custom proxy select + clear last error
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
