@@ -657,16 +657,22 @@ function formatSimpleTime(iso) {
   return s.replace("T", " ").replace(/Z$/, "").replace(/\.\d+/, "").slice(0, 16);
 }
 
-function metricCard({ tone, icon, label, value, sub, status, valueLtr = true, hintLtr = false }) {
+function metricCard({ tone, icon, label, value, sub, subHtml, status, valueLtr = true, hintLtr = false }) {
   const statusCls = status ? ` is-${status}` : "";
   const valueDir = valueLtr ? ' dir="ltr"' : "";
   const hintDir = hintLtr ? ' dir="ltr"' : "";
+  let hint = "";
+  if (subHtml) {
+    hint = `<p class="backup-health-hint">${subHtml}</p>`;
+  } else if (sub) {
+    hint = `<p class="backup-health-hint"${hintDir}>${esc(sub)}</p>`;
+  }
   return `<article class="backup-health-card">
     <span class="choice-icon ${tone}" aria-hidden="true">${icon}</span>
     <div class="backup-health-body">
       <p class="backup-health-label">${esc(label)}</p>
       <p class="backup-health-value${statusCls}"${valueDir}>${esc(value)}</p>
-      ${sub ? `<p class="backup-health-hint"${hintDir}>${esc(sub)}</p>` : ""}
+      ${hint}
     </div>
   </article>`;
 }
@@ -787,31 +793,32 @@ async function refreshDashboard() {
       value: sys.docker ? t("healthOk") : t("healthMissing"),
       status: sys.docker ? "ok" : "off",
       valueLtr: false,
-      sub: `${t("profile")}: ${health.profile || "—"}`,
+      subHtml: `${esc(t("profile"))}: <bdi dir="ltr">${esc(health.profile || "—")}</bdi>`,
     }),
     metricCard({
       tone: "icon-tone-orange",
       icon: ICONS.disk,
       label: t("healthDisk"),
       value: humanSize(diskFree),
-      sub: diskTotal != null ? `${t("freeOf")} ${humanSize(diskTotal)}` : "",
-      hintLtr: true,
+      subHtml: diskTotal != null
+        ? `${esc(t("freeOf"))} <bdi dir="ltr">${esc(humanSize(diskTotal))}</bdi>`
+        : "",
     }),
     metricCard({
       tone: "icon-tone-green",
       icon: ICONS.cpu,
       label: t("healthMem"),
       value: memFree != null ? humanSize(memFree) : "—",
-      sub: health.cpu_count != null ? `CPU ${health.cpu_count} · load ${load ?? "—"}` : "",
-      hintLtr: true,
+      subHtml: health.cpu_count != null
+        ? `<bdi dir="ltr">CPU ${esc(health.cpu_count)} · load ${esc(load ?? "—")}</bdi>`
+        : "",
     }),
     metricCard({
       tone: "icon-tone-yellow",
       icon: ICONS.archive,
       label: t("healthArchives"),
       value: String(data.backup_count ?? 0),
-      sub: `${t("totalSize")}: ${humanSize(data.backup_total_bytes)}`,
-      hintLtr: true,
+      subHtml: `${esc(t("totalSize"))}: <bdi dir="ltr">${esc(humanSize(data.backup_total_bytes))}</bdi>`,
     }),
     metricCard({
       tone: "icon-tone-blue",
@@ -820,7 +827,7 @@ async function refreshDashboard() {
       value: sched.enabled ? schedTime : t("scheduleOff"),
       status: sched.enabled ? "ok" : "off",
       valueLtr: true,
-      sub: `${t("keepLast")}: ${data.retention_count || 10}`,
+      subHtml: `${esc(t("keepLast"))}: <bdi dir="ltr">${esc(data.retention_count || 10)}</bdi>`,
     }),
   ].join("");
 
