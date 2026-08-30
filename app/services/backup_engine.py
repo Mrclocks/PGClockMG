@@ -1181,7 +1181,7 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
         )
 
         BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        filename = f"pgclockmg-{db_type}-{_stamp()}.zip"
+        filename = f"pgclockmg-{_stamp()}.zip"
         out_path = BACKUP_DIR / filename
         _set_progress(job, 72, f"Writing zip {filename}…")
         with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
