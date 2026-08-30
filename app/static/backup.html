@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#0f1218">
   <title>PGClockMG Backup</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=4.0.4">
-  <link rel="stylesheet" href="/static/css/backup.css?v=4.0.4">
+  <link rel="stylesheet" href="/static/css/style.css?v=4.0.4c">
+  <link rel="stylesheet" href="/static/css/backup.css?v=4.0.4c">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
@@ -102,21 +102,19 @@
             <h2 id="dashH2"></h2>
             <p class="desc" id="dashDesc"></p>
           </div>
-          <div class="backup-run-col">
-            <button type="button" class="btn btn-primary" id="btnBackupNow" onclick="createBackupNow()"></button>
-            <div id="backupProgress" class="backup-run-box hidden" role="status" aria-live="polite">
-              <div class="backup-section-head">
-                <span class="choice-icon icon-tone-orange" id="backupProgressIcon" aria-hidden="true">
-                  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 3v4"/><path d="M12 17v4"/><path d="M3 12h4"/><path d="M17 12h4"/><circle cx="12" cy="12" r="3"/></svg>
-                </span>
-                <p id="backupProgressTitle" class="desc-sm" style="margin:0"></p>
-              </div>
-              <div class="backup-progress-track" aria-hidden="true">
-                <div class="backup-progress-bar" id="backupProgressBar"></div>
-              </div>
-              <pre id="backupProgressLog" class="backup-log"></pre>
-            </div>
+          <button type="button" class="btn btn-primary" id="btnBackupNow" onclick="createBackupNow()"></button>
+        </div>
+        <div id="backupProgress" class="backup-run-box hidden" role="status" aria-live="polite">
+          <div class="backup-section-head">
+            <span class="choice-icon icon-tone-neutral" id="backupProgressIcon" aria-hidden="true">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 3v4"/><path d="M12 17v4"/><path d="M3 12h4"/><path d="M17 12h4"/><circle cx="12" cy="12" r="3"/></svg>
+            </span>
+            <p id="backupProgressTitle" class="desc-sm" style="margin:0"></p>
           </div>
+          <div class="backup-progress-track" aria-hidden="true">
+            <div class="backup-progress-bar" id="backupProgressBar"></div>
+          </div>
+          <pre id="backupProgressLog" class="backup-log"></pre>
         </div>
 
         <h3 class="section-title" id="secHealthTitle"></h3>
@@ -125,7 +123,7 @@
         <h3 class="section-title" id="secPgTitle"></h3>
         <div id="dashPgCard" class="success-card backup-section-card">
           <div class="backup-section-head">
-            <span class="choice-icon icon-tone-blue" aria-hidden="true">
+            <span class="choice-icon icon-tone-white" aria-hidden="true">
               <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 3l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V7l8-4z"/></svg>
             </span>
             <div>
@@ -133,16 +131,13 @@
               <p class="desc-sm" id="dashPgSub"></p>
             </div>
           </div>
-          <div id="dashPgSpecs" class="specs-grid"></div>
+          <div id="dashPgSpecs" class="specs-grid backup-pg-specs"></div>
         </div>
-
-        <h3 class="section-title" id="secStatsTitle"></h3>
-        <div class="backup-icon-grid backup-stat-grid" id="dashStats"></div>
 
         <h3 class="section-title" id="secBackupStatusTitle"></h3>
         <div class="backup-split-grid">
-          <div class="info-box backup-section-card" id="dashLast"></div>
-          <div class="info-box backup-section-card" id="dashDelivery"></div>
+          <div class="info-box backup-section-card backup-status-card" id="dashLast"></div>
+          <div class="info-box backup-section-card backup-status-card" id="dashDelivery"></div>
         </div>
         <div id="dashError" class="warning-card hidden" style="margin-top:12px"></div>
       </section>
@@ -168,17 +163,20 @@
 
         <div class="backup-settings-stack">
           <article class="backup-settings-card">
-            <div class="backup-section-head">
+            <div class="backup-settings-head">
               <span class="choice-icon icon-tone-blue" aria-hidden="true">
                 <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
               </span>
-              <div>
-                <h3 class="section-title" id="setSchedTitle"></h3>
+              <div class="backup-settings-head-body">
+                <div class="backup-switch-row">
+                  <h3 class="section-title" id="setSchedTitle"></h3>
+                  <label class="ios-toggle" for="schedEnabled" id="lblSchedEnabledWrap">
+                    <input type="checkbox" id="schedEnabled" role="switch">
+                    <span class="ios-toggle-track"><span class="ios-toggle-thumb"></span></span>
+                  </label>
+                </div>
                 <p class="desc-sm" id="setSchedHint"></p>
               </div>
-            </div>
-            <div class="form-group">
-              <label class="check-row"><input type="checkbox" id="schedEnabled"> <span id="lblSchedEnabled"></span></label>
             </div>
             <div class="form-row">
               <div class="form-group">
@@ -194,26 +192,33 @@
                 <input type="number" min="1" max="100" id="retentionCount" class="text-input">
               </div>
             </div>
-            <div class="form-group">
-              <label class="check-row"><input type="checkbox" id="schedTelegram"> <span id="lblSchedTelegram"></span></label>
+            <div class="backup-switch-row backup-switch-row-inset">
+              <span class="backup-switch-label" id="lblSchedTelegram"></span>
+              <label class="ios-toggle" for="schedTelegram">
+                <input type="checkbox" id="schedTelegram" role="switch">
+                <span class="ios-toggle-track"><span class="ios-toggle-thumb"></span></span>
+              </label>
             </div>
           </article>
 
           <article class="backup-settings-card">
-            <div class="backup-section-head">
+            <div class="backup-settings-head">
               <span class="choice-icon icon-tone-cyan" aria-hidden="true">
                 <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M22 3L11 14"/><path d="M22 3l-7 19-3-8-8-3 18-8z"/></svg>
               </span>
-              <div>
-                <div class="backup-tg-title-row">
-                  <h3 class="section-title" id="setTgTitle"></h3>
-                  <span id="tgStatusTag" class="backup-status-tag is-unknown" role="status">…</span>
+              <div class="backup-settings-head-body">
+                <div class="backup-switch-row">
+                  <div class="backup-tg-title-row">
+                    <h3 class="section-title" id="setTgTitle"></h3>
+                    <span id="tgStatusTag" class="backup-status-tag is-unknown" role="status">…</span>
+                  </div>
+                  <label class="ios-toggle" for="tgEnabled">
+                    <input type="checkbox" id="tgEnabled" role="switch">
+                    <span class="ios-toggle-track"><span class="ios-toggle-thumb"></span></span>
+                  </label>
                 </div>
                 <p class="desc-sm" id="setTgHint"></p>
               </div>
-            </div>
-            <div class="form-group">
-              <label class="check-row"><input type="checkbox" id="tgEnabled"> <span id="lblTgEnabled"></span></label>
             </div>
             <div class="form-group">
               <label id="lblTgToken"></label>
@@ -237,17 +242,20 @@
           </article>
 
           <article class="backup-settings-card">
-            <div class="backup-section-head">
+            <div class="backup-settings-head">
               <span class="choice-icon icon-tone-orange" aria-hidden="true">
                 <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 12h16"/><path d="M12 4v16"/><circle cx="12" cy="12" r="9"/></svg>
               </span>
-              <div>
-                <h3 class="section-title" id="setProxyTitle"></h3>
+              <div class="backup-settings-head-body">
+                <div class="backup-switch-row">
+                  <h3 class="section-title" id="setProxyTitle"></h3>
+                  <label class="ios-toggle" for="proxyEnabled">
+                    <input type="checkbox" id="proxyEnabled" role="switch">
+                    <span class="ios-toggle-track"><span class="ios-toggle-thumb"></span></span>
+                  </label>
+                </div>
                 <p class="desc-sm" id="setProxyHint"></p>
               </div>
-            </div>
-            <div class="form-group">
-              <label class="check-row"><input type="checkbox" id="proxyEnabled"> <span id="lblProxyEnabled"></span></label>
             </div>
             <div class="form-row">
               <div class="form-group">
@@ -279,11 +287,11 @@
           </article>
 
           <article class="backup-settings-card">
-            <div class="backup-section-head">
+            <div class="backup-settings-head">
               <span class="choice-icon icon-tone-green" aria-hidden="true">
                 <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M16 3h5v5"/><path d="M4 20L21 3"/><path d="M21 16v5h-5"/></svg>
               </span>
-              <div>
+              <div class="backup-settings-head-body">
                 <h3 class="section-title" id="setStreamTitle"></h3>
                 <p class="desc-sm" id="streamDestHint"></p>
               </div>
@@ -295,11 +303,11 @@
           </article>
 
           <article class="backup-settings-card">
-            <div class="backup-section-head">
+            <div class="backup-settings-head">
               <span class="choice-icon icon-tone-red" aria-hidden="true">
                 <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
               </span>
-              <div>
+              <div class="backup-settings-head-body">
                 <h3 class="section-title" id="setPassTitle"></h3>
                 <p class="desc-sm" id="setPassHint"></p>
               </div>
@@ -352,6 +360,6 @@
 
     </main>
   </div>
-  <script src="/static/js/backup.js?v=4.0.4"></script>
+  <script src="/static/js/backup.js?v=4.0.4c"></script>
 </body>
 </html>

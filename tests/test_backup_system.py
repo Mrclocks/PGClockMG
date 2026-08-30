@@ -323,7 +323,6 @@ def test_backup_api_setup_login(tmp_path, monkeypatch):
     monkeypatch.setattr(bm, "get_system_status", lambda: {
         "pasarguard": False, "pasarguard_db": None, "docker": False, "resources": {},
     })
-    monkeypatch.setattr(bm, "live_panel_stats", lambda: {"ok": False, "counts": {}})
     monkeypatch.setattr(bm, "list_backup_files", lambda: [])
 
     client = TestClient(bm.app)

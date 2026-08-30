@@ -46,7 +46,7 @@ const I18N = {
     btnSetup: "ذخیره و ورود",
     btnLogin: "ورود",
     dashH2: "پایش و بکاپ",
-    dashDesc: "وضعیت سیستم، آمار پنل و بکاپ کامل با یک کلیک.",
+    dashDesc: "وضعیت سیستم و بکاپ کامل با یک کلیک.",
     dashPgTitle: "وضعیت PasarGuard",
     dashPgSubOk: "پنل روی این سرور نصب است و آماده بکاپ‌گیری است.",
     dashPgSubMissing: "PasarGuard روی این سرور پیدا نشد — اول پنل را نصب کنید.",
@@ -172,7 +172,7 @@ const I18N = {
     btnSetup: "Save & enter",
     btnLogin: "Sign in",
     dashH2: "Health & backup",
-    dashDesc: "System health, live panel stats, and one-click full backup.",
+    dashDesc: "System health and one-click full backup.",
     dashPgTitle: "PasarGuard status",
     dashPgSubOk: "Panel is installed on this server and ready for backup.",
     dashPgSubMissing: "PasarGuard was not found — install the panel first.",
@@ -298,7 +298,7 @@ const I18N = {
     btnSetup: "Сохранить и войти",
     btnLogin: "Войти",
     dashH2: "Мониторинг и бэкап",
-    dashDesc: "Здоровье системы, живая статистика и полный бэкап в один клик.",
+    dashDesc: "Здоровье системы и полный бэкап в один клик.",
     dashPgTitle: "Статус PasarGuard",
     dashPgSubOk: "Панель установлена и готова к бэкапу.",
     dashPgSubMissing: "PasarGuard не найден — сначала установите панель.",
@@ -431,17 +431,17 @@ function applyI18n() {
     ["tabDash", "tabDash"], ["tabList", "tabList"], ["tabSettings", "tabSettings"],
     ["btnLogout", "logout"], ["lblPassword", "lblPassword"], ["lblPasswordConfirm", "lblPasswordConfirm"],
     ["authPolicy", "authPolicy"], ["dashH2", "dashH2"], ["dashDesc", "dashDesc"], ["dashPgTitle", "dashPgTitle"],
-    ["secHealthTitle", "secHealthTitle"], ["secPgTitle", "secPgTitle"], ["secStatsTitle", "secStatsTitle"],
+    ["secHealthTitle", "secHealthTitle"], ["secPgTitle", "secPgTitle"],
     ["secBackupStatusTitle", "secBackupStatusTitle"],
     ["btnBackupNow", "btnBackupNow"], ["btnBackupNowList", "btnBackupNow"],
     ["listH2", "listH2"], ["listDesc", "listDesc"],
     ["setH2", "setH2"], ["setDesc", "setDesc"], ["setSchedTitle", "setSchedTitle"], ["setSchedHint", "setSchedHint"],
-    ["lblSchedEnabled", "lblSchedEnabled"], ["lblSchedHour", "lblSchedHour"], ["lblSchedMinute", "lblSchedMinute"],
+    ["lblSchedHour", "lblSchedHour"], ["lblSchedMinute", "lblSchedMinute"],
     ["lblRetention", "lblRetention"], ["lblSchedTelegram", "lblSchedTelegram"],
-    ["setTgTitle", "setTgTitle"], ["setTgHint", "setTgHint"], ["lblTgEnabled", "lblTgEnabled"], ["lblTgToken", "lblTgToken"],
+    ["setTgTitle", "setTgTitle"], ["setTgHint", "setTgHint"], ["lblTgToken", "lblTgToken"],
     ["lblTgChat", "lblTgChat"], ["lblTgCaption", "lblTgCaption"], ["tgCaptionHint", "tgCaptionHint"],
     ["btnTgPreview", "btnTgPreview"], ["btnTgTest", "btnTgTest"],
-    ["setProxyTitle", "setProxyTitle"], ["setProxyHint", "setProxyHint"], ["lblProxyEnabled", "lblProxyEnabled"],
+    ["setProxyTitle", "setProxyTitle"], ["setProxyHint", "setProxyHint"],
     ["lblProxyType", "lblProxyType"], ["lblProxyHost", "lblProxyHost"], ["lblProxyPort", "lblProxyPort"],
     ["lblProxyUser", "lblProxyUser"], ["lblProxyPass", "lblProxyPass"],
     ["setStreamTitle", "setStreamTitle"], ["lblStreamDest", "lblStreamDest"], ["streamDestHint", "streamDestHint"],
@@ -455,6 +455,17 @@ function applyI18n() {
   for (const [id, key] of map) {
     const el = document.getElementById(id);
     if (el) el.textContent = t(key);
+  }
+  // Switch aria labels (title is visible; keep accessible name on the control)
+  const switchLabels = [
+    ["schedEnabled", "lblSchedEnabled"],
+    ["schedTelegram", "lblSchedTelegram"],
+    ["tgEnabled", "lblTgEnabled"],
+    ["proxyEnabled", "lblProxyEnabled"],
+  ];
+  for (const [id, key] of switchLabels) {
+    const el = document.getElementById(id);
+    if (el) el.setAttribute("aria-label", t(key));
   }
   document.getElementById("authTitle").textContent = setupMode ? t("authSetupTitle") : t("authLoginTitle");
   document.getElementById("authDesc").textContent = setupMode ? t("authSetupDesc") : t("authLoginDesc");
@@ -622,8 +633,6 @@ async function refreshDashboard() {
     [t("db"), access.db_type || sys.pasarguard_db || "—"],
     [t("port"), access.port || "—"],
     [t("ssl"), access.ssl == null ? "—" : (access.ssl ? t("yes") : t("no"))],
-    [t("panelUrl"), access.url || "—"],
-    ["Docker", sys.docker ? "OK" : "—"],
   ].map(([label, value]) => `
     <div class="specs-item">
       <span class="specs-label">${esc(label)}</span>
@@ -680,36 +689,21 @@ async function refreshDashboard() {
     }),
   ].join("");
 
-  const counts = (data.live_stats && data.live_stats.counts) || {};
-  const tones = ["icon-tone-blue", "icon-tone-orange", "icon-tone-green", "icon-tone-cyan", "icon-tone-yellow", "icon-tone-red"];
-  const keys = [
-    ["users", "users"],
-    ["nodes", "nodes"],
-    ["admins", "admins"],
-    ["inbounds", "inbounds"],
-    ["hosts", "hosts"],
-    ["groups", "groups"],
-  ];
-  document.getElementById("dashStats").innerHTML = keys.map(([k, iconKey], idx) => metricCard({
-    tone: tones[idx % tones.length],
-    icon: ICONS[iconKey],
-    value: counts[k] == null ? "—" : String(counts[k]),
-    label: t(k),
-  })).join("");
-
   const last = data.last_backup;
   const lastBox = document.getElementById("dashLast");
   if (!last) {
+    lastBox.classList.remove("is-detailed");
     lastBox.innerHTML = `<div class="backup-section-head">
       <span class="choice-icon icon-tone-yellow" aria-hidden="true">${ICONS.archive}</span>
-      <div><h3 style="margin:0 0 4px;font-size:1rem">${esc(t("lastBackup"))}</h3>
-      <p class="desc-sm" style="margin:0">${esc(t("noLast"))}</p></div></div>`;
+      <div><h3 style="margin:0;font-size:1rem;line-height:1.35">${esc(t("lastBackup"))}</h3>
+      <p class="desc-sm" style="margin:2px 0 0">${esc(t("noLast"))}</p></div></div>`;
   } else {
     const c = last.counts || {};
+    lastBox.classList.add("is-detailed");
     lastBox.innerHTML = `<div class="backup-section-head">
       <span class="choice-icon icon-tone-green" aria-hidden="true">${ICONS.archive}</span>
-      <div><h3 style="margin:0 0 4px;font-size:1rem">${esc(t("lastBackup"))}</h3>
-      <p class="desc-sm" style="margin:0;word-break:break-all">${esc(last.filename || last.backup_id)}</p></div></div>
+      <div><h3 style="margin:0;font-size:1rem;line-height:1.35">${esc(t("lastBackup"))}</h3>
+      <p class="desc-sm" style="margin:2px 0 0;word-break:break-all">${esc(last.filename || last.backup_id)}</p></div></div>
       <div class="specs-grid">
         <div class="specs-item"><span class="specs-label">${esc(t("size"))}</span><span class="specs-value">${esc(humanSize(last.size_bytes))}</span></div>
         <div class="specs-item"><span class="specs-label">${esc(t("db"))}</span><span class="specs-value">${esc(last.db_type || "—")}</span></div>
@@ -720,6 +714,7 @@ async function refreshDashboard() {
   }
 
   const delivery = document.getElementById("dashDelivery");
+  delivery.classList.add("is-detailed");
   let tgLive = { connected: false };
   try {
     tgLive = await api("/api/telegram/status");
@@ -730,8 +725,8 @@ async function refreshDashboard() {
   const tgTagLabel = tgLive.connected ? t("tgConnected") : t("tgDisconnected");
   delivery.innerHTML = `<div class="backup-section-head">
       <span class="choice-icon icon-tone-cyan" aria-hidden="true">${ICONS.send}</span>
-      <div><h3 style="margin:0 0 4px;font-size:1rem">${esc(t("deliveryTitle"))} <span class="backup-status-tag ${tgTagClass}">${esc(tgTagLabel)}</span></h3>
-      <p class="desc-sm" style="margin:0">${esc(tg.enabled ? t("telegramOn") : t("telegramOff"))} · ${esc(tg.configured ? t("telegramReady") : t("telegramNeedConfig"))}</p></div></div>
+      <div><h3 style="margin:0;font-size:1rem;line-height:1.35">${esc(t("deliveryTitle"))} <span class="backup-status-tag ${tgTagClass}">${esc(tgTagLabel)}</span></h3>
+      <p class="desc-sm" style="margin:2px 0 0">${esc(tg.enabled ? t("telegramOn") : t("telegramOff"))} · ${esc(tg.configured ? t("telegramReady") : t("telegramNeedConfig"))}</p></div></div>
       <div class="backup-item-chips">
         <span class="backup-chip">${esc(sched.enabled ? t("scheduleOn") : t("scheduleOff"))}</span>
         <span class="backup-chip">${esc(tg.proxy_enabled ? t("proxyOn") : "Proxy —")}</span>

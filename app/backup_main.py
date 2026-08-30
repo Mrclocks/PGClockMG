@@ -17,7 +17,6 @@ from app.services.backup_engine import (
     delete_backup_file,
     get_backup_job,
     list_backup_files,
-    live_panel_stats,
     resolve_backup_path,
     start_backup_async,
 )
@@ -232,7 +231,6 @@ async def dashboard():
     from app.services.pg_access import get_panel_access_info
 
     system = get_system_status()
-    stats = live_panel_stats()
     cfg = load_settings()
     backups = list_backup_files()
     total_bytes = sum(int(b.get("size_bytes") or 0) for b in backups)
@@ -266,7 +264,6 @@ async def dashboard():
             "port": access.get("port"),
             "db_type": access.get("db_type") or system.get("pasarguard_db"),
         },
-        "live_stats": stats,
         "last_backup": cfg.get("last_backup"),
         "last_error": cfg.get("last_error"),
         "backup_count": len(backups),
