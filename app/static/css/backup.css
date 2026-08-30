@@ -163,6 +163,60 @@
   cursor: not-allowed;
 }
 
+/* Soft orange CTA — same chrome as primary (Telegram test) */
+.backup-app .btn-orange,
+.backup-app #btnTgTest {
+  background: hsla(24, 95%, 53%, 0.12);
+  color: hsl(24, 95%, 62%);
+  border: 1.5px solid hsla(24, 95%, 50%, 0.7);
+  box-shadow: none;
+}
+
+.backup-app .btn-orange:hover:not(:disabled),
+.backup-app #btnTgTest:hover:not(:disabled) {
+  background: hsla(24, 95%, 53%, 0.2);
+  border-color: hsla(24, 95%, 55%, 0.9);
+  color: hsl(24, 95%, 72%);
+  transform: none;
+}
+
+.backup-app .btn-orange:disabled,
+.backup-app #btnTgTest:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Update check — soft red fill (not solid hover-selected look) */
+.backup-app #btnUpdateCheck.btn-back,
+.backup-app #btnUpdateCheck {
+  background: hsla(0, 72%, 51%, 0.12);
+  color: hsl(0, 72%, 65%);
+  border: 1.5px solid hsla(0, 72%, 51%, 0.55);
+  box-shadow: none;
+}
+
+.backup-app #btnUpdateCheck:hover:not(:disabled) {
+  background: hsla(0, 72%, 51%, 0.2);
+  border-color: hsla(0, 72%, 51%, 0.75);
+  color: hsl(0, 72%, 74%);
+  transform: none;
+}
+
+.backup-app #btnUpdateCheck:focus,
+.backup-app #btnUpdateCheck:focus-visible,
+.backup-app #btnUpdateCheck:active {
+  outline: none;
+  box-shadow: none;
+  background: hsla(0, 72%, 51%, 0.12);
+  color: hsl(0, 72%, 65%);
+  border-color: hsla(0, 72%, 51%, 0.55);
+}
+
+.backup-app #btnUpdateCheck:disabled {
+  opacity: 0.7;
+  cursor: wait;
+}
+
 .backup-section-save {
   margin-top: 16px;
 }
@@ -1712,6 +1766,12 @@ html[dir="rtl"] .backup-stream-steps {
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
   max-height: 220px;
   overflow: auto;
+}
+
+/* Interval list is short — show every option without a scrollbar */
+#schedIntervalMenu.backup-select-menu {
+  max-height: none;
+  overflow: visible;
 }
 
 .backup-select-menu li {
