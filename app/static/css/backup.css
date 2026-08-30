@@ -435,17 +435,26 @@
 }
 
 /* PasarGuard status card: icon tones + start-aligned title (RTL = right) */
-.backup-pg-card,
-.backup-pg-card.success-card,
-.backup-pg-card.warning-card {
-  text-align: start;
+#dashPgCard.backup-pg-card,
+#dashPgCard.backup-pg-card.success-card,
+#dashPgCard.backup-pg-card.warning-card {
+  text-align: start !important;
 }
 
-.backup-pg-card .backup-section-head,
-.backup-pg-card .backup-section-head-body,
-.backup-pg-card .backup-section-head h3,
-.backup-pg-card .backup-section-head .desc-sm {
-  text-align: start;
+#dashPgCard .backup-section-head {
+  justify-content: flex-start;
+  align-items: flex-start;
+  text-align: start !important;
+}
+
+#dashPgCard .backup-section-head-body,
+#dashPgCard .backup-section-head h3,
+#dashPgCard .backup-section-head .desc-sm,
+#dashPgCard #dashPgTitle,
+#dashPgCard #dashPgSub {
+  text-align: start !important;
+  margin-inline: 0;
+  width: 100%;
 }
 
 .backup-actions-wrap {
@@ -590,7 +599,12 @@
 }
 
 .btn-list-action,
-a.btn-list-action {
+a.btn-list-action,
+a.btn-list-action:link,
+a.btn-list-action:visited,
+a.btn-list-action:hover,
+a.btn-list-action:active,
+a.btn-list-action:focus {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -600,12 +614,12 @@ a.btn-list-action {
   font-size: 0.88rem;
   font-weight: 550;
   line-height: 1.2;
-  color: var(--text-muted);
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-soft);
+  color: var(--text-muted) !important;
+  background: var(--bg-elevated) !important;
+  border: 1px solid var(--border-soft) !important;
   border-radius: var(--radius-sm);
   text-decoration: none !important;
-  box-shadow: none;
+  box-shadow: none !important;
   cursor: pointer;
   box-sizing: border-box;
   transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
@@ -613,9 +627,9 @@ a.btn-list-action {
 
 .btn-list-action:hover,
 a.btn-list-action:hover {
-  color: var(--text);
-  border-color: var(--border-hover);
-  background: hsla(0, 0%, 100%, 0.06);
+  color: var(--text) !important;
+  border-color: var(--border-hover) !important;
+  background: hsla(0, 0%, 100%, 0.06) !important;
   text-decoration: none !important;
 }
 
@@ -626,11 +640,22 @@ a.btn-list-action svg {
   width: 15px;
   height: 15px;
   flex-shrink: 0;
+  color: inherit;
+  stroke: currentColor;
 }
 
 .btn-list-action span,
 a.btn-list-action span {
   text-decoration: none !important;
+  border-bottom: none !important;
+  color: inherit;
+}
+
+.specs-value[dir="ltr"],
+.backup-item-meta[dir="ltr"],
+.metric-sub[dir="ltr"] {
+  direction: ltr;
+  unicode-bidi: isolate;
 }
 
 .form-row {

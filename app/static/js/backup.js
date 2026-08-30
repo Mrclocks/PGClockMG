@@ -762,11 +762,11 @@ async function refreshDashboard() {
       <div><h3 style="margin:0;font-size:1rem;line-height:1.35">${esc(t("lastBackup"))}</h3>
       <p class="desc-sm" style="margin:2px 0 0;word-break:break-all">${esc(last.filename || last.backup_id)}</p></div></div>
       <div class="specs-grid backup-last-specs">
-        <div class="specs-item"><span class="specs-label">${esc(t("size"))}</span><span class="specs-value">${esc(humanSize(last.size_bytes))}</span></div>
+        <div class="specs-item"><span class="specs-label">${esc(t("size"))}</span><span class="specs-value" dir="ltr">${esc(humanSize(last.size_bytes))}</span></div>
         <div class="specs-item"><span class="specs-label">${esc(t("db"))}</span><span class="specs-value">${esc(last.db_type || "—")}</span></div>
-        <div class="specs-item"><span class="specs-label">${esc(t("users"))}</span><span class="specs-value">${esc(c.users ?? "—")}</span></div>
-        <div class="specs-item"><span class="specs-label">${esc(t("nodes"))}</span><span class="specs-value">${esc(c.nodes ?? "—")}</span></div>
-        <div class="specs-item"><span class="specs-label">${esc(t("time"))}</span><span class="specs-value">${esc(formatSimpleTime(last.created_at))}</span></div>
+        <div class="specs-item"><span class="specs-label">${esc(t("users"))}</span><span class="specs-value" dir="ltr">${esc(c.users ?? "—")}</span></div>
+        <div class="specs-item"><span class="specs-label">${esc(t("nodes"))}</span><span class="specs-value" dir="ltr">${esc(c.nodes ?? "—")}</span></div>
+        <div class="specs-item"><span class="specs-label">${esc(t("time"))}</span><span class="specs-value" dir="ltr">${esc(formatSimpleTime(last.created_at))}</span></div>
       </div>`;
   }
 
@@ -886,10 +886,10 @@ async function refreshList() {
           <span class="choice-icon icon-tone-blue" aria-hidden="true">${ICONS.archive}</span>
           <div style="min-width:0">
             <strong>${it.filename}</strong>
-            <div class="backup-item-meta">${esc(formatSimpleTime(it.mtime) || it.mtime || "")} · ${esc(m.db_type || "?")}</div>
+            <div class="backup-item-meta" dir="ltr">${esc(formatSimpleTime(it.mtime) || it.mtime || "")} · ${esc(m.db_type || "?")}</div>
           </div>
         </div>
-        <span class="backup-item-badge">${humanSize(it.size_bytes)}</span>
+        <span class="backup-item-badge" dir="ltr">${humanSize(it.size_bytes)}</span>
       </div>
       <div class="backup-item-chips">
         <span class="backup-chip">${t("users")}: ${c.users ?? "—"}</span>
