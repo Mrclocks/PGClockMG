@@ -759,3 +759,105 @@ html[dir="rtl"] .backup-stream-steps {
 #streamProgress.is-running .backup-progress-bar {
   width: var(--stream-pct, 40%);
 }
+
+.backup-error-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.backup-error-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.backup-error-row .btn {
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+.backup-select {
+  position: relative;
+  width: 100%;
+}
+
+.backup-select-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: var(--control-h);
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+  text-align: start;
+  cursor: pointer;
+}
+
+.backup-select-trigger:hover {
+  border-color: var(--border-hover);
+}
+
+.backup-select.is-open .backup-select-trigger,
+.backup-select-trigger:focus-visible {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-glow);
+}
+
+.backup-select-caret {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  opacity: 0.7;
+  transition: transform 0.18s ease;
+}
+
+.backup-select.is-open .backup-select-caret {
+  transform: rotate(180deg);
+}
+
+.backup-select-menu {
+  position: absolute;
+  z-index: 40;
+  inset-inline: 0;
+  top: calc(100% + 6px);
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  background: var(--bg-card);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  max-height: 220px;
+  overflow: auto;
+}
+
+.backup-select-menu li {
+  padding: 10px 12px;
+  border-radius: calc(var(--radius-sm) - 2px);
+  color: var(--text);
+  font-size: 0.95rem;
+  cursor: pointer;
+  line-height: 1.35;
+}
+
+.backup-select-menu li:hover,
+.backup-select-menu li:focus-visible {
+  background: var(--bg-elevated);
+  outline: none;
+}
+
+.backup-select-menu li.is-active,
+.backup-select-menu li[aria-selected="true"] {
+  background: hsla(var(--pg-primary), 0.16);
+  color: var(--primary);
+  font-weight: 600;
+}

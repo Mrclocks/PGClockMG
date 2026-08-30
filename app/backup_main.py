@@ -30,15 +30,13 @@ from app.services.backup_settings import (
 from app.services.backup_net import UnsafeDestinationError
 from app.services.backup_stream import get_push_job, start_push_async
 from app.services.backup_telegram import (
-    format_caption,
-    human_size,
     probe_telegram_connection,
     send_backup_to_telegram,
     test_telegram_connection,
 )
 from app.services.prerequisites import get_system_status, is_pasarguard_installed
 
-APP_VERSION = "4.0.5"
+APP_VERSION = "4.0.6"
 
 
 @asynccontextmanager
@@ -455,21 +453,10 @@ async def api_telegram_test(body: TelegramTestBody | None = None):
     return result
 
 
-@app.post("/api/telegram/preview")
-async def api_telegram_preview(request: Request):
-    data = await request.json()
-    template = data.get("caption_template") or DEFAULT_TELEGRAM_CAPTION
-    sample = {
-        "date": "2026-01-15T03:00:00Z",
-        "size": human_size(125 * 1024 * 1024),
-        "db_type": "timescaledb",
-        "users": 1200,
-        "nodes": 8,
-        "status": "ok",
-        "filename": "pgclockmg-timescaledb-sample.zip",
-        "parts": "3 part(s)",
-    }
-    return {"text": format_caption(template, sample)}
+@app.delete("/api/dashboard/last-error")
+async def api_clear_last_error():
+    update_settings({"last_error": None})
+    return {"ok": True}
 
 
 @app.post("/api/password/change")

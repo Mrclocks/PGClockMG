@@ -81,7 +81,6 @@ const I18N = {
     lblTgChat: "Chat ID",
     lblTgCaption: "متن پیام",
     tgCaptionHint: "متغیرها: {date} {size} {db_type} {users} {nodes} {status} {filename} {parts}",
-    btnTgPreview: "پیش‌نمایش متن",
     btnTgTest: "تست اتصال",
     setProxyTitle: "پروکسی تلگرام",
     setProxyHint: "اگر تلگرام مستقیم در دسترس نیست.",
@@ -155,6 +154,7 @@ const I18N = {
     yes: "بله",
     no: "خیر",
     lastError: "آخرین خطا",
+    clearError: "حذف",
     deliveryTitle: "ارسال و زمان‌بندی",
     profile: "پروفایل منابع",
   },
@@ -218,7 +218,6 @@ const I18N = {
     lblTgChat: "Chat ID",
     lblTgCaption: "Message text",
     tgCaptionHint: "Vars: {date} {size} {db_type} {users} {nodes} {status} {filename} {parts}",
-    btnTgPreview: "Preview text",
     btnTgTest: "Test connection",
     setProxyTitle: "Telegram proxy",
     setProxyHint: "Use when Telegram is blocked directly.",
@@ -292,6 +291,7 @@ const I18N = {
     yes: "Yes",
     no: "No",
     lastError: "Last error",
+    clearError: "Clear",
     deliveryTitle: "Delivery & schedule",
     profile: "Resource profile",
   },
@@ -355,7 +355,6 @@ const I18N = {
     lblTgChat: "Chat ID",
     lblTgCaption: "Текст сообщения",
     tgCaptionHint: "Переменные: {date} {size} {db_type} {users} {nodes} {status} {filename} {parts}",
-    btnTgPreview: "Превью",
     btnTgTest: "Тест",
     setProxyTitle: "Прокси Telegram",
     setProxyHint: "Если Telegram недоступен напрямую.",
@@ -429,6 +428,7 @@ const I18N = {
     yes: "Да",
     no: "Нет",
     lastError: "Последняя ошибка",
+    clearError: "Удалить",
     deliveryTitle: "Доставка и расписание",
     profile: "Профиль ресурсов",
   },
@@ -473,7 +473,7 @@ function applyI18n() {
     ["lblRetention", "lblRetention"], ["lblSchedTelegram", "lblSchedTelegram"],
     ["setTgTitle", "setTgTitle"], ["setTgHint", "setTgHint"], ["lblTgToken", "lblTgToken"],
     ["lblTgChat", "lblTgChat"], ["lblTgCaption", "lblTgCaption"], ["tgCaptionHint", "tgCaptionHint"],
-    ["btnTgPreview", "btnTgPreview"], ["btnTgTest", "btnTgTest"],
+    ["btnTgTest", "btnTgTest"],
     ["setProxyTitle", "setProxyTitle"], ["setProxyHint", "setProxyHint"],
     ["lblProxyType", "lblProxyType"], ["lblProxyHost", "lblProxyHost"], ["lblProxyPort", "lblProxyPort"],
     ["lblProxyUser", "lblProxyUser"], ["lblProxyPass", "lblProxyPass"],
@@ -507,6 +507,9 @@ function applyI18n() {
     const el = document.getElementById(id);
     if (el) el.setAttribute("aria-label", t(key));
   }
+  initProxyTypeSelect();
+  const clearBtn = document.getElementById("btnClearLastError");
+  if (clearBtn) clearBtn.textContent = t("clearError");
   document.getElementById("authTitle").textContent = setupMode ? t("authSetupTitle") : t("authLoginTitle");
   document.getElementById("authDesc").textContent = setupMode ? t("authSetupDesc") : t("authLoginDesc");
   document.getElementById("btnAuthSubmit").textContent = setupMode ? t("btnSetup") : t("btnLogin");
@@ -777,12 +780,17 @@ async function refreshDashboard() {
   setTelegramStatusTag({ connected: !!tgLive.connected });
 
   const errBox = document.getElementById("dashError");
+  const errBody = document.getElementById("dashErrorBody");
+  const clearBtn = document.getElementById("btnClearLastError");
+  if (clearBtn) clearBtn.textContent = t("clearError");
   if (data.last_error && data.last_error.message) {
     errBox.classList.remove("hidden");
-    errBox.innerHTML = `<strong>${esc(t("lastError"))}</strong><br>${esc(data.last_error.at || "")} · ${esc(data.last_error.message)}`;
+    if (errBody) {
+      errBody.innerHTML = `<strong>${esc(t("lastError"))}</strong><br>${esc(data.last_error.at || "")} · ${esc(data.last_error.message)}`;
+    }
   } else {
     errBox.classList.add("hidden");
-    errBox.textContent = "";
+    if (errBody) errBody.textContent = "";
   }
 }
 
@@ -1029,7 +1037,7 @@ async function loadSettingsForm() {
   document.getElementById("tgChat").value = tg.chat_id || "";
   document.getElementById("tgCaption").value = tg.caption_template || "";
   document.getElementById("proxyEnabled").checked = !!tg.proxy_enabled;
-  document.getElementById("proxyType").value = tg.proxy_type || "socks5";
+  setProxyTypeValue(tg.proxy_type || "socks5");
   document.getElementById("proxyHost").value = tg.proxy_host || "";
   document.getElementById("proxyPort").value = tg.proxy_port || 1080;
   document.getElementById("proxyUser").value = tg.proxy_user || "";
@@ -1132,15 +1140,75 @@ async function testTelegram() {
   }
 }
 
-async function previewTelegram() {
-  const box = document.getElementById("tgPreviewBox");
-  const r = await api("/api/telegram/preview", {
-    method: "POST",
-    body: JSON.stringify({ caption_template: document.getElementById("tgCaption").value }),
-  });
-  box.textContent = r.text || "";
-  box.classList.remove("hidden");
+
+function setProxyTypeValue(value) {
+  const v = (value === "http") ? "http" : "socks5";
+  const hidden = document.getElementById("proxyType");
+  const label = document.getElementById("proxyTypeLabel");
+  const menu = document.getElementById("proxyTypeMenu");
+  if (hidden) hidden.value = v;
+  if (label) label.textContent = v.toUpperCase();
+  if (menu) {
+    menu.querySelectorAll("[role=option]").forEach((li) => {
+      const on = li.getAttribute("data-value") === v;
+      li.setAttribute("aria-selected", on ? "true" : "false");
+      li.classList.toggle("is-active", on);
+    });
+  }
 }
+
+function initProxyTypeSelect() {
+  const root = document.getElementById("proxyTypeSelect");
+  const trigger = document.getElementById("proxyTypeTrigger");
+  const menu = document.getElementById("proxyTypeMenu");
+  if (!root || !trigger || !menu || root.dataset.ready) return;
+  root.dataset.ready = "1";
+
+  const close = () => {
+    menu.classList.add("hidden");
+    trigger.setAttribute("aria-expanded", "false");
+    root.classList.remove("is-open");
+  };
+  const open = () => {
+    menu.classList.remove("hidden");
+    trigger.setAttribute("aria-expanded", "true");
+    root.classList.add("is-open");
+  };
+
+  trigger.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (menu.classList.contains("hidden")) open();
+    else close();
+  });
+  menu.querySelectorAll("[role=option]").forEach((li) => {
+    li.addEventListener("click", (e) => {
+      e.preventDefault();
+      setProxyTypeValue(li.getAttribute("data-value"));
+      close();
+    });
+  });
+  document.addEventListener("click", (e) => {
+    if (!root.contains(e.target)) close();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") close();
+  });
+  setProxyTypeValue(document.getElementById("proxyType")?.value || "socks5");
+}
+
+async function clearLastError() {
+  try {
+    await api("/api/dashboard/last-error", { method: "DELETE" });
+    const errBox = document.getElementById("dashError");
+    const errBody = document.getElementById("dashErrorBody");
+    if (errBox) errBox.classList.add("hidden");
+    if (errBody) errBody.textContent = "";
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
 
 boot().catch((e) => {
   const err = document.getElementById("authError");
