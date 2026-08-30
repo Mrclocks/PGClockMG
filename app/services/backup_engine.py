@@ -997,6 +997,9 @@ def create_backup_bundle(*, trigger: str = "manual") -> dict:
             "error": None,
         }
     result = _create_backup_into(job_id, trigger=trigger)
+    # Telegram must never run under the create lock or delay this return.
+    if (result or {}).get("status") == "success":
+        _enqueue_telegram_auto_send(result)
     try:
         BACKUP_JOBS_DIR.mkdir(parents=True, exist_ok=True)
         (BACKUP_JOBS_DIR / f"{job_id}.json").write_text(
@@ -1037,6 +1040,9 @@ def start_backup_async(*, trigger: str = "manual") -> dict:
             result = _create_backup_into(job_id, trigger=trigger)
             with _jobs_lock:
                 _jobs[job_id] = result
+            # Telegram must never block backup completion or hold the create lock.
+            if (result or {}).get("status") == "success":
+                _enqueue_telegram_auto_send(result)
         except Exception as exc:
             with _jobs_lock:
                 j = _jobs.get(job_id) or job
@@ -1047,6 +1053,54 @@ def start_backup_async(*, trigger: str = "manual") -> dict:
 
     threading.Thread(target=_safe_runner, name=f"backup-{job_id}", daemon=True).start()
     return dict(job)
+
+
+def _enqueue_telegram_auto_send(job_snapshot: dict) -> None:
+    """Fire-and-forget Telegram delivery after a successful backup job.
+
+    Never called while holding ``_CREATE_LOCK``. Failures here cannot change
+    the backup job status away from success.
+    """
+    snap = dict(job_snapshot or {})
+    job_id = str(snap.get("job_id") or "")
+
+    def _run() -> None:
+        try:
+            from app.services.backup_telegram import maybe_auto_send_backup
+
+            tg_send = maybe_auto_send_backup({**snap, "status": "success"})
+            with _jobs_lock:
+                job = _jobs.get(job_id)
+                if not job:
+                    return
+                if tg_send is None:
+                    job["telegram"] = {"skipped": True}
+                    _jobs[job_id] = job
+                    return
+                job["telegram"] = tg_send
+                logs = list(job.get("logs") or [])
+                if tg_send.get("ok"):
+                    logs.append(f"[{time.strftime('%H:%M:%S')}] Telegram: backup document sent")
+                else:
+                    err = tg_send.get("error") or "unknown"
+                    logs.append(f"[{time.strftime('%H:%M:%S')}] Telegram send failed: {err}")
+                job["logs"] = logs[-500:]
+                _jobs[job_id] = job
+        except Exception as exc:
+            with _jobs_lock:
+                job = _jobs.get(job_id)
+                if job is not None:
+                    job["telegram"] = {"ok": False, "error": str(exc)}
+                    logs = list(job.get("logs") or [])
+                    logs.append(f"[{time.strftime('%H:%M:%S')}] Telegram send failed: {exc}")
+                    job["logs"] = logs[-500:]
+                    _jobs[job_id] = job
+
+    threading.Thread(
+        target=_run,
+        name=f"backup-tg-{job_id[:8] or 'auto'}",
+        daemon=True,
+    ).start()
 
 
 def _create_backup_into(job_id: str, *, trigger: str) -> dict:
@@ -1259,29 +1313,13 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
         except Exception as exc:
             _log(job, f"Retention warning: {exc}")
 
-        # Web-panel manual backups: auto-send to Telegram while job is still running
-        # so the UI poll does not resolve before the document is uploaded.
-        try:
-            from app.services.backup_telegram import maybe_auto_send_backup
-
-            _set_progress(job, 93, "Checking Telegram delivery…")
-            tg_send = maybe_auto_send_backup({**dict(job), "status": "success", "trigger": trigger})
-            if tg_send is not None:
-                job["telegram"] = tg_send
-                if tg_send.get("ok"):
-                    _set_progress(job, 98, "Telegram: backup document sent")
-                else:
-                    _set_progress(job, 98, f"Telegram send failed: {tg_send.get('error') or 'unknown'}")
-            else:
-                _set_progress(job, 98, "Telegram auto-send skipped")
-        except Exception as tg_exc:
-            job["telegram"] = {"ok": False, "error": str(tg_exc)}
-            _set_progress(job, 98, f"Telegram send failed: {tg_exc}")
-
+        # Backup is complete here. Telegram (if any) is queued by the caller
+        # AFTER this function returns and the create lock is released.
         job["status"] = "success"
         job["progress"] = 100
         job["phase"] = "done"
         job["finished_at"] = _utc_now()
+        _set_progress(job, 100, "Backup complete")
         return dict(job)
     except Exception as exc:
         job["status"] = "error"

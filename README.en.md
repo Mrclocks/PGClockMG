@@ -1,4 +1,4 @@
-> 🚀 **`v4.3.2`** — Dashboard spacing fix + backup filename without DB type
+> 🚀 **`v4.3.3`** — Backup no longer blocked by Telegram (no 93% hang / Load failed)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

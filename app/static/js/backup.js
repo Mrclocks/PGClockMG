@@ -40,6 +40,7 @@ const I18N = {
     errBadPass: "رمز اشتباه است.",
     errThrottle: "تلاش‌های زیاد — چند دقیقه صبر کنید و دوباره امتحان کنید.",
     errServer: "خطای سرور. لاگ را ببینید: journalctl -u pg-backup -n 50",
+    errNetwork: "قطع لحظه‌ای ارتباط — در حال تلاش مجدد…",
     authLoginTitle: "ورود به پنل بکاپ",
     authLoginDesc: "با رمز همین پنل وارد شوید.",
     lblPassword: "رمز عبور",
@@ -232,6 +233,7 @@ const I18N = {
     errBadPass: "Wrong password.",
     errThrottle: "Too many attempts — wait a few minutes and try again.",
     errServer: "Server error. Check logs: journalctl -u pg-backup -n 50",
+    errNetwork: "Brief connection drop — retrying…",
     authLoginTitle: "Backup panel login",
     authLoginDesc: "Sign in with this panel’s password.",
     lblPassword: "Password",
@@ -424,6 +426,7 @@ const I18N = {
     errBadPass: "Неверный пароль.",
     errThrottle: "Слишком много попыток — подождите несколько минут.",
     errServer: "Ошибка сервера. Смотрите: journalctl -u pg-backup -n 50",
+    errNetwork: "Краткий обрыв связи — повтор…",
     authLoginTitle: "Вход в панель бэкапа",
     authLoginDesc: "Войдите с паролем этой панели.",
     lblPassword: "Пароль",
@@ -848,11 +851,21 @@ function applyI18n() {
 }
 
 async function api(path, opts = {}) {
-  const res = await fetch(path, {
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
-    ...opts,
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+      ...opts,
+    });
+  } catch (e) {
+    const raw = (e && e.message) || "";
+    // Safari/WebKit often reports transient fetch failures as "Load failed".
+    if (/load failed|failed to fetch|networkerror|network request failed/i.test(raw)) {
+      throw new Error(t("errNetwork"));
+    }
+    throw new Error(raw || t("errNetwork"));
+  }
   let data = null;
   const ct = res.headers.get("content-type") || "";
   if (ct.includes("application/json")) data = await res.json();
@@ -1241,14 +1254,9 @@ async function createBackupNow() {
     logEl.classList.add("hidden");
     track?.classList.add("hidden");
     if (pctEl) pctEl.classList.add("hidden");
-    const tg = done.telegram;
-    if (tg && tg.ok) {
-      showToast(t("backupDone") + (done.filename ? ": " + done.filename : "") + "\n" + t("tgAutoSent"), "success");
-    } else if (tg && tg.ok === false) {
-      showToast(t("tgAutoFail") + (tg.error ? ": " + tg.error : ""), "warning");
-    } else {
-      showToast(t("backupDone") + (done.filename ? ": " + done.filename : ""), "success");
-    }
+    // Backup success is independent of Telegram. Toast immediately; TG may follow.
+    showToast(t("backupDone") + (done.filename ? ": " + done.filename : ""), "success");
+    watchTelegramAfterBackup(done.job_id || job.job_id);
     await refreshDashboard();
     await refreshList();
     backupProgressFadeTimer = setTimeout(() => {
@@ -1275,6 +1283,32 @@ async function createBackupNow() {
   }
 }
 
+/** After backup success, optionally surface Telegram result without blocking create. */
+async function watchTelegramAfterBackup(jobId) {
+  if (!jobId) return;
+  const deadline = Date.now() + 180000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 1200));
+    try {
+      const job = await api("/api/backups/jobs/" + encodeURIComponent(jobId));
+      if (!job || job.status !== "success") return;
+      const tg = job.telegram;
+      if (!tg) continue;
+      if (tg.skipped) return;
+      if (tg.ok) {
+        showToast(t("tgAutoSent"), "success");
+        return;
+      }
+      if (tg.ok === false) {
+        showToast(t("tgAutoFail") + (tg.error ? ": " + tg.error : ""), "warning");
+        return;
+      }
+    } catch (_) {
+      // Keep watching; transient poll errors must not undo backup success.
+    }
+  }
+}
+
 function setBackupProgressUI(pct) {
   const bar = document.getElementById("backupProgressBar");
   const pctEl = document.getElementById("backupProgressPct");
@@ -1287,10 +1321,14 @@ function setBackupProgressUI(pct) {
 }
 
 async function pollJob(jobId, title, logEl, box) {
+  const started = Date.now();
+  const hardDeadlineMs = 45 * 60 * 1000;
+  let consecutiveErrors = 0;
   return new Promise((resolve, reject) => {
     const tick = async () => {
       try {
         const job = await api("/api/backups/jobs/" + jobId);
+        consecutiveErrors = 0;
         logEl.textContent = (job.logs || []).join("\n");
         logEl.scrollTop = logEl.scrollHeight;
         const pct = Number(job.progress);
@@ -1315,6 +1353,16 @@ async function pollJob(jobId, title, logEl, box) {
         }
         pollTimer = setTimeout(tick, 700);
       } catch (e) {
+        consecutiveErrors += 1;
+        const elapsed = Date.now() - started;
+        // Transient fetch blips ("Load failed") must not abort a running backup.
+        if (elapsed < hardDeadlineMs && consecutiveErrors <= 25) {
+          if (title && consecutiveErrors === 1) {
+            title.textContent = t("backupRunning") + " · " + t("errNetwork");
+          }
+          pollTimer = setTimeout(tick, Math.min(2500, 350 * consecutiveErrors));
+          return;
+        }
         reject(e);
       }
     };
