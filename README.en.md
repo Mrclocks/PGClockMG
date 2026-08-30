@@ -1,4 +1,4 @@
-> 🚀 **`v4.3.5`** — Interval menu without scroll + orange/red update button polish
+> 🚀 **`v4.3.6`** — Dashboard nav buttons beside titles + scroll to top on tab change
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

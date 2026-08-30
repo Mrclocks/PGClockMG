@@ -801,6 +801,23 @@
   text-align: start;
 }
 
+/* Compact nav CTA opposite the title (RTL/LTR via margin-inline-start:auto) */
+.backup-dash-nav-btn {
+  flex: 0 0 auto;
+  align-self: center;
+  margin-inline-start: auto;
+  min-height: 30px;
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  font-weight: 650;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.backup-status-card .backup-section-head {
+  align-items: center;
+}
+
 .backup-section-head .section-title,
 .backup-section-head h3 {
   margin: 0 0 4px;
