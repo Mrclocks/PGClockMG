@@ -1,4 +1,4 @@
-> 🚀 **`v4.3.3`** — Backup no longer blocked by Telegram (no 93% hang / Load failed)
+> 🚀 **`v4.3.3`** — Backup decoupled from Telegram + PasarGuard status card style match
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

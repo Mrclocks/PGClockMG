@@ -1041,7 +1041,7 @@ html[dir="rtl"] .backup-app .specs-item .specs-value[dir="ltr"] {
 
 #dashPgCard .backup-section-head {
   justify-content: flex-start;
-  align-items: flex-start;
+  align-items: center;
   text-align: start !important;
 }
 
@@ -1053,6 +1053,16 @@ html[dir="rtl"] .backup-app .specs-item .specs-value[dir="ltr"] {
   text-align: start !important;
   margin-inline: 0;
   width: 100%;
+}
+
+#dashPgCard .backup-section-head h3 {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.35;
+}
+
+#dashPgCard .backup-section-head .desc-sm {
+  margin: 2px 0 0;
 }
 
 .backup-actions-wrap {
