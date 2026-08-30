@@ -950,6 +950,8 @@ async function refreshDashboard() {
         <div class="specs-item"><span class="specs-label">${esc(t("db"))}</span><span class="specs-value">${esc(last.db_type || "—")}</span></div>
         <div class="specs-item"><span class="specs-label">${esc(t("users"))}</span><span class="specs-value" dir="ltr">${esc(c.users ?? "—")}</span></div>
         <div class="specs-item"><span class="specs-label">${esc(t("nodes"))}</span><span class="specs-value" dir="ltr">${esc(c.nodes ?? "—")}</span></div>
+        <div class="specs-item"><span class="specs-label">${esc(t("admins"))}</span><span class="specs-value" dir="ltr">${esc(c.admins ?? "—")}</span></div>
+        <div class="specs-item"><span class="specs-label">${esc(t("inbounds"))}</span><span class="specs-value" dir="ltr">${esc(c.inbounds ?? "—")}</span></div>
         <div class="specs-item"><span class="specs-label">${esc(t("time"))}</span><span class="specs-value" dir="ltr">${esc(formatSimpleTime(last.created_at))}</span></div>
       </div>`;
   }

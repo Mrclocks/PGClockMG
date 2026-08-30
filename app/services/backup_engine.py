@@ -29,6 +29,7 @@ from app.config import (
 from app.services.env_migration import (
     detect_db_type_from_env,
     get_pasarguard_admin_connection,
+    parse_sqlalchemy_url,
     read_env_var,
     sqlite_fs_path_from_url,
 )
@@ -65,12 +66,299 @@ def get_backup_job(job_id: str) -> dict | None:
         return dict(job) if job else None
 
 
+def _parse_count_output(text: str) -> int | None:
+    """Extract a COUNT(*) integer from docker client stdout/stderr noise."""
+    for line in reversed((text or "").strip().splitlines()):
+        s = line.strip().strip('"').strip("'")
+        if s.isdigit():
+            return int(s)
+    return None
+
+
+def _pg_count_credentials(db_type: str) -> list[tuple[str, str, str]]:
+    """Ordered (user, password, database) candidates for live COUNT queries."""
+    text = ""
+    if PASARGUARD_ENV.is_file():
+        try:
+            text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            text = ""
+    admin = get_pasarguard_admin_connection(db_type, env_text=text)
+    url = read_env_var(text, "SQLALCHEMY_DATABASE_URL") or ""
+    parsed = {}
+    try:
+        parsed = parse_sqlalchemy_url(url, text) if url else {}
+    except Exception:
+        parsed = {}
+    database = (
+        admin.get("database")
+        or parsed.get("database")
+        or read_env_var(text, "POSTGRES_DB")
+        or read_env_var(text, "DB_NAME")
+        or "pasarguard"
+    )
+    pairs: list[tuple[str, str]] = []
+    def _add(user: str | None, password: str | None) -> None:
+        u = (user or "").strip()
+        p = password if password is not None else ""
+        if not u:
+            return
+        key = (u, p)
+        if key not in pairs:
+            pairs.append(key)
+
+    _add(admin.get("user"), admin.get("password"))
+    _add(parsed.get("user"), parsed.get("password"))
+    _add(read_env_var(text, "DB_USER"), read_env_var(text, "DB_PASSWORD"))
+    _add(read_env_var(text, "POSTGRES_USER"), read_env_var(text, "POSTGRES_PASSWORD"))
+    _add("postgres", read_env_var(text, "POSTGRES_PASSWORD") or read_env_var(text, "DB_PASSWORD"))
+    _add("pasarguard", read_env_var(text, "DB_PASSWORD") or read_env_var(text, "POSTGRES_PASSWORD"))
+    # Cross-try passwords with each username (common when POSTGRES_PASSWORD ≠ DB_PASSWORD)
+    users = list(dict.fromkeys(u for u, _ in pairs))
+    pwds = list(dict.fromkeys(p for _, p in pairs if p))
+    for u in users:
+        for p in pwds:
+            _add(u, p)
+    return [(u, p, database) for u, p in pairs]
+
+
+def _mysql_count_credentials(db_type: str) -> list[tuple[str, str, str]]:
+    text = ""
+    if PASARGUARD_ENV.is_file():
+        try:
+            text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            text = ""
+    admin = get_pasarguard_admin_connection(db_type, env_text=text)
+    url = read_env_var(text, "SQLALCHEMY_DATABASE_URL") or ""
+    parsed = {}
+    try:
+        parsed = parse_sqlalchemy_url(url, text) if url else {}
+    except Exception:
+        parsed = {}
+    database = (
+        admin.get("database")
+        or parsed.get("database")
+        or read_env_var(text, "MYSQL_DATABASE")
+        or read_env_var(text, "DB_NAME")
+        or "pasarguard"
+    )
+    pairs: list[tuple[str, str]] = []
+    def _add(user: str | None, password: str | None) -> None:
+        u = (user or "").strip()
+        if not u:
+            return
+        key = (u, password if password is not None else "")
+        if key not in pairs:
+            pairs.append(key)
+
+    _add(admin.get("user"), admin.get("password"))
+    _add("root", read_env_var(text, "MYSQL_ROOT_PASSWORD") or admin.get("password"))
+    _add(parsed.get("user"), parsed.get("password"))
+    _add(read_env_var(text, "MYSQL_USER") or read_env_var(text, "DB_USER"),
+         read_env_var(text, "MYSQL_PASSWORD") or read_env_var(text, "DB_PASSWORD"))
+    users = list(dict.fromkeys(u for u, _ in pairs))
+    pwds = list(dict.fromkeys(p for _, p in pairs if p))
+    for u in users:
+        for p in pwds:
+            _add(u, p)
+    return [(u, p, database) for u, p in pairs]
+
+
+def _docker_sql_counts(db_type: str) -> dict[str, int | None]:
+    """COUNT PasarGuard tables via docker compose for mysql/mariadb/pg/timescale."""
+    out: dict[str, int | None] = {t: None for t in STAT_TABLES}
+    svc = resolve_db_service(db_type)
+    if not svc:
+        # Soft-family fallback: try the other service name in the family
+        for alt in (("postgresql", "timescaledb"), ("timescaledb", "postgresql"),
+                    ("mysql", "mariadb"), ("mariadb", "mysql")):
+            if db_type == alt[0]:
+                svc = resolve_db_service(alt[1])
+                if svc:
+                    break
+    if not svc:
+        return out
+
+    if db_type in ("mysql", "mariadb"):
+        creds = _mysql_count_credentials(db_type)
+        bins = mysql_client_bins(db_type, svc)
+        working: tuple[str, str, str, str] | None = None  # user, pwd, db, binary
+        for user, password, database in creds:
+            for binary in bins:
+                ok, text = _run(
+                    [
+                        "docker", "compose", "exec", "-T",
+                        "-e", f"MYSQL_PWD={password}",
+                        svc, binary, "-u", user, "-N", "-e",
+                        "SELECT COUNT(*) FROM `users`;", database,
+                    ],
+                    cwd=str(PASARGUARD_DIR),
+                    timeout=60,
+                )
+                if ok and _parse_count_output(text) is not None:
+                    working = (user, password, database, binary)
+                    break
+            if working:
+                break
+        if not working:
+            return out
+        user, password, database, binary = working
+        for table in STAT_TABLES:
+            ok, text = _run(
+                [
+                    "docker", "compose", "exec", "-T",
+                    "-e", f"MYSQL_PWD={password}",
+                    svc, binary, "-u", user, "-N", "-e",
+                    f"SELECT COUNT(*) FROM `{table}`;", database,
+                ],
+                cwd=str(PASARGUARD_DIR),
+                timeout=60,
+            )
+            if ok:
+                out[table] = _parse_count_output(text)
+        return out
+
+    # PostgreSQL / TimescaleDB
+    creds = _pg_count_credentials(db_type)
+    working_pg: tuple[str, str, str] | None = None
+    for user, password, database in creds:
+        ok, text = _run(
+            [
+                "docker", "compose", "exec", "-T",
+                "-e", f"PGPASSWORD={password}",
+                svc, "psql", "-U", user, "-d", database, "-At", "-v", "ON_ERROR_STOP=1",
+                "-c", 'SELECT COUNT(*) FROM "users";',
+            ],
+            cwd=str(PASARGUARD_DIR),
+            timeout=60,
+        )
+        if ok and _parse_count_output(text) is not None:
+            working_pg = (user, password, database)
+            break
+    if not working_pg:
+        return out
+    user, password, database = working_pg
+    for table in STAT_TABLES:
+        ok, text = _run(
+            [
+                "docker", "compose", "exec", "-T",
+                "-e", f"PGPASSWORD={password}",
+                svc, "psql", "-U", user, "-d", database, "-At", "-v", "ON_ERROR_STOP=1",
+                "-c", f'SELECT COUNT(*) FROM "{table}";',
+            ],
+            cwd=str(PASARGUARD_DIR),
+            timeout=60,
+        )
+        if ok:
+            out[table] = _parse_count_output(text)
+    return out
+
+
+def _estimate_sql_dump_counts(sql_text: str) -> dict[str, int | None]:
+    """Best-effort row counts from pg_dump / mysqldump text for manifest display."""
+    out: dict[str, int | None] = {t: None for t in STAT_TABLES}
+    if not sql_text:
+        return out
+    for table in STAT_TABLES:
+        n = 0
+        copy_re = re.compile(
+            rf"(?is)COPY\s+(?:public\.)?[\"`]?{re.escape(table)}[\"`]?\s*\([^;]*?\)\s+FROM\s+stdin;\s*(.*?)\\.\s*"
+        )
+        for m in copy_re.finditer(sql_text):
+            block = (m.group(1) or "").strip()
+            if block:
+                n += sum(1 for ln in block.splitlines() if ln.strip())
+        insert_re = re.compile(
+            rf"(?i)INSERT\s+INTO\s+[\"`\[]?{re.escape(table)}[\"`\]]?\s*(?:\([^)]*\))?\s*VALUES",
+        )
+        for m in insert_re.finditer(sql_text):
+            # Count top-level value groups until semicolon
+            rest = sql_text[m.end():]
+            end = rest.find(";")
+            chunk = rest if end < 0 else rest[:end]
+            depth = 0
+            for ch in chunk:
+                if ch == "(":
+                    if depth == 0:
+                        n += 1
+                    depth += 1
+                elif ch == ")" and depth:
+                    depth -= 1
+        out[table] = n if n > 0 else None
+    return out
+
+
+def _counts_from_dump_artifact(dump_path: Path, db_type: str) -> dict[str, int | None]:
+    if db_type == "sqlite":
+        return _sqlite_counts(dump_path)
+    try:
+        # Cap read size — large dumps still usually put table data early enough
+        text = dump_path.read_text(encoding="utf-8", errors="ignore")[:8_000_000]
+    except OSError:
+        return {t: None for t in STAT_TABLES}
+    return _estimate_sql_dump_counts(text)
+
+
+def _merge_counts(
+    primary: dict | None,
+    fallback: dict | None,
+) -> dict[str, int | None]:
+    primary = primary or {}
+    fallback = fallback or {}
+    out: dict[str, int | None] = {}
+    for t in STAT_TABLES:
+        a = primary.get(t)
+        b = fallback.get(t)
+        if isinstance(a, int):
+            out[t] = a
+        elif isinstance(b, int):
+            out[t] = b
+        else:
+            out[t] = None
+    return out
+
+
+def _enrich_manifest_from_zip(path: Path, meta: dict) -> dict:
+    """Fill missing counts/db_type from the zip's pgclockmg-manifest.json."""
+    counts = meta.get("counts") if isinstance(meta.get("counts"), dict) else {}
+    has_counts = any(isinstance(counts.get(t), int) for t in STAT_TABLES)
+    if has_counts and meta.get("db_type"):
+        return meta
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            names = zf.namelist()
+            man_name = next(
+                (n for n in names if n == "pgclockmg-manifest.json" or n.endswith("/pgclockmg-manifest.json")),
+                None,
+            )
+            if not man_name:
+                return meta
+            inner = json.loads(zf.read(man_name).decode("utf-8", errors="ignore"))
+    except Exception:
+        return meta
+    if not isinstance(inner, dict):
+        return meta
+    merged = dict(meta)
+    if not merged.get("db_type") and inner.get("db_type"):
+        merged["db_type"] = inner.get("db_type")
+    inner_counts = inner.get("counts") if isinstance(inner.get("counts"), dict) else {}
+    merged["counts"] = _merge_counts(counts, inner_counts)
+    return merged
+
+
+def resolve_backup_manifest(path: Path) -> dict:
+    """Sidecar meta merged with in-zip pgclockmg-manifest (fills missing counts)."""
+    meta = _read_sidecar_meta(path) or {}
+    return _enrich_manifest_from_zip(path, meta)
+
+
 def list_backup_files() -> list[dict]:
     items: list[dict] = []
     if not BACKUP_DIR.is_dir():
         return items
     for path in sorted(BACKUP_DIR.glob("pgclockmg-*.zip"), key=lambda p: p.stat().st_mtime, reverse=True):
-        meta = _read_sidecar_meta(path) or {}
+        meta = resolve_backup_manifest(path)
         st = path.stat()
         items.append({
             "id": path.stem,
@@ -251,52 +539,6 @@ def _sqlite_counts(path: Path) -> dict[str, int | None]:
                 out[table] = None
     finally:
         conn.close()
-    return out
-
-
-def _docker_sql_counts(db_type: str) -> dict[str, int | None]:
-    out: dict[str, int | None] = {t: None for t in STAT_TABLES}
-    svc = resolve_db_service(db_type)
-    if not svc:
-        return out
-    conn = get_pasarguard_admin_connection(db_type)
-    user = conn.get("user") or ("root" if db_type in ("mysql", "mariadb") else "postgres")
-    password = conn.get("password") or ""
-    database = conn.get("database") or "pasarguard"
-
-    for table in STAT_TABLES:
-        if db_type in ("mysql", "mariadb"):
-            bins = mysql_client_bins(db_type, svc)
-            ok = False
-            text = ""
-            for binary in bins:
-                ok, text = _run(
-                    [
-                        "docker", "compose", "exec", "-T",
-                        "-e", f"MYSQL_PWD={password}",
-                        svc, binary, "-u", user, "-N", "-e",
-                        f"SELECT COUNT(*) FROM `{table}`;", database,
-                    ],
-                    cwd=str(PASARGUARD_DIR),
-                    timeout=60,
-                )
-                if ok:
-                    break
-        else:
-            ok, text = _run(
-                [
-                    "docker", "compose", "exec", "-T",
-                    "-e", f"PGPASSWORD={password}",
-                    svc, "psql", "-U", user, "-d", database, "-At",
-                    "-c", f'SELECT COUNT(*) FROM "{table}";',
-                ],
-                cwd=str(PASARGUARD_DIR),
-                timeout=60,
-            )
-        if ok:
-            line = (text or "").strip().splitlines()
-            if line and line[-1].strip().isdigit():
-                out[table] = int(line[-1].strip())
     return out
 
 
@@ -803,27 +1045,43 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
 
         stats = live_panel_stats()
         counts = stats.get("counts") or {}
-        # Refuse zip when live panel has data but the dump looks empty.
+        # If live docker COUNT failed (common on PG password mismatch), fall back
+        # to counting rows from the dump we just produced so the UI still shows specs.
+        dump_counts = _counts_from_dump_artifact(dump_path, db_type)
+        counts = _merge_counts(counts, dump_counts)
+        if any(isinstance(counts.get(t), int) for t in STAT_TABLES):
+            _log(
+                job,
+                "Panel counts: "
+                + ", ".join(f"{k}={counts.get(k)}" for k in STAT_TABLES if counts.get(k) is not None),
+            )
+        else:
+            _log(job, "Panel counts unavailable (live query + dump estimate both empty)")
+
+        # Refuse zip when live/dump panel has data but the dump looks empty.
         live_users = counts.get("users")
         if isinstance(live_users, int) and live_users > 0:
-            dump_users = None
+            dump_users = dump_counts.get("users")
             if db_type == "sqlite":
                 dump_users = _sqlite_counts(dump_path).get("users")
-            else:
+            elif dump_users is None:
                 try:
                     sample = dump_path.read_text(encoding="utf-8", errors="ignore")[:2_000_000]
                 except Exception:
                     sample = ""
-                # Heuristic: COPY/INSERT evidence for users table
                 lower = sample.lower()
-                if "copy public.users" in lower or "copy users" in lower or "insert into `users`" in lower or "insert into users" in lower:
-                    dump_users = live_users  # content present — defer exact count to restore
-                elif "create table" in lower and "users" in lower and live_users > 0:
-                    # Schema-only dump while live has users
+                if (
+                    "copy public.users" in lower
+                    or "copy users" in lower
+                    or "insert into `users`" in lower
+                    or "insert into users" in lower
+                ):
+                    dump_users = live_users
+                elif "create table" in lower and "users" in lower:
                     dump_users = 0
             if dump_users == 0:
                 raise RuntimeError(
-                    f"Backup dump has 0 users but live panel reports {live_users} — refusing empty dump"
+                    f"Backup dump has 0 users but panel reports {live_users} — refusing empty dump"
                 )
 
         version = read_env_var(env_text, "APP_VERSION") or None

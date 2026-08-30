@@ -564,3 +564,111 @@ def test_list_backups_api_includes_path(tmp_path, monkeypatch):
     assert "items" in data
     assert data.get("backups_path") == str(BACKUP_DIR)
     print("OK: /api/backups returns backups_path")
+
+
+def test_estimate_sql_dump_counts_pg_and_mysql():
+    from app.services.backup_engine import _estimate_sql_dump_counts
+
+    pg = """
+-- PostgreSQL dump
+COPY public.users (id, username) FROM stdin;
+1	alice
+2	bob
+3	carol
+\\.
+COPY public.nodes (id) FROM stdin;
+1
+\\.
+INSERT INTO admins (id) VALUES (1), (2);
+"""
+    c = _estimate_sql_dump_counts(pg)
+    assert c["users"] == 3
+    assert c["nodes"] == 1
+    assert c["admins"] == 2
+
+    my = """
+INSERT INTO `users` VALUES (1,'a'),(2,'b');
+INSERT INTO `inbounds` (`id`) VALUES (10);
+INSERT INTO `inbounds` (`id`) VALUES (11);
+"""
+    c2 = _estimate_sql_dump_counts(my)
+    assert c2["users"] == 2
+    assert c2["inbounds"] == 2
+    print("OK: sql dump count estimates for pg + mysql")
+
+
+def test_docker_sql_counts_tries_fallback_credentials(tmp_path, monkeypatch):
+    """PG counts must succeed when first (admin) credential fails and app user works."""
+    import app.services.backup_engine as eng
+
+    env = tmp_path / ".env"
+    env.write_text(
+        'SQLALCHEMY_DATABASE_URL="postgresql+asyncpg://pasarguard:appsecret@127.0.0.1/pasarguard"\n'
+        'POSTGRES_USER="postgres"\n'
+        'POSTGRES_PASSWORD="wrong"\n'
+        'DB_USER="pasarguard"\n'
+        'DB_PASSWORD="appsecret"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(eng, "PASARGUARD_ENV", env)
+    monkeypatch.setattr(eng, "PASARGUARD_DIR", tmp_path)
+    monkeypatch.setattr(eng, "resolve_db_service", lambda _t: "postgresql")
+
+    calls = {"n": 0}
+
+    def fake_run(cmd, **_kwargs):
+        calls["n"] += 1
+        joined = " ".join(str(c) for c in cmd)
+        # Fail when using wrong postgres password
+        if "PGPASSWORD=wrong" in joined:
+            return False, "password authentication failed"
+        if 'SELECT COUNT(*) FROM "users"' in joined and "PGPASSWORD=appsecret" in joined:
+            return True, "NOTICE: foo\n7\n"
+        if "PGPASSWORD=appsecret" in joined and "SELECT COUNT(*)" in joined:
+            # Extract table name roughly
+            for table, n in (("users", "7"), ("nodes", "2"), ("admins", "1"),
+                             ("inbounds", "4"), ("hosts", "3"), ("groups", "5")):
+                if f'FROM "{table}"' in joined:
+                    return True, f"{n}\n"
+            return True, "0\n"
+        return False, "fail"
+
+    monkeypatch.setattr(eng, "_run", fake_run)
+    counts = eng._docker_sql_counts("postgresql")
+    assert counts["users"] == 7
+    assert counts["nodes"] == 2
+    assert counts["admins"] == 1
+    assert counts["inbounds"] == 4
+    assert calls["n"] >= 2
+    print("OK: docker sql counts fall back across PG credentials")
+
+
+def test_list_backups_enriches_counts_from_zip_manifest(tmp_path, monkeypatch):
+    import json
+    import zipfile
+    import app.services.backup_engine as eng
+
+    monkeypatch.setattr(eng, "BACKUP_DIR", tmp_path)
+    zpath = tmp_path / "pgclockmg-postgresql-demo.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        zf.writestr(".env", "SQLALCHEMY_DATABASE_URL=postgresql+asyncpg://u:p@x/pasarguard\n")
+        zf.writestr("db_backup.sql", "-- dump\n")
+        zf.writestr(
+            "pgclockmg-manifest.json",
+            json.dumps({
+                "format": "pgclockmg-full-bundle",
+                "db_type": "postgresql",
+                "counts": {"users": 11, "nodes": 2, "admins": 1, "inbounds": 3},
+            }),
+        )
+    # Sidecar without counts (simulates older PG backup bug)
+    (tmp_path / "pgclockmg-postgresql-demo.zip.json").write_text(
+        json.dumps({"db_type": "postgresql", "counts": {"users": None}}),
+        encoding="utf-8",
+    )
+    items = eng.list_backup_files()
+    assert len(items) == 1
+    c = items[0]["manifest"]["counts"]
+    assert c["users"] == 11
+    assert c["nodes"] == 2
+    print("OK: list_backup_files enriches counts from zip manifest")
