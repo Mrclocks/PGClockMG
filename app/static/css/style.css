@@ -998,7 +998,13 @@ button.db-card {
   border-color: var(--border-soft);
 }
 
-.info-box, .warnings-box, .warning-card, .option-card, .summary-card, .success-card, .block-msg {
+.info-box, 
+.post-success-tips {
+  margin-top: 12px;
+  margin-bottom: 14px;
+  text-align: start;
+}
+.warnings-box, .warning-card, .option-card, .summary-card, .success-card, .block-msg {
   background: var(--bg-card);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius);

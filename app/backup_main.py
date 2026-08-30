@@ -36,7 +36,7 @@ from app.services.backup_telegram import (
 )
 from app.services.prerequisites import get_system_status, is_pasarguard_installed
 
-APP_VERSION = "4.1.7"
+APP_VERSION = "4.1.8"
 
 
 def _dashboard_update_info() -> dict:
