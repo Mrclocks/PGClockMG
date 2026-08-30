@@ -169,6 +169,73 @@ def test_maybe_auto_send_only_manual(monkeypatch, tmp_path):
     print("OK: auto telegram only for manual backups")
 
 
+def test_telegram_enqueue_never_blocks_or_fails_backup(monkeypatch):
+    """Telegram runs in a daemon thread; backup status stays success even if TG hangs/fails."""
+    import threading
+    import time
+
+    import app.services.backup_engine as eng
+
+    job_id = "tgdecouple1"
+    with eng._jobs_lock:
+        eng._jobs[job_id] = {
+            "job_id": job_id,
+            "status": "success",
+            "trigger": "manual",
+            "logs": [],
+            "progress": 100,
+            "phase": "done",
+            "backup_id": "b1",
+            "filename": "b1.zip",
+            "manifest": {},
+            "error": None,
+        }
+
+    release_tg = threading.Event()
+
+    def slow_fail_send(backup_result, *, settings=None):
+        release_tg.wait(timeout=5)
+        return {"ok": False, "error": "forced_tg_fail"}
+
+    monkeypatch.setattr(
+        "app.services.backup_telegram.maybe_auto_send_backup",
+        slow_fail_send,
+    )
+
+    t0 = time.monotonic()
+    eng._enqueue_telegram_auto_send(dict(eng._jobs[job_id]))
+    assert time.monotonic() - t0 < 0.4
+    assert eng.get_backup_job(job_id)["status"] == "success"
+    assert eng.get_backup_job(job_id).get("telegram") is None
+
+    release_tg.set()
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        job = eng.get_backup_job(job_id)
+        if job and job.get("telegram") is not None:
+            break
+        time.sleep(0.05)
+
+    job = eng.get_backup_job(job_id)
+    assert job["status"] == "success"
+    assert job["progress"] == 100
+    assert job["telegram"]["ok"] is False
+    assert "forced_tg_fail" in (job["telegram"].get("error") or "")
+    print("OK: telegram enqueue is non-blocking and cannot fail the backup")
+
+
+def test_create_backup_success_path_has_no_inline_telegram():
+    """Regression: create must not block on 'Checking Telegram delivery…'."""
+    import inspect
+    import app.services.backup_engine as eng
+
+    src = inspect.getsource(eng._create_backup_into)
+    assert "maybe_auto_send_backup" not in src
+    assert "Checking Telegram" not in src
+    assert "Telegram auto-send" not in src
+    print("OK: create path has no inline telegram")
+
+
 def test_stream_listener_lifecycle():
     from app.services import backup_stream as stream
 
