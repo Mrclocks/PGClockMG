@@ -1,4 +1,4 @@
-> 🚀 **`v4.0.8`** — Health cards redesign + language dropdown
+> 🚀 **`v4.1.0`** — Security verification + branch cleanup + 4.1 release
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

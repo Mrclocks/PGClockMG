@@ -154,7 +154,8 @@ def test_service_unit_and_firewall_use_the_chosen_port():
     text = INSTALL_SH.read_text(encoding="utf-8")
     assert "Environment=PG_MIGRATOR_PORT=${WEB_PORT}" in text
     assert "--port ${WEB_PORT}" in text
-    assert 'ufw allow "${WEB_PORT}/tcp"' in text
+    assert 'ufw allow "${port}/tcp"' in text
+    assert 'open_firewall "$WEB_PORT"' in text
     assert not re.search(r"--port 7000", text)
     print("OK: unit file, firewall and banner follow WEB_PORT")
 
