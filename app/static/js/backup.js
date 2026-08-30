@@ -2105,9 +2105,19 @@ async function checkForUpdate(force = false) {
   const checkBtn = document.getElementById("btnUpdateCheck");
   const defaultLabel = t("btnUpdateCheck");
   clearTimeout(_updateCheckResetTimer);
+
+  const restoreCheckBtn = (label = defaultLabel) => {
+    if (!checkBtn) return;
+    checkBtn.textContent = label;
+    checkBtn.disabled = false;
+    // Drop sticky :focus/:active after click so it looks idle again.
+    try { checkBtn.blur(); } catch (_) {}
+  };
+
   if (checkBtn) {
     checkBtn.disabled = true;
     checkBtn.textContent = t("updateChecking");
+    try { checkBtn.blur(); } catch (_) {}
   }
   try {
     const info = await api("/api/update/status" + (force ? "?force=true" : ""));
@@ -2115,30 +2125,20 @@ async function checkForUpdate(force = false) {
     renderUpdateBanner(info || {});
     if (checkBtn) {
       if (info && info.available) {
-        checkBtn.textContent = defaultLabel;
-        checkBtn.disabled = false;
+        restoreCheckBtn(defaultLabel);
       } else if (info && info.error) {
         checkBtn.textContent = t("updateCheckFail");
-        _updateCheckResetTimer = setTimeout(() => {
-          checkBtn.textContent = defaultLabel;
-          checkBtn.disabled = false;
-        }, 3500);
+        _updateCheckResetTimer = setTimeout(() => restoreCheckBtn(defaultLabel), 3500);
       } else {
         checkBtn.textContent = t("updateUpToDate");
-        _updateCheckResetTimer = setTimeout(() => {
-          checkBtn.textContent = defaultLabel;
-          checkBtn.disabled = false;
-        }, 3500);
+        _updateCheckResetTimer = setTimeout(() => restoreCheckBtn(defaultLabel), 3500);
       }
     }
     return info;
   } catch (e) {
     if (checkBtn) {
       checkBtn.textContent = t("updateCheckFail");
-      _updateCheckResetTimer = setTimeout(() => {
-        checkBtn.textContent = defaultLabel;
-        checkBtn.disabled = false;
-      }, 3500);
+      _updateCheckResetTimer = setTimeout(() => restoreCheckBtn(defaultLabel), 3500);
     }
     showToast(t("updateCheckFail") + ": " + e.message, "error");
     return null;
