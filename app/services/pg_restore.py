@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import json
 import os
 import re
 import shutil
@@ -1181,6 +1182,25 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
         db_type = detect_db_type_from_env(env_text, prefer_compose=False) if env_text else None
         summary = extract_env_summary(env_text) if env_text else None
 
+        # Prefer PGClockBackup manifest when present (db_type + live panel counts)
+        manifest_meta: dict = {}
+        for cand in (tmp / "pgclockmg-manifest.json", tmp / "manifest.json"):
+            if cand.is_file():
+                try:
+                    manifest_meta = json.loads(cand.read_text(encoding="utf-8"))
+                except Exception:
+                    manifest_meta = {}
+                break
+        if isinstance(manifest_meta.get("db_type"), str) and manifest_meta["db_type"].strip():
+            man_db = manifest_meta["db_type"].strip().lower()
+            if man_db in ("sqlite", "postgresql", "timescaledb", "mysql", "mariadb"):
+                if not db_type or (db_type == "postgresql" and man_db == "timescaledb"):
+                    db_type = man_db
+                elif db_type != man_db and not soft_db_family(db_type, man_db):
+                    # Manifest is authoritative for PGClockBackup bundles
+                    if manifest_meta.get("format") == "pgclockmg-full-bundle":
+                        db_type = man_db
+
         artifacts = discover_backup_artifacts(tmp, env_db=db_type)
         layout = artifacts["layout"]
         if not db_type:
@@ -1199,6 +1219,11 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
                 db_type = "timescaledb"
 
         table_counts = _estimate_backup_table_counts(tmp, layout)
+        man_counts = manifest_meta.get("counts") if isinstance(manifest_meta, dict) else None
+        if isinstance(man_counts, dict):
+            for k, v in man_counts.items():
+                if isinstance(v, int) and v > 0 and (k not in table_counts or table_counts.get(k, 0) < v):
+                    table_counts[k] = v
         installed = is_pasarguard_installed()
         installed_db = get_pasarguard_db_type() if installed else None
 
@@ -1775,7 +1800,7 @@ async def _sync_pg_role_passwords(
         )
         # Also try as postgres superuser if first attempt failed
         if not ok and user != "postgres":
-            await _run(
+            ok, out = await _run(
                 job,
                 [
                     "docker", "compose", "exec", "-T",
@@ -1786,10 +1811,14 @@ async def _sync_pg_role_passwords(
                 cwd=str(PASARGUARD_DIR),
                 timeout=30,
             )
-        job.log(f"Synced password for role {role}")
-    # Restart pgbouncer so auth cache picks up new SCRAM secrets
-    await _compose(job, "restart", "pgbouncer", timeout=90)
-    await asyncio.sleep(3)
+        if ok:
+            job.log(f"Synced password for role {role}")
+        else:
+            job.log(f"Could not sync password for role {role}: {(out or '')[-200:]}")
+    # Restart pgbouncer so auth cache picks up new SCRAM secrets (ignore if absent)
+    if _compose_has_service("pgbouncer"):
+        await _compose(job, "restart", "pgbouncer", timeout=90)
+        await asyncio.sleep(3)
 
 
 async def _ensure_timescaledb_not_in_restore_mode(
@@ -1870,6 +1899,12 @@ async def _ensure_timescaledb_not_in_restore_mode(
             break
         last_err = extract_psql_errors(out2 or "")[:300] or (out2 or "")[-300:]
     if not cleared:
+        if restoring == "on":
+            raise RuntimeError(
+                "TimescaleDB is stuck in restoring=on and timescaledb_post_restore() failed.\n"
+                f"{last_err}\n"
+                "PasarGuard would crash silently after alembic Context — refusing to continue."
+            )
         job.log(f"timescaledb_post_restore warning: {last_err}")
         return
 
@@ -1881,9 +1916,11 @@ async def _ensure_timescaledb_not_in_restore_mode(
         val3 = (out3 or "").strip().splitlines()
         after = val3[-1].strip().lower() if val3 else ""
         if after == "on":
-            job.log("WARNING: timescaledb.restoring is still on after post_restore")
-        else:
-            job.log(f"TimescaleDB restore mode confirmed clear ({after or 'off/n/a'})")
+            raise RuntimeError(
+                "TimescaleDB timescaledb.restoring is still on after post_restore — "
+                "panel would die silently. Refusing to mark restore as success."
+            )
+        job.log(f"TimescaleDB restore mode confirmed clear ({after or 'off/n/a'})")
         return
 
 
@@ -1914,7 +1951,7 @@ async def _heal_panel_auth_if_needed(job: MigrationJob, password: str, user: str
                 db_type=db_type,
                 db_name=db_name or "pasarguard",
             )
-    await _compose(job, "restart", "pasarguard", timeout=120)
+    await _compose(job, "up", "-d", "--force-recreate", "pasarguard", timeout=120)
     await asyncio.sleep(6)
     ok2, logs2 = await _run(
         job,
@@ -1923,7 +1960,7 @@ async def _heal_panel_auth_if_needed(job: MigrationJob, password: str, user: str
         timeout=40,
     )
     if is_auth_failure_text(logs2 or ""):
-        job.log("Auth still failing after heal — check DB_PASSWORD in /opt/pasarguard/.env")
+        job.log("Auth still failing after heal — check DB_PASSWORD / POSTGRES_PASSWORD in /opt/pasarguard/.env")
     else:
         job.log("Auth heal applied — panel should start cleanly")
 
@@ -3036,7 +3073,8 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                     # MySQL convert auth uses root more often than app user
                     verify_user = cur_user or "root"
             else:
-                verify_pass = cur_db_pass or cur_pg_pass or live_admin.get("password") or ""
+                # Prefer POSTGRES_PASSWORD (cur_pg_pass already falls back to DB_PASSWORD)
+                verify_pass = cur_pg_pass or live_admin.get("password") or ""
         else:
             verify_user = bak_user or cur_user or live_admin.get("user") or "pasarguard"
             verify_pass = (
@@ -3144,14 +3182,12 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         else:
             job.log("Skipping full alembic re-sync after convert (schema already at head)")
 
-        # Force recreate so panel picks up finalized .env (DB URL / SSL)
+        # Force recreate so panel picks up finalized .env (DB URL / SSL).
+        # Do not fall back to plain `up -d` — that reuses a stale container and
+        # can leave the panel on the old env while health checks pass on old logs.
         ok, out = await _compose(job, "up", "-d", "--force-recreate", "pasarguard", timeout=300)
         if not ok:
             job.log(f"compose recreate warning: {out[-1500:]}")
-            ok, out = await _compose(job, "up", "-d", timeout=300)
-        if not ok:
-            # Do NOT wipe Timescale volume here — that caused empty-panel false success
-            job.log(f"compose up warning: {out[-1500:]}")
             mismatch = detect_ts_mismatch_from_text(out)
             if mismatch:
                 job.log(
@@ -3159,9 +3195,14 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                     "retag only, no data wipe after restore"
                 )
                 await _align_timescaledb_image(job, mismatch[0], wipe_data=False)
-                ok, out = await _compose(job, "up", "-d", timeout=300)
-                if not ok:
-                    raise RuntimeError(f"PasarGuard failed to start after restore:\n{out[-2000:]}")
+                ok, out = await _compose(
+                    job, "up", "-d", "--force-recreate", "pasarguard", timeout=300,
+                )
+            if not ok:
+                raise RuntimeError(
+                    "PasarGuard failed to start after restore (force-recreate):\n"
+                    f"{out[-2000:]}"
+                )
         await asyncio.sleep(8)
 
         await _heal_panel_auth_if_needed(
@@ -3183,8 +3224,8 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             )
         else:
             verify_pass = (
-                read_env_var(env_now, "DB_PASSWORD")
-                or read_env_var(env_now, "POSTGRES_PASSWORD")
+                read_env_var(env_now, "POSTGRES_PASSWORD")
+                or read_env_var(env_now, "DB_PASSWORD")
                 or verify_pass
             )
         verify_user = read_env_var(env_now, "DB_USER") or verify_user
@@ -3197,7 +3238,9 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             verify_user,
             verify_db,
             expected_counts,
-            require_any_data=bool(expected_counts) or bool(analysis.get("table_counts")),
+            # Always require panel data when we cannot estimate backup rows
+            # (matches the log line above) — env/certs alone are not success.
+            require_any_data=True,
         )
 
         if params.get("disable_nodes_after_restore"):
@@ -3715,6 +3758,31 @@ async def _restore_postgres(
     dump = dump or resolve_backup_sql_dump(root, env_db=analysis.get("backup_db") or db_type)
     if not dump or not dump.exists():
         raise RuntimeError("SQL dump missing")
+
+    # PGClockBackup ships globals.sql at zip root (beside db_backup.sql).
+    # Apply roles best-effort before the app dump — same idea as multi-layout.
+    root_globals = root / "globals.sql"
+    if root_globals.is_file():
+        job.log("Restoring root globals.sql (roles)…")
+        gtext = filter_globals_sql(
+            root_globals.read_text(encoding="utf-8", errors="ignore")
+        )
+        if strip_for_plain_pg:
+            gtext = filter_timescaledb_extension_sql(gtext, strip_all=True)
+        cmd = [
+            "docker", "compose", "exec", "-T",
+            "-e", f"PGPASSWORD={password}",
+            svc, "psql", "-v", "ON_ERROR_STOP=0", "-U", user, "-d", "postgres",
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=str(PASARGUARD_DIR),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        await proc.communicate(input=gtext.encode("utf-8"))
+
     await psql(
         f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
         f"WHERE datname = '{db_name}' AND pid <> pg_backend_pid();"

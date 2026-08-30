@@ -587,6 +587,7 @@ function applyPhaseI18n() {
   set('restoreSelectText', 'restore.select');
   set('restoreStreamHint', 'restore.streamHint');
   set('btnStreamListen', 'restore.streamListen');
+  set('btnCopyStreamToken', 'copy');
   const streamSteps = document.getElementById('restoreStreamSteps');
   if (streamSteps) {
     streamSteps.innerHTML = [t('restore.streamStep1'), t('restore.streamStep2'), t('restore.streamStep3')]

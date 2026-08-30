@@ -1,4 +1,4 @@
-> 🚀 **`v4.1.3`** — Soft blue button fills, centered backup success, better stream icon
+> 🚀 **`v4.1.4`** — Stream token copy label, stacked status boxes, stricter restore health
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

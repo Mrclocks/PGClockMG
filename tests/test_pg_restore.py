@@ -76,13 +76,17 @@ def test_ensure_timescaledb_forces_post_restore_when_on():
     job = MagicMock()
     job.log = MagicMock()
     calls: list[str] = []
+    state = {"phase": "check"}
 
     async def fake_run(_job, cmd, **_kwargs):
         joined = " ".join(str(c) for c in cmd)
         calls.append(joined)
         if "current_setting" in joined:
-            return True, "on\n"
+            if state["phase"] == "check":
+                return True, "on\n"
+            return True, "off\n"
         if "timescaledb_post_restore" in joined:
+            state["phase"] = "after"
             return True, "t\n"
         return True, ""
 
@@ -100,6 +104,39 @@ def test_ensure_timescaledb_forces_post_restore_when_on():
     log_text = " ".join(str(c.args[0]) for c in job.log.call_args_list if c.args)
     assert "restore mode" in log_text.lower()
     print("OK: ensure post_restore when restoring=on")
+
+
+def test_ensure_timescaledb_hard_fails_when_still_on():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from app.services import pg_restore as mod
+
+    job = MagicMock()
+    job.log = MagicMock()
+
+    async def fake_run(_job, cmd, **_kwargs):
+        joined = " ".join(str(c) for c in cmd)
+        if "current_setting" in joined:
+            return True, "on\n"
+        if "timescaledb_post_restore" in joined:
+            return True, "t\n"
+        return True, ""
+
+    async def _go():
+        with (
+            patch.object(mod, "_detect_db_container", AsyncMock(return_value="timescaledb")),
+            patch.object(mod, "_run", side_effect=fake_run),
+        ):
+            await mod._ensure_timescaledb_not_in_restore_mode(
+                job, "secret", "pasarguard", "pasarguard",
+            )
+
+    try:
+        asyncio.run(_go())
+        raise AssertionError("expected RuntimeError when restoring stays on")
+    except RuntimeError as e:
+        assert "restoring" in str(e).lower()
+    print("OK: hard-fail when timescaledb.restoring stays on")
 
 
 def test_ensure_timescaledb_forces_post_restore_when_check_fails():
@@ -680,6 +717,51 @@ def test_analyze_all_db_types():
         shutil.rmtree(base, ignore_errors=True)
 
 
+def test_analyze_reads_pgclockmg_manifest():
+    """Manifest db_type + counts should win when URL looks like plain postgres."""
+    import json
+    import tempfile
+    import shutil
+    import zipfile
+    import app.services.pg_restore as mod
+
+    base = Path(tempfile.mkdtemp(prefix="pg-manifest-"))
+    try:
+        zpath = base / "bak.zip"
+        with zipfile.ZipFile(zpath, "w") as zf:
+            zf.writestr(
+                ".env",
+                'SQLALCHEMY_DATABASE_URL="postgresql+asyncpg://u:p@127.0.0.1/pasarguard"\n',
+            )
+            zf.writestr(
+                "db_backup.sql",
+                "--\n-- PostgreSQL database dump\n--\nCREATE TABLE users(id int);\nINSERT INTO users VALUES (1);\n" * 3,
+            )
+            zf.writestr(
+                "pgclockmg-manifest.json",
+                json.dumps({
+                    "format": "pgclockmg-full-bundle",
+                    "db_type": "timescaledb",
+                    "counts": {"users": 42, "nodes": 3, "admins": 1, "inbounds": 2},
+                }),
+            )
+        orig_installed = mod.is_pasarguard_installed
+        orig_db = mod.get_pasarguard_db_type
+        mod.is_pasarguard_installed = lambda: True  # type: ignore
+        mod.get_pasarguard_db_type = lambda: "timescaledb"  # type: ignore
+        try:
+            a = analyze_pasarguard_backup(path=zpath)
+            assert a["backup_db"] == "timescaledb"
+            assert a["table_counts"].get("users") == 42
+            assert a["ok"] is True
+        finally:
+            mod.is_pasarguard_installed = orig_installed  # type: ignore
+            mod.get_pasarguard_db_type = orig_db  # type: ignore
+        print("OK: analyze prefers pgclockmg-manifest.json")
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
 def test_analyze_experimental_hard_mismatch():
     import tempfile
     import shutil
@@ -1000,6 +1082,7 @@ if __name__ == "__main__":
     test_soft_db_family_matrix()
     test_ts_to_ts_syncs_alembic_before_panel()
     test_ensure_timescaledb_forces_post_restore_when_on()
+    test_ensure_timescaledb_hard_fails_when_still_on()
     test_ensure_timescaledb_forces_post_restore_when_check_fails()
     test_filter_timescaledb_extension_sql()
     test_filter_timescaledb_strip_all_for_plain_pg()
@@ -1027,6 +1110,7 @@ if __name__ == "__main__":
     test_parse_manifest_ts_versions()
     test_analyze_newer_timescale_backup_reports_floor()
     test_analyze_all_db_types()
+    test_analyze_reads_pgclockmg_manifest()
     test_analyze_experimental_hard_mismatch()
     test_filter_globals_sql_makes_create_role_idempotent()
     test_verify_settings_soft_when_critical_ok()

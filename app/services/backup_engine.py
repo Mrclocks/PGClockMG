@@ -803,7 +803,41 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
 
         stats = live_panel_stats()
         counts = stats.get("counts") or {}
+        # Refuse zip when live panel has data but the dump looks empty.
+        live_users = counts.get("users")
+        if isinstance(live_users, int) and live_users > 0:
+            dump_users = None
+            if db_type == "sqlite":
+                dump_users = _sqlite_counts(dump_path).get("users")
+            else:
+                try:
+                    sample = dump_path.read_text(encoding="utf-8", errors="ignore")[:2_000_000]
+                except Exception:
+                    sample = ""
+                # Heuristic: COPY/INSERT evidence for users table
+                lower = sample.lower()
+                if "copy public.users" in lower or "copy users" in lower or "insert into `users`" in lower or "insert into users" in lower:
+                    dump_users = live_users  # content present — defer exact count to restore
+                elif "create table" in lower and "users" in lower and live_users > 0:
+                    # Schema-only dump while live has users
+                    dump_users = 0
+            if dump_users == 0:
+                raise RuntimeError(
+                    f"Backup dump has 0 users but live panel reports {live_users} — refusing empty dump"
+                )
+
         version = read_env_var(env_text, "APP_VERSION") or None
+
+        # Stamp engine into bundled .env so restore analyze is unambiguous
+        env_out = staging / ".env"
+        if env_out.is_file() and db_type:
+            try:
+                text = env_out.read_text(encoding="utf-8", errors="ignore")
+                if "PASARGUARD_DB_ENGINE=" not in text:
+                    text = text.rstrip() + f"\nPASARGUARD_DB_ENGINE={db_type}\n"
+                    env_out.write_text(text, encoding="utf-8")
+            except Exception:
+                pass
 
         manifest = {
             "format": "pgclockmg-full-bundle",
