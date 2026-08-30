@@ -737,10 +737,11 @@
 .backup-icon-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: 12px; /* compact tiles — keep this style */
   margin: 0;
 }
 
+/* Same vertical rhythm as Backups tab (.backup-list gap + .backup-page-head) */
 .backup-dash-stack {
   display: flex;
   flex-direction: column;
@@ -749,12 +750,18 @@
 
 .backup-dash-stack > .backup-section-card,
 .backup-dash-stack > .backup-split-grid,
-.backup-dash-stack > .backup-icon-grid {
-  margin-bottom: 0;
+.backup-dash-stack > .backup-icon-grid,
+.backup-dash-stack .backup-section-card,
+.backup-dash-stack .info-box,
+.backup-dash-stack .success-card,
+.backup-dash-stack .warning-card {
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
 }
 
-.backup-dash-head {
-  margin-bottom: 4px;
+/* Match other tabs: caption → content = 20px (do not shrink) */
+#panel-dash > .backup-page-head {
+  margin-bottom: 20px;
 }
 
 .backup-stat-grid {
@@ -900,7 +907,7 @@ html[dir="rtl"] .backup-app .specs-item .specs-value[dir="ltr"] {
 .backup-split-grid {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 20px;
+  gap: 20px; /* same as .backup-list */
 }
 
 @media (min-width: 900px) {
@@ -986,7 +993,7 @@ html[dir="rtl"] .backup-app .specs-item .specs-value[dir="ltr"] {
 
 .backup-status-card {
   padding: var(--backup-box-pad-y) var(--backup-box-pad-x) !important;
-  margin-bottom: 0 !important;
+  margin: 0 !important;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -1022,6 +1029,8 @@ html[dir="rtl"] .backup-app .specs-item .specs-value[dir="ltr"] {
 #dashPgCard.backup-pg-card.success-card,
 #dashPgCard.backup-pg-card.warning-card {
   text-align: start !important;
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
 }
 
 #dashPgCard .backup-section-head {

@@ -1,4 +1,4 @@
-> 🚀 **`v4.3.1`** — Faster dashboard load, no login flash, cleaner layout
+> 🚀 **`v4.3.2`** — Dashboard spacing fix + backup filename without DB type
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

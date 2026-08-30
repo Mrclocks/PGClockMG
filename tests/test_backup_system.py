@@ -625,7 +625,9 @@ def test_backup_bundle_all_sql_engines(tmp_path, monkeypatch):
         path = eng.resolve_backup_path(job["backup_id"])
         _assert_sql_bundle(path, db_type, expect_globals=with_globals)
         assert job["manifest"]["counts"]["users"] == 3
-        assert f"pgclockmg-{db_type}-" in (job.get("filename") or "")
+        assert (job.get("filename") or "").startswith("pgclockmg-")
+        assert (job.get("filename") or "").endswith(".zip")
+        assert f"-{db_type}-" not in (job.get("filename") or "")
 
     print("OK: postgresql/timescaledb/mysql/mariadb full-bundle layouts")
 
