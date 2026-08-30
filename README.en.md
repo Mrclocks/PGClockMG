@@ -1,4 +1,4 @@
-> 🚀 **`v4.1.2`** — Custom modals (no native dialogs), latest-backup tag, preserve backups on uninstall
+> 🚀 **`v4.1.3`** — Soft blue button fills, centered backup success, better stream icon
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
