@@ -155,6 +155,7 @@ const I18N = {
     lblNewPassConfirm: "تکرار رمز جدید",
     btnSaveSettings: "ذخیره تنظیمات",
     saved: "ذخیره شد",
+    saveFail: "ذخیره نشد",
     streamH2: "ارسال استریم به ویزارد",
     streamDesc: "فایل بکاپ روی همین سرور می‌ماند؛ فقط یک کپی به ویزارد مقصد فرستاده می‌شود. اول مقصد را در حالت دریافت بگذارید، بعد از اینجا ارسال کنید.",
     streamStep1: "روی سرور مقصد: ویزارد → ریستور → آماده‌سازی دریافت استریم",
@@ -348,6 +349,7 @@ const I18N = {
     lblNewPassConfirm: "Confirm new password",
     btnSaveSettings: "Save settings",
     saved: "Saved",
+    saveFail: "Save failed",
     streamH2: "Stream to wizard",
     streamDesc: "The zip stays on this server; only a copy is sent to the destination wizard. Put the destination in receive mode first, then send from here.",
     streamStep1: "On destination: Wizard → Restore → Ready to receive stream",
@@ -541,6 +543,7 @@ const I18N = {
     lblNewPassConfirm: "Повтор нового пароля",
     btnSaveSettings: "Сохранить настройки",
     saved: "Сохранено",
+    saveFail: "Не сохранено",
     streamH2: "Стрим в мастер",
     streamDesc: "ZIP остаётся на этом сервере; на мастер назначения уходит только копия. Сначала включите приём на назначении, потом отправляйте отсюда.",
     streamStep1: "На назначении: Мастер → Restore → Готов принимать стрим",
@@ -1732,7 +1735,7 @@ async function saveSettings(opts = {}) {
   if (!quiet) showToast(t("saved"), "success");
   refreshTelegramStatusTag().catch(() => {});
   } catch (e) {
-    if (!quiet) showToast((t("saved") || "Save") + ": " + (e.message || e), "error");
+    if (!quiet) showToast(t("saveFail") + ": " + (e.message || e), "error");
     throw e;
   }
 }
