@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#0f1218">
   <title>PGClockMG Backup</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=4.0.7">
-  <link rel="stylesheet" href="/static/css/backup.css?v=4.0.7">
+  <link rel="stylesheet" href="/static/css/style.css?v=4.0.8">
+  <link rel="stylesheet" href="/static/css/backup.css?v=4.0.8">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
@@ -32,12 +32,18 @@
         </div>
       </div>
       <div class="header-meta">
-        <div class="lang-switch" id="langSwitch" role="group" aria-label="Language">
-          <button type="button" class="lang-btn" data-lang="fa" onclick="setBackupLang('fa')"><span class="lang-name">FA</span></button>
-          <button type="button" class="lang-btn" data-lang="en" onclick="setBackupLang('en')"><span class="lang-name">EN</span></button>
-          <button type="button" class="lang-btn" data-lang="ru" onclick="setBackupLang('ru')"><span class="lang-name">RU</span></button>
+        <div class="backup-lang" id="langSwitch">
+          <button type="button" class="backup-lang-trigger" id="langTrigger" aria-haspopup="listbox" aria-expanded="false" aria-label="Language">
+            <span id="langCurrentLabel">FA</span>
+            <svg class="backup-lang-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+          <ul class="backup-lang-menu hidden" id="langMenu" role="listbox">
+            <li role="option" tabindex="-1" data-lang="fa" aria-selected="false">فارسی · FA</li>
+            <li role="option" tabindex="-1" data-lang="en" aria-selected="false">English · EN</li>
+            <li role="option" tabindex="-1" data-lang="ru" aria-selected="false">Русский · RU</li>
+          </ul>
         </div>
-        <button type="button" class="btn btn-back btn-sm hidden" id="btnLogout" onclick="logoutBackup()"></button>
+        <button type="button" class="btn btn-back btn-sm backup-logout-btn hidden" id="btnLogout" onclick="logoutBackup()"></button>
       </div>
     </header>
 
@@ -390,6 +396,6 @@
 
     </main>
   </div>
-  <script src="/static/js/backup.js?v=4.0.7"></script>
+  <script src="/static/js/backup.js?v=4.0.8"></script>
 </body>
 </html>

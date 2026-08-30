@@ -135,7 +135,10 @@ const I18N = {
     healthDisk: "فضای بکاپ",
     healthMem: "رم آزاد",
     healthCpu: "CPU / Load",
-    healthArchives: "آرشیوها",
+    healthArchives: "آرشیو بکاپ",
+    healthSchedule: "زمان‌بندی",
+    healthOk: "آماده",
+    healthMissing: "یافت نشد",
     freeOf: "آزاد از",
     totalSize: "حجم کل",
     keepLast: "نگه‌داری",
@@ -273,7 +276,10 @@ const I18N = {
     healthDisk: "Backup disk",
     healthMem: "Free RAM",
     healthCpu: "CPU / Load",
-    healthArchives: "Archives",
+    healthArchives: "Backup archives",
+    healthSchedule: "Schedule",
+    healthOk: "Ready",
+    healthMissing: "Not found",
     freeOf: "free of",
     totalSize: "Total size",
     keepLast: "Retention",
@@ -411,7 +417,10 @@ const I18N = {
     healthDisk: "Диск бэкапа",
     healthMem: "Свободная RAM",
     healthCpu: "CPU / Load",
-    healthArchives: "Архивы",
+    healthArchives: "Архивы бэкапа",
+    healthSchedule: "Расписание",
+    healthOk: "Готово",
+    healthMissing: "Не найден",
     freeOf: "свободно из",
     totalSize: "Общий размер",
     keepLast: "Хранение",
@@ -452,9 +461,7 @@ function setBackupLang(next) {
   localStorage.setItem("pg_backup_lang", next);
   document.documentElement.lang = next;
   document.documentElement.dir = next === "fa" ? "rtl" : "ltr";
-  document.querySelectorAll(".lang-btn").forEach((btn) => {
-    btn.setAttribute("aria-pressed", btn.dataset.lang === next ? "true" : "false");
-  });
+  syncLangMenu(next);
   applyI18n();
   if (!document.getElementById("panel-auth")?.classList.contains("active")) {
     refreshDashboard().catch(() => {});
@@ -462,6 +469,63 @@ function setBackupLang(next) {
       refreshList().catch(() => {});
     }
   }
+}
+
+const LANG_SHORT = { fa: "FA", en: "EN", ru: "RU" };
+
+function syncLangMenu(code) {
+  const current = LANG_SHORT[code] || String(code).toUpperCase();
+  const label = document.getElementById("langCurrentLabel");
+  if (label) label.textContent = current;
+  const menu = document.getElementById("langMenu");
+  if (menu) {
+    menu.querySelectorAll("[data-lang]").forEach((li) => {
+      const on = li.getAttribute("data-lang") === code;
+      li.setAttribute("aria-selected", on ? "true" : "false");
+      li.classList.toggle("is-active", on);
+    });
+  }
+  const trigger = document.getElementById("langTrigger");
+  if (trigger) trigger.setAttribute("aria-expanded", "false");
+  document.getElementById("langSwitch")?.classList.remove("is-open");
+  menu?.classList.add("hidden");
+}
+
+function initLangMenu() {
+  const root = document.getElementById("langSwitch");
+  const trigger = document.getElementById("langTrigger");
+  const menu = document.getElementById("langMenu");
+  if (!root || !trigger || !menu || root.dataset.ready) return;
+  root.dataset.ready = "1";
+
+  const close = () => {
+    root.classList.remove("is-open");
+    menu.classList.add("hidden");
+    trigger.setAttribute("aria-expanded", "false");
+  };
+
+  trigger.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const open = root.classList.toggle("is-open");
+    menu.classList.toggle("hidden", !open);
+    trigger.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+
+  menu.querySelectorAll("[data-lang]").forEach((li) => {
+    li.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const code = li.getAttribute("data-lang");
+      close();
+      if (code) setBackupLang(code);
+    });
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!root.contains(e.target)) close();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") close();
+  });
 }
 
 function applyI18n() {
@@ -513,6 +577,8 @@ function applyI18n() {
     if (el) el.setAttribute("aria-label", t(key));
   }
   initProxyTypeSelect();
+  initLangMenu();
+  syncLangMenu(lang);
   const clearBtn = document.getElementById("btnClearLastError");
   if (clearBtn) clearBtn.textContent = t("clearError");
   document.getElementById("authTitle").textContent = setupMode ? t("authSetupTitle") : t("authLoginTitle");
@@ -591,17 +657,18 @@ function formatSimpleTime(iso) {
   return s.replace("T", " ").replace(/Z$/, "").replace(/\.\d+/, "").slice(0, 16);
 }
 
-function metricCard({ tone, icon, value, label, sub }) {
-  return `<div class="backup-metric">
-    <div class="backup-metric-top">
-      <span class="choice-icon ${tone}" aria-hidden="true">${icon}</span>
+function metricCard({ tone, icon, label, value, sub, status, valueLtr = true, hintLtr = false }) {
+  const statusCls = status ? ` is-${status}` : "";
+  const valueDir = valueLtr ? ' dir="ltr"' : "";
+  const hintDir = hintLtr ? ' dir="ltr"' : "";
+  return `<article class="backup-health-card">
+    <span class="choice-icon ${tone}" aria-hidden="true">${icon}</span>
+    <div class="backup-health-body">
+      <p class="backup-health-label">${esc(label)}</p>
+      <p class="backup-health-value${statusCls}"${valueDir}>${esc(value)}</p>
+      ${sub ? `<p class="backup-health-hint"${hintDir}>${esc(sub)}</p>` : ""}
     </div>
-    <div>
-      <strong>${esc(value)}</strong>
-      <div class="metric-label">${esc(label)}</div>
-      ${sub ? `<div class="metric-sub">${esc(sub)}</div>` : ""}
-    </div>
-  </div>`;
+  </article>`;
 }
 
 function esc(s) {
@@ -701,48 +768,59 @@ async function refreshDashboard() {
   const diskTotal = health.backup_disk_total_bytes;
   const memFree = health.memory_available_bytes;
   const load = health.load_ratio_1m;
+  const schedTime = `${String(sched.hour ?? 3).padStart(2, "0")}:${String(sched.minute ?? 0).padStart(2, "0")}`;
   document.getElementById("dashHealthGrid").innerHTML = [
     metricCard({
       tone: "icon-tone-blue",
       icon: ICONS.shield,
-      value: installed ? "OK" : "—",
       label: t("healthPg"),
+      value: installed ? t("healthOk") : t("healthMissing"),
+      status: installed ? "ok" : "warn",
+      valueLtr: false,
       sub: access.db_type || sys.pasarguard_db || "—",
+      hintLtr: true,
     }),
     metricCard({
       tone: "icon-tone-cyan",
       icon: ICONS.docker,
-      value: sys.docker ? "OK" : "—",
       label: t("healthDocker"),
+      value: sys.docker ? t("healthOk") : t("healthMissing"),
+      status: sys.docker ? "ok" : "off",
+      valueLtr: false,
       sub: `${t("profile")}: ${health.profile || "—"}`,
     }),
     metricCard({
       tone: "icon-tone-orange",
       icon: ICONS.disk,
-      value: humanSize(diskFree),
       label: t("healthDisk"),
+      value: humanSize(diskFree),
       sub: diskTotal != null ? `${t("freeOf")} ${humanSize(diskTotal)}` : "",
+      hintLtr: true,
     }),
     metricCard({
       tone: "icon-tone-green",
       icon: ICONS.cpu,
-      value: memFree != null ? humanSize(memFree) : "—",
       label: t("healthMem"),
+      value: memFree != null ? humanSize(memFree) : "—",
       sub: health.cpu_count != null ? `CPU ${health.cpu_count} · load ${load ?? "—"}` : "",
+      hintLtr: true,
     }),
     metricCard({
       tone: "icon-tone-yellow",
       icon: ICONS.archive,
-      value: String(data.backup_count ?? 0),
       label: t("healthArchives"),
+      value: String(data.backup_count ?? 0),
       sub: `${t("totalSize")}: ${humanSize(data.backup_total_bytes)}`,
+      hintLtr: true,
     }),
     metricCard({
       tone: "icon-tone-blue",
       icon: ICONS.clock,
-      value: sched.enabled ? t("scheduleOn") : t("scheduleOff"),
-      label: t("keepLast"),
-      sub: `${data.retention_count || 10} · ${String(sched.hour ?? 3).padStart(2, "0")}:${String(sched.minute ?? 0).padStart(2, "0")} UTC`,
+      label: t("healthSchedule"),
+      value: sched.enabled ? schedTime : t("scheduleOff"),
+      status: sched.enabled ? "ok" : "off",
+      valueLtr: true,
+      sub: `${t("keepLast")}: ${data.retention_count || 10}`,
     }),
   ].join("");
 

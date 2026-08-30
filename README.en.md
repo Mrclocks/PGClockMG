@@ -1,4 +1,4 @@
-> 🚀 **`v4.0.7`** — Backup panel layout polish (actions, stream, dashboard)
+> 🚀 **`v4.0.8`** — Health cards redesign + language dropdown
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
