@@ -897,7 +897,7 @@ function esc(s) {
 async function boot() {
   setBackupLang(lang);
   const st = await api("/api/setup/status");
-  document.getElementById("appVersion").textContent = "v" + (st.version || "4.2.2");
+  document.getElementById("appVersion").textContent = "v" + (st.version || "4.2.3");
   setupMode = !st.password_set;
   window.__setupTokenRequired = !!st.setup_token_required;
   document.getElementById("authConfirmWrap").classList.toggle("hidden", !setupMode);
