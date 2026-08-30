@@ -128,18 +128,18 @@
   white-space: nowrap;
 }
 
-/* Primary CTAs in backup panel: transparent fill + strong border */
+/* Primary CTAs: same blue as Telegram action, soft translucent fill */
 .backup-app .btn-primary {
-  background: hsla(var(--pg-primary), 0.12);
-  color: hsl(210, 90%, 72%);
-  border: 1.5px solid hsl(210, 90%, 55%);
+  background: hsla(210, 90%, 52%, 0.1);
+  color: hsl(210, 90%, 68%);
+  border: 1.5px solid hsla(210, 90%, 55%, 0.75);
   box-shadow: none;
 }
 
 .backup-app .btn-primary:hover:not(:disabled) {
-  background: hsla(var(--pg-primary), 0.2);
-  border-color: hsl(210, 90%, 62%);
-  color: #fff;
+  background: hsla(210, 90%, 52%, 0.18);
+  border-color: hsla(210, 90%, 62%, 0.9);
+  color: hsl(210, 90%, 78%);
   transform: none;
 }
 
@@ -270,12 +270,27 @@
 }
 
 .backup-run-box.is-success-compact {
-  padding-block: 14px;
+  display: flex;
+  align-items: center;
+  padding-block: 16px;
+  min-height: 56px;
+}
+
+.backup-run-box.is-success-compact .backup-section-head {
+  margin-bottom: 0;
+  width: 100%;
+  align-items: center;
 }
 
 .backup-run-box.is-success-compact .backup-progress-track,
 .backup-run-box.is-success-compact .backup-log {
   display: none;
+}
+
+.backup-run-box.is-success-compact #backupProgressTitle {
+  display: flex;
+  align-items: center;
+  line-height: 1.35;
 }
 
 .backup-run-box.is-fading {
