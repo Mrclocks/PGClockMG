@@ -36,7 +36,7 @@ from app.services.backup_telegram import (
 )
 from app.services.prerequisites import get_system_status, is_pasarguard_installed
 
-APP_VERSION = "4.1.4"
+APP_VERSION = "4.1.5"
 
 
 @asynccontextmanager
@@ -227,6 +227,12 @@ async def logout():
 async def dashboard():
     from app.config import BACKUP_PORT, WEB_PORT
     from app.services.pg_access import get_panel_access_info
+    from app.services.backup_engine import (
+        _merge_counts,
+        live_panel_stats,
+        resolve_backup_manifest,
+        resolve_backup_path,
+    )
 
     system = get_system_status()
     cfg = load_settings()
@@ -243,6 +249,23 @@ async def dashboard():
         access = get_panel_access_info() or {}
     except Exception:
         access = {}
+
+    last = cfg.get("last_backup")
+    if isinstance(last, dict) and last.get("backup_id"):
+        path = resolve_backup_path(str(last.get("backup_id")))
+        if path and path.is_file():
+            meta = resolve_backup_manifest(path)
+            last = {
+                **last,
+                "db_type": last.get("db_type") or meta.get("db_type"),
+                "counts": _merge_counts(last.get("counts") or {}, meta.get("counts") or {}),
+            }
+
+    live = {}
+    try:
+        live = live_panel_stats()
+    except Exception:
+        live = {}
 
     return {
         "version": APP_VERSION,
@@ -262,7 +285,8 @@ async def dashboard():
             "port": access.get("port"),
             "db_type": access.get("db_type") or system.get("pasarguard_db"),
         },
-        "last_backup": cfg.get("last_backup"),
+        "live_stats": live,
+        "last_backup": last,
         "last_error": cfg.get("last_error"),
         "backup_count": len(backups),
         "backup_total_bytes": total_bytes,
