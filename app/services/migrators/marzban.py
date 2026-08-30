@@ -813,11 +813,16 @@ class MarzbanMigrator(BaseMigrator):
         access = get_panel_access_info()
         env_text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.exists() else None
         port = read_env_var(env_text, "UVICORN_PORT") if env_text else None
+        from app.services.pg_access import resolve_dashboard_path
+
+        dash = resolve_dashboard_path(env_text) if env_text else (access.get("dashboard_path") or "/dashboard/")
         root = (read_env_var(env_text, "UVICORN_ROOT_PATH") or "").rstrip("/") if env_text else ""
         out = {
             "panel_url": access.get("login_url") or get_panel_url_from_env(env_text),
             "panel_port": port or access.get("port") or "8000",
             "panel_root_path": root or access.get("root_path") or "/",
+            "panel_dashboard_path": dash,
+            "dashboard_path": dash,
             "login_url": access.get("login_url"),
             "root_path": access.get("root_path"),
             "subscription_mode": "native",

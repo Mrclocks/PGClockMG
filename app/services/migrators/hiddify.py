@@ -505,6 +505,12 @@ class HiddifyMigrator(BaseMigrator):
         return False, detail
 
     def _get_panel_url(self) -> str:
-        from app.services.pg_access import get_panel_access_info
+        from app.services.pg_access import get_panel_access_info, build_dashboard_url, resolve_dashboard_path
+        from app.config import PASARGUARD_ENV
 
-        return get_panel_access_info().get("login_url") or "https://127.0.0.1:8000/dashboard/"
+        access = get_panel_access_info()
+        if access.get("login_url"):
+            return access["login_url"]
+        env_text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.exists() else ""
+        dash = resolve_dashboard_path(env_text) if env_text else "/dashboard/"
+        return build_dashboard_url("127.0.0.1", access.get("port") or "8000", https=True, dashboard_path=dash)

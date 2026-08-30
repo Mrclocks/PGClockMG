@@ -674,6 +674,9 @@ def extract_env_summary(text: str) -> dict:
     panel_port = read_env_var(text, "UVICORN_PORT") or "8000"
     panel_host = read_env_var(text, "UVICORN_HOST") or "0.0.0.0"
     panel_root_path = (read_env_var(text, "UVICORN_ROOT_PATH") or "").rstrip("/") or "/"
+    from app.services.pg_access import resolve_dashboard_path
+
+    panel_dashboard_path = resolve_dashboard_path(text)
     return {
         "db_type": db_type,
         "db_user": db_user,
@@ -686,30 +689,31 @@ def extract_env_summary(text: str) -> dict:
         "panel_port": panel_port,
         "panel_host": panel_host,
         "panel_root_path": panel_root_path,
+        "panel_dashboard_path": panel_dashboard_path,
         "has_password": bool(db_password),
     }
 
 
 def get_panel_url_from_env(env_text: str | None = None, ip: str | None = None) -> str:
     """Build PasarGuard dashboard URL — domain from .env preferred, else IP."""
-    from app.services.pg_access import build_dashboard_url, get_panel_access_info
+    from app.services.pg_access import build_dashboard_url, get_panel_access_info, resolve_dashboard_path
 
     if ip:
         port = "8000"
-        root_path = ""
+        dashboard_path = "/dashboard/"
         if env_text:
             port = read_env_var(env_text, "UVICORN_PORT") or "8000"
-            root_path = (read_env_var(env_text, "UVICORN_ROOT_PATH") or "").rstrip("/")
-        return build_dashboard_url(ip, port, https=True, root_path=root_path)
+            dashboard_path = resolve_dashboard_path(env_text)
+        return build_dashboard_url(ip, port, https=True, dashboard_path=dashboard_path)
 
     access = get_panel_access_info()
     if access.get("login_url"):
         return access["login_url"]
 
     port = (read_env_var(env_text, "UVICORN_PORT") if env_text else None) or "8000"
-    root_path = (read_env_var(env_text, "UVICORN_ROOT_PATH") or "").rstrip("/") if env_text else ""
+    dashboard_path = resolve_dashboard_path(env_text) if env_text else "/dashboard/"
     host = access.get("domain") or access.get("ip") or "127.0.0.1"
-    return build_dashboard_url(host, port, https=True, root_path=root_path)
+    return build_dashboard_url(host, port, https=True, dashboard_path=dashboard_path)
 
 
 def transform_marzban_env(
@@ -1135,8 +1139,8 @@ def finalize_pasarguard_env_after_restore(
         ):
             text = _unset_env_var(text, key)
 
-    # Never overwrite backup UVICORN_PORT/HOST — only fill if missing
-    for key in ("UVICORN_PORT", "UVICORN_HOST", "UVICORN_ROOT_PATH", "ALLOWED_ORIGINS"):
+    # Never overwrite backup UVICORN_PORT/HOST/DASHBOARD_PATH — only fill if missing
+    for key in ("UVICORN_PORT", "UVICORN_HOST", "UVICORN_ROOT_PATH", "DASHBOARD_PATH", "ALLOWED_ORIGINS"):
         if read_env_var(text, key):
             continue
         val = read_env_var(install_env_snapshot, key)
@@ -1247,6 +1251,7 @@ MIGRATE_ENV_KEYS = {
     "UVICORN_HOST",
     "UVICORN_PORT",
     "UVICORN_ROOT_PATH",
+    "DASHBOARD_PATH",
     "XRAY_EXECUTABLE_PATH",
     "XRAY_JSON",
     "SUDO_USERNAME",
