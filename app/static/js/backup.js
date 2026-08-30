@@ -1044,9 +1044,13 @@ async function refreshDashboard() {
   const sched = data.schedule || {};
   const installed = data.pasarguard_installed;
 
-  document.getElementById("dashPgCard").className = installed
-    ? "success-card backup-section-card backup-pg-card"
-    : "warning-card backup-section-card backup-pg-card";
+  const pgCard = document.getElementById("dashPgCard");
+  pgCard.className = "info-box backup-section-card backup-pg-card backup-status-card";
+  pgCard.classList.toggle("is-detailed", true);
+  const pgIcon = document.getElementById("dashPgIcon");
+  if (pgIcon) {
+    pgIcon.className = installed ? "choice-icon icon-tone-blue" : "choice-icon icon-tone-yellow";
+  }
   document.getElementById("dashPgSub").textContent = installed ? t("dashPgSubOk") : t("dashPgSubMissing");
 
   const specs = document.getElementById("dashPgSpecs");

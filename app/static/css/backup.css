@@ -1024,13 +1024,19 @@ html[dir="rtl"] .backup-app .specs-item .specs-value[dir="ltr"] {
   margin-top: 12px;
 }
 
-/* PasarGuard status card: icon tones + start-aligned title (RTL = right) */
-#dashPgCard.backup-pg-card,
-#dashPgCard.backup-pg-card.success-card,
-#dashPgCard.backup-pg-card.warning-card {
+/* PasarGuard status card — same neutral info-box look as other dash cards */
+#dashPgCard.backup-pg-card {
   text-align: start !important;
   margin-top: 0 !important;
   margin-bottom: 0 !important;
+  border-color: var(--border-soft);
+  background: var(--bg-card);
+  color: var(--text);
+  justify-content: flex-start;
+}
+
+#dashPgCard .backup-pg-specs {
+  margin-top: 0;
 }
 
 #dashPgCard .backup-section-head {
