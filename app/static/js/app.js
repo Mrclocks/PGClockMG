@@ -1440,12 +1440,20 @@ function showSuccess(result) {
   }
   document.getElementById('resultMessage').textContent = t(`step6.${msgKey}`);
 
+  const tipsEl = document.getElementById('resultPostSuccessTips');
+  if (tipsEl) {
+    const tips = [`<p class="warn-line">${statusIcon('warn')}<span>${t('step6.disableOldPanelTip')}</span></p>`];
+    tipsEl.innerHTML = tips.join('');
+    tipsEl.classList.remove('hidden');
+  }
+
   let details = '';
   // 3X-UI: show detected DB generation (modern vs legacy) on final confirm
   if (state.selectedPanel?.id === '3x-ui' || result?.xui_schema) {
     const modern = !!(result?.xui_schema_modern || result?.xui_schema === 'modern');
     const schemaLabel = modern ? t('step6.xuiSchemaModern') : t('step6.xuiSchemaLegacy');
     details += `<p class="status-inline">${statusIcon('ok')} <span>${schemaLabel}</span></p>`;
+    details += `<p class="warn-line">${statusIcon('warn')}<span>${t('step6.xuiOldSubPortWarn')}</span></p>`;
   }
   const warnings = result?.warnings;
   if (warnings) {
@@ -1559,6 +1567,11 @@ function showError(msg, logs) {
   document.getElementById('resultSuccess').classList.add('hidden');
   document.getElementById('errorMessage').textContent = msg;
   if (logs) document.getElementById('errorLog').textContent = logs;
+  const tipsEl = document.getElementById('resultPostSuccessTips');
+  if (tipsEl) {
+    tipsEl.classList.add('hidden');
+    tipsEl.innerHTML = '';
+  }
 }
 
 function setupUpload() {

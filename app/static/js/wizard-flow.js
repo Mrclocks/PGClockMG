@@ -1421,6 +1421,11 @@ function showRestoreDone(result) {
       : '';
     msg.textContent = `${t('restore.doneTitle') || ''}${convert}`.trim();
   }
+  const tipsEl = document.getElementById('restorePostSuccessTips');
+  if (tipsEl) {
+    tipsEl.innerHTML = `<p class="warn-line">${typeof statusIcon === 'function' ? statusIcon('warn') : '⚠️'}<span>${t('restore.disableOldPanelTip')}</span></p>`;
+    tipsEl.classList.remove('hidden');
+  }
   const nodesNote = document.getElementById('restoreNodesDisabledNote');
   if (nodesNote) {
     if (access.nodes_disabled) {

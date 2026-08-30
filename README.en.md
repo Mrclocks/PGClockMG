@@ -1,4 +1,4 @@
-> 🚀 **`v4.1.7`** — Open panel button, in-app updates, accurate backup progress
+> 🚀 **`v4.1.8`** — x-ui migration warnings + disable-old-panel guidance
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

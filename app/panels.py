@@ -154,16 +154,19 @@ PANELS: dict[str, PanelInfo] = {
         },
         warnings={
             "en": [
+                "To keep old subscription links working and set up redirect, disable your previous panel BEFORE starting migration.",
                 "PasarGuard MUST be installed on this server BEFORE migration.",
                 "SQLite only (x-ui.db).",
                 "TLS/SSL certificates are NOT migrated — configure certificates again in PasarGuard.",
             ],
             "fa": [
+                "برای ثابت ماندن لینک‌های قدیمی و راه‌اندازی ریدایرکت، قبل از شروع مهاجرت پنل قبلی خود را غیرفعال کنید.",
                 "PasarGuard باید قبل از مهاجرت روی این سرور نصب باشد.",
                 "فقط SQLite (x-ui.db).",
                 "سرتیفیکیت‌های TLS/SSL منتقل نمی‌شوند — بعداً در PasarGuard دوباره تنظیم کنید.",
             ],
             "ru": [
+                "Чтобы сохранить старые ссылки подписки и настроить redirect, ОТКЛЮЧИТЕ предыдущую панель ДО начала миграции.",
                 "PasarGuard ДОЛЖЕН быть установлен ДО миграции.",
                 "Только SQLite (x-ui.db).",
                 "TLS/SSL сертификаты НЕ переносятся — настройте их снова в PasarGuard.",
