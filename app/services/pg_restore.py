@@ -3869,7 +3869,7 @@ async def _merge_env_after_restore(
 
     text = backup_env
     # Only fill panel listen settings if backup omitted them
-    for key in ("UVICORN_PORT", "UVICORN_HOST", "UVICORN_ROOT_PATH", "ALLOWED_ORIGINS"):
+    for key in ("UVICORN_PORT", "UVICORN_HOST", "UVICORN_ROOT_PATH", "DASHBOARD_PATH", "ALLOWED_ORIGINS"):
         if read_env_var(text, key):
             continue
         cur = read_env_var(current_env, key)

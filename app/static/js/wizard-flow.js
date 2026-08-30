@@ -153,16 +153,21 @@ function renderGuideSections(container, access) {
 
 function resolveLoginUrl(access) {
   const a = access || state.panelAccess || {};
-  // Prefer server-built URL (already includes UVICORN_ROOT_PATH from .env)
+  // Prefer server-built URL (already includes DASHBOARD_PATH from .env)
   const preferred = a.login_url || a.panel_url || a.public_url || a.localhost_url || '';
   if (preferred) return preferred;
   const host = (state.pgDomain || a.domain || state.pgIp || a.host || a.ip || '').trim();
   const port = a.port || '8000';
-  const root = (a.root_path && a.root_path !== '/' ? a.root_path : '') || '';
+  let dash = (a.dashboard_path || a.panel_dashboard_path || '').trim();
+  if (!dash) {
+    const root = (a.root_path && a.root_path !== '/' ? a.root_path : '') || '';
+    dash = root ? `${root}/dashboard/` : '/dashboard/';
+  }
+  if (!dash.startsWith('/')) dash = `/${dash}`;
+  if (!dash.endsWith('/')) dash = `${dash}/`;
+  dash = dash.replace(/\/{2,}/g, '/');
   if (host && host !== '127.0.0.1' && host !== 'localhost') {
-    const path = `${root}/dashboard/`.replace(/\/{2,}/g, '/');
-    const p = path.startsWith('/') ? path : `/${path}`;
-    return `https://${host}:${port}${p}`;
+    return `https://${host}:${port}${dash}`;
   }
   return '';
 }

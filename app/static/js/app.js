@@ -1416,18 +1416,31 @@ function showSuccess(result) {
   document.getElementById('resultError').classList.add('hidden');
   document.querySelector('#resultSuccess h2').textContent = t('step6.success');
 
+  const dashRaw = result?.panel_dashboard_path
+    || result?.dashboard_path
+    || state.pasarguardEnvSummary?.panel_dashboard_path
+    || state.systemCheck?.pasarguard_env?.panel_dashboard_path
+    || state.panelAccess?.dashboard_path
+    || '';
   const rootRaw = result?.panel_root_path
     || state.pasarguardEnvSummary?.panel_root_path
     || state.systemCheck?.pasarguard_env?.panel_root_path
     || '';
-  const root = (rootRaw && rootRaw !== '/' ? String(rootRaw).replace(/\/$/, '') : '');
+  let dash = (dashRaw && String(dashRaw).trim()) || '';
+  if (!dash) {
+    const root = (rootRaw && rootRaw !== '/' ? String(rootRaw).replace(/\/$/, '') : '');
+    dash = root ? `${root}/dashboard/` : '/dashboard/';
+  }
+  if (!dash.startsWith('/')) dash = `/${dash}`;
+  if (!dash.endsWith('/')) dash = `${dash}/`;
+  dash = dash.replace(/\/{2,}/g, '/');
   const port = result?.panel_port || state.pasarguardEnvSummary?.panel_port || state.systemCheck?.pasarguard_env?.panel_port || '8000';
   const accessUrl = (typeof resolveLoginUrl === 'function')
     ? resolveLoginUrl(state.panelAccess || state.systemCheck?.panel_access)
     : (state.panelAccess?.login_url || state.systemCheck?.panel_access?.login_url || '');
   const panelUrl = result?.panel_url
     || accessUrl
-    || `https://${state.serverIp.split(':')[0]}:${port}${root}/dashboard/`.replace(/([^:]\/)\/+/g, '$1');
+    || `https://${state.serverIp.split(':')[0]}:${port}${dash}`.replace(/([^:]\/)\/+/g, '$1');
   document.getElementById('panelLink').href = panelUrl;
 
   const mode = result?.subscription_mode || state.selectedPanel?.subscription_mode;

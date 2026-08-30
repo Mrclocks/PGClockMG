@@ -106,14 +106,58 @@ def resolve_pasarguard_public_base(env_text: str | None = None) -> str:
     return f"{scheme}://{host}:{port}"
 
 
-def build_dashboard_url(host: str, port: str | int = "8000", *, https: bool = True, root_path: str = "") -> str:
-    """Canonical panel login URL: https://host:8000/dashboard/"""
+def normalize_dashboard_path(path: str | None, *, default: str = "/dashboard/") -> str:
+    """Normalize DASHBOARD_PATH to a leading+trailing-slash form."""
+    raw = (path or "").strip().strip('"').strip("'")
+    if not raw:
+        return default
+    if not raw.startswith("/"):
+        raw = "/" + raw
+    if not raw.endswith("/"):
+        raw = raw + "/"
+    # Collapse duplicate slashes without touching the leading one
+    while "//" in raw:
+        raw = raw.replace("//", "/")
+    return raw or default
+
+
+def resolve_dashboard_path(env_text: str | None = None) -> str:
+    """Panel UI path from .env: DASHBOARD_PATH (PasarGuard/Marzban), else legacy ROOT_PATH.
+
+    PasarGuard and Marzban both use DASHBOARD_PATH (default ``/dashboard/``).
+    Older setups sometimes set UVICORN_ROOT_PATH as a prefix before /dashboard/.
+    """
+    text = env_text if env_text is not None else ""
+    dash = read_env_var(text, "DASHBOARD_PATH") if text else None
+    if dash and str(dash).strip():
+        return normalize_dashboard_path(str(dash))
+    root = (read_env_var(text, "UVICORN_ROOT_PATH") or "").strip().rstrip("/") if text else ""
+    if root:
+        return normalize_dashboard_path(f"{root}/dashboard/")
+    return "/dashboard/"
+
+
+def build_dashboard_url(
+    host: str,
+    port: str | int = "8000",
+    *,
+    https: bool = True,
+    root_path: str = "",
+    dashboard_path: str | None = None,
+) -> str:
+    """Canonical panel login URL from host/port + DASHBOARD_PATH.
+
+    Prefer ``dashboard_path`` (from DASHBOARD_PATH in .env). Legacy callers may
+    still pass ``root_path`` (UVICORN_ROOT_PATH) which prefixes ``/dashboard/``.
+    """
     host = (host or "").strip()
     port = str(port or "8000").strip() or "8000"
-    rp = (root_path or "").rstrip("/")
-    path = f"{rp}/dashboard/".replace("//", "/")
-    if not path.startswith("/"):
-        path = "/" + path
+    if dashboard_path is not None and str(dashboard_path).strip():
+        path = normalize_dashboard_path(dashboard_path)
+    elif root_path and str(root_path).strip() and str(root_path).strip() != "/":
+        path = normalize_dashboard_path(f"{str(root_path).rstrip('/')}/dashboard/")
+    else:
+        path = "/dashboard/"
     scheme = "https" if https else "http"
     return f"{scheme}://{host}:{port}{path}"
 
@@ -125,6 +169,7 @@ def get_panel_access_info(prefer_host: str | None = None) -> dict:
     detected_ip = _server_ip()
     port = (read_env_var(env_text, "UVICORN_PORT") if env_text else None) or "8000"
     root_path = (read_env_var(env_text, "UVICORN_ROOT_PATH") or "").rstrip("/")
+    dashboard_path = resolve_dashboard_path(env_text) if env_text else "/dashboard/"
     ssl = _has_ssl(env_text) if env_text else False
     domain = _guess_domain(env_text) if env_text else None
 
@@ -140,9 +185,9 @@ def get_panel_access_info(prefer_host: str | None = None) -> dict:
         ip = detected_ip
         host = domain or ip
 
-    public_https = build_dashboard_url(host, port, https=True, root_path=root_path)
-    public_http = build_dashboard_url(host, port, https=False, root_path=root_path)
-    localhost_url = build_dashboard_url("127.0.0.1", port, https=False, root_path=root_path)
+    public_https = build_dashboard_url(host, port, https=True, dashboard_path=dashboard_path)
+    public_http = build_dashboard_url(host, port, https=False, dashboard_path=dashboard_path)
+    localhost_url = build_dashboard_url("127.0.0.1", port, https=False, dashboard_path=dashboard_path)
     ssh_tunnel = f"ssh -L {port}:localhost:{port} user@{ip}"
     owner_cmd = "pasarguard cli generate-temp-key"
     env_path = "/opt/pasarguard/.env"
@@ -167,7 +212,7 @@ def get_panel_access_info(prefer_host: str | None = None) -> dict:
                 "items": [
                     {"text": "Dashboard URL:", "copy": public_https},
                     {"text": "Config file:", "copy": env_path},
-                    {"text": "Change port/path with UVICORN_PORT and UVICORN_ROOT_PATH in .env", "copy": None},
+                    {"text": "Change port/path with UVICORN_PORT and DASHBOARD_PATH in .env", "copy": None},
                 ],
             },
             {
@@ -200,7 +245,7 @@ def get_panel_access_info(prefer_host: str | None = None) -> dict:
                 "items": [
                     {"text": "لینک داشبورد:", "copy": public_https},
                     {"text": "مسیر فایل تنظیمات:", "copy": env_path},
-                    {"text": "پورت و path را با UVICORN_PORT و UVICORN_ROOT_PATH در .env عوض کنید.", "copy": None},
+                    {"text": "پورت و path را با UVICORN_PORT و DASHBOARD_PATH در .env عوض کنید.", "copy": None},
                 ],
             },
             {
@@ -233,7 +278,7 @@ def get_panel_access_info(prefer_host: str | None = None) -> dict:
                 "items": [
                     {"text": "URL дашборда:", "copy": public_https},
                     {"text": "Файл настроек:", "copy": env_path},
-                    {"text": "Порт/path: UVICORN_PORT и UVICORN_ROOT_PATH в .env", "copy": None},
+                    {"text": "Порт/path: UVICORN_PORT и DASHBOARD_PATH в .env", "copy": None},
                 ],
             },
             {
@@ -277,6 +322,7 @@ def get_panel_access_info(prefer_host: str | None = None) -> dict:
         "ip": ip,
         "port": port,
         "root_path": root_path or "/",
+        "dashboard_path": dashboard_path,
         "panel_url": login_url,
         "public_url": public_https,
         "public_http_url": public_http,
