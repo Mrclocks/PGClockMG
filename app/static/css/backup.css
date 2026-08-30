@@ -263,6 +263,58 @@
   padding: var(--backup-box-pad-y) var(--backup-box-pad-x);
   min-width: 0;
   margin: 0 0 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.backup-run-box > .backup-progress-meta,
+.backup-run-box > .backup-log {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  align-self: stretch;
+}
+
+.backup-progress-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 8px;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.backup-progress-track {
+  height: 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--success) 12%, var(--bg-elevated));
+  border: 1px solid color-mix(in srgb, var(--success) 28%, var(--border-soft));
+  overflow: hidden;
+  margin: 0;
+  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.backup-log {
+  margin-top: 10px;
+  max-height: 220px;
+  overflow: auto;
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-soft);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  direction: ltr;
+  text-align: left;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
 }
 
 .backup-run-box.is-running {
@@ -277,6 +329,7 @@
 
 .backup-run-box.is-success-compact {
   display: flex;
+  flex-direction: row;
   align-items: center;
   padding-block: 16px;
   min-height: 56px;
@@ -323,26 +376,6 @@
 .backup-run-box .backup-section-head {
   margin-bottom: 10px;
   align-items: center;
-}
-
-.backup-progress-track {
-  height: 8px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--success) 12%, var(--bg-elevated));
-  border: 1px solid color-mix(in srgb, var(--success) 28%, var(--border-soft));
-  overflow: hidden;
-  margin: 0;
-  width: 100%;
-  flex: 1;
-  min-width: 0;
-}
-
-.backup-progress-meta {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 0 0 8px;
-  width: 100%;
 }
 
 .backup-progress-pct {
@@ -408,7 +441,7 @@
   50% { opacity: 1; transform: scaleX(1); }
 }
 
-/* Update banner + PasarGuard open button */
+/* Update banner — solid orange, no gradient */
 .backup-update-banner {
   display: flex;
   flex-wrap: wrap;
@@ -418,8 +451,8 @@
   margin: 0 0 18px;
   padding: 14px 16px;
   border-radius: var(--radius-sm);
-  border: 1.5px solid hsla(210, 90%, 55%, 0.55);
-  background: hsla(210, 90%, 52%, 0.1);
+  border: 1.5px solid hsla(24, 95%, 53%, 0.75);
+  background: hsla(24, 95%, 53%, 0.12);
   color: var(--text);
 }
 
@@ -442,12 +475,32 @@
 .backup-update-banner-copy strong {
   display: block;
   margin-bottom: 2px;
+  color: hsl(24, 95%, 62%);
+}
+
+.backup-update-banner-copy .desc-sm {
+  color: var(--text-muted);
+  margin: 0;
 }
 
 .backup-update-banner-actions {
   display: flex;
   gap: 8px;
   flex-shrink: 0;
+}
+
+.backup-update-banner .btn-primary,
+#btnDashUpdateGo.btn-primary {
+  background: hsl(24, 95%, 53%);
+  color: #fff;
+  border: 1px solid hsl(24, 95%, 46%);
+  box-shadow: none;
+}
+
+.backup-update-banner .btn-primary:hover:not(:disabled),
+#btnDashUpdateGo.btn-primary:hover:not(:disabled) {
+  background: hsl(24, 95%, 48%);
+  transform: translateY(-1px);
 }
 
 .backup-pg-actions {
@@ -937,21 +990,6 @@ html[dir="rtl"] .backup-app .specs-item .specs-value[dir="ltr"] {
   flex-wrap: wrap;
   gap: 8px;
   justify-content: flex-start;
-}
-
-.backup-log {
-  margin-top: 10px;
-  max-height: 220px;
-  overflow: auto;
-  padding: 12px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-soft);
-  font-family: var(--font-mono);
-  font-size: 0.78rem;
-  white-space: pre-wrap;
-  direction: ltr;
-  text-align: left;
 }
 
 .backup-list {
@@ -1480,7 +1518,8 @@ html[dir="rtl"] .backup-stream-steps {
   margin-top: 0;
 }
 
-.backup-run-box.is-running .backup-progress-bar,
+/* Only stream uses CSS var width while waiting for first bytes — do not override
+   determinate backup/update bars (would fight inline width and look stuck). */
 #streamProgress.is-running .backup-progress-bar {
   width: var(--stream-pct, 40%);
 }
