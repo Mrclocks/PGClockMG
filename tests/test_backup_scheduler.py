@@ -1,9 +1,19 @@
-"""Unit tests for backup schedule interval helpers."""
+"""Unit tests for backup schedule, retention, integrity, and notify helpers."""
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import zipfile
 
-from app.services.backup_scheduler import due_for_scheduled_run
-from app.services.backup_settings import normalize_interval_hours, normalize_schedule, parse_last_run_at
+from app.services.backup_engine import apply_retention, verify_backup_archive
+from app.services.backup_scheduler import FAILURE_RETRY_SECONDS, due_for_scheduled_run
+from app.services.backup_settings import (
+    normalize_destinations,
+    normalize_interval_hours,
+    normalize_schedule,
+    normalize_timezone,
+    parse_last_run_at,
+)
+from app.services.backup_telegram import resolve_destinations
 
 
 def test_normalize_interval_hours():
@@ -18,12 +28,26 @@ def test_normalize_interval_hours():
     assert normalize_interval_hours("nope") == 24
 
 
+def test_normalize_timezone():
+    assert normalize_timezone("Asia/Tehran") == "Asia/Tehran"
+    assert normalize_timezone("Not/AZone") == "UTC"
+    assert normalize_timezone("") == "UTC"
+
+
 def test_normalize_schedule_sanitizes():
-    out = normalize_schedule({"enabled": 1, "interval_hours": 7, "send_telegram": "yes"})
-    assert out == {"enabled": True, "interval_hours": 24, "send_telegram": True}
-    out2 = normalize_schedule({"enabled": False, "interval_hours": 6, "send_telegram": False})
-    assert out2["interval_hours"] == 6
-    assert "last_run_at" not in out2
+    out = normalize_schedule({
+        "enabled": 1,
+        "interval_hours": 7,
+        "timezone": "Asia/Tehran",
+        "send_telegram": "yes",
+        "notify_on_failure": 0,
+    })
+    assert out["enabled"] is True
+    assert out["interval_hours"] == 24
+    assert out["timezone"] == "Asia/Tehran"
+    assert out["send_telegram"] is True
+    assert out["notify_on_failure"] is False
+    assert "last_run_at" not in out
 
 
 def test_parse_last_run_at():
@@ -37,11 +61,111 @@ def test_parse_last_run_at():
 
 def test_due_for_scheduled_run_interval():
     now = datetime(2026, 8, 30, 15, 0, tzinfo=timezone.utc)
-    assert due_for_scheduled_run(enabled=False, interval_hours=1, last_run_at=None, now=now) is False
-    assert due_for_scheduled_run(enabled=True, interval_hours=3, last_run_at=None, now=now) is True
+    assert due_for_scheduled_run(enabled=False, interval_hours=1, now=now) is False
+    assert due_for_scheduled_run(enabled=True, interval_hours=3, last_success_at=None, now=now) is True
 
-    recent = (now - timedelta(hours=2)).isoformat().replace("+00:00", "Z")
-    assert due_for_scheduled_run(enabled=True, interval_hours=3, last_run_at=recent, now=now) is False
+    recent = (now - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert due_for_scheduled_run(
+        enabled=True, interval_hours=3, last_success_at=recent, now=now
+    ) is False
 
-    old = (now - timedelta(hours=3, minutes=1)).isoformat().replace("+00:00", "Z")
-    assert due_for_scheduled_run(enabled=True, interval_hours=3, last_run_at=old, now=now) is True
+    old = (now - timedelta(hours=3, minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert due_for_scheduled_run(
+        enabled=True, interval_hours=3, last_success_at=old, now=now
+    ) is True
+
+
+def test_due_respects_failure_backoff():
+    now = datetime(2026, 8, 30, 15, 0, tzinfo=timezone.utc)
+    success = (now - timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    attempt = (now - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert due_for_scheduled_run(
+        enabled=True,
+        interval_hours=3,
+        last_success_at=success,
+        last_attempt_at=attempt,
+        now=now,
+    ) is False
+
+    attempt_old = (now - timedelta(seconds=FAILURE_RETRY_SECONDS + 1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert due_for_scheduled_run(
+        enabled=True,
+        interval_hours=3,
+        last_success_at=success,
+        last_attempt_at=attempt_old,
+        now=now,
+    ) is True
+
+
+def test_legacy_last_run_at_counts_as_success():
+    now = datetime(2026, 8, 30, 15, 0, tzinfo=timezone.utc)
+    legacy = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert due_for_scheduled_run(
+        enabled=True,
+        interval_hours=3,
+        last_run_at=legacy,
+        now=now,
+    ) is False
+
+
+def test_normalize_destinations_and_resolve():
+    dests = normalize_destinations(
+        [{"chat_id": "222", "message_thread_id": 9}],
+        primary_chat="111",
+        primary_thread=3,
+    )
+    assert dests[0]["chat_id"] == "111"
+    assert dests[0]["message_thread_id"] == 3
+    assert dests[1]["chat_id"] == "222"
+    assert dests[1]["message_thread_id"] == 9
+
+    resolved = resolve_destinations({
+        "chat_id": "111",
+        "message_thread_id": 3,
+        "destinations": [{"chat_id": "222", "message_thread_id": 9}],
+    })
+    assert len(resolved) == 2
+
+
+def test_apply_retention_by_days(tmp_path, monkeypatch):
+    import app.services.backup_engine as eng
+    import time
+
+    monkeypatch.setattr(eng, "BACKUP_DIR", tmp_path)
+    now = time.time()
+    paths = []
+    for i, age_days in enumerate([0.1, 2.0, 10.0]):
+        p = tmp_path / f"pgclockmg-sqlite-old{i}.zip"
+        p.write_bytes(b"x")
+        (tmp_path / f"{p.name}.json").write_text("{}", encoding="utf-8")
+        # set mtime
+        ts = now - age_days * 86400
+        import os
+        os.utime(p, (ts, ts))
+        paths.append(p)
+
+    removed = apply_retention(keep_count=10, keep_days=7)
+    assert removed == 1
+    assert paths[0].exists()
+    assert paths[1].exists()
+    assert not paths[2].exists()
+
+
+def test_verify_backup_archive_ok(tmp_path):
+    zpath = tmp_path / "ok.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        zf.writestr(".env", "A=1\n")
+        zf.writestr("db_backup.sql", "-- dump\n" + ("x" * 100))
+    result = verify_backup_archive(zpath)
+    assert result["ok"] is True
+    assert result["crc_ok"] is True
+    assert result["sha256"]
+
+
+def test_verify_backup_archive_missing_dump(tmp_path):
+    zpath = tmp_path / "bad.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        zf.writestr(".env", "A=1\n")
+    result = verify_backup_archive(zpath)
+    assert result["ok"] is False
+    assert result["error"] == "missing_db_dump"

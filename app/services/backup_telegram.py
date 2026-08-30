@@ -14,11 +14,18 @@ import httpx
 
 from app.config import TELEGRAM_BOT_MAX_BYTES
 from app.services.backup_net import UnsafeDestinationError, assert_proxy_host
-from app.services.backup_settings import DEFAULT_TELEGRAM_CAPTION, load_settings, update_settings
+from app.services.backup_settings import (
+    DEFAULT_TELEGRAM_CAPTION,
+    load_settings,
+    normalize_destinations,
+    normalize_thread_id,
+    update_settings,
+)
 
 log = logging.getLogger("pgclockmg.backup_telegram")
 
 TELEGRAM_CAPTION_MAX = 1024
+TELEGRAM_TEXT_MAX = 4000
 
 
 def _proxy_url(tg: dict) -> str | None:
@@ -92,30 +99,42 @@ def resolve_admin_chat_id(tg: dict) -> str:
     return (tg.get("chat_id") or tg.get("admin_id") or "").strip()
 
 
+def resolve_destinations(tg: dict | None = None) -> list[dict]:
+    """
+    Resolve send targets: primary chat (+ optional topic) plus extra destinations.
+    """
+    cfg = tg if tg is not None else telegram_config()
+    primary = resolve_admin_chat_id(cfg)
+    return normalize_destinations(
+        cfg.get("destinations") or [],
+        primary_chat=primary,
+        primary_thread=cfg.get("message_thread_id"),
+    )
+
+
 def telegram_config(settings: dict | None = None) -> dict:
     cfg = settings or load_settings()
     tg = dict(cfg.get("telegram") or {})
     chat = resolve_admin_chat_id(tg)
     if chat:
         tg["chat_id"] = chat
+    tg["message_thread_id"] = normalize_thread_id(tg.get("message_thread_id"))
     return tg
 
 
 def telegram_ready(tg: dict | None = None) -> bool:
     cfg = tg if tg is not None else telegram_config()
     token = (cfg.get("bot_token") or "").strip()
-    chat_id = resolve_admin_chat_id(cfg)
-    return bool(cfg.get("enabled") and token and chat_id)
+    return bool(cfg.get("enabled") and token and resolve_destinations(cfg))
 
 
 def probe_telegram_connection(settings: dict | None = None) -> dict:
     """Lightweight connectivity check (getMe only — does not send a chat message)."""
     tg = telegram_config(settings)
     token = (tg.get("bot_token") or "").strip()
-    chat_id = resolve_admin_chat_id(tg)
     if not token:
         return {"ok": False, "connected": False, "error": "bot_token_missing"}
-    if not chat_id:
+    if not resolve_destinations(tg):
         return {"ok": False, "connected": False, "error": "admin_id_missing"}
     try:
         with _client(tg, timeout=20.0) as client:
@@ -209,19 +228,118 @@ def _api_error(resp: httpx.Response) -> str:
     return (resp.text or f"http_{resp.status_code}")[:800]
 
 
+def send_telegram_message(
+    text: str,
+    *,
+    chat_id: str,
+    message_thread_id: int | None = None,
+    settings: dict | None = None,
+) -> dict:
+    """Send a plain text message to one chat (optional forum topic)."""
+    tg = telegram_config(settings)
+    token = (tg.get("bot_token") or "").strip()
+    cid = (chat_id or "").strip()
+    if not token or not cid:
+        return {"ok": False, "error": "telegram_not_configured"}
+    body_text = clip_caption(text, TELEGRAM_TEXT_MAX)
+    data: dict[str, Any] = {"chat_id": str(cid), "text": body_text, "disable_web_page_preview": "true"}
+    tid = normalize_thread_id(message_thread_id)
+    if tid is not None:
+        data["message_thread_id"] = str(tid)
+    try:
+        with _client(tg, timeout=30.0) as client:
+            resp = client.post(f"https://api.telegram.org/bot{token}/sendMessage", data=data)
+            if resp.status_code >= 400:
+                return {"ok": False, "error": _api_error(resp)}
+            body = resp.json()
+            if not body.get("ok"):
+                return {"ok": False, "error": body.get("description") or "sendMessage_failed"}
+            return {"ok": True, "message_id": (body.get("result") or {}).get("message_id")}
+    except Exception as exc:
+        log.exception("telegram sendMessage failed")
+        return {"ok": False, "error": str(exc)}
+
+
+def _send_document_parts(
+    *,
+    client: httpx.Client,
+    token: str,
+    chat_id: str,
+    message_thread_id: int | None,
+    path: Path,
+    parts: int,
+    max_part: int,
+    full_caption: str,
+) -> dict:
+    sent: list[dict] = []
+    with path.open("rb") as fh:
+        for idx in range(parts):
+            chunk = fh.read(max_part)
+            if not chunk:
+                break
+            part_name = path.name if parts == 1 else f"{path.name}.{idx + 1:03d}-of-{parts:03d}"
+            if parts == 1:
+                caption = full_caption
+            elif idx == 0:
+                caption = clip_caption(f"{full_caption}\n\n({idx + 1}/{parts})")
+            else:
+                caption = f"{path.name} ({idx + 1}/{parts})"
+            mime = mimetypes.guess_type(part_name)[0] or "application/zip"
+            files = {"document": (part_name, BytesIO(chunk), mime)}
+            data: dict[str, Any] = {
+                "chat_id": str(chat_id),
+                "caption": caption,
+                "disable_content_type_detection": "true",
+            }
+            tid = normalize_thread_id(message_thread_id)
+            if tid is not None:
+                data["message_thread_id"] = str(tid)
+            resp = client.post(
+                f"https://api.telegram.org/bot{token}/sendDocument",
+                data=data,
+                files=files,
+            )
+            if resp.status_code >= 400:
+                return {
+                    "ok": False,
+                    "error": _api_error(resp),
+                    "sent_parts": len(sent),
+                    "total_parts": parts,
+                }
+            body = resp.json()
+            if not body.get("ok"):
+                return {
+                    "ok": False,
+                    "error": body.get("description") or "sendDocument_failed",
+                    "sent_parts": len(sent),
+                    "total_parts": parts,
+                }
+            msg = body.get("result") or {}
+            sent.append(
+                {
+                    "part": idx + 1,
+                    "name": part_name,
+                    "bytes": len(chunk),
+                    "message_id": msg.get("message_id"),
+                    "chat_id": str(chat_id),
+                    "message_thread_id": tid,
+                }
+            )
+    return {"ok": True, "sent": sent, "parts": parts}
+
+
 def send_backup_to_telegram(
     path: Path,
     *,
     manifest: dict | None = None,
     settings: dict | None = None,
 ) -> dict:
-    """Send a single on-disk zip as a Telegram document (caption on the file itself)."""
+    """Send a single on-disk zip as a Telegram document to all destinations."""
     tg = telegram_config(settings)
     token = (tg.get("bot_token") or "").strip()
-    chat_id = resolve_admin_chat_id(tg)
-    if not token or not chat_id:
+    destinations = resolve_destinations(tg)
+    if not token or not destinations:
         return {"ok": False, "error": "telegram_not_configured"}
-    # Explicit API sends are allowed whenever credentials exist; auto-send uses telegram_ready().
     if not path.is_file():
         return {"ok": False, "error": "file_missing"}
 
@@ -244,70 +362,56 @@ def send_backup_to_telegram(
     }
     full_caption = clip_caption(format_caption(tg.get("caption_template"), base_ctx))
 
-    sent: list[dict] = []
+    all_sent: list[dict] = []
+    dest_results: list[dict] = []
     try:
         with _client(tg, timeout=300.0) as client:
-            with path.open("rb") as fh:
-                for idx in range(parts):
-                    chunk = fh.read(max_part)
-                    if not chunk:
-                        break
-                    part_name = path.name if parts == 1 else f"{path.name}.{idx + 1:03d}-of-{parts:03d}"
-                    if parts == 1:
-                        caption = full_caption
-                    elif idx == 0:
-                        caption = clip_caption(f"{full_caption}\n\n({idx + 1}/{parts})")
-                    else:
-                        caption = f"{path.name} ({idx + 1}/{parts})"
-                    mime = mimetypes.guess_type(part_name)[0] or "application/zip"
-                    # Caption rides on sendDocument so the file is never orphaned from the text.
-                    files = {
-                        "document": (part_name, BytesIO(chunk), mime),
-                    }
-                    data = {
-                        "chat_id": str(chat_id),
-                        "caption": caption,
-                        "disable_content_type_detection": "true",
-                    }
-                    resp = client.post(
-                        f"https://api.telegram.org/bot{token}/sendDocument",
-                        data=data,
-                        files=files,
+            for dest in destinations:
+                # Re-open file for each destination (parts read is sequential).
+                result = _send_document_parts(
+                    client=client,
+                    token=token,
+                    chat_id=str(dest["chat_id"]),
+                    message_thread_id=dest.get("message_thread_id"),
+                    path=path,
+                    parts=parts,
+                    max_part=max_part,
+                    full_caption=full_caption,
+                )
+                dest_results.append({
+                    "chat_id": dest["chat_id"],
+                    "message_thread_id": dest.get("message_thread_id"),
+                    "ok": bool(result.get("ok")),
+                    "error": result.get("error"),
+                })
+                if result.get("ok"):
+                    all_sent.extend(result.get("sent") or [])
+                else:
+                    # Continue other destinations; report partial failure.
+                    log.warning(
+                        "telegram send to %s failed: %s",
+                        dest.get("chat_id"),
+                        result.get("error"),
                     )
-                    if resp.status_code >= 400:
-                        return {
-                            "ok": False,
-                            "error": _api_error(resp),
-                            "sent_parts": len(sent),
-                            "total_parts": parts,
-                        }
-                    body = resp.json()
-                    if not body.get("ok"):
-                        return {
-                            "ok": False,
-                            "error": body.get("description") or "sendDocument_failed",
-                            "sent_parts": len(sent),
-                            "total_parts": parts,
-                        }
-                    msg = body.get("result") or {}
-                    sent.append(
-                        {
-                            "part": idx + 1,
-                            "name": part_name,
-                            "bytes": len(chunk),
-                            "message_id": msg.get("message_id"),
-                        }
-                    )
+        ok_any = any(d.get("ok") for d in dest_results)
         return {
-            "ok": True,
+            "ok": ok_any,
             "parts": parts,
-            "sent": sent,
+            "sent": all_sent,
+            "destinations": dest_results,
             "kept_as_single_file": True,
             "path": str(path),
+            "error": None if ok_any else (dest_results[0].get("error") if dest_results else "send_failed"),
         }
     except Exception as exc:
         log.exception("telegram sendDocument failed")
-        return {"ok": False, "error": str(exc), "sent_parts": len(sent), "total_parts": parts}
+        return {
+            "ok": False,
+            "error": str(exc),
+            "sent": all_sent,
+            "destinations": dest_results,
+            "total_parts": parts,
+        }
 
 
 def maybe_auto_send_backup(

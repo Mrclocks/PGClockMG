@@ -380,11 +380,31 @@ def delete_backup_file(backup_id: str) -> bool:
         return False
 
 
-def apply_retention(keep: int) -> int:
-    keep = max(1, int(keep or 10))
+def apply_retention(keep: int | None = None, keep_days: int | None = None, *, keep_count: int | None = None) -> int:
+    """
+    Delete old backups by count and/or age.
+
+    - Always keep at most ``keep_count`` newest files (default 10).
+    - If ``keep_days`` > 0, also delete files older than that many days.
+    A file is removed when it exceeds the count limit OR the age limit.
+    """
+    count = keep_count if keep_count is not None else keep
+    count = max(1, int(count if count is not None else 10))
+    days = max(0, int(keep_days if keep_days is not None else 0))
     files = sorted(BACKUP_DIR.glob("pgclockmg-*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+    now = time.time()
     removed = 0
-    for path in files[keep:]:
+    for idx, path in enumerate(files):
+        too_many = idx >= count
+        too_old = False
+        if days > 0:
+            try:
+                age_days = (now - path.stat().st_mtime) / 86400.0
+            except OSError:
+                age_days = 0
+            too_old = age_days > days
+        if not (too_many or too_old):
+            continue
         try:
             path.unlink(missing_ok=True)
             path.with_suffix(path.suffix + ".json").unlink(missing_ok=True)
@@ -392,6 +412,63 @@ def apply_retention(keep: int) -> int:
         except OSError:
             pass
     return removed
+
+
+def verify_backup_archive(
+    path: Path,
+    *,
+    expected_sha256: str | None = None,
+) -> dict:
+    """
+    Light integrity check after create: sha256, Zip CRC (testzip), required members.
+    """
+    if not path.is_file():
+        return {"ok": False, "error": "file_missing"}
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        return {"ok": False, "error": f"stat_failed:{exc}"}
+    if size < 64:
+        return {"ok": False, "error": "file_too_small"}
+
+    digest = _sha256_file(path)
+    if expected_sha256 and digest.lower() != str(expected_sha256).lower():
+        return {"ok": False, "error": "sha256_mismatch", "sha256": digest}
+
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            bad = zf.testzip()
+            if bad is not None:
+                return {"ok": False, "error": f"zip_crc_failed:{bad}", "sha256": digest}
+            names = set(zf.namelist())
+            # Touch central metadata for a light dry-read of each member header.
+            for info in zf.infolist():
+                if info.file_size < 0 or info.compress_size < 0:
+                    return {"ok": False, "error": f"zip_bad_member:{info.filename}", "sha256": digest}
+    except zipfile.BadZipFile:
+        return {"ok": False, "error": "bad_zip", "sha256": digest}
+    except Exception as exc:
+        return {"ok": False, "error": f"zip_verify_failed:{exc}", "sha256": digest}
+
+    has_env = ".env" in names or any(n.endswith("/.env") for n in names)
+    has_dump = (
+        "db_backup.sql" in names
+        or "db.sqlite3" in names
+        or any(n.endswith("/db_backup.sql") or n.endswith("/db.sqlite3") for n in names)
+    )
+    if not has_env:
+        return {"ok": False, "error": "missing_env", "sha256": digest}
+    if not has_dump:
+        return {"ok": False, "error": "missing_db_dump", "sha256": digest}
+
+    return {
+        "ok": True,
+        "sha256": digest,
+        "size_bytes": size,
+        "crc_ok": True,
+        "members": len(names),
+        "verified_at": _utc_now(),
+    }
 
 
 def _read_sidecar_meta(path: Path) -> dict | None:
@@ -1119,17 +1196,37 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
         _write_sidecar_meta(out_path, manifest)
         _set_progress(job, 86, "Verifying backup archive…")
 
-        with zipfile.ZipFile(out_path, "r") as zf:
-            names = set(zf.namelist())
-        if ".env" not in names and not any(n.endswith("/.env") for n in names):
-            raise RuntimeError("Backup zip missing .env")
-        has_dump = (
-            "db_backup.sql" in names
-            or "db.sqlite3" in names
-            or any(n.endswith("/db_backup.sql") or n.endswith("/db.sqlite3") for n in names)
-        )
-        if not has_dump:
-            raise RuntimeError("Backup zip missing database dump")
+        from app.services.backup_settings import load_settings as _load_settings
+
+        integrity_cfg = ((_load_settings().get("integrity") or {}))
+        do_verify = bool(integrity_cfg.get("verify_after_create", True))
+        if do_verify:
+            verified = verify_backup_archive(out_path, expected_sha256=digest)
+            if not verified.get("ok"):
+                try:
+                    out_path.unlink(missing_ok=True)
+                    out_path.with_suffix(out_path.suffix + ".json").unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise RuntimeError(f"Backup integrity check failed: {verified.get('error')}")
+            manifest["verified"] = True
+            manifest["verified_at"] = verified.get("verified_at")
+            manifest["crc_ok"] = True
+            _write_sidecar_meta(out_path, manifest)
+            _set_progress(job, 88, "Integrity OK (sha256 + zip CRC)")
+        else:
+            with zipfile.ZipFile(out_path, "r") as zf:
+                names = set(zf.namelist())
+            if ".env" not in names and not any(n.endswith("/.env") for n in names):
+                raise RuntimeError("Backup zip missing .env")
+            has_dump = (
+                "db_backup.sql" in names
+                or "db.sqlite3" in names
+                or any(n.endswith("/db_backup.sql") or n.endswith("/db.sqlite3") for n in names)
+            )
+            if not has_dump:
+                raise RuntimeError("Backup zip missing database dump")
+            manifest["verified"] = False
 
         job["backup_id"] = out_path.stem
         job["filename"] = filename
@@ -1147,9 +1244,20 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
                 "db_type": db_type,
                 "counts": manifest["counts"],
                 "sha256": digest,
+                "verified": bool(manifest.get("verified")),
             },
             "last_error": None,
         })
+
+        # Apply retention after every successful create (count + optional days).
+        try:
+            cfg_ret = _load_settings()
+            apply_retention(
+                keep_count=int(cfg_ret.get("retention_count") or 10),
+                keep_days=int(cfg_ret.get("retention_days") or 0),
+            )
+        except Exception as exc:
+            _log(job, f"Retention warning: {exc}")
 
         # Web-panel manual backups: auto-send to Telegram while job is still running
         # so the UI poll does not resolve before the document is uploaded.
