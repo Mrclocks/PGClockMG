@@ -1034,7 +1034,7 @@ textarea.text-input {
 
 #dashLast.backup-status-card:not(.is-detailed) {
   justify-content: center;
-  padding-block: 14px;
+  padding-block: var(--backup-box-pad-y);
 }
 
 .backup-empty {
