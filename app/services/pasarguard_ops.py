@@ -182,11 +182,16 @@ async def fetch_compose_logs(
     tail: int = 200,
     *,
     timeout: int = 30,
+    since: str | None = None,
 ) -> str:
     """Fetch compose logs quietly — do not echo every line into the job UI."""
     cwd = str(PASARGUARD_DIR)
+    cmd = ["docker", "compose", "logs", "--no-color", "--tail", str(tail)]
+    if since:
+        cmd.extend(["--since", since])
+    cmd.extend(services)
     ok, out = await migrator._run_cmd(
-        ["docker", "compose", "logs", "--no-color", "--tail", str(tail), *services],
+        cmd,
         cwd=cwd,
         timeout=timeout,
         quiet=True,
@@ -200,19 +205,47 @@ async def fetch_pasarguard_logs(
     *,
     include_db: bool = False,
     timeout: int = 30,
+    since: str | None = None,
 ) -> str:
     """Panel logs only by default — DB restart FATAL lines are not panel failures."""
-    pg = await fetch_compose_logs(migrator, ["pasarguard"], tail=tail, timeout=timeout)
+    pg = await fetch_compose_logs(
+        migrator, ["pasarguard"], tail=tail, timeout=timeout, since=since,
+    )
     if not include_db:
         return pg
     target_db = migrator.params.get("target_db")
     db_svc = resolve_db_service(target_db) if target_db else None
     if db_svc:
         db_logs = await fetch_compose_logs(
-            migrator, [db_svc], tail=min(tail, 80), timeout=min(timeout, 20)
+            migrator, [db_svc], tail=min(tail, 80), timeout=min(timeout, 20), since=since,
         )
         return f"{pg}\n{db_logs}"
     return pg
+
+
+async def _panel_port_is_listening(migrator) -> bool:
+    """Best-effort TCP check against finalized UVICORN_PORT (localhost)."""
+    import socket
+
+    from app.services.env_migration import read_env_var
+
+    try:
+        env_text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return True  # cannot read env — don't block on probe
+    port_raw = (read_env_var(env_text, "UVICORN_PORT") or "8000").strip()
+    try:
+        port = int(port_raw)
+    except ValueError:
+        return True
+    if port <= 0 or port > 65535:
+        return True
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=2.5):
+            return True
+    except OSError:
+        migrator.job.log(f"Panel port {port} not accepting connections yet")
+        return False
 
 
 def _check_logs_for_failure(output: str) -> str | None:
@@ -459,7 +492,7 @@ async def _try_heal_db_auth_mismatch(migrator, logs: str) -> bool:
             )
         else:
             await sync_postgres_roles_to_app_password(
-                migrator, target_db, admin, env_text=env,
+                migrator, target_db, admin, env_text=env, password=url_pwd,
             )
         return True
     except Exception as e:
@@ -730,7 +763,12 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
 
     Light / clean DBs still finish on normal startup markers within soft_budget;
     long waits only engage when alembic activity is observed.
+
+    Log markers are scoped with ``docker compose logs --since`` from this wait's
+    start so a previous boot's "Application startup complete" cannot false-pass.
     """
+    from datetime import datetime, timezone
+
     soft_budget = max(60, int(max_wait))
     # Hard ceiling: large Marzban→PG chains (esp. bigint id) can take a long time.
     absolute_cap = max(soft_budget * 4, 3600)
@@ -740,6 +778,9 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
     # migrates do not sit until the absolute cap.
     stuck_same_upgrade_default = max(300, min(900, soft_budget))
     stuck_same_upgrade_heavy = max(3600, soft_budget * 2, 900)
+
+    # Ignore startup markers from before this verification window.
+    boot_since = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     migrator.job.log(
         f"Verifying PasarGuard started without errors "
@@ -782,7 +823,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
         if now >= deadline:
             # Final chance: if alembic is still active under the absolute cap, keep going.
             out_end = await fetch_pasarguard_logs(
-                migrator, tail=log_tail, timeout=log_timeout
+                migrator, tail=log_tail, timeout=log_timeout, since=boot_since,
             )
             if _has_alembic_bootstrap_markers(out_end):
                 saw_alembic_bootstrap = True
@@ -808,7 +849,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                 break
 
         out = await fetch_pasarguard_logs(
-            migrator, tail=log_tail, timeout=log_timeout
+            migrator, tail=log_tail, timeout=log_timeout, since=boot_since,
         )
         # Only surface real failures into the job log (not 200× docker log spam).
         _log_failures_from_output(migrator, out)
@@ -1028,6 +1069,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
             if not has_startup:
                 silent_loop_healed = True
                 await _heal_silent_restart_loop(migrator)
+                boot_since = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 await asyncio.sleep(15)
                 prev_restart_count = 0
                 continue
@@ -1108,14 +1150,19 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
         if any(marker in (out or "") for marker in STARTUP_MARKERS):
             stable_ready += 1
             if stable_ready >= 2:
-                migrator.job.log("PasarGuard healthy — application startup confirmed")
-                return
+                if await _panel_port_is_listening(migrator):
+                    migrator.job.log("PasarGuard healthy — application startup confirmed")
+                    return
+                migrator.job.log(
+                    "Startup marker seen but panel port not listening yet — waiting…"
+                )
+                stable_ready = 1
         else:
             stable_ready = 0
 
         await asyncio.sleep(4)
 
-    out = await fetch_pasarguard_logs(migrator, tail=400)
+    out = await fetch_pasarguard_logs(migrator, tail=400, since=boot_since)
     hit = _check_logs_for_failure(out)
     if hit:
         raise RuntimeError(
