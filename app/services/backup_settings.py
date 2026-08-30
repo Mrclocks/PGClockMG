@@ -6,11 +6,14 @@ import json
 import os
 import threading
 from copy import deepcopy
+from datetime import datetime, timezone
 from typing import Any
 
 from app.config import BACKUP_SETTINGS_FILE, TELEGRAM_BOT_MAX_BYTES
 
 _LOCK = threading.RLock()
+
+SCHEDULE_INTERVALS = (1, 3, 6, 12, 24)
 
 DEFAULT_TELEGRAM_CAPTION = (
     "PGClockMG backup\n"
@@ -26,9 +29,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "retention_count": 10,
     "schedule": {
         "enabled": False,
+        "interval_hours": 24,
+        # Legacy daily clock fields (ignored by the interval scheduler).
         "hour": 3,
         "minute": 0,
         "send_telegram": False,
+        "last_run_at": None,
     },
     "telegram": {
         "enabled": False,
@@ -49,6 +55,43 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "last_backup": None,
     "last_error": None,
 }
+
+
+def normalize_interval_hours(value: object) -> int:
+    try:
+        iv = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 24
+    return iv if iv in SCHEDULE_INTERVALS else 24
+
+
+def parse_last_run_at(raw: object) -> datetime | None:
+    if not raw or not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def normalize_schedule(patch: dict | None) -> dict:
+    """Sanitize a schedule patch from the API/UI."""
+    src = dict(patch or {})
+    out: dict[str, Any] = {
+        "enabled": bool(src.get("enabled")),
+        "interval_hours": normalize_interval_hours(src.get("interval_hours")),
+        "send_telegram": bool(src.get("send_telegram")),
+    }
+    # Preserve last_run_at only when the client explicitly sends it.
+    if "last_run_at" in src:
+        out["last_run_at"] = src.get("last_run_at")
+    return out
 
 
 def _atomic_write(path, data: dict) -> None:

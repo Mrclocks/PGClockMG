@@ -324,7 +324,6 @@ async def dashboard():
             ),
             "proxy_enabled": bool(tg.get("proxy_enabled")),
         },
-        "stream_dest": ((cfg.get("stream") or {}).get("default_dest_url") or ""),
         "health": {
             "backup_disk_free_bytes": backup_disk.get("free_bytes"),
             "backup_disk_total_bytes": backup_disk.get("total_bytes"),
@@ -447,9 +446,9 @@ async def api_put_settings(body: SettingsPatch):
     if body.retention_count is not None:
         patch["retention_count"] = max(1, min(100, int(body.retention_count)))
     if body.schedule is not None:
-        patch["schedule"] = body.schedule
-    if body.stream is not None:
-        patch["stream"] = body.stream
+        from app.services.backup_settings import normalize_schedule
+
+        patch["schedule"] = normalize_schedule(body.schedule)
     if body.telegram is not None:
         current = load_settings().get("telegram") or {}
         tg = dict(body.telegram)

@@ -106,10 +106,14 @@ const I18N = {
     setH2: "تنظیمات",
     setDesc: "هر بخش جداست؛ فقط همان چیزی که لازم دارید را تغییر دهید.",
     setSchedTitle: "زمان‌بندی خودکار",
-    setSchedHint: "بکاپ روزانه را بر اساس ساعت UTC تنظیم کنید.",
-    lblSchedEnabled: "بکاپ خودکار روزانه (UTC)",
-    lblSchedHour: "ساعت",
-    lblSchedMinute: "دقیقه",
+    setSchedHint: "بازهٔ ارسال بکاپ خودکار را انتخاب کنید.",
+    lblSchedEnabled: "بکاپ خودکار فعال باشد",
+    lblSchedInterval: "بازهٔ زمانی",
+    schedInterval1: "هر ۱ ساعت",
+    schedInterval3: "هر ۳ ساعت",
+    schedInterval6: "هر ۶ ساعت",
+    schedInterval12: "هر ۱۲ ساعت",
+    schedInterval24: "هر ۲۴ ساعت",
     lblRetention: "تعداد نگه‌داری",
     lblSchedTelegram: "بعد از بکاپ خودکار، به تلگرام هم بفرست",
     setTgTitle: "تلگرام",
@@ -128,9 +132,6 @@ const I18N = {
     lblProxyPort: "پورت",
     lblProxyUser: "کاربر",
     lblProxyPass: "رمز پروکسی",
-    setStreamTitle: "مقصد استریم پیش‌فرض",
-    lblStreamDest: "آدرس ویزارد مقصد",
-    streamDestHint: "۱) روی سرور مقصد: ویزارد → ریستور → آماده‌سازی دریافت استریم. ۲) توکن را کپی کنید. ۳) آدرس همان سرور (مثل http://IP:7000) و توکن را اینجا بزنید.",
     setPassTitle: "تغییر رمز پنل",
     setPassHint: "اگر نمی‌خواهید رمز عوض شود، این بخش را خالی بگذارید.",
     lblNewPass: "رمز جدید",
@@ -188,8 +189,6 @@ const I18N = {
     tgDisconnected: "قطع",
     tgChecking: "در حال بررسی…",
     proxyOn: "پروکسی روشن",
-    streamSet: "مقصد استریم تنظیم شده",
-    streamUnset: "مقصد استریم خالی است",
     panelUrl: "آدرس پنل",
     ssl: "SSL",
     port: "پورت",
@@ -283,10 +282,14 @@ const I18N = {
     setH2: "Settings",
     setDesc: "Each section stands alone — change only what you need.",
     setSchedTitle: "Automatic schedule",
-    setSchedHint: "Run a daily backup on the UTC clock.",
-    lblSchedEnabled: "Daily automatic backup (UTC)",
-    lblSchedHour: "Hour",
-    lblSchedMinute: "Minute",
+    setSchedHint: "Choose how often automatic backups run.",
+    lblSchedEnabled: "Enable automatic backups",
+    lblSchedInterval: "Interval",
+    schedInterval1: "Every 1 hour",
+    schedInterval3: "Every 3 hours",
+    schedInterval6: "Every 6 hours",
+    schedInterval12: "Every 12 hours",
+    schedInterval24: "Every 24 hours",
     lblRetention: "Keep last N backups",
     lblSchedTelegram: "Also send scheduled backups to Telegram",
     setTgTitle: "Telegram",
@@ -305,9 +308,6 @@ const I18N = {
     lblProxyPort: "Port",
     lblProxyUser: "Username",
     lblProxyPass: "Proxy password",
-    setStreamTitle: "Default stream destination",
-    lblStreamDest: "Destination wizard URL",
-    streamDestHint: "1) On the destination: Wizard → Restore → Ready to receive stream. 2) Copy the one-time token. 3) Paste that server URL (e.g. http://IP:7000) and the token here.",
     setPassTitle: "Change panel password",
     setPassHint: "Leave blank if you don’t want to change the password.",
     lblNewPass: "New password",
@@ -365,8 +365,6 @@ const I18N = {
     tgDisconnected: "Disconnected",
     tgChecking: "Checking…",
     proxyOn: "Proxy on",
-    streamSet: "Stream destination set",
-    streamUnset: "No stream destination",
     panelUrl: "Panel URL",
     ssl: "SSL",
     port: "Port",
@@ -460,10 +458,14 @@ const I18N = {
     setH2: "Настройки",
     setDesc: "Каждый блок отдельный — меняйте только то, что нужно.",
     setSchedTitle: "Авторасписание",
-    setSchedHint: "Ежедневный бэкап по часам UTC.",
-    lblSchedEnabled: "Ежедневный автобэкап (UTC)",
-    lblSchedHour: "Час",
-    lblSchedMinute: "Минута",
+    setSchedHint: "Выберите, как часто делать автоматический бэкап.",
+    lblSchedEnabled: "Включить автоматический бэкап",
+    lblSchedInterval: "Интервал",
+    schedInterval1: "Каждый 1 час",
+    schedInterval3: "Каждые 3 часа",
+    schedInterval6: "Каждые 6 часов",
+    schedInterval12: "Каждые 12 часов",
+    schedInterval24: "Каждые 24 часа",
     lblRetention: "Хранить последние N",
     lblSchedTelegram: "Также отправлять автобэкап в Telegram",
     setTgTitle: "Telegram",
@@ -482,9 +484,6 @@ const I18N = {
     lblProxyPort: "Порт",
     lblProxyUser: "Пользователь",
     lblProxyPass: "Пароль прокси",
-    setStreamTitle: "Назначение стрима по умолчанию",
-    lblStreamDest: "URL мастера назначения",
-    streamDestHint: "1) На назначении: мастер → Restore → Готов принимать стрим. 2) Скопируйте одноразовый токен. 3) Вставьте URL того сервера (например http://IP:7000) и токен сюда.",
     setPassTitle: "Смена пароля панели",
     setPassHint: "Оставьте пустым, если пароль менять не нужно.",
     lblNewPass: "Новый пароль",
@@ -542,8 +541,6 @@ const I18N = {
     tgDisconnected: "Нет связи",
     tgChecking: "Проверка…",
     proxyOn: "Прокси вкл.",
-    streamSet: "Назначение стрима задано",
-    streamUnset: "Назначение стрима пусто",
     panelUrl: "URL панели",
     ssl: "SSL",
     port: "Порт",
@@ -740,7 +737,7 @@ function applyI18n() {
     ["btnBackupNowList", "btnBackupNow"],
     ["listH2", "listH2"], ["listDesc", "listDesc"],
     ["setH2", "setH2"], ["setDesc", "setDesc"], ["setSchedTitle", "setSchedTitle"], ["setSchedHint", "setSchedHint"],
-    ["lblSchedHour", "lblSchedHour"], ["lblSchedMinute", "lblSchedMinute"],
+    ["lblSchedInterval", "lblSchedInterval"],
     ["lblRetention", "lblRetention"], ["lblSchedTelegram", "lblSchedTelegram"],
     ["setTgTitle", "setTgTitle"], ["setTgHint", "setTgHint"], ["lblTgToken", "lblTgToken"],
     ["lblTgChat", "lblTgChat"], ["lblTgCaption", "lblTgCaption"], ["tgCaptionHint", "tgCaptionHint"],
@@ -748,7 +745,6 @@ function applyI18n() {
     ["setProxyTitle", "setProxyTitle"], ["setProxyHint", "setProxyHint"],
     ["lblProxyType", "lblProxyType"], ["lblProxyHost", "lblProxyHost"], ["lblProxyPort", "lblProxyPort"],
     ["lblProxyUser", "lblProxyUser"], ["lblProxyPass", "lblProxyPass"],
-    ["setStreamTitle", "setStreamTitle"], ["lblStreamDest", "lblStreamDest"], ["streamDestHint", "streamDestHint"],
     ["setUpdateTitle", "setUpdateTitle"], ["setUpdateHint", "setUpdateHint"],
     ["lblUpdateCurrent", "lblUpdateCurrent"], ["lblUpdateLatest", "lblUpdateLatest"],
     ["lblUpdateChangelog", "lblUpdateChangelog"],
@@ -784,6 +780,7 @@ function applyI18n() {
     if (el) el.setAttribute("aria-label", t(key));
   }
   initProxyTypeSelect();
+  initSchedIntervalSelect();
   initLangMenu();
   initBackupModal();
   syncLangMenu(lang);
@@ -1003,7 +1000,10 @@ async function refreshDashboard() {
   const diskTotal = health.backup_disk_total_bytes;
   const memFree = health.memory_available_bytes;
   const load = health.load_ratio_1m;
-  const schedTime = `${String(sched.hour ?? 3).padStart(2, "0")}:${String(sched.minute ?? 0).padStart(2, "0")}`;
+  const schedInterval = [1, 3, 6, 12, 24].includes(Number(sched.interval_hours))
+    ? Number(sched.interval_hours)
+    : 24;
+  const schedLabel = t(`schedInterval${schedInterval}`);
   document.getElementById("dashHealthGrid").innerHTML = [
     metricCard({
       tone: "icon-tone-blue",
@@ -1053,9 +1053,9 @@ async function refreshDashboard() {
       tone: "icon-tone-blue",
       icon: ICONS.clock,
       label: t("healthSchedule"),
-      value: sched.enabled ? schedTime : t("healthOff"),
+      value: sched.enabled ? schedLabel : t("healthOff"),
       status: sched.enabled ? "ok" : "off",
-      valueLtr: !sched.enabled ? false : true,
+      valueLtr: false,
       subHtml: `${esc(t("keepLast"))}: <bdi dir="ltr">${esc(data.retention_count || 10)}</bdi>`,
     }),
   ].join("");
@@ -1102,10 +1102,9 @@ async function refreshDashboard() {
       <p class="desc-sm" style="margin:2px 0 0">${esc(tg.enabled ? t("telegramOn") : t("telegramOff"))} · ${esc(tg.configured ? t("telegramReady") : t("telegramNeedConfig"))}</p></div></div>
       <div class="backup-item-chips">
         <span class="backup-chip">${esc(sched.enabled ? t("scheduleOn") : t("scheduleOff"))}</span>
+        ${sched.enabled ? `<span class="backup-chip">${esc(schedLabel)}</span>` : ""}
         <span class="backup-chip">${esc(tg.proxy_enabled ? t("proxyOn") : "Proxy —")}</span>
-        <span class="backup-chip">${esc(data.stream_dest ? t("streamSet") : t("streamUnset"))}</span>
-      </div>
-      ${data.stream_dest ? `<p class="desc-sm" style="margin-top:10px;word-break:break-all">${esc(data.stream_dest)}</p>` : ""}`;
+      </div>`;
 
   setTelegramStatusTag({ connected: !!tgLive.connected });
 
@@ -1319,8 +1318,7 @@ async function deleteBackup(id) {
 
 async function openStream(id) {
   document.getElementById("streamBackupId").value = id;
-  const settings = await api("/api/settings");
-  document.getElementById("streamUrl").value = (settings.stream && settings.stream.default_dest_url) || "";
+  document.getElementById("streamUrl").value = "";
   document.getElementById("streamToken").value = "";
   document.getElementById("streamMsg").classList.add("hidden");
   document.getElementById("streamProgress").classList.add("hidden");
@@ -1436,8 +1434,7 @@ async function loadSettingsForm() {
   const sched = s.schedule || {};
   const tg = s.telegram || {};
   document.getElementById("schedEnabled").checked = !!sched.enabled;
-  document.getElementById("schedHour").value = sched.hour ?? 3;
-  document.getElementById("schedMinute").value = sched.minute ?? 0;
+  setSchedIntervalValue(sched.interval_hours ?? 24);
   document.getElementById("retentionCount").value = s.retention_count ?? 10;
   document.getElementById("schedTelegram").checked = !!sched.send_telegram;
   document.getElementById("tgEnabled").checked = !!tg.enabled;
@@ -1452,7 +1449,6 @@ async function loadSettingsForm() {
   document.getElementById("proxyPort").value = tg.proxy_port || 1080;
   document.getElementById("proxyUser").value = tg.proxy_user || "";
   document.getElementById("proxyPass").value = "";
-  document.getElementById("streamDest").value = (s.stream && s.stream.default_dest_url) || "";
   setTelegramStatusTag({ checking: true });
   refreshTelegramStatusTag().catch(() => setTelegramStatusTag({ connected: false }));
   checkForUpdate(false).catch(() => {});
@@ -1496,8 +1492,7 @@ async function saveSettings(opts = {}) {
     retention_count: Number(document.getElementById("retentionCount").value || 10),
     schedule: {
       enabled: document.getElementById("schedEnabled").checked,
-      hour: Number(document.getElementById("schedHour").value || 0),
-      minute: Number(document.getElementById("schedMinute").value || 0),
+      interval_hours: Number(document.getElementById("schedInterval").value || 24),
       send_telegram: document.getElementById("schedTelegram").checked,
     },
     telegram: {
@@ -1512,9 +1507,6 @@ async function saveSettings(opts = {}) {
       proxy_port: Number(document.getElementById("proxyPort").value || 1080),
       proxy_user: document.getElementById("proxyUser").value.trim(),
       proxy_password: document.getElementById("proxyPass").value,
-    },
-    stream: {
-      default_dest_url: document.getElementById("streamDest").value.trim(),
     },
   };
   await api("/api/settings", { method: "PUT", body: JSON.stringify(patch) });
@@ -1577,6 +1569,75 @@ function setProxyTypeValue(value) {
       li.classList.toggle("is-active", on);
     });
   }
+}
+
+const SCHED_INTERVALS = [1, 3, 6, 12, 24];
+
+function schedIntervalLabel(hours) {
+  const n = SCHED_INTERVALS.includes(Number(hours)) ? Number(hours) : 24;
+  return t(`schedInterval${n}`);
+}
+
+function setSchedIntervalValue(value) {
+  const n = SCHED_INTERVALS.includes(Number(value)) ? Number(value) : 24;
+  const hidden = document.getElementById("schedInterval");
+  const label = document.getElementById("schedIntervalLabel");
+  const menu = document.getElementById("schedIntervalMenu");
+  if (hidden) hidden.value = String(n);
+  if (label) label.textContent = schedIntervalLabel(n);
+  if (menu) {
+    menu.querySelectorAll("[role=option]").forEach((li) => {
+      const on = Number(li.getAttribute("data-value")) === n;
+      li.setAttribute("aria-selected", on ? "true" : "false");
+      li.classList.toggle("is-active", on);
+      li.textContent = schedIntervalLabel(li.getAttribute("data-value"));
+    });
+  }
+}
+
+function initSchedIntervalSelect() {
+  const root = document.getElementById("schedIntervalSelect");
+  const trigger = document.getElementById("schedIntervalTrigger");
+  const menu = document.getElementById("schedIntervalMenu");
+  if (!root || !trigger || !menu) return;
+  const current = document.getElementById("schedInterval")?.value || "24";
+  if (root.dataset.ready) {
+    setSchedIntervalValue(current);
+    return;
+  }
+  root.dataset.ready = "1";
+
+  const close = () => {
+    menu.classList.add("hidden");
+    trigger.setAttribute("aria-expanded", "false");
+    root.classList.remove("is-open");
+  };
+  const open = () => {
+    menu.classList.remove("hidden");
+    trigger.setAttribute("aria-expanded", "true");
+    root.classList.add("is-open");
+  };
+
+  trigger.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (menu.classList.contains("hidden")) open();
+    else close();
+  });
+  menu.querySelectorAll("[role=option]").forEach((li) => {
+    li.addEventListener("click", (e) => {
+      e.preventDefault();
+      setSchedIntervalValue(li.getAttribute("data-value"));
+      close();
+    });
+  });
+  document.addEventListener("click", (e) => {
+    if (!root.contains(e.target)) close();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") close();
+  });
+  setSchedIntervalValue(current);
 }
 
 function initProxyTypeSelect() {

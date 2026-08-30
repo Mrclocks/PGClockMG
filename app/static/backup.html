@@ -208,12 +208,21 @@
             </div>
             <div class="form-row">
               <div class="form-group">
-                <label id="lblSchedHour"></label>
-                <input type="number" min="0" max="23" id="schedHour" class="text-input">
-              </div>
-              <div class="form-group">
-                <label id="lblSchedMinute"></label>
-                <input type="number" min="0" max="59" id="schedMinute" class="text-input">
+                <label id="lblSchedInterval"></label>
+                <div class="backup-select" id="schedIntervalSelect">
+                  <button type="button" class="backup-select-trigger" id="schedIntervalTrigger" aria-haspopup="listbox" aria-expanded="false">
+                    <span id="schedIntervalLabel">24</span>
+                    <svg class="backup-select-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+                  </button>
+                  <ul class="backup-select-menu hidden" id="schedIntervalMenu" role="listbox">
+                    <li role="option" tabindex="-1" data-value="1" aria-selected="false">1</li>
+                    <li role="option" tabindex="-1" data-value="3" aria-selected="false">3</li>
+                    <li role="option" tabindex="-1" data-value="6" aria-selected="false">6</li>
+                    <li role="option" tabindex="-1" data-value="12" aria-selected="false">12</li>
+                    <li role="option" tabindex="-1" data-value="24" aria-selected="true">24</li>
+                  </ul>
+                  <input type="hidden" id="schedInterval" value="24">
+                </div>
               </div>
               <div class="form-group">
                 <label id="lblRetention"></label>
@@ -316,22 +325,6 @@
                 <label id="lblProxyPass"></label>
                 <input type="password" id="proxyPass" class="text-input" autocomplete="off">
               </div>
-            </div>
-          </article>
-
-          <article class="backup-settings-card">
-            <div class="backup-settings-head">
-              <span class="choice-icon icon-tone-green" aria-hidden="true">
-                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M16 3h5v5"/><path d="M4 20L21 3"/><path d="M21 16v5h-5"/></svg>
-              </span>
-              <div class="backup-settings-head-body">
-                <h3 class="section-title" id="setStreamTitle"></h3>
-                <p class="desc-sm" id="streamDestHint"></p>
-              </div>
-            </div>
-            <div class="form-group">
-              <label id="lblStreamDest"></label>
-              <input type="text" id="streamDest" class="text-input" placeholder="http://DEST_IP:7000">
             </div>
           </article>
 
