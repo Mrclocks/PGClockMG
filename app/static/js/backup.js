@@ -963,6 +963,14 @@ function showBackupTab(tab) {
   } else if (tab === "stream") {
     showPanel("panel-stream");
   }
+  // Always open the destination from the top (nav buttons sit mid/bottom of dash).
+  const jumpTop = () => {
+    try { window.scrollTo({ top: 0, left: 0, behavior: "auto" }); } catch (_) { window.scrollTo(0, 0); }
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+  };
+  jumpTop();
+  requestAnimationFrame(jumpTop);
 }
 
 function humanSize(n) {
@@ -1210,22 +1218,22 @@ async function refreshDashboard() {
 
   const last = data.last_backup;
   const lastBox = document.getElementById("dashLast");
-  const goBackupsBtn = `<div class="actions backup-actions-wrap" style="margin-top:12px">
-      <button type="button" class="btn btn-primary btn-sm" onclick="showBackupTab('list')">${esc(t("btnGoBackups"))}</button>
-    </div>`;
+  const goBackupsBtn = `<button type="button" class="btn btn-primary btn-sm backup-dash-nav-btn" onclick="showBackupTab('list')">${esc(t("btnGoBackups"))}</button>`;
   if (!last) {
     lastBox.classList.remove("is-detailed");
     lastBox.innerHTML = `<div class="backup-section-head">
       <span class="choice-icon icon-tone-yellow" aria-hidden="true">${ICONS.archive}</span>
-      <div><h3 style="margin:0;font-size:1rem;line-height:1.35">${esc(t("lastBackup"))}</h3>
-      <p class="desc-sm" style="margin:2px 0 0">${esc(t("noLast"))}</p></div></div>${goBackupsBtn}`;
+      <div class="backup-section-head-body"><h3 style="margin:0;font-size:1rem;line-height:1.35">${esc(t("lastBackup"))}</h3>
+      <p class="desc-sm" style="margin:2px 0 0">${esc(t("noLast"))}</p></div>
+      ${goBackupsBtn}</div>`;
   } else {
     const c = last.counts || {};
     lastBox.classList.add("is-detailed");
     lastBox.innerHTML = `<div class="backup-section-head">
       <span class="choice-icon icon-tone-green" aria-hidden="true">${ICONS.archive}</span>
-      <div><h3 style="margin:0;font-size:1rem;line-height:1.35">${esc(t("lastBackup"))}</h3>
-      <p class="desc-sm" style="margin:2px 0 0;word-break:break-all">${esc(last.filename || last.backup_id)}</p></div></div>
+      <div class="backup-section-head-body"><h3 style="margin:0;font-size:1rem;line-height:1.35">${esc(t("lastBackup"))}</h3>
+      <p class="desc-sm" style="margin:2px 0 0;word-break:break-all">${esc(last.filename || last.backup_id)}</p></div>
+      ${goBackupsBtn}</div>
       <div class="specs-grid backup-last-specs">
         <div class="specs-item"><span class="specs-label">${esc(t("size"))}</span><span class="specs-value" dir="ltr">${esc(humanSize(last.size_bytes))}</span></div>
         <div class="specs-item"><span class="specs-label">${esc(t("db"))}</span><span class="specs-value">${esc(last.db_type || "—")}</span></div>
@@ -1234,7 +1242,7 @@ async function refreshDashboard() {
         <div class="specs-item"><span class="specs-label">${esc(t("admins"))}</span><span class="specs-value" dir="ltr">${esc(c.admins ?? "—")}</span></div>
         <div class="specs-item"><span class="specs-label">${esc(t("inbounds"))}</span><span class="specs-value" dir="ltr">${esc(c.inbounds ?? "—")}</span></div>
         <div class="specs-item"><span class="specs-label">${esc(t("time"))}</span><span class="specs-value" dir="ltr">${esc(formatSimpleTime(last.created_at))}</span></div>
-      </div>${goBackupsBtn}`;
+      </div>`;
   }
 
   const delivery = document.getElementById("dashDelivery");
@@ -1242,18 +1250,17 @@ async function refreshDashboard() {
   // Paint immediately with config-only status; probe Telegram in the background.
   const tgTagClass = "is-unknown";
   const tgTagLabel = t("tgChecking");
-  const goSettingsBtn = `<div class="actions backup-actions-wrap" style="margin-top:12px">
-      <button type="button" class="btn btn-primary btn-sm" onclick="showBackupTab('settings')">${esc(t("btnGoSettings"))}</button>
-    </div>`;
+  const goSettingsBtn = `<button type="button" class="btn btn-primary btn-sm backup-dash-nav-btn" onclick="showBackupTab('settings')">${esc(t("btnGoSettings"))}</button>`;
   delivery.innerHTML = `<div class="backup-section-head">
       <span class="choice-icon icon-tone-cyan" aria-hidden="true">${ICONS.send}</span>
-      <div><h3 style="margin:0;font-size:1rem;line-height:1.35">${esc(t("deliveryTitle"))} <span class="backup-status-tag ${tgTagClass}" id="dashTgStatusTag">${esc(tgTagLabel)}</span></h3>
-      <p class="desc-sm" style="margin:2px 0 0">${esc(tg.enabled ? t("telegramOn") : t("telegramOff"))} · ${esc(tg.configured ? t("telegramReady") : t("telegramNeedConfig"))}</p></div></div>
+      <div class="backup-section-head-body"><h3 style="margin:0;font-size:1rem;line-height:1.35">${esc(t("deliveryTitle"))} <span class="backup-status-tag ${tgTagClass}" id="dashTgStatusTag">${esc(tgTagLabel)}</span></h3>
+      <p class="desc-sm" style="margin:2px 0 0">${esc(tg.enabled ? t("telegramOn") : t("telegramOff"))} · ${esc(tg.configured ? t("telegramReady") : t("telegramNeedConfig"))}</p></div>
+      ${goSettingsBtn}</div>
       <div class="backup-item-chips">
         <span class="backup-chip">${esc(sched.enabled ? t("scheduleOn") : t("scheduleOff"))}</span>
         ${sched.enabled ? `<span class="backup-chip">${esc(schedLabel)}</span>` : ""}
         <span class="backup-chip">${esc(tg.proxy_enabled ? t("proxyOn") : "Proxy —")}</span>
-      </div>${goSettingsBtn}`;
+      </div>`;
 
   setTelegramStatusTag({ checking: true });
   refreshTelegramStatusTag()
