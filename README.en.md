@@ -1,4 +1,4 @@
-> 🚀 **`v4.3.0`** — Interval schedule, timezone, retention days, integrity verify, multi-Telegram, failure notify
+> 🚀 **`v4.3.1`** — Faster dashboard load, no login flash, cleaner layout
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

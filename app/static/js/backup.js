@@ -47,7 +47,7 @@ const I18N = {
     authPolicy: "حداقل ۱۲ کاراکتر؛ شامل حرف بزرگ، کوچک، عدد و نماد.",
     btnSetup: "ذخیره و ورود",
     btnLogin: "ورود",
-    dashH2: "پایش",
+    dashH2: "داشبورد",
     dashDesc: "وضعیت سرور، پنل و آخرین بکاپ را یکجا ببینید.",
     dashPgTitle: "وضعیت PasarGuard",
     dashPgSubOk: "پنل روی این سرور نصب است و آماده بکاپ‌گیری است.",
@@ -239,7 +239,7 @@ const I18N = {
     authPolicy: "At least 12 characters, including upper, lower, digit, and symbol.",
     btnSetup: "Save & enter",
     btnLogin: "Sign in",
-    dashH2: "Overview",
+    dashH2: "Dashboard",
     dashDesc: "See server health, panel status, and the latest backup in one place.",
     dashPgTitle: "PasarGuard status",
     dashPgSubOk: "The panel is installed on this server and ready for backups.",
@@ -431,7 +431,7 @@ const I18N = {
     authPolicy: "Минимум 12 символов: заглавные, строчные, цифра и спецсимвол.",
     btnSetup: "Сохранить и войти",
     btnLogin: "Войти",
-    dashH2: "Обзор",
+    dashH2: "Панель",
     dashDesc: "Статус сервера, панели и последнего бэкапа в одном месте.",
     dashPgTitle: "Статус PasarGuard",
     dashPgSubOk: "Панель установлена на этом сервере и готова к бэкапу.",
@@ -780,8 +780,7 @@ function applyI18n() {
     ["tabDash", "tabDash"], ["tabList", "tabList"], ["tabSettings", "tabSettings"],
     ["btnLogout", "logout"], ["lblPassword", "lblPassword"], ["lblPasswordConfirm", "lblPasswordConfirm"],
     ["authPolicy", "authPolicy"], ["dashPgTitle", "dashPgTitle"],
-    ["secHealthTitle", "secHealthTitle"], ["secPgTitle", "secPgTitle"],
-    ["secBackupStatusTitle", "secBackupStatusTitle"],
+    ["dashH2", "dashH2"], ["dashDesc", "dashDesc"],
     ["btnBackupNowList", "btnBackupNow"],
     ["listH2", "listH2"], ["listDesc", "listDesc"],
     ["setH2", "setH2"], ["setDesc", "setDesc"], ["setSchedTitle", "setSchedTitle"], ["setSchedHint", "setSchedHint"],
@@ -886,13 +885,13 @@ function showBackupTab(tab) {
   });
   if (tab === "dash") {
     showPanel("panel-dash");
-    refreshDashboard();
+    refreshDashboard().catch(() => {});
   } else if (tab === "list") {
     showPanel("panel-list");
-    refreshList();
+    refreshList().catch(() => {});
   } else if (tab === "settings") {
     showPanel("panel-settings");
-    loadSettingsForm();
+    loadSettingsForm().catch(() => {});
   } else if (tab === "stream") {
     showPanel("panel-stream");
   }
@@ -950,25 +949,43 @@ function esc(s) {
 
 async function boot() {
   setBackupLang(lang);
-  const st = await api("/api/setup/status");
-  document.getElementById("appVersion").textContent = "v" + (st.version || "4.3.0");
-  setupMode = !st.password_set;
-  window.__setupTokenRequired = !!st.setup_token_required;
-  document.getElementById("authConfirmWrap").classList.toggle("hidden", !setupMode);
-  document.getElementById("authSetupTokenWrap").classList.toggle(
-    "hidden",
-    !(setupMode && window.__setupTokenRequired)
-  );
-  applyI18n();
+  try {
+    const st = await api("/api/setup/status");
+    document.getElementById("appVersion").textContent = "v" + (st.version || "4.3.1");
+    setupMode = !st.password_set;
+    window.__setupTokenRequired = !!st.setup_token_required;
+    document.getElementById("authConfirmWrap").classList.toggle("hidden", !setupMode);
+    document.getElementById("authSetupTokenWrap").classList.toggle(
+      "hidden",
+      !(setupMode && window.__setupTokenRequired)
+    );
+    applyI18n();
 
-  if (!setupMode) {
-    try {
-      await api("/api/dashboard");
-      enterApp();
-      return;
-    } catch (_) { /* need login */ }
+    if (!setupMode) {
+      try {
+        // Lightweight session probe — do not load the heavy dashboard twice.
+        await api("/api/session");
+        finishBoot();
+        enterApp();
+        return;
+      } catch (_) { /* need login */ }
+    }
+    finishBoot();
+    showPanel("panel-auth");
+  } catch (e) {
+    finishBoot();
+    showPanel("panel-auth");
+    const err = document.getElementById("authError");
+    if (err) {
+      err.textContent = e.message || String(e);
+      err.classList.remove("hidden");
+    }
   }
-  showPanel("panel-auth");
+}
+
+function finishBoot() {
+  document.documentElement.classList.remove("is-booting");
+  document.body.classList.add("is-booted");
 }
 
 function enterApp() {
@@ -1149,17 +1166,12 @@ async function refreshDashboard() {
 
   const delivery = document.getElementById("dashDelivery");
   delivery.classList.add("is-detailed");
-  let tgLive = { connected: false };
-  try {
-    tgLive = await api("/api/telegram/status");
-  } catch (_) {
-    tgLive = { connected: false };
-  }
-  const tgTagClass = tgLive.connected ? "is-connected" : "is-disconnected";
-  const tgTagLabel = tgLive.connected ? t("tgConnected") : t("tgDisconnected");
+  // Paint immediately with config-only status; probe Telegram in the background.
+  const tgTagClass = "is-unknown";
+  const tgTagLabel = t("tgChecking");
   delivery.innerHTML = `<div class="backup-section-head">
       <span class="choice-icon icon-tone-cyan" aria-hidden="true">${ICONS.send}</span>
-      <div><h3 style="margin:0;font-size:1rem;line-height:1.35">${esc(t("deliveryTitle"))} <span class="backup-status-tag ${tgTagClass}">${esc(tgTagLabel)}</span></h3>
+      <div><h3 style="margin:0;font-size:1rem;line-height:1.35">${esc(t("deliveryTitle"))} <span class="backup-status-tag ${tgTagClass}" id="dashTgStatusTag">${esc(tgTagLabel)}</span></h3>
       <p class="desc-sm" style="margin:2px 0 0">${esc(tg.enabled ? t("telegramOn") : t("telegramOff"))} · ${esc(tg.configured ? t("telegramReady") : t("telegramNeedConfig"))}</p></div></div>
       <div class="backup-item-chips">
         <span class="backup-chip">${esc(sched.enabled ? t("scheduleOn") : t("scheduleOff"))}</span>
@@ -1167,7 +1179,23 @@ async function refreshDashboard() {
         <span class="backup-chip">${esc(tg.proxy_enabled ? t("proxyOn") : "Proxy —")}</span>
       </div>`;
 
-  setTelegramStatusTag({ connected: !!tgLive.connected });
+  setTelegramStatusTag({ checking: true });
+  refreshTelegramStatusTag()
+    .then((st) => {
+      const el = document.getElementById("dashTgStatusTag");
+      if (!el) return;
+      const connected = !!(st && st.connected);
+      el.classList.remove("is-connected", "is-disconnected", "is-unknown");
+      el.classList.add(connected ? "is-connected" : "is-disconnected");
+      el.textContent = connected ? t("tgConnected") : t("tgDisconnected");
+    })
+    .catch(() => {
+      const el = document.getElementById("dashTgStatusTag");
+      if (!el) return;
+      el.classList.remove("is-connected", "is-disconnected", "is-unknown");
+      el.classList.add("is-disconnected");
+      el.textContent = t("tgDisconnected");
+    });
 
   const errBox = document.getElementById("dashError");
   const errBody = document.getElementById("dashErrorBody");
@@ -1701,51 +1729,6 @@ function setSchedIntervalValue(value) {
   }
 }
 
-function initSchedIntervalSelect() {
-  const root = document.getElementById("schedIntervalSelect");
-  const trigger = document.getElementById("schedIntervalTrigger");
-  const menu = document.getElementById("schedIntervalMenu");
-  if (!root || !trigger || !menu) return;
-  const current = document.getElementById("schedInterval")?.value || "24";
-  if (root.dataset.ready) {
-    setSchedIntervalValue(current);
-    return;
-  }
-  root.dataset.ready = "1";
-
-  const close = () => {
-    menu.classList.add("hidden");
-    trigger.setAttribute("aria-expanded", "false");
-    root.classList.remove("is-open");
-  };
-  const open = () => {
-    menu.classList.remove("hidden");
-    trigger.setAttribute("aria-expanded", "true");
-    root.classList.add("is-open");
-  };
-
-  trigger.addEventListener("click", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (menu.classList.contains("hidden")) open();
-    else close();
-  });
-  menu.querySelectorAll("[role=option]").forEach((li) => {
-    li.addEventListener("click", (e) => {
-      e.preventDefault();
-      setSchedIntervalValue(li.getAttribute("data-value"));
-      close();
-    });
-  });
-  document.addEventListener("click", (e) => {
-    if (!root.contains(e.target)) close();
-  });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") close();
-  });
-  setSchedIntervalValue(current);
-}
-
 const SCHED_TIMEZONES = [
   "UTC", "Asia/Tehran", "Asia/Dubai", "Asia/Istanbul", "Europe/Moscow",
   "Europe/London", "Europe/Berlin", "America/New_York", "Asia/Shanghai", "Asia/Tokyo",
@@ -1767,18 +1750,17 @@ function setSchedTimezoneValue(value) {
   }
 }
 
-function initSchedTimezoneSelect() {
-  const root = document.getElementById("schedTimezoneSelect");
-  const trigger = document.getElementById("schedTimezoneTrigger");
-  const menu = document.getElementById("schedTimezoneMenu");
+/** One shared binder for panel custom selects (avoids duplicate document listeners). */
+function bindBackupSelect(rootId, triggerId, menuId, onPick, refresh) {
+  const root = document.getElementById(rootId);
+  const trigger = document.getElementById(triggerId);
+  const menu = document.getElementById(menuId);
   if (!root || !trigger || !menu) return;
-  const current = document.getElementById("schedTimezone")?.value || "UTC";
   if (root.dataset.ready) {
-    setSchedTimezoneValue(current);
+    if (typeof refresh === "function") refresh();
     return;
   }
   root.dataset.ready = "1";
-
   const close = () => {
     menu.classList.add("hidden");
     trigger.setAttribute("aria-expanded", "false");
@@ -1789,7 +1771,6 @@ function initSchedTimezoneSelect() {
     trigger.setAttribute("aria-expanded", "true");
     root.classList.add("is-open");
   };
-
   trigger.addEventListener("click", (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -1799,7 +1780,7 @@ function initSchedTimezoneSelect() {
   menu.querySelectorAll("[role=option]").forEach((li) => {
     li.addEventListener("click", (e) => {
       e.preventDefault();
-      setSchedTimezoneValue(li.getAttribute("data-value"));
+      onPick(li.getAttribute("data-value"));
       close();
     });
   });
@@ -1809,47 +1790,37 @@ function initSchedTimezoneSelect() {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") close();
   });
-  setSchedTimezoneValue(current);
+  if (typeof refresh === "function") refresh();
+}
+
+function initSchedIntervalSelect() {
+  bindBackupSelect(
+    "schedIntervalSelect",
+    "schedIntervalTrigger",
+    "schedIntervalMenu",
+    (v) => setSchedIntervalValue(v),
+    () => setSchedIntervalValue(document.getElementById("schedInterval")?.value || "24"),
+  );
+}
+
+function initSchedTimezoneSelect() {
+  bindBackupSelect(
+    "schedTimezoneSelect",
+    "schedTimezoneTrigger",
+    "schedTimezoneMenu",
+    (v) => setSchedTimezoneValue(v),
+    () => setSchedTimezoneValue(document.getElementById("schedTimezone")?.value || "UTC"),
+  );
 }
 
 function initProxyTypeSelect() {
-  const root = document.getElementById("proxyTypeSelect");
-  const trigger = document.getElementById("proxyTypeTrigger");
-  const menu = document.getElementById("proxyTypeMenu");
-  if (!root || !trigger || !menu || root.dataset.ready) return;
-  root.dataset.ready = "1";
-
-  const close = () => {
-    menu.classList.add("hidden");
-    trigger.setAttribute("aria-expanded", "false");
-    root.classList.remove("is-open");
-  };
-  const open = () => {
-    menu.classList.remove("hidden");
-    trigger.setAttribute("aria-expanded", "true");
-    root.classList.add("is-open");
-  };
-
-  trigger.addEventListener("click", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (menu.classList.contains("hidden")) open();
-    else close();
-  });
-  menu.querySelectorAll("[role=option]").forEach((li) => {
-    li.addEventListener("click", (e) => {
-      e.preventDefault();
-      setProxyTypeValue(li.getAttribute("data-value"));
-      close();
-    });
-  });
-  document.addEventListener("click", (e) => {
-    if (!root.contains(e.target)) close();
-  });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") close();
-  });
-  setProxyTypeValue(document.getElementById("proxyType")?.value || "socks5");
+  bindBackupSelect(
+    "proxyTypeSelect",
+    "proxyTypeTrigger",
+    "proxyTypeMenu",
+    (v) => setProxyTypeValue(v),
+    () => setProxyTypeValue(document.getElementById("proxyType")?.value || "socks5"),
+  );
 }
 
 async function clearLastError() {
@@ -2008,8 +1979,11 @@ async function applyPanelUpdate() {
 
 
 boot().catch((e) => {
+  finishBoot();
   const err = document.getElementById("authError");
-  err.textContent = e.message || String(e);
-  err.classList.remove("hidden");
+  if (err) {
+    err.textContent = e.message || String(e);
+    err.classList.remove("hidden");
+  }
   showPanel("panel-auth");
 });

@@ -82,6 +82,31 @@ def _release_payload(data: dict, *, current: str) -> dict:
     }
 
 
+def peek_cached_update(current: str) -> dict | None:
+    """Return a fresh in-memory update cache entry, or None."""
+    now = time.time()
+    with _LOCK:
+        cached = _CHECK_CACHE.get("payload")
+        if (
+            cached
+            and (now - float(_CHECK_CACHE.get("at") or 0)) < _CHECK_TTL_SEC
+            and (cached.get("current") == current)
+        ):
+            return dict(cached)
+    return None
+
+
+def schedule_background_update_check(current: str) -> None:
+    """Refresh the update cache without blocking the request thread."""
+    def _run() -> None:
+        try:
+            check_for_update(current=current, force=False, timeout=6.0)
+        except Exception:
+            log.exception("background update check failed")
+
+    threading.Thread(target=_run, name="backup-update-check", daemon=True).start()
+
+
 def check_for_update(*, current: str, force: bool = False, timeout: float = 20.0) -> dict:
     """Return latest GitHub release compared to the running backup panel version."""
     now = time.time()
