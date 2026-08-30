@@ -97,9 +97,14 @@ async function copyText(codeOrId, raw) {
     await writeClipboard(text);
     flash(t('copied'), 'copied');
   } catch (e) {
-    // Last resort: show the text so the user can copy manually.
     flash(t('copyFailed') || 'Copy failed', 'copy-failed');
-    window.prompt(t('copy') || 'Copy', text);
+    await showAppModal({
+      title: t('copyManual.title') || t('copy'),
+      body: t('copyManual.body') || '',
+      copyText: text,
+      okText: t('uninstall.ok') || 'OK',
+      showCancel: false,
+    });
   }
 }
 
@@ -205,6 +210,76 @@ function bindFinishModal() {
   });
 }
 
+let _appModalResolver = null;
+
+function showAppModal({ title, body, okText, cancelText, danger = false, showCancel = false, copyText = '' }) {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById('appModal');
+    const titleEl = document.getElementById('appModalTitle');
+    const bodyEl = document.getElementById('appModalBody');
+    const okBtn = document.getElementById('appModalOk');
+    const cancelBtn = document.getElementById('appModalCancel');
+    const copyWrap = document.getElementById('appModalCopyWrap');
+    const copyEl = document.getElementById('appModalCopyText');
+    if (!overlay || !okBtn) {
+      resolve(true);
+      return;
+    }
+    if (_appModalResolver) {
+      _appModalResolver(false);
+      _appModalResolver = null;
+    }
+    _appModalResolver = resolve;
+    titleEl.textContent = title || t('uninstall.noticeTitle') || 'Notice';
+    bodyEl.textContent = body || '';
+    okBtn.textContent = okText || t('uninstall.ok') || 'OK';
+    okBtn.className = danger ? 'btn btn-ghost btn-danger' : 'btn btn-primary';
+    if (showCancel) {
+      cancelBtn.classList.remove('hidden');
+      cancelBtn.textContent = cancelText || t('uninstall.cancel') || 'Cancel';
+    } else {
+      cancelBtn.classList.add('hidden');
+    }
+    if (copyText && copyWrap && copyEl) {
+      copyWrap.classList.remove('hidden');
+      copyEl.textContent = copyText;
+    } else if (copyWrap) {
+      copyWrap.classList.add('hidden');
+      if (copyEl) copyEl.textContent = '';
+    }
+    overlay.classList.remove('hidden');
+    okBtn.focus();
+  });
+}
+
+function closeAppModal(result) {
+  const overlay = document.getElementById('appModal');
+  if (overlay) overlay.classList.add('hidden');
+  if (_appModalResolver) {
+    const r = _appModalResolver;
+    _appModalResolver = null;
+    r(!!result);
+  }
+}
+
+function bindAppModal() {
+  const overlay = document.getElementById('appModal');
+  const okBtn = document.getElementById('appModalOk');
+  const cancelBtn = document.getElementById('appModalCancel');
+  if (!overlay || overlay.dataset.bound) return;
+  overlay.dataset.bound = '1';
+  okBtn?.addEventListener('click', () => closeAppModal(true));
+  cancelBtn?.addEventListener('click', () => closeAppModal(false));
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) closeAppModal(false);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && overlay && !overlay.classList.contains('hidden')) {
+      closeAppModal(false);
+    }
+  });
+}
+
 async function uninstallWizard(skipConfirm) {
   const errEls = [
     document.getElementById('restoreUninstallErr'),
@@ -212,7 +287,17 @@ async function uninstallWizard(skipConfirm) {
   ];
   errEls.forEach(el => { if (el) { el.textContent = ''; el.classList.add('hidden'); } });
 
-  if (!skipConfirm && !confirm(t('uninstall.confirm'))) return;
+  if (!skipConfirm) {
+    const ok = await showAppModal({
+      title: t('uninstall.confirmTitle') || t('uninstall.title'),
+      body: t('uninstall.confirm'),
+      okText: t('uninstall.confirmBtn') || t('uninstall.button'),
+      cancelText: t('uninstall.cancel'),
+      showCancel: true,
+      danger: true,
+    });
+    if (!ok) return;
+  }
   try {
     const res = await fetch('/api/self-uninstall', { method: 'POST' });
     const data = await res.json().catch(() => ({}));
@@ -222,7 +307,14 @@ async function uninstallWizard(skipConfirm) {
         || t('uninstall.failed');
       throw new Error(msg);
     }
-    if (!skipConfirm) alert(t('uninstall.scheduled'));
+    if (!skipConfirm) {
+      await showAppModal({
+        title: t('uninstall.noticeTitle'),
+        body: t('uninstall.scheduled'),
+        okText: t('uninstall.ok'),
+        showCancel: false,
+      });
+    }
   } catch (e) {
     const msg = e.message || String(e) || t('uninstall.failed');
     errEls.forEach(el => {
@@ -230,12 +322,21 @@ async function uninstallWizard(skipConfirm) {
       el.textContent = msg;
       el.classList.remove('hidden');
     });
-    if (skipConfirm) alert(msg);
+    if (skipConfirm) {
+      await showAppModal({
+        title: t('uninstall.errorTitle'),
+        body: msg,
+        okText: t('uninstall.ok'),
+        showCancel: false,
+        danger: true,
+      });
+    }
   }
 }
 
 window.copyText = copyText;
 window.uninstallWizard = uninstallWizard;
+window.bindAppModal = bindAppModal;
 
 const PHASE_PANELS = {
   welcome: 'panel-welcome',

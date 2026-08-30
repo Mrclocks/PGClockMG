@@ -67,6 +67,18 @@ const I18N = {
     sendTg: "تلگرام",
     sendStream: "استریم",
     remove: "حذف",
+    latestBackupTag: "آخرین بکاپ",
+    backupsPath: "مسیر ذخیره",
+    modalOk: "باشه",
+    modalCancel: "انصراف",
+    modalConfirm: "تأیید",
+    modalNotice: "پیام",
+    confirmDeleteTitle: "حذف بکاپ",
+    tgTestOkTitle: "تست تلگرام",
+    tgTestFailTitle: "خطای تلگرام",
+    streamFailTitle: "خطای استریم",
+    clearErrorFailTitle: "خطا",
+    confirmDelete: "این بکاپ حذف شود؟",
     setH2: "تنظیمات",
     setDesc: "هر بخش جداگانه مرتب شده؛ فقط همان چیزی که لازم دارید را عوض کنید.",
     setSchedTitle: "زمان‌بندی خودکار",
@@ -129,7 +141,6 @@ const I18N = {
     noLast: "هنوز بکاپی گرفته نشده",
     size: "حجم",
     time: "زمان",
-    confirmDelete: "این بکاپ حذف شود؟",
     healthPg: "PasarGuard",
     healthDocker: "Docker",
     healthDisk: "فضای بکاپ",
@@ -209,6 +220,18 @@ const I18N = {
     sendTg: "Telegram",
     sendStream: "Stream",
     remove: "Delete",
+    latestBackupTag: "Latest",
+    backupsPath: "Storage path",
+    modalOk: "OK",
+    modalCancel: "Cancel",
+    modalConfirm: "Confirm",
+    modalNotice: "Notice",
+    confirmDeleteTitle: "Delete backup",
+    tgTestOkTitle: "Telegram test",
+    tgTestFailTitle: "Telegram error",
+    streamFailTitle: "Stream error",
+    clearErrorFailTitle: "Error",
+    confirmDelete: "Delete this backup?",
     setH2: "Settings",
     setDesc: "Clear sections — change only what you need.",
     setSchedTitle: "Automatic schedule",
@@ -271,7 +294,6 @@ const I18N = {
     noLast: "No backup yet",
     size: "Size",
     time: "Time",
-    confirmDelete: "Delete this backup?",
     healthPg: "PasarGuard",
     healthDocker: "Docker",
     healthDisk: "Backup disk",
@@ -351,6 +373,18 @@ const I18N = {
     sendTg: "Telegram",
     sendStream: "Стрим",
     remove: "Удалить",
+    latestBackupTag: "Последний",
+    backupsPath: "Путь хранения",
+    modalOk: "OK",
+    modalCancel: "Отмена",
+    modalConfirm: "Подтвердить",
+    modalNotice: "Сообщение",
+    confirmDeleteTitle: "Удалить бэкап",
+    tgTestOkTitle: "Тест Telegram",
+    tgTestFailTitle: "Ошибка Telegram",
+    streamFailTitle: "Ошибка стрима",
+    clearErrorFailTitle: "Ошибка",
+    confirmDelete: "Удалить бэкап?",
     setH2: "Настройки",
     setDesc: "Разделы по делу — меняйте только нужное.",
     setSchedTitle: "Авторасписание",
@@ -413,7 +447,6 @@ const I18N = {
     noLast: "Пока нет",
     size: "Размер",
     time: "Время",
-    confirmDelete: "Удалить бэкап?",
     healthPg: "PasarGuard",
     healthDocker: "Docker",
     healthDisk: "Диск бэкапа",
@@ -454,6 +487,68 @@ const I18N = {
 let lang = localStorage.getItem("pg_backup_lang") || "fa";
 let setupMode = false;
 let pollTimer = null;
+let backupProgressFadeTimer = null;
+let backupProgressHideTimer = null;
+let _modalResolver = null;
+
+function showBackupModal({ title, body, okText, cancelText, danger = false, showCancel = false }) {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById("backupModal");
+    const titleEl = document.getElementById("backupModalTitle");
+    const bodyEl = document.getElementById("backupModalBody");
+    const okBtn = document.getElementById("backupModalOk");
+    const cancelBtn = document.getElementById("backupModalCancel");
+    if (!overlay || !okBtn) {
+      resolve(true);
+      return;
+    }
+    if (_modalResolver) {
+      _modalResolver(false);
+      _modalResolver = null;
+    }
+    _modalResolver = resolve;
+    titleEl.textContent = title || t("modalNotice");
+    bodyEl.textContent = body || "";
+    okBtn.textContent = okText || t("modalOk");
+    okBtn.className = danger ? "btn btn-back" : "btn btn-primary";
+    if (showCancel) {
+      cancelBtn.classList.remove("hidden");
+      cancelBtn.textContent = cancelText || t("modalCancel");
+    } else {
+      cancelBtn.classList.add("hidden");
+    }
+    overlay.classList.remove("hidden");
+    okBtn.focus();
+  });
+}
+
+function closeBackupModal(result) {
+  const overlay = document.getElementById("backupModal");
+  if (overlay) overlay.classList.add("hidden");
+  if (_modalResolver) {
+    const r = _modalResolver;
+    _modalResolver = null;
+    r(!!result);
+  }
+}
+
+function initBackupModal() {
+  const overlay = document.getElementById("backupModal");
+  const okBtn = document.getElementById("backupModalOk");
+  const cancelBtn = document.getElementById("backupModalCancel");
+  if (!overlay || overlay.dataset.ready) return;
+  overlay.dataset.ready = "1";
+  okBtn?.addEventListener("click", () => closeBackupModal(true));
+  cancelBtn?.addEventListener("click", () => closeBackupModal(false));
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) closeBackupModal(false);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !overlay.classList.contains("hidden")) {
+      closeBackupModal(false);
+    }
+  });
+}
 
 function t(key) {
   return (I18N[lang] && I18N[lang][key]) || (I18N.en[key] || key);
@@ -581,6 +676,7 @@ function applyI18n() {
   }
   initProxyTypeSelect();
   initLangMenu();
+  initBackupModal();
   syncLangMenu(lang);
   const clearBtn = document.getElementById("btnClearLastError");
   if (clearBtn) clearBtn.textContent = t("clearError");
@@ -900,25 +996,43 @@ async function createBackupNow() {
   const box = document.getElementById("backupProgress");
   const title = document.getElementById("backupProgressTitle");
   const logEl = document.getElementById("backupProgressLog");
+  const track = box?.querySelector(".backup-progress-track");
   const listBtn = document.getElementById("btnBackupNowList");
   showBackupTab("list");
-  box.classList.remove("hidden", "is-success", "is-error");
+  clearTimeout(backupProgressFadeTimer);
+  clearTimeout(backupProgressHideTimer);
+  box.classList.remove("hidden", "is-success", "is-error", "is-fading", "is-success-compact");
   box.classList.add("is-running");
   title.textContent = t("backupRunning");
+  logEl.classList.remove("hidden");
+  track?.classList.remove("hidden");
   logEl.textContent = "";
   if (listBtn) listBtn.disabled = true;
   try {
     const job = await api("/api/backups/create", { method: "POST", body: "{}" });
     const done = await pollJob(job.job_id, title, logEl, box);
     box.classList.remove("is-running");
-    box.classList.add("is-success");
+    box.classList.add("is-success", "is-success-compact");
     title.textContent = t("backupDone") + (done.filename ? ": " + done.filename : "");
+    logEl.classList.add("hidden");
+    track?.classList.add("hidden");
     await refreshDashboard();
     await refreshList();
+    backupProgressFadeTimer = setTimeout(() => {
+      box.classList.add("is-fading");
+      backupProgressHideTimer = setTimeout(() => {
+        box.classList.add("hidden");
+        box.classList.remove("is-fading", "is-success", "is-success-compact", "is-error", "is-running");
+        logEl.classList.remove("hidden");
+        track?.classList.remove("hidden");
+      }, 550);
+    }, 4200);
   } catch (e) {
-    box.classList.remove("is-running");
+    box.classList.remove("is-running", "is-success-compact");
     box.classList.add("is-error");
     title.textContent = t("backupFail") + ": " + e.message;
+    logEl.classList.remove("hidden");
+    track?.classList.remove("hidden");
   } finally {
     if (listBtn) listBtn.disabled = false;
   }
@@ -957,6 +1071,17 @@ async function pollJob(jobId, title, logEl, box) {
 async function refreshList() {
   const data = await api("/api/backups");
   const root = document.getElementById("backupList");
+  const pathEl = document.getElementById("listBackupPath");
+  if (pathEl) {
+    const p = data.backups_path || "";
+    if (p) {
+      pathEl.hidden = false;
+      pathEl.textContent = `${t("backupsPath")}: ${p}`;
+    } else {
+      pathEl.hidden = true;
+      pathEl.textContent = "";
+    }
+  }
   const items = data.items || [];
   if (!items.length) {
     root.innerHTML = `<div class="info-box backup-empty">
@@ -965,15 +1090,18 @@ async function refreshList() {
     </div>`;
     return;
   }
-  root.innerHTML = items.map((it) => {
+  root.innerHTML = items.map((it, idx) => {
     const m = it.manifest || {};
     const c = m.counts || {};
-    return `<div class="backup-item">
+    const latest = idx === 0
+      ? `<span class="backup-latest-tag">${esc(t("latestBackupTag"))}</span>`
+      : "";
+    return `<div class="backup-item${idx === 0 ? " is-latest" : ""}">
       <div class="backup-item-head">
         <div style="display:flex;gap:12px;align-items:flex-start;min-width:0">
           <span class="choice-icon icon-tone-blue" aria-hidden="true">${ICONS.archive}</span>
           <div style="min-width:0">
-            <strong>${it.filename}</strong>
+            <strong>${esc(it.filename)}${latest}</strong>
             <div class="backup-item-meta" dir="ltr">${esc(formatSimpleTime(it.mtime) || it.mtime || "")} · ${esc(m.db_type || "?")}</div>
           </div>
         </div>
@@ -998,14 +1126,28 @@ async function refreshList() {
 async function sendTelegram(id) {
   try {
     const r = await api("/api/backups/" + encodeURIComponent(id) + "/telegram", { method: "POST", body: "{}" });
-    alert(r.ok ? `OK · parts=${r.parts}` : (r.error || "fail"));
+    await showBackupModal({
+      title: t("tgTestOkTitle"),
+      body: r.ok ? `OK · parts=${r.parts}` : (r.error || "fail"),
+    });
   } catch (e) {
-    alert(e.message);
+    await showBackupModal({
+      title: t("tgTestFailTitle"),
+      body: e.message,
+      danger: true,
+    });
   }
 }
 
 async function deleteBackup(id) {
-  if (!confirm(t("confirmDelete"))) return;
+  const ok = await showBackupModal({
+    title: t("confirmDeleteTitle"),
+    body: t("confirmDelete"),
+    okText: t("modalConfirm"),
+    showCancel: true,
+    danger: true,
+  });
+  if (!ok) return;
   await api("/api/backups/" + encodeURIComponent(id), { method: "DELETE" });
   refreshList();
   refreshDashboard();
@@ -1235,10 +1377,17 @@ async function testTelegram() {
     await saveSettings();
     const r = await api("/api/telegram/test", { method: "POST", body: "{}" });
     setTelegramStatusTag({ connected: true });
-    alert("OK · @" + ((r.bot && r.bot.username) || "?"));
+    await showBackupModal({
+      title: t("tgTestOkTitle"),
+      body: "OK · @" + ((r.bot && r.bot.username) || "?"),
+    });
   } catch (e) {
     setTelegramStatusTag({ connected: false });
-    alert(e.message);
+    await showBackupModal({
+      title: t("tgTestFailTitle"),
+      body: e.message,
+      danger: true,
+    });
   }
 }
 
@@ -1307,7 +1456,11 @@ async function clearLastError() {
     if (errBox) errBox.classList.add("hidden");
     if (errBody) errBody.textContent = "";
   } catch (e) {
-    alert(e.message);
+    await showBackupModal({
+      title: t("clearErrorFailTitle"),
+      body: e.message,
+      danger: true,
+    });
   }
 }
 

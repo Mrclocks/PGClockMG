@@ -269,6 +269,20 @@
   background: var(--success-bg);
 }
 
+.backup-run-box.is-success-compact {
+  padding-block: 14px;
+}
+
+.backup-run-box.is-success-compact .backup-progress-track,
+.backup-run-box.is-success-compact .backup-log {
+  display: none;
+}
+
+.backup-run-box.is-fading {
+  opacity: 0;
+  transition: opacity 0.5s ease;
+}
+
 .backup-run-box.is-error {
   border-color: var(--error-border);
   background: var(--error-bg);
@@ -729,6 +743,34 @@ html[dir="rtl"] .backup-app .specs-item .specs-value[dir="ltr"] {
 .backup-item-head strong {
   word-break: break-all;
   font-size: 0.95rem;
+}
+
+.backup-latest-tag {
+  display: inline-flex;
+  align-items: center;
+  margin-inline-start: 8px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--success) 45%, transparent);
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  color: var(--success);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.backup-item.is-latest {
+  border-color: color-mix(in srgb, var(--success) 35%, var(--border-soft));
+}
+
+.backup-path-line {
+  margin: 6px 0 0;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  word-break: break-all;
 }
 
 .backup-item-badge {

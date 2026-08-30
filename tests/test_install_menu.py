@@ -557,6 +557,26 @@ def test_uninstall_wizard_keeps_backup_service_when_both_present():
     print("OK: uninstall wizard does not remove the backup service or install dir")
 
 
+def test_uninstall_backup_preserves_archives():
+    with sandbox() as tmp:
+        box = Sandbox(tmp)
+        box.write_backup(port=7001)
+        archives = box.backup / "backups"
+        archives.mkdir(parents=True, exist_ok=True)
+        (archives / "pgclockmg-sqlite-demo.zip").write_text("zipdata", encoding="utf-8")
+
+        res = box.run("action_uninstall_backup", {"PG_MIGRATOR_YES": "1"})
+        out = plain(res.stdout)
+        assert res.returncode == 0, out + res.stderr
+        assert "PGClockBackup removed." in out, out
+        assert not box.backup.exists(), "backup install dir should be gone"
+        assert not (box.systemd / "pg-backup.service").exists()
+        kept = list(box.keep.glob("pgclockbackup-backups-*/pgclockmg-sqlite-demo.zip"))
+        assert kept, "backup archives must be preserved outside the install dir"
+        assert "Backups preserved at" in out or "Backup archives kept at" in out
+    print("OK: uninstall backup preserves archives")
+
+
 def test_uninstall_is_a_noop_when_not_installed():
     with sandbox() as tmp:
         box = Sandbox(tmp)
@@ -696,6 +716,7 @@ if __name__ == "__main__":
     test_healthz_probe_reports_dead_port()
     test_uninstall_removes_service_and_keeps_backups()
     test_uninstall_wizard_keeps_backup_service_when_both_present()
+    test_uninstall_backup_preserves_archives()
     test_uninstall_is_a_noop_when_not_installed()
     test_uninstall_can_be_declined()
     test_menu_loop_rejects_unknown_option_then_exits()
