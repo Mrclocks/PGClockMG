@@ -106,20 +106,40 @@ const I18N = {
     setH2: "تنظیمات",
     setDesc: "هر بخش جداست؛ فقط همان چیزی که لازم دارید را تغییر دهید.",
     setSchedTitle: "زمان‌بندی خودکار",
-    setSchedHint: "بکاپ روزانه را بر اساس ساعت UTC تنظیم کنید.",
-    lblSchedEnabled: "بکاپ خودکار روزانه (UTC)",
-    lblSchedHour: "ساعت",
-    lblSchedMinute: "دقیقه",
+    setSchedHint: "بازه و منطقهٔ زمانی بکاپ خودکار را تنظیم کنید.",
+    lblSchedEnabled: "بکاپ خودکار فعال باشد",
+    lblSchedInterval: "بازهٔ زمانی",
+    lblSchedTimezone: "منطقهٔ زمانی",
+    schedInterval1: "هر ۱ ساعت",
+    schedInterval3: "هر ۳ ساعت",
+    schedInterval6: "هر ۶ ساعت",
+    schedInterval12: "هر ۱۲ ساعت",
+    schedInterval24: "هر ۲۴ ساعت",
     lblRetention: "تعداد نگه‌داری",
+    lblRetentionDays: "حداکثر سن (روز)",
+    retentionDaysHint: "۰ = فقط بر اساس تعداد. مثلاً ۷ یعنی فایل‌های قدیمی‌تر از ۷ روز حذف شوند.",
     lblSchedTelegram: "بعد از بکاپ خودکار، به تلگرام هم بفرست",
+    lblSchedNotifyFail: "اعلان شکست زمان‌بندی (تلگرام)",
+    lblIntegrityVerify: "تأیید سلامت بکاپ بعد از ساخت (SHA256 + CRC)",
+    schedNextHintEmpty: "با روشن کردن زمان‌بندی، زمان اجرای بعدی اینجا دیده می‌شود.",
+    schedNextHint: "اجرای بعدی: {time}",
     setTgTitle: "تلگرام",
     setTgHint: "اختیاری است. فایل روی سرور یک‌تکه می‌ماند و فقط هنگام ارسال به تلگرام در صورت نیاز تکه‌تکه می‌شود.",
     lblTgEnabled: "ارسال به تلگرام فعال باشد",
     lblTgToken: "Bot Token",
-    lblTgChat: "Admin ID",
+    lblTgChat: "Admin ID / Chat ID",
+    lblTgTopic: "Topic ID (اختیاری)",
+    tgTopicHint: "برای گروه فوروم تلگرام؛ خالی بگذارید اگر تاپیک ندارید.",
+    lblTgChat2: "مقصد دوم (Chat ID)",
+    lblTgTopic2: "Topic مقصد دوم",
+    tgDestHint: "می‌توانید یک چت/تاپیک دوم برای بکاپ بگذارید؛ هر دو مقصد فایل را می‌گیرند.",
     lblTgCaption: "متن پیام",
     tgCaptionHint: "متغیرها: {date} {size} {db_type} {users} {nodes} {status} {filename} {parts}",
     btnTgTest: "اتصال و ارسال بکاپ",
+    setWebhookTitle: "وب‌هوک اعلان شکست",
+    setWebhookHint: "در صورت شکست بکاپ زمان‌بندی‌شده، یک JSON به این آدرس POST می‌شود.",
+    lblWebhookUrl: "آدرس وب‌هوک (HTTPS/HTTP عمومی)",
+    lblWebhookEnabled: "وب‌هوک فعال باشد",
     setProxyTitle: "پروکسی تلگرام",
     setProxyHint: "اگر تلگرام مستقیم در دسترس نیست، پروکسی بگذارید.",
     lblProxyEnabled: "از پروکسی استفاده کن",
@@ -128,9 +148,6 @@ const I18N = {
     lblProxyPort: "پورت",
     lblProxyUser: "کاربر",
     lblProxyPass: "رمز پروکسی",
-    setStreamTitle: "مقصد استریم پیش‌فرض",
-    lblStreamDest: "آدرس ویزارد مقصد",
-    streamDestHint: "۱) روی سرور مقصد: ویزارد → ریستور → آماده‌سازی دریافت استریم. ۲) توکن را کپی کنید. ۳) آدرس همان سرور (مثل http://IP:7000) و توکن را اینجا بزنید.",
     setPassTitle: "تغییر رمز پنل",
     setPassHint: "اگر نمی‌خواهید رمز عوض شود، این بخش را خالی بگذارید.",
     lblNewPass: "رمز جدید",
@@ -188,8 +205,6 @@ const I18N = {
     tgDisconnected: "قطع",
     tgChecking: "در حال بررسی…",
     proxyOn: "پروکسی روشن",
-    streamSet: "مقصد استریم تنظیم شده",
-    streamUnset: "مقصد استریم خالی است",
     panelUrl: "آدرس پنل",
     ssl: "SSL",
     port: "پورت",
@@ -283,20 +298,40 @@ const I18N = {
     setH2: "Settings",
     setDesc: "Each section stands alone — change only what you need.",
     setSchedTitle: "Automatic schedule",
-    setSchedHint: "Run a daily backup on the UTC clock.",
-    lblSchedEnabled: "Daily automatic backup (UTC)",
-    lblSchedHour: "Hour",
-    lblSchedMinute: "Minute",
+    setSchedHint: "Choose interval and timezone for automatic backups.",
+    lblSchedEnabled: "Enable automatic backups",
+    lblSchedInterval: "Interval",
+    lblSchedTimezone: "Timezone",
+    schedInterval1: "Every 1 hour",
+    schedInterval3: "Every 3 hours",
+    schedInterval6: "Every 6 hours",
+    schedInterval12: "Every 12 hours",
+    schedInterval24: "Every 24 hours",
     lblRetention: "Keep last N backups",
+    lblRetentionDays: "Max age (days)",
+    retentionDaysHint: "0 = count only. Example: 7 deletes archives older than 7 days.",
     lblSchedTelegram: "Also send scheduled backups to Telegram",
+    lblSchedNotifyFail: "Notify on schedule failure (Telegram)",
+    lblIntegrityVerify: "Verify backup health after create (SHA256 + CRC)",
+    schedNextHintEmpty: "Turn on the schedule to see the next run time here.",
+    schedNextHint: "Next run: {time}",
     setTgTitle: "Telegram",
     setTgHint: "Optional. The file stays whole on disk and is split only when Telegram needs smaller parts.",
     lblTgEnabled: "Enable Telegram delivery",
     lblTgToken: "Bot Token",
-    lblTgChat: "Admin ID",
+    lblTgChat: "Admin ID / Chat ID",
+    lblTgTopic: "Topic ID (optional)",
+    tgTopicHint: "For Telegram forum groups; leave empty if unused.",
+    lblTgChat2: "Second destination (Chat ID)",
+    lblTgTopic2: "Second topic ID",
+    tgDestHint: "Optional second chat/topic — both destinations receive the file.",
     lblTgCaption: "Message text",
     tgCaptionHint: "Variables: {date} {size} {db_type} {users} {nodes} {status} {filename} {parts}",
     btnTgTest: "Connect & send backup",
+    setWebhookTitle: "Failure webhook",
+    setWebhookHint: "On scheduled backup failure, POST a small JSON payload to this URL.",
+    lblWebhookUrl: "Webhook URL (public HTTPS/HTTP)",
+    lblWebhookEnabled: "Enable webhook",
     setProxyTitle: "Telegram proxy",
     setProxyHint: "Use a proxy when Telegram is blocked directly.",
     lblProxyEnabled: "Use proxy",
@@ -305,9 +340,6 @@ const I18N = {
     lblProxyPort: "Port",
     lblProxyUser: "Username",
     lblProxyPass: "Proxy password",
-    setStreamTitle: "Default stream destination",
-    lblStreamDest: "Destination wizard URL",
-    streamDestHint: "1) On the destination: Wizard → Restore → Ready to receive stream. 2) Copy the one-time token. 3) Paste that server URL (e.g. http://IP:7000) and the token here.",
     setPassTitle: "Change panel password",
     setPassHint: "Leave blank if you don’t want to change the password.",
     lblNewPass: "New password",
@@ -365,8 +397,6 @@ const I18N = {
     tgDisconnected: "Disconnected",
     tgChecking: "Checking…",
     proxyOn: "Proxy on",
-    streamSet: "Stream destination set",
-    streamUnset: "No stream destination",
     panelUrl: "Panel URL",
     ssl: "SSL",
     port: "Port",
@@ -460,20 +490,40 @@ const I18N = {
     setH2: "Настройки",
     setDesc: "Каждый блок отдельный — меняйте только то, что нужно.",
     setSchedTitle: "Авторасписание",
-    setSchedHint: "Ежедневный бэкап по часам UTC.",
-    lblSchedEnabled: "Ежедневный автобэкап (UTC)",
-    lblSchedHour: "Час",
-    lblSchedMinute: "Минута",
+    setSchedHint: "Интервал и часовой пояс автоматического бэкапа.",
+    lblSchedEnabled: "Включить автоматический бэкап",
+    lblSchedInterval: "Интервал",
+    lblSchedTimezone: "Часовой пояс",
+    schedInterval1: "Каждый 1 час",
+    schedInterval3: "Каждые 3 часа",
+    schedInterval6: "Каждые 6 часов",
+    schedInterval12: "Каждые 12 часов",
+    schedInterval24: "Каждые 24 часа",
     lblRetention: "Хранить последние N",
+    lblRetentionDays: "Макс. возраст (дни)",
+    retentionDaysHint: "0 = только по количеству. Например 7 — удалять старше 7 дней.",
     lblSchedTelegram: "Также отправлять автобэкап в Telegram",
+    lblSchedNotifyFail: "Уведомлять при сбое расписания (Telegram)",
+    lblIntegrityVerify: "Проверять целостность после создания (SHA256 + CRC)",
+    schedNextHintEmpty: "Включите расписание, чтобы увидеть следующий запуск.",
+    schedNextHint: "Следующий запуск: {time}",
     setTgTitle: "Telegram",
     setTgHint: "По желанию. На диске файл остаётся целым; дробится только при отправке в Telegram, если нужно.",
     lblTgEnabled: "Включить отправку в Telegram",
     lblTgToken: "Bot Token",
-    lblTgChat: "Admin ID",
+    lblTgChat: "Admin ID / Chat ID",
+    lblTgTopic: "Topic ID (опционально)",
+    tgTopicHint: "Для форум-групп Telegram; оставьте пустым, если не нужно.",
+    lblTgChat2: "Второе назначение (Chat ID)",
+    lblTgTopic2: "Topic второго назначения",
+    tgDestHint: "Можно указать второй чат/топик — оба получат файл.",
     lblTgCaption: "Текст сообщения",
     tgCaptionHint: "Переменные: {date} {size} {db_type} {users} {nodes} {status} {filename} {parts}",
     btnTgTest: "Подключить и отправить бэкап",
+    setWebhookTitle: "Webhook при сбое",
+    setWebhookHint: "При сбое автобэкапа отправится JSON POST на этот URL.",
+    lblWebhookUrl: "URL webhook (публичный HTTPS/HTTP)",
+    lblWebhookEnabled: "Включить webhook",
     setProxyTitle: "Прокси Telegram",
     setProxyHint: "Если Telegram недоступен напрямую, укажите прокси.",
     lblProxyEnabled: "Использовать прокси",
@@ -482,9 +532,6 @@ const I18N = {
     lblProxyPort: "Порт",
     lblProxyUser: "Пользователь",
     lblProxyPass: "Пароль прокси",
-    setStreamTitle: "Назначение стрима по умолчанию",
-    lblStreamDest: "URL мастера назначения",
-    streamDestHint: "1) На назначении: мастер → Restore → Готов принимать стрим. 2) Скопируйте одноразовый токен. 3) Вставьте URL того сервера (например http://IP:7000) и токен сюда.",
     setPassTitle: "Смена пароля панели",
     setPassHint: "Оставьте пустым, если пароль менять не нужно.",
     lblNewPass: "Новый пароль",
@@ -542,8 +589,6 @@ const I18N = {
     tgDisconnected: "Нет связи",
     tgChecking: "Проверка…",
     proxyOn: "Прокси вкл.",
-    streamSet: "Назначение стрима задано",
-    streamUnset: "Назначение стрима пусто",
     panelUrl: "URL панели",
     ssl: "SSL",
     port: "Порт",
@@ -740,15 +785,19 @@ function applyI18n() {
     ["btnBackupNowList", "btnBackupNow"],
     ["listH2", "listH2"], ["listDesc", "listDesc"],
     ["setH2", "setH2"], ["setDesc", "setDesc"], ["setSchedTitle", "setSchedTitle"], ["setSchedHint", "setSchedHint"],
-    ["lblSchedHour", "lblSchedHour"], ["lblSchedMinute", "lblSchedMinute"],
-    ["lblRetention", "lblRetention"], ["lblSchedTelegram", "lblSchedTelegram"],
+    ["lblSchedInterval", "lblSchedInterval"], ["lblSchedTimezone", "lblSchedTimezone"],
+    ["lblRetention", "lblRetention"], ["lblRetentionDays", "lblRetentionDays"], ["retentionDaysHint", "retentionDaysHint"],
+    ["lblSchedTelegram", "lblSchedTelegram"], ["lblSchedNotifyFail", "lblSchedNotifyFail"],
+    ["lblIntegrityVerify", "lblIntegrityVerify"],
     ["setTgTitle", "setTgTitle"], ["setTgHint", "setTgHint"], ["lblTgToken", "lblTgToken"],
-    ["lblTgChat", "lblTgChat"], ["lblTgCaption", "lblTgCaption"], ["tgCaptionHint", "tgCaptionHint"],
+    ["lblTgChat", "lblTgChat"], ["lblTgTopic", "lblTgTopic"], ["tgTopicHint", "tgTopicHint"],
+    ["lblTgChat2", "lblTgChat2"], ["lblTgTopic2", "lblTgTopic2"], ["tgDestHint", "tgDestHint"],
+    ["lblTgCaption", "lblTgCaption"], ["tgCaptionHint", "tgCaptionHint"],
     ["btnTgTest", "btnTgTest"],
+    ["setWebhookTitle", "setWebhookTitle"], ["setWebhookHint", "setWebhookHint"], ["lblWebhookUrl", "lblWebhookUrl"],
     ["setProxyTitle", "setProxyTitle"], ["setProxyHint", "setProxyHint"],
     ["lblProxyType", "lblProxyType"], ["lblProxyHost", "lblProxyHost"], ["lblProxyPort", "lblProxyPort"],
     ["lblProxyUser", "lblProxyUser"], ["lblProxyPass", "lblProxyPass"],
-    ["setStreamTitle", "setStreamTitle"], ["lblStreamDest", "lblStreamDest"], ["streamDestHint", "streamDestHint"],
     ["setUpdateTitle", "setUpdateTitle"], ["setUpdateHint", "setUpdateHint"],
     ["lblUpdateCurrent", "lblUpdateCurrent"], ["lblUpdateLatest", "lblUpdateLatest"],
     ["lblUpdateChangelog", "lblUpdateChangelog"],
@@ -776,7 +825,10 @@ function applyI18n() {
   const switchLabels = [
     ["schedEnabled", "lblSchedEnabled"],
     ["schedTelegram", "lblSchedTelegram"],
+    ["schedNotifyFail", "lblSchedNotifyFail"],
+    ["integrityVerify", "lblIntegrityVerify"],
     ["tgEnabled", "lblTgEnabled"],
+    ["webhookEnabled", "lblWebhookEnabled"],
     ["proxyEnabled", "lblProxyEnabled"],
   ];
   for (const [id, key] of switchLabels) {
@@ -784,6 +836,8 @@ function applyI18n() {
     if (el) el.setAttribute("aria-label", t(key));
   }
   initProxyTypeSelect();
+  initSchedIntervalSelect();
+  initSchedTimezoneSelect();
   initLangMenu();
   initBackupModal();
   syncLangMenu(lang);
@@ -897,7 +951,7 @@ function esc(s) {
 async function boot() {
   setBackupLang(lang);
   const st = await api("/api/setup/status");
-  document.getElementById("appVersion").textContent = "v" + (st.version || "4.2.3");
+  document.getElementById("appVersion").textContent = "v" + (st.version || "4.3.0");
   setupMode = !st.password_set;
   window.__setupTokenRequired = !!st.setup_token_required;
   document.getElementById("authConfirmWrap").classList.toggle("hidden", !setupMode);
@@ -1003,7 +1057,12 @@ async function refreshDashboard() {
   const diskTotal = health.backup_disk_total_bytes;
   const memFree = health.memory_available_bytes;
   const load = health.load_ratio_1m;
-  const schedTime = `${String(sched.hour ?? 3).padStart(2, "0")}:${String(sched.minute ?? 0).padStart(2, "0")}`;
+  const schedInterval = [1, 3, 6, 12, 24].includes(Number(sched.interval_hours))
+    ? Number(sched.interval_hours)
+    : 24;
+  const schedLabel = t(`schedInterval${schedInterval}`);
+  const nextLocal = (sched.next_run && sched.next_run.at_local) || sched.last_success_local || "";
+  const tz = sched.timezone || "UTC";
   document.getElementById("dashHealthGrid").innerHTML = [
     metricCard({
       tone: "icon-tone-blue",
@@ -1053,10 +1112,12 @@ async function refreshDashboard() {
       tone: "icon-tone-blue",
       icon: ICONS.clock,
       label: t("healthSchedule"),
-      value: sched.enabled ? schedTime : t("healthOff"),
+      value: sched.enabled ? schedLabel : t("healthOff"),
       status: sched.enabled ? "ok" : "off",
-      valueLtr: !sched.enabled ? false : true,
-      subHtml: `${esc(t("keepLast"))}: <bdi dir="ltr">${esc(data.retention_count || 10)}</bdi>`,
+      valueLtr: false,
+      subHtml: sched.enabled
+        ? `<bdi dir="ltr">${esc(tz)}</bdi>${nextLocal ? ` · <bdi dir="ltr">${esc(nextLocal)}</bdi>` : ""}`
+        : `${esc(t("keepLast"))}: <bdi dir="ltr">${esc(data.retention_count || 10)}</bdi>`,
     }),
   ].join("");
 
@@ -1102,10 +1163,9 @@ async function refreshDashboard() {
       <p class="desc-sm" style="margin:2px 0 0">${esc(tg.enabled ? t("telegramOn") : t("telegramOff"))} · ${esc(tg.configured ? t("telegramReady") : t("telegramNeedConfig"))}</p></div></div>
       <div class="backup-item-chips">
         <span class="backup-chip">${esc(sched.enabled ? t("scheduleOn") : t("scheduleOff"))}</span>
+        ${sched.enabled ? `<span class="backup-chip">${esc(schedLabel)}</span>` : ""}
         <span class="backup-chip">${esc(tg.proxy_enabled ? t("proxyOn") : "Proxy —")}</span>
-        <span class="backup-chip">${esc(data.stream_dest ? t("streamSet") : t("streamUnset"))}</span>
-      </div>
-      ${data.stream_dest ? `<p class="desc-sm" style="margin-top:10px;word-break:break-all">${esc(data.stream_dest)}</p>` : ""}`;
+      </div>`;
 
   setTelegramStatusTag({ connected: !!tgLive.connected });
 
@@ -1319,8 +1379,12 @@ async function deleteBackup(id) {
 
 async function openStream(id) {
   document.getElementById("streamBackupId").value = id;
-  const settings = await api("/api/settings");
-  document.getElementById("streamUrl").value = (settings.stream && settings.stream.default_dest_url) || "";
+  try {
+    const settings = await api("/api/settings");
+    document.getElementById("streamUrl").value = (settings.stream && settings.stream.default_dest_url) || "";
+  } catch (_) {
+    document.getElementById("streamUrl").value = "";
+  }
   document.getElementById("streamToken").value = "";
   document.getElementById("streamMsg").classList.add("hidden");
   document.getElementById("streamProgress").classList.add("hidden");
@@ -1436,23 +1500,40 @@ async function loadSettingsForm() {
   const sched = s.schedule || {};
   const tg = s.telegram || {};
   document.getElementById("schedEnabled").checked = !!sched.enabled;
-  document.getElementById("schedHour").value = sched.hour ?? 3;
-  document.getElementById("schedMinute").value = sched.minute ?? 0;
+  setSchedIntervalValue(sched.interval_hours ?? 24);
+  setSchedTimezoneValue(sched.timezone || "UTC");
   document.getElementById("retentionCount").value = s.retention_count ?? 10;
+  document.getElementById("retentionDays").value = s.retention_days ?? 0;
   document.getElementById("schedTelegram").checked = !!sched.send_telegram;
+  document.getElementById("schedNotifyFail").checked = sched.notify_on_failure !== false;
+  document.getElementById("integrityVerify").checked = !!(s.integrity && s.integrity.verify_after_create !== false);
+  const nextEl = document.getElementById("schedNextHint");
+  if (nextEl) {
+    if (sched.enabled && sched.next_run && sched.next_run.at_local) {
+      nextEl.textContent = t("schedNextHint").replace("{time}", sched.next_run.at_local);
+    } else {
+      nextEl.textContent = t("schedNextHintEmpty");
+    }
+  }
   document.getElementById("tgEnabled").checked = !!tg.enabled;
   document.getElementById("tgToken").value = "";
   document.getElementById("tgToken").placeholder = tg.bot_token_hint || "";
   document.getElementById("tgTokenHint").textContent = tg.bot_token_set ? (tg.bot_token_hint || "••••") : "";
   document.getElementById("tgChat").value = tg.admin_id || tg.chat_id || "";
+  document.getElementById("tgTopic").value = tg.message_thread_id || "";
+  const extras = tg.extra_destinations || [];
+  document.getElementById("tgChat2").value = (extras[0] && extras[0].chat_id) || "";
+  document.getElementById("tgTopic2").value = (extras[0] && extras[0].message_thread_id) || "";
   document.getElementById("tgCaption").value = tg.caption_template || "";
+  const notify = s.notify || {};
+  document.getElementById("webhookEnabled").checked = !!notify.webhook_enabled;
+  document.getElementById("webhookUrl").value = notify.webhook_url || "";
   document.getElementById("proxyEnabled").checked = !!tg.proxy_enabled;
   setProxyTypeValue(tg.proxy_type || "socks5");
   document.getElementById("proxyHost").value = tg.proxy_host || "";
   document.getElementById("proxyPort").value = tg.proxy_port || 1080;
   document.getElementById("proxyUser").value = tg.proxy_user || "";
   document.getElementById("proxyPass").value = "";
-  document.getElementById("streamDest").value = (s.stream && s.stream.default_dest_url) || "";
   setTelegramStatusTag({ checking: true });
   refreshTelegramStatusTag().catch(() => setTelegramStatusTag({ connected: false }));
   checkForUpdate(false).catch(() => {});
@@ -1492,19 +1573,39 @@ async function saveSettings(opts = {}) {
   const quiet = !!opts.quiet;
   const tokenVal = document.getElementById("tgToken").value.trim();
   const adminId = document.getElementById("tgChat").value.trim();
+  const extraChat = document.getElementById("tgChat2").value.trim();
+  const extraTopicRaw = document.getElementById("tgTopic2").value.trim();
+  const destinations = [];
+  if (extraChat) {
+    const item = { chat_id: extraChat, label: "secondary" };
+    if (extraTopicRaw) item.message_thread_id = Number(extraTopicRaw);
+    destinations.push(item);
+  }
+  const topicRaw = document.getElementById("tgTopic").value.trim();
   const patch = {
     retention_count: Number(document.getElementById("retentionCount").value || 10),
+    retention_days: Number(document.getElementById("retentionDays").value || 0),
     schedule: {
       enabled: document.getElementById("schedEnabled").checked,
-      hour: Number(document.getElementById("schedHour").value || 0),
-      minute: Number(document.getElementById("schedMinute").value || 0),
+      interval_hours: Number(document.getElementById("schedInterval").value || 24),
+      timezone: document.getElementById("schedTimezone").value || "UTC",
       send_telegram: document.getElementById("schedTelegram").checked,
+      notify_on_failure: document.getElementById("schedNotifyFail").checked,
+    },
+    integrity: {
+      verify_after_create: document.getElementById("integrityVerify").checked,
+    },
+    notify: {
+      webhook_enabled: document.getElementById("webhookEnabled").checked,
+      webhook_url: document.getElementById("webhookUrl").value.trim(),
     },
     telegram: {
       enabled: document.getElementById("tgEnabled").checked,
       bot_token: tokenVal,
       chat_id: adminId,
       admin_id: adminId,
+      message_thread_id: topicRaw ? Number(topicRaw) : null,
+      destinations,
       caption_template: document.getElementById("tgCaption").value,
       proxy_enabled: document.getElementById("proxyEnabled").checked,
       proxy_type: document.getElementById("proxyType").value,
@@ -1512,9 +1613,6 @@ async function saveSettings(opts = {}) {
       proxy_port: Number(document.getElementById("proxyPort").value || 1080),
       proxy_user: document.getElementById("proxyUser").value.trim(),
       proxy_password: document.getElementById("proxyPass").value,
-    },
-    stream: {
-      default_dest_url: document.getElementById("streamDest").value.trim(),
     },
   };
   await api("/api/settings", { method: "PUT", body: JSON.stringify(patch) });
@@ -1577,6 +1675,141 @@ function setProxyTypeValue(value) {
       li.classList.toggle("is-active", on);
     });
   }
+}
+
+const SCHED_INTERVALS = [1, 3, 6, 12, 24];
+
+function schedIntervalLabel(hours) {
+  const n = SCHED_INTERVALS.includes(Number(hours)) ? Number(hours) : 24;
+  return t(`schedInterval${n}`);
+}
+
+function setSchedIntervalValue(value) {
+  const n = SCHED_INTERVALS.includes(Number(value)) ? Number(value) : 24;
+  const hidden = document.getElementById("schedInterval");
+  const label = document.getElementById("schedIntervalLabel");
+  const menu = document.getElementById("schedIntervalMenu");
+  if (hidden) hidden.value = String(n);
+  if (label) label.textContent = schedIntervalLabel(n);
+  if (menu) {
+    menu.querySelectorAll("[role=option]").forEach((li) => {
+      const on = Number(li.getAttribute("data-value")) === n;
+      li.setAttribute("aria-selected", on ? "true" : "false");
+      li.classList.toggle("is-active", on);
+      li.textContent = schedIntervalLabel(li.getAttribute("data-value"));
+    });
+  }
+}
+
+function initSchedIntervalSelect() {
+  const root = document.getElementById("schedIntervalSelect");
+  const trigger = document.getElementById("schedIntervalTrigger");
+  const menu = document.getElementById("schedIntervalMenu");
+  if (!root || !trigger || !menu) return;
+  const current = document.getElementById("schedInterval")?.value || "24";
+  if (root.dataset.ready) {
+    setSchedIntervalValue(current);
+    return;
+  }
+  root.dataset.ready = "1";
+
+  const close = () => {
+    menu.classList.add("hidden");
+    trigger.setAttribute("aria-expanded", "false");
+    root.classList.remove("is-open");
+  };
+  const open = () => {
+    menu.classList.remove("hidden");
+    trigger.setAttribute("aria-expanded", "true");
+    root.classList.add("is-open");
+  };
+
+  trigger.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (menu.classList.contains("hidden")) open();
+    else close();
+  });
+  menu.querySelectorAll("[role=option]").forEach((li) => {
+    li.addEventListener("click", (e) => {
+      e.preventDefault();
+      setSchedIntervalValue(li.getAttribute("data-value"));
+      close();
+    });
+  });
+  document.addEventListener("click", (e) => {
+    if (!root.contains(e.target)) close();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") close();
+  });
+  setSchedIntervalValue(current);
+}
+
+const SCHED_TIMEZONES = [
+  "UTC", "Asia/Tehran", "Asia/Dubai", "Asia/Istanbul", "Europe/Moscow",
+  "Europe/London", "Europe/Berlin", "America/New_York", "Asia/Shanghai", "Asia/Tokyo",
+];
+
+function setSchedTimezoneValue(value) {
+  const v = SCHED_TIMEZONES.includes(value) ? value : "UTC";
+  const hidden = document.getElementById("schedTimezone");
+  const label = document.getElementById("schedTimezoneLabel");
+  const menu = document.getElementById("schedTimezoneMenu");
+  if (hidden) hidden.value = v;
+  if (label) label.textContent = v;
+  if (menu) {
+    menu.querySelectorAll("[role=option]").forEach((li) => {
+      const on = li.getAttribute("data-value") === v;
+      li.setAttribute("aria-selected", on ? "true" : "false");
+      li.classList.toggle("is-active", on);
+    });
+  }
+}
+
+function initSchedTimezoneSelect() {
+  const root = document.getElementById("schedTimezoneSelect");
+  const trigger = document.getElementById("schedTimezoneTrigger");
+  const menu = document.getElementById("schedTimezoneMenu");
+  if (!root || !trigger || !menu) return;
+  const current = document.getElementById("schedTimezone")?.value || "UTC";
+  if (root.dataset.ready) {
+    setSchedTimezoneValue(current);
+    return;
+  }
+  root.dataset.ready = "1";
+
+  const close = () => {
+    menu.classList.add("hidden");
+    trigger.setAttribute("aria-expanded", "false");
+    root.classList.remove("is-open");
+  };
+  const open = () => {
+    menu.classList.remove("hidden");
+    trigger.setAttribute("aria-expanded", "true");
+    root.classList.add("is-open");
+  };
+
+  trigger.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (menu.classList.contains("hidden")) open();
+    else close();
+  });
+  menu.querySelectorAll("[role=option]").forEach((li) => {
+    li.addEventListener("click", (e) => {
+      e.preventDefault();
+      setSchedTimezoneValue(li.getAttribute("data-value"));
+      close();
+    });
+  });
+  document.addEventListener("click", (e) => {
+    if (!root.contains(e.target)) close();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") close();
+  });
+  setSchedTimezoneValue(current);
 }
 
 function initProxyTypeSelect() {

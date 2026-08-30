@@ -24,6 +24,13 @@ from app.services.backup_scheduler import start_scheduler, stop_scheduler
 from app.services.backup_settings import (
     DEFAULT_TELEGRAM_CAPTION,
     load_settings,
+    normalize_destinations,
+    normalize_integrity,
+    normalize_notify,
+    normalize_retention_count,
+    normalize_retention_days,
+    normalize_schedule,
+    normalize_thread_id,
     public_settings,
     update_settings,
 )
@@ -36,7 +43,7 @@ from app.services.backup_telegram import (
 )
 from app.services.prerequisites import get_system_status, is_pasarguard_installed
 
-APP_VERSION = "4.2.3"
+APP_VERSION = "4.3.0"
 
 
 def _dashboard_update_info() -> dict:
@@ -101,8 +108,11 @@ class LoginBody(BaseModel):
 
 class SettingsPatch(BaseModel):
     retention_count: int | None = None
+    retention_days: int | None = None
     schedule: dict | None = None
     telegram: dict | None = None
+    notify: dict | None = None
+    integrity: dict | None = None
     stream: dict | None = None
 
 
@@ -259,6 +269,22 @@ async def dashboard():
     memory = resources.get("memory") or {}
     tg = cfg.get("telegram") or {}
     sched = cfg.get("schedule") or {}
+    try:
+        from app.services.backup_settings import next_run_after, normalize_timezone, format_in_timezone, parse_last_run_at
+
+        success = sched.get("last_success_at") or sched.get("last_run_at")
+        sched = {
+            **sched,
+            "timezone": normalize_timezone(sched.get("timezone")),
+            "last_success_local": format_in_timezone(parse_last_run_at(success), sched.get("timezone")),
+            "next_run": next_run_after(
+                last_success_at=success,
+                interval_hours=sched.get("interval_hours"),
+                timezone_name=sched.get("timezone"),
+            ) if sched.get("enabled") else None,
+        }
+    except Exception:
+        pass
     access = {}
     try:
         access = get_panel_access_info() or {}
@@ -315,16 +341,28 @@ async def dashboard():
         "backup_count": len(backups),
         "backup_total_bytes": total_bytes,
         "retention_count": cfg.get("retention_count") or 10,
+        "retention_days": int(cfg.get("retention_days") or 0),
         "schedule": sched,
         "telegram": {
             "enabled": bool(tg.get("enabled")),
             "configured": bool(
                 (tg.get("bot_token") or "").strip()
-                and ((tg.get("chat_id") or tg.get("admin_id") or "").strip())
+                and (
+                    (tg.get("chat_id") or tg.get("admin_id") or "").strip()
+                    or (tg.get("destinations") or [])
+                )
             ),
             "proxy_enabled": bool(tg.get("proxy_enabled")),
+            "destinations_count": len(tg.get("destinations") or []) + (
+                1 if (tg.get("chat_id") or tg.get("admin_id") or "").strip() else 0
+            ),
         },
-        "stream_dest": ((cfg.get("stream") or {}).get("default_dest_url") or ""),
+        "notify": {
+            "webhook_enabled": bool((cfg.get("notify") or {}).get("webhook_enabled")),
+        },
+        "integrity": {
+            "verify_after_create": bool((cfg.get("integrity") or {}).get("verify_after_create", True)),
+        },
         "health": {
             "backup_disk_free_bytes": backup_disk.get("free_bytes"),
             "backup_disk_total_bytes": backup_disk.get("total_bytes"),
@@ -445,11 +483,23 @@ async def api_get_settings():
 async def api_put_settings(body: SettingsPatch):
     patch: dict = {}
     if body.retention_count is not None:
-        patch["retention_count"] = max(1, min(100, int(body.retention_count)))
+        patch["retention_count"] = normalize_retention_count(body.retention_count)
+    if body.retention_days is not None:
+        patch["retention_days"] = normalize_retention_days(body.retention_days)
     if body.schedule is not None:
-        patch["schedule"] = body.schedule
-    if body.stream is not None:
-        patch["stream"] = body.stream
+        patch["schedule"] = normalize_schedule(body.schedule)
+    if body.notify is not None:
+        notify = normalize_notify(body.notify)
+        if notify.get("webhook_enabled") and notify.get("webhook_url"):
+            try:
+                from app.services.backup_net import normalize_public_http_url
+
+                notify["webhook_url"] = normalize_public_http_url(notify["webhook_url"])
+            except UnsafeDestinationError as exc:
+                raise HTTPException(400, f"webhook_url_unsafe:{exc}") from exc
+        patch["notify"] = notify
+    if body.integrity is not None:
+        patch["integrity"] = normalize_integrity(body.integrity)
     if body.telegram is not None:
         current = load_settings().get("telegram") or {}
         tg = dict(body.telegram)
@@ -457,6 +507,14 @@ async def api_put_settings(body: SettingsPatch):
         admin_id = (tg.pop("admin_id", None) or "").strip()
         if admin_id and not (tg.get("chat_id") or "").strip():
             tg["chat_id"] = admin_id
+        tg["message_thread_id"] = normalize_thread_id(tg.get("message_thread_id"))
+        # Normalize destinations (extras); primary stays on chat_id / message_thread_id.
+        primary = (tg.get("chat_id") or "").strip()
+        extras = tg.get("destinations") if "destinations" in tg else current.get("destinations")
+        tg["destinations"] = [
+            d for d in normalize_destinations(extras or [])
+            if not (primary and d.get("chat_id") == primary and d.get("message_thread_id") == tg.get("message_thread_id"))
+        ]
         # keep previous secrets when blank
         if not (tg.get("bot_token") or "").strip():
             tg["bot_token"] = current.get("bot_token") or ""
@@ -469,19 +527,22 @@ async def api_put_settings(body: SettingsPatch):
             tg["caption_template"] = DEFAULT_TELEGRAM_CAPTION
         patch["telegram"] = tg
     saved = update_settings(patch)
-    if "retention_count" in patch:
-        apply_retention(patch["retention_count"])
+    if "retention_count" in patch or "retention_days" in patch:
+        apply_retention(
+            keep_count=int(saved.get("retention_count") or 10),
+            keep_days=int(saved.get("retention_days") or 0),
+        )
     return public_settings(saved)
 
 
 @app.get("/api/telegram/status")
 async def api_telegram_status():
     cfg = load_settings()
-    from app.services.backup_telegram import resolve_admin_chat_id, telegram_config
+    from app.services.backup_telegram import resolve_destinations, telegram_config
 
     tg = telegram_config(cfg)
     enabled = bool(tg.get("enabled"))
-    configured = bool((tg.get("bot_token") or "").strip() and resolve_admin_chat_id(tg))
+    configured = bool((tg.get("bot_token") or "").strip() and resolve_destinations(tg))
     if not enabled or not configured:
         return {
             "ok": False,
