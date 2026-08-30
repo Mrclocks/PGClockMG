@@ -641,6 +641,21 @@ function showToast(message, type = "success", opts = {}) {
   if (ttl > 0) setTimeout(remove, ttl);
   // Keep sticky host from stacking forever
   while (host.children.length > 4) host.lastElementChild?.remove();
+  // Toasts sit at the top of main — scroll there so Save / ops aren't missed.
+  if (opts.scroll !== false) {
+    requestAnimationFrame(() => {
+      try {
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      } catch (_) {
+        window.scrollTo(0, 0);
+      }
+      try {
+        host.scrollIntoView({ behavior: "smooth", block: "start" });
+      } catch (_) {
+        host.scrollIntoView(true);
+      }
+    });
+  }
 }
 
 function showBackupModal({ title, body, okText, cancelText, danger = false, showCancel = false }) {
@@ -1651,6 +1666,7 @@ async function refreshTelegramStatusTag() {
 
 async function saveSettings(opts = {}) {
   const quiet = !!opts.quiet;
+  try {
   const tokenVal = document.getElementById("tgToken").value.trim();
   const adminId = document.getElementById("tgChat").value.trim();
   const extraChat = document.getElementById("tgChat2").value.trim();
@@ -1715,6 +1731,10 @@ async function saveSettings(opts = {}) {
   }
   if (!quiet) showToast(t("saved"), "success");
   refreshTelegramStatusTag().catch(() => {});
+  } catch (e) {
+    if (!quiet) showToast((t("saved") || "Save") + ": " + (e.message || e), "error");
+    throw e;
+  }
 }
 
 async function testTelegram() {
