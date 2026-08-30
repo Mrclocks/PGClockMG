@@ -1,4 +1,4 @@
-> 🚀 **`v4.1.0`** — Security verification + branch cleanup + 4.1 release
+> 🚀 **`v4.1.1`** — Dashboard redesign + colored outline actions + box padding
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
