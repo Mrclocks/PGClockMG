@@ -486,6 +486,17 @@ function applyPhaseI18n() {
   set('restoreSelectText', 'restore.select');
   set('restoreStreamHint', 'restore.streamHint');
   set('btnStreamListen', 'restore.streamListen');
+  const streamSteps = document.getElementById('restoreStreamSteps');
+  if (streamSteps) {
+    streamSteps.innerHTML = [t('restore.streamStep1'), t('restore.streamStep2'), t('restore.streamStep3')]
+      .map((s) => `<li>${escapeHtml(s)}</li>`).join('');
+  }
+  const streamTag = document.getElementById('restoreStreamStatusTag');
+  if (streamTag && !streamTag.dataset.live) {
+    streamTag.classList.remove('is-connected', 'is-disconnected');
+    streamTag.classList.add('is-unknown');
+    streamTag.textContent = t('restore.streamIdle');
+  }
   set('btnRestoreConfirm', 'restore.confirm');
   set('btnRestoreBack', 'restore.back');
   set('restoreDoneTitle', 'restore.doneTitle');
@@ -1346,10 +1357,48 @@ async function startStreamListen() {
   const tokenBox = document.getElementById('restoreStreamTokenBox');
   const tokenEl = document.getElementById('restoreStreamToken');
   const btn = document.getElementById('btnStreamListen');
+  const prog = document.getElementById('restoreStreamProgress');
+  const pctEl = document.getElementById('restoreStreamProgressPct');
+  const fill = document.getElementById('restoreStreamProgressFill');
   if (_streamPollTimer) {
     clearTimeout(_streamPollTimer);
     _streamPollTimer = null;
   }
+  const setTag = (state) => {
+    const el = document.getElementById('restoreStreamStatusTag');
+    if (!el) return;
+    el.classList.remove('is-connected', 'is-disconnected', 'is-unknown');
+    if (state === 'listening') {
+      el.classList.add('is-unknown');
+      el.textContent = t('restore.streamListening');
+    } else if (state === 'receiving') {
+      el.classList.add('is-connected');
+      el.textContent = t('restore.streamConnected');
+    } else if (state === 'ready') {
+      el.classList.add('is-connected');
+      el.textContent = t('restore.streamReady');
+    } else if (state === 'error') {
+      el.classList.add('is-disconnected');
+      el.textContent = t('restore.streamError');
+    } else {
+      el.classList.add('is-unknown');
+      el.textContent = t('restore.streamIdle');
+    }
+  };
+  const setProgress = (pct, label) => {
+    if (prog) prog.classList.remove('hidden');
+    if (status) status.textContent = label || '';
+    const width = Math.max(0, Math.min(100, Number(pct) || 0));
+    if (pctEl) pctEl.textContent = `${width}%`;
+    if (fill) fill.style.width = `${width}%`;
+  };
+  const human = (n) => {
+    const v = Number(n) || 0;
+    if (v < 1024) return `${v} B`;
+    if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
+    if (v < 1024 * 1024 * 1024) return `${(v / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(v / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  };
   try {
     if (btn) btn.disabled = true;
     const res = await fetch('/api/stream/listen', { method: 'POST' });
@@ -1357,39 +1406,46 @@ async function startStreamListen() {
     if (!res.ok) throw new Error(data.detail || 'listen failed');
     tokenEl.textContent = data.token;
     tokenBox.classList.remove('hidden');
-    status.classList.remove('hidden');
-    status.textContent = `${t('restore.streamWaiting')} ${data.token}`;
+    setTag('listening');
+    setProgress(0, t('restore.streamWaiting'));
     const poll = async () => {
       try {
         const sres = await fetch(`/api/stream/status/${encodeURIComponent(data.token)}`);
         const st = await sres.json();
         if (!sres.ok) throw new Error(st.detail || 'status failed');
+        const got = Number(st.bytes_received) || 0;
+        const total = Number(st.expected_size) || 0;
         if (st.status === 'receiving') {
-          status.textContent = `${t('restore.streamReceiving')} (${st.bytes_received || 0} B)`;
+          setTag('receiving');
+          const pct = total > 0 ? Math.round((got / total) * 100) : Math.min(95, Math.max(5, Math.round(got / (1024 * 1024))));
+          const meta = total > 0 ? `${human(got)} / ${human(total)}` : human(got);
+          setProgress(pct, `${t('restore.streamReceiving')} ${meta}`);
         }
         if (st.status === 'ready' && st.upload_id) {
-          status.textContent = t('restore.streamReady');
+          setTag('ready');
+          setProgress(100, t('restore.streamReady'));
           await applyStreamedBackup(st.upload_id, st.filename || 'streamed-backup.zip');
           if (btn) btn.disabled = false;
           return;
         }
         if (st.status === 'error') {
-          status.textContent = `${t('restore.streamError')}: ${st.error || ''}`;
+          setTag('error');
+          setProgress(100, `${t('restore.streamError')}: ${st.error || ''}`);
           if (btn) btn.disabled = false;
           return;
         }
-        _streamPollTimer = setTimeout(poll, 1200);
+        _streamPollTimer = setTimeout(poll, 800);
       } catch (e) {
-        status.textContent = `${t('restore.streamError')}: ${e.message}`;
+        setTag('error');
+        setProgress(100, `${t('restore.streamError')}: ${e.message}`);
         if (btn) btn.disabled = false;
       }
     };
     poll();
   } catch (e) {
-    if (status) {
-      status.classList.remove('hidden');
-      status.textContent = `${t('restore.streamError')}: ${e.message}`;
-    }
+    setTag('error');
+    if (prog) prog.classList.remove('hidden');
+    if (status) status.textContent = `${t('restore.streamError')}: ${e.message}`;
     if (btn) btn.disabled = false;
   }
 }

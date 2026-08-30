@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#0f1218">
   <title>PGClockMG Backup</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=4.0.4c">
-  <link rel="stylesheet" href="/static/css/backup.css?v=4.0.4c">
+  <link rel="stylesheet" href="/static/css/style.css?v=4.0.5">
+  <link rel="stylesheet" href="/static/css/backup.css?v=4.0.5">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
@@ -116,6 +116,7 @@
           </div>
           <pre id="backupProgressLog" class="backup-log"></pre>
         </div>
+        <div id="dashError" class="warning-card hidden backup-top-error" role="alert"></div>
 
         <h3 class="section-title" id="secHealthTitle"></h3>
         <div class="backup-icon-grid" id="dashHealthGrid"></div>
@@ -139,7 +140,6 @@
           <div class="info-box backup-section-card backup-status-card" id="dashLast"></div>
           <div class="info-box backup-section-card backup-status-card" id="dashDelivery"></div>
         </div>
-        <div id="dashError" class="warning-card hidden" style="margin-top:12px"></div>
       </section>
 
       <section class="panel" id="panel-list">
@@ -340,19 +340,38 @@
             <p class="desc" id="streamDesc"></p>
           </div>
         </div>
+        <ol class="backup-stream-steps" id="streamSteps"></ol>
         <div class="backup-settings-card">
+          <div class="backup-switch-row" style="margin-bottom:14px">
+            <h3 class="section-title" id="streamConnTitle" style="margin:0"></h3>
+            <span id="streamStatusTag" class="backup-status-tag is-unknown" role="status">…</span>
+          </div>
           <div class="form-group">
             <label id="lblStreamUrl"></label>
-            <input type="text" id="streamUrl" class="text-input">
+            <input type="text" id="streamUrl" class="text-input" placeholder="http://DEST_IP:7000">
+            <p class="desc-sm" id="streamUrlHint"></p>
           </div>
           <div class="form-group">
             <label id="lblStreamToken"></label>
             <input type="text" id="streamToken" class="text-input" autocomplete="off">
+            <p class="desc-sm" id="streamTokenHint"></p>
           </div>
           <input type="hidden" id="streamBackupId">
           <div class="actions backup-actions-wrap">
             <button type="button" class="btn btn-back" id="btnStreamBack" onclick="showBackupTab('list')"></button>
             <button type="button" class="btn btn-primary" id="btnStreamSend" onclick="sendStream()"></button>
+          </div>
+          <div id="streamProgress" class="backup-run-box hidden" style="margin-top:14px;margin-bottom:0" role="status" aria-live="polite">
+            <div class="backup-section-head" style="margin-bottom:8px;align-items:center">
+              <span class="choice-icon icon-tone-neutral" aria-hidden="true">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M16 3h5v5"/><path d="M4 20L21 3"/><path d="M21 16v5h-5"/></svg>
+              </span>
+              <p id="streamProgressTitle" class="desc-sm" style="margin:0"></p>
+            </div>
+            <div class="backup-progress-track" aria-hidden="true">
+              <div class="backup-progress-bar" id="streamProgressBar" style="width:0%"></div>
+            </div>
+            <p id="streamProgressMeta" class="desc-sm" style="margin:8px 0 0;direction:ltr;text-align:left"></p>
           </div>
           <div id="streamMsg" class="info-box hidden" style="margin-top:12px"></div>
         </div>
@@ -360,6 +379,6 @@
 
     </main>
   </div>
-  <script src="/static/js/backup.js?v=4.0.4c"></script>
+  <script src="/static/js/backup.js?v=4.0.5"></script>
 </body>
 </html>

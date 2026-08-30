@@ -28,7 +28,7 @@ from app.services.backup_settings import (
     update_settings,
 )
 from app.services.backup_net import UnsafeDestinationError
-from app.services.backup_stream import push_backup_file
+from app.services.backup_stream import get_push_job, start_push_async
 from app.services.backup_telegram import (
     format_caption,
     human_size,
@@ -38,7 +38,7 @@ from app.services.backup_telegram import (
 )
 from app.services.prerequisites import get_system_status, is_pasarguard_installed
 
-APP_VERSION = "4.0.4"
+APP_VERSION = "4.0.5"
 
 
 @asynccontextmanager
@@ -361,19 +361,30 @@ async def api_stream_send(body: StreamSendBody):
         except Exception:
             pass
     try:
-        result = push_backup_file(
-            path,
-            dest_base_url=body.dest_url.strip(),
-            token=body.token.strip(),
-            sha256=sha,
-        )
+        # Validate destination early (same checks as push) before starting the job
+        from app.services.backup_net import normalize_public_http_url
+        normalize_public_http_url(body.dest_url.strip())
     except UnsafeDestinationError as exc:
         raise HTTPException(400, str(exc)) from exc
-    if not result.get("ok"):
-        raise HTTPException(400, result.get("error") or "stream_failed")
-    # remember last dest
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not (body.token or "").strip():
+        raise HTTPException(400, "token_missing")
     update_settings({"stream": {"default_dest_url": body.dest_url.strip()}})
-    return result
+    return start_push_async(
+        path,
+        dest_base_url=body.dest_url.strip(),
+        token=body.token.strip(),
+        sha256=sha,
+    )
+
+
+@app.get("/api/backups/stream/jobs/{job_id}")
+async def api_stream_job(job_id: str):
+    job = get_push_job(job_id)
+    if not job:
+        raise HTTPException(404, "job_not_found")
+    return job
 
 
 @app.get("/api/settings")

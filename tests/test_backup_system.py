@@ -271,6 +271,19 @@ def test_sqlite_url_path_variants_no_uri_authority(tmp_path, monkeypatch):
     print("OK: sqlite URL variants + URI authority regression")
 
 
+def test_safe_db_ident_rejects_path_like_values():
+    from app.services.backup_engine import _safe_db_ident
+    assert _safe_db_ident("pasarguard", fallback="x") == "pasarguard"
+    assert _safe_db_ident(None, fallback="pasarguard") == "pasarguard"
+    for bad in ("/var/lib/pasarguard/db.sqlite3", "file:///tmp/x", "//var/lib/x", "a b"):
+        try:
+            _safe_db_ident(bad)
+            raise AssertionError(f"expected reject for {bad!r}")
+        except RuntimeError:
+            pass
+    print("OK: safe db ident rejects path-like values")
+
+
 def test_stream_push_receive_roundtrip(tmp_path, monkeypatch):
     """Chunked receive reconstructs the exact zip bytes."""
     import asyncio

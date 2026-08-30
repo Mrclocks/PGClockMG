@@ -391,25 +391,48 @@ def _dump_sqlite(dest: Path, job: dict, *, env_text: str = "") -> None:
         raise RuntimeError("SQLite backup copy is empty")
 
 
+def _safe_db_ident(value: str | None, *, fallback: str | None = None, kind: str = "database") -> str:
+    """Reject empty / path-like / URI-tainted DB identifiers from misparsed .env URLs."""
+    raw = (value or "").strip()
+    if not raw:
+        if fallback is not None:
+            return fallback
+        raise RuntimeError(f"Missing {kind} name in PasarGuard .env")
+    # Never allow filesystem or URI fragments to leak into docker dump args
+    if raw.startswith(("/", ".", "file:")) or "://" in raw or "\\" in raw:
+        raise RuntimeError(f"Invalid {kind} name from .env: {raw!r}")
+    if not re.fullmatch(r"[A-Za-z0-9_$-]{1,128}", raw):
+        raise RuntimeError(f"Unsafe {kind} name from .env: {raw!r}")
+    return raw
+
+
 def _dump_postgres(db_type: str, dest: Path, job: dict) -> None:
     svc = resolve_db_service(db_type)
     if not svc:
         raise RuntimeError(f"No Docker DB service found for {db_type}")
     conn = get_pasarguard_admin_connection(db_type)
-    users = []
+    users: list[str] = []
     for cand in (
         conn.get("user"),
         "postgres",
         read_env_var(PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.is_file() else "", "DB_USER"),
         "pasarguard",
     ):
-        if cand and cand not in users:
-            users.append(cand)
+        if not cand:
+            continue
+        try:
+            safe = _safe_db_ident(str(cand), kind="user")
+        except RuntimeError:
+            continue
+        if safe not in users:
+            users.append(safe)
+    if not users:
+        users = ["postgres"]
     password = conn.get("password") or ""
-    database = conn.get("database") or "pasarguard"
+    database = _safe_db_ident(conn.get("database"), fallback="pasarguard", kind="database")
     last_err = ""
     for user in users:
-        _log(job, f"Running pg_dump via {svc} as {user}…")
+        _log(job, f"Running pg_dump via {svc} as {user} (db={database})…")
         cmd = [
             "docker", "compose", "exec", "-T",
             "-e", f"PGPASSWORD={password}",
@@ -477,7 +500,7 @@ def _dump_mysql(db_type: str, dest: Path, job: dict) -> None:
         raise RuntimeError(f"No Docker DB service found for {db_type}")
     conn = get_pasarguard_admin_connection(db_type)
     env_text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.is_file() else ""
-    users = []
+    users: list[str] = []
     for cand in (
         conn.get("user"),
         "root",
@@ -485,11 +508,19 @@ def _dump_mysql(db_type: str, dest: Path, job: dict) -> None:
         read_env_var(env_text, "DB_USER"),
         "pasarguard",
     ):
-        if cand and cand not in users:
-            users.append(cand)
+        if not cand:
+            continue
+        try:
+            safe = _safe_db_ident(str(cand), kind="user")
+        except RuntimeError:
+            continue
+        if safe not in users:
+            users.append(safe)
+    if not users:
+        users = ["root"]
     password = conn.get("password") or ""
-    database = conn.get("database") or "pasarguard"
-    _log(job, f"Running mysqldump via {svc}…")
+    database = _safe_db_ident(conn.get("database"), fallback="pasarguard", kind="database")
+    _log(job, f"Running mysqldump via {svc} (db={database})…")
     dump_bins = ["mysqldump", "mariadb-dump"]
     if "maria" in (svc or "").lower() or db_type == "mariadb":
         dump_bins = ["mariadb-dump", "mysqldump"]

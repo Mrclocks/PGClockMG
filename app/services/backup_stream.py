@@ -21,8 +21,89 @@ _LISTENERS: dict[str, dict[str, Any]] = {}
 
 LISTENER_TTL_SEC = 30 * 60
 STREAM_CHUNK = 8 * 1024 * 1024  # 8 MiB — fewer syscalls for large zips
-PROGRESS_EVERY = 16 * 1024 * 1024  # update listener progress every 16 MiB
+PROGRESS_EVERY = 1 * 1024 * 1024  # update listener progress every 1 MiB (smoother UI)
 MAX_STREAM_BYTES = 20 * 1024 * 1024 * 1024  # 20 GiB hard cap even without expected_size
+
+_PUSH_JOBS: dict[str, dict[str, Any]] = {}
+_PUSH_LOCK = threading.RLock()
+
+
+def get_push_job(job_id: str) -> dict | None:
+    with _PUSH_LOCK:
+        job = _PUSH_JOBS.get(job_id)
+        return dict(job) if job else None
+
+
+def start_push_async(
+    path: Path,
+    *,
+    dest_base_url: str,
+    token: str,
+    sha256: str | None = None,
+) -> dict:
+    """Background push so the backup UI can poll progress."""
+    job_id = secrets.token_hex(6)
+    size = path.stat().st_size if path.is_file() else 0
+    job = {
+        "job_id": job_id,
+        "status": "queued",  # queued | connecting | sending | success | error
+        "bytes_sent": 0,
+        "bytes_total": size,
+        "error": None,
+        "result": None,
+        "started_at": time.time(),
+    }
+    with _PUSH_LOCK:
+        _PUSH_JOBS[job_id] = job
+
+    def _run() -> None:
+        def on_progress(sent: int, total: int, *, phase: str = "sending") -> None:
+            with _PUSH_LOCK:
+                j = _PUSH_JOBS.get(job_id)
+                if not j:
+                    return
+                j["status"] = phase
+                j["bytes_sent"] = int(sent)
+                j["bytes_total"] = int(total)
+
+        try:
+            with _PUSH_LOCK:
+                if job_id in _PUSH_JOBS:
+                    _PUSH_JOBS[job_id]["status"] = "connecting"
+            result = push_backup_file(
+                path,
+                dest_base_url=dest_base_url,
+                token=token,
+                sha256=sha256,
+                progress_cb=on_progress,
+            )
+            with _PUSH_LOCK:
+                j = _PUSH_JOBS.get(job_id) or job
+                if result.get("ok"):
+                    j["status"] = "success"
+                    j["bytes_sent"] = int(result.get("size_bytes") or j.get("bytes_total") or 0)
+                    j["result"] = result
+                    j["error"] = None
+                else:
+                    j["status"] = "error"
+                    j["error"] = result.get("error") or "stream_failed"
+                    j["result"] = result
+                _PUSH_JOBS[job_id] = j
+        except UnsafeDestinationError as exc:
+            with _PUSH_LOCK:
+                j = _PUSH_JOBS.get(job_id) or job
+                j["status"] = "error"
+                j["error"] = str(exc)
+                _PUSH_JOBS[job_id] = j
+        except Exception as exc:
+            with _PUSH_LOCK:
+                j = _PUSH_JOBS.get(job_id) or job
+                j["status"] = "error"
+                j["error"] = str(exc)
+                _PUSH_JOBS[job_id] = j
+
+    threading.Thread(target=_run, daemon=True, name=f"stream-push-{job_id}").start()
+    return {"job_id": job_id, "bytes_total": size, "status": "queued"}
 
 
 def _purge_expired() -> None:
@@ -50,6 +131,7 @@ def create_listener(*, label: str | None = None) -> dict:
             "expires_at": time.time() + LISTENER_TTL_SEC,
             "status": "listening",  # listening | receiving | ready | error | consumed
             "bytes_received": 0,
+            "expected_size": None,
             "expected_sha256": None,
             "filename": None,
             "upload_id": None,
@@ -98,6 +180,7 @@ async def receive_stream(
             raise RuntimeError(f"listener_status_{info['status']}")
         info["status"] = "receiving"
         info["expected_sha256"] = expected_sha256
+        info["expected_size"] = expected_size
         info["filename"] = filename or "streamed-backup.zip"
 
     upload_id = secrets.token_hex(8)
@@ -199,6 +282,7 @@ def push_backup_file(
     token: str,
     sha256: str | None = None,
     timeout: float = 3600.0,
+    progress_cb: Any | None = None,
 ) -> dict:
     """Source side: stream a local zip to destination /api/stream/receive/{token}."""
     if not path.is_file():
@@ -228,12 +312,31 @@ def push_backup_file(
     }
 
     def _iter_file():
+        sent = 0
+        last_report = 0
+        if progress_cb:
+            try:
+                progress_cb(0, size, phase="connecting")
+            except TypeError:
+                progress_cb(0, size)
         with path.open("rb") as fh:
             while True:
                 chunk = fh.read(STREAM_CHUNK)
                 if not chunk:
                     break
+                sent += len(chunk)
+                if progress_cb and (sent - last_report >= PROGRESS_EVERY or sent >= size):
+                    last_report = sent
+                    try:
+                        progress_cb(sent, size, phase="sending")
+                    except TypeError:
+                        progress_cb(sent, size)
                 yield chunk
+        if progress_cb:
+            try:
+                progress_cb(size, size, phase="sending")
+            except TypeError:
+                progress_cb(size, size)
 
     try:
         timeout_cfg = httpx.Timeout(timeout, connect=30.0, read=timeout, write=timeout)

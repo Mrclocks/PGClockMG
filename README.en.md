@@ -1,4 +1,4 @@
-> 🚀 **`v4.0.4`** — SQLite backup path fix + progress under the backup button  
+> 🚀 **`v4.0.5`** — Clearer stream UX + DB dump hardening + top-of-page last error  
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

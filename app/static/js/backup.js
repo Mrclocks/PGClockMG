@@ -93,17 +93,28 @@ const I18N = {
     lblProxyPass: "رمز پروکسی",
     setStreamTitle: "مقصد استریم پیش‌فرض",
     lblStreamDest: "آدرس ویزارد مقصد",
-    streamDestHint: "مثال: http://IP:7000 — روی مقصد از ویزارد «دریافت استریم» را بزنید.",
+    streamDestHint: "۱) روی سرور مقصد ویزارد را باز کنید → ریستور → «آماده‌سازی دریافت استریم». ۲) توکن را کپی کنید. ۳) اینجا آدرس همان سرور (مثلاً http://IP:7000) و توکن را بزنید و ارسال کنید.",
     setPassTitle: "تغییر رمز پنل",
     setPassHint: "خالی بگذارید اگر نمی‌خواهید عوض شود.",
     lblNewPass: "رمز جدید",
     lblNewPassConfirm: "تکرار رمز جدید",
     btnSaveSettings: "ذخیره تنظیمات",
     saved: "ذخیره شد",
-    streamH2: "ارسال استریم",
-    streamDesc: "بکاپ روی سرور می‌ماند؛ فقط به مقصد استریم می‌شود. مقصد باید آمادهٔ دریافت باشد.",
+    streamH2: "ارسال استریم به ویزارد",
+    streamDesc: "بکاپ روی همین سرور می‌ماند و فقط یک کپی به ویزارد مقصد فرستاده می‌شود. اول مقصد را در حالت دریافت بگذارید، بعد از اینجا ارسال کنید.",
+    streamStep1: "روی سرور مقصد: ویزارد → ریستور → آماده‌سازی دریافت استریم",
+    streamStep2: "توکن یک‌بارمصرف را کپی کنید (حدود ۳۰ دقیقه معتبر است)",
+    streamStep3: "اینجا آدرس ویزارد مقصد و توکن را وارد کنید و ارسال را بزنید",
+    streamConnTitle: "وضعیت ارسال",
+    streamUrlHint: "مثلاً http://203.0.113.10:7000 — همان پورتی که ویزارد مقصد روی آن گوش می‌دهد.",
+    streamTokenHint: "توکنی که دکمه «آماده‌سازی دریافت استریم» روی ویزارد مقصد نشان می‌دهد.",
+    streamIdle: "آماده",
+    streamConnecting: "در حال اتصال به مقصد…",
+    streamSending: "در حال ارسال…",
+    streamSuccess: "ارسال کامل شد",
+    streamFail: "ارسال ناموفق",
     lblStreamUrl: "آدرس ویزارد مقصد",
-    lblStreamToken: "توکن دریافت",
+    lblStreamToken: "توکن دریافت از ویزارد مقصد",
     btnStreamSend: "شروع ارسال",
     btnStreamBack: "بازگشت",
     users: "کاربر",
@@ -219,17 +230,28 @@ const I18N = {
     lblProxyPass: "Proxy password",
     setStreamTitle: "Default stream destination",
     lblStreamDest: "Destination wizard URL",
-    streamDestHint: "Example: http://IP:7000 — on destination open wizard Receive Stream.",
+    streamDestHint: "1) On destination: open wizard → Restore → Ready to receive stream. 2) Copy the one-time token. 3) Paste the wizard URL (e.g. http://IP:7000) and token here, then send.",
     setPassTitle: "Change panel password",
     setPassHint: "Leave blank to keep the current password.",
     lblNewPass: "New password",
     lblNewPassConfirm: "Confirm new password",
     btnSaveSettings: "Save settings",
     saved: "Saved",
-    streamH2: "Stream send",
-    streamDesc: "File stays on this server; only streamed to destination. Destination must be listening.",
+    streamH2: "Stream to wizard",
+    streamDesc: "The zip stays on this server; a copy is pushed to the destination wizard. Put the destination in receive mode first, then send from here.",
+    streamStep1: "On destination: Wizard → Restore → Ready to receive stream",
+    streamStep2: "Copy the one-time token (valid ~30 minutes)",
+    streamStep3: "Paste destination wizard URL + token here and start send",
+    streamConnTitle: "Send status",
+    streamUrlHint: "Example: http://203.0.113.10:7000 — the port where the destination wizard listens.",
+    streamTokenHint: "Token shown after clicking Ready to receive stream on the destination wizard.",
+    streamIdle: "Ready",
+    streamConnecting: "Connecting to destination…",
+    streamSending: "Sending…",
+    streamSuccess: "Send complete",
+    streamFail: "Send failed",
     lblStreamUrl: "Destination wizard URL",
-    lblStreamToken: "Receive token",
+    lblStreamToken: "Receive token from destination wizard",
     btnStreamSend: "Start send",
     btnStreamBack: "Back",
     users: "Users",
@@ -345,17 +367,28 @@ const I18N = {
     lblProxyPass: "Пароль прокси",
     setStreamTitle: "Назначение стрима",
     lblStreamDest: "URL мастера назначения",
-    streamDestHint: "Пример: http://IP:7000",
+    streamDestHint: "1) На назначении: мастер → Restore → Готов принимать стрим. 2) Скопируйте одноразовый токен. 3) Вставьте URL мастера (например http://IP:7000) и токен здесь, затем отправьте.",
     setPassTitle: "Смена пароля",
     setPassHint: "Оставьте пустым, чтобы не менять.",
     lblNewPass: "Новый пароль",
     lblNewPassConfirm: "Повтор",
     btnSaveSettings: "Сохранить",
     saved: "Сохранено",
-    streamH2: "Стрим",
-    streamDesc: "Файл остаётся здесь; только стрим на назначение.",
-    lblStreamUrl: "URL мастера",
-    lblStreamToken: "Токен",
+    streamH2: "Стрим в мастер",
+    streamDesc: "ZIP остаётся здесь; копия уходит на мастер назначения. Сначала включите приём на назначении, потом отправляйте отсюда.",
+    streamStep1: "На назначении: Мастер → Restore → Готов принимать стрим",
+    streamStep2: "Скопируйте одноразовый токен (действует ~30 минут)",
+    streamStep3: "Вставьте URL мастера и токен здесь и начните отправку",
+    streamConnTitle: "Статус отправки",
+    streamUrlHint: "Пример: http://203.0.113.10:7000 — порт, на котором слушает мастер назначения.",
+    streamTokenHint: "Токен после кнопки «Готов принимать стрим» на мастере назначения.",
+    streamIdle: "Готово",
+    streamConnecting: "Подключение к назначению…",
+    streamSending: "Отправка…",
+    streamSuccess: "Отправка завершена",
+    streamFail: "Отправка не удалась",
+    lblStreamUrl: "URL мастера назначения",
+    lblStreamToken: "Токен приёма с мастера назначения",
     btnStreamSend: "Отправить",
     btnStreamBack: "Назад",
     users: "Пользователи",
@@ -451,11 +484,18 @@ function applyI18n() {
     ["btnSaveSettings", "btnSaveSettings"],
     ["streamH2", "streamH2"], ["streamDesc", "streamDesc"], ["lblStreamUrl", "lblStreamUrl"],
     ["lblStreamToken", "lblStreamToken"], ["btnStreamSend", "btnStreamSend"], ["btnStreamBack", "btnStreamBack"],
+    ["streamConnTitle", "streamConnTitle"], ["streamUrlHint", "streamUrlHint"], ["streamTokenHint", "streamTokenHint"],
   ];
   for (const [id, key] of map) {
     const el = document.getElementById(id);
     if (el) el.textContent = t(key);
   }
+  const steps = document.getElementById("streamSteps");
+  if (steps) {
+    steps.innerHTML = [t("streamStep1"), t("streamStep2"), t("streamStep3")]
+      .map((s) => `<li>${esc(s)}</li>`).join("");
+  }
+  setStreamStatusTag("idle");
   // Switch aria labels (title is visible; keep accessible name on the control)
   const switchLabels = [
     ["schedEnabled", "lblSchedEnabled"],
@@ -867,15 +907,51 @@ async function openStream(id) {
   document.getElementById("streamUrl").value = (settings.stream && settings.stream.default_dest_url) || "";
   document.getElementById("streamToken").value = "";
   document.getElementById("streamMsg").classList.add("hidden");
+  document.getElementById("streamProgress").classList.add("hidden");
+  setStreamStatusTag("idle");
   showBackupTab("stream");
+}
+
+function setStreamStatusTag(state) {
+  const el = document.getElementById("streamStatusTag");
+  if (!el) return;
+  el.classList.remove("is-connected", "is-disconnected", "is-unknown");
+  const map = {
+    idle: ["is-unknown", "streamIdle"],
+    connecting: ["is-unknown", "streamConnecting"],
+    sending: ["is-unknown", "streamSending"],
+    success: ["is-connected", "streamSuccess"],
+    error: ["is-disconnected", "streamFail"],
+  };
+  const [cls, key] = map[state] || map.idle;
+  el.classList.add(cls);
+  el.textContent = t(key);
+}
+
+function setStreamProgressUI({ title, pct, meta, running }) {
+  const box = document.getElementById("streamProgress");
+  const bar = document.getElementById("streamProgressBar");
+  const titleEl = document.getElementById("streamProgressTitle");
+  const metaEl = document.getElementById("streamProgressMeta");
+  box.classList.remove("hidden", "is-running", "is-success", "is-error");
+  if (running) box.classList.add("is-running");
+  titleEl.textContent = title || "";
+  metaEl.textContent = meta || "";
+  const width = Math.max(0, Math.min(100, Number(pct) || 0));
+  bar.style.width = width + "%";
+  bar.style.animation = running && width < 100 ? "" : "none";
 }
 
 async function sendStream() {
   const msg = document.getElementById("streamMsg");
-  msg.classList.remove("hidden");
-  msg.textContent = "…";
+  const btn = document.getElementById("btnStreamSend");
+  msg.classList.add("hidden");
+  msg.textContent = "";
+  setStreamStatusTag("connecting");
+  setStreamProgressUI({ title: t("streamConnecting"), pct: 0, meta: "", running: true });
+  if (btn) btn.disabled = true;
   try {
-    const r = await api("/api/backups/stream/send", {
+    const started = await api("/api/backups/stream/send", {
       method: "POST",
       body: JSON.stringify({
         backup_id: document.getElementById("streamBackupId").value,
@@ -883,10 +959,58 @@ async function sendStream() {
         token: document.getElementById("streamToken").value,
       }),
     });
-    msg.textContent = "OK · " + JSON.stringify(r.response || r);
+    const jobId = started.job_id;
+    if (!jobId) throw new Error("no job_id");
+    await pollStreamJob(jobId);
   } catch (e) {
+    setStreamStatusTag("error");
+    setStreamProgressUI({ title: t("streamFail") + ": " + e.message, pct: 100, meta: "", running: false });
+    const box = document.getElementById("streamProgress");
+    box.classList.add("is-error");
+    msg.classList.remove("hidden");
     msg.textContent = e.message;
+  } finally {
+    if (btn) btn.disabled = false;
   }
+}
+
+async function pollStreamJob(jobId) {
+  return new Promise((resolve, reject) => {
+    const tick = async () => {
+      try {
+        const job = await api("/api/backups/stream/jobs/" + encodeURIComponent(jobId));
+        const total = Number(job.bytes_total) || 0;
+        const sent = Number(job.bytes_sent) || 0;
+        const pct = total > 0 ? Math.round((sent / total) * 100) : (job.status === "success" ? 100 : 5);
+        const meta = total > 0
+          ? `${humanSize(sent)} / ${humanSize(total)} (${pct}%)`
+          : humanSize(sent);
+        if (job.status === "connecting" || job.status === "queued") {
+          setStreamStatusTag("connecting");
+          setStreamProgressUI({ title: t("streamConnecting"), pct: Math.max(pct, 2), meta, running: true });
+        } else if (job.status === "sending") {
+          setStreamStatusTag("sending");
+          setStreamProgressUI({ title: t("streamSending"), pct, meta, running: true });
+        } else if (job.status === "success") {
+          setStreamStatusTag("success");
+          setStreamProgressUI({ title: t("streamSuccess"), pct: 100, meta, running: false });
+          document.getElementById("streamProgress").classList.add("is-success");
+          const msg = document.getElementById("streamMsg");
+          msg.classList.remove("hidden");
+          msg.textContent = t("streamSuccess") + (job.result && job.result.sha256 ? " · sha256=" + job.result.sha256.slice(0, 12) + "…" : "");
+          resolve(job);
+          return;
+        } else if (job.status === "error") {
+          reject(new Error(job.error || "stream_failed"));
+          return;
+        }
+        setTimeout(tick, 700);
+      } catch (e) {
+        reject(e);
+      }
+    };
+    tick();
+  });
 }
 
 async function loadSettingsForm() {

@@ -2882,6 +2882,53 @@ a.btn-panel-enter:focus {
   align-items: flex-start;
   gap: 14px;
 }
+
+/* Shared stream status (wizard + backup language) */
+.backup-status-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.3;
+  border: 1px solid var(--border-soft);
+  white-space: nowrap;
+}
+.backup-status-tag.is-connected {
+  color: var(--success);
+  background: var(--success-bg);
+  border-color: var(--success);
+}
+.backup-status-tag.is-disconnected {
+  color: hsl(0, 78%, 62%);
+  background: hsla(0, 78%, 55%, 0.12);
+  border-color: hsla(0, 78%, 55%, 0.45);
+}
+.backup-status-tag.is-unknown {
+  color: var(--text-muted);
+  background: var(--bg-elevated);
+}
+.backup-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+}
+.backup-stream-steps {
+  margin: 10px 0 0;
+  padding: 0 0 0 1.25rem;
+  color: var(--text-muted);
+  font-size: 0.88rem;
+  line-height: 1.6;
+}
+html[dir="rtl"] .backup-stream-steps {
+  padding: 0 1.25rem 0 0;
+}
+.backup-stream-steps li { margin-bottom: 4px; }
+
 /* iOS-style toggle */
 .ios-toggle {
   flex-shrink: 0;
