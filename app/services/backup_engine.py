@@ -35,14 +35,18 @@ from app.services.env_migration import (
 )
 from app.services.pasarguard_ops import mysql_client_bins, resolve_db_service
 from app.services.prerequisites import get_pasarguard_db_type, is_pasarguard_installed
+from app.services.sql_dump_counts import (
+    STAT_TABLES,
+    assert_dump_compatible_with_live_users,
+    estimate_sql_dump_counts_from_text,
+    scan_sql_dump_file,
+)
 
 LogFn = Callable[[str], None]
 
 _CREATE_LOCK = threading.Lock()
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
-
-STAT_TABLES = ("users", "nodes", "admins", "inbounds", "hosts", "groups")
 
 
 def _utc_now() -> str:
@@ -264,47 +268,18 @@ def _docker_sql_counts(db_type: str) -> dict[str, int | None]:
 
 def _estimate_sql_dump_counts(sql_text: str) -> dict[str, int | None]:
     """Best-effort row counts from pg_dump / mysqldump text for manifest display."""
-    out: dict[str, int | None] = {t: None for t in STAT_TABLES}
-    if not sql_text:
-        return out
-    for table in STAT_TABLES:
-        n = 0
-        copy_re = re.compile(
-            rf"(?is)COPY\s+(?:public\.)?[\"`]?{re.escape(table)}[\"`]?\s*\([^;]*?\)\s+FROM\s+stdin;\s*(.*?)\\.\s*"
-        )
-        for m in copy_re.finditer(sql_text):
-            block = (m.group(1) or "").strip()
-            if block:
-                n += sum(1 for ln in block.splitlines() if ln.strip())
-        insert_re = re.compile(
-            rf"(?i)INSERT\s+INTO\s+[\"`\[]?{re.escape(table)}[\"`\]]?\s*(?:\([^)]*\))?\s*VALUES",
-        )
-        for m in insert_re.finditer(sql_text):
-            # Count top-level value groups until semicolon
-            rest = sql_text[m.end():]
-            end = rest.find(";")
-            chunk = rest if end < 0 else rest[:end]
-            depth = 0
-            for ch in chunk:
-                if ch == "(":
-                    if depth == 0:
-                        n += 1
-                    depth += 1
-                elif ch == ")" and depth:
-                    depth -= 1
-        out[table] = n if n > 0 else None
-    return out
+    return estimate_sql_dump_counts_from_text(sql_text)
 
 
 def _counts_from_dump_artifact(dump_path: Path, db_type: str) -> dict[str, int | None]:
     if db_type == "sqlite":
         return _sqlite_counts(dump_path)
     try:
-        # Cap read size — large dumps still usually put table data early enough
-        text = dump_path.read_text(encoding="utf-8", errors="ignore")[:8_000_000]
+        meta = scan_sql_dump_file(dump_path)
+        counts = meta.get("counts") or {}
+        return {t: counts.get(t) for t in STAT_TABLES}
     except OSError:
         return {t: None for t in STAT_TABLES}
-    return _estimate_sql_dump_counts(text)
 
 
 def _merge_counts(
@@ -1063,9 +1038,17 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
 
         stats = live_panel_stats()
         counts = stats.get("counts") or {}
-        # If live docker COUNT failed (common on PG password mismatch), fall back
-        # to counting rows from the dump we just produced so the UI still shows specs.
-        dump_counts = _counts_from_dump_artifact(dump_path, db_type)
+        # Prefer live docker COUNTs; fall back to full-file dump scan for UI specs.
+        dump_meta = None
+        if db_type == "sqlite":
+            dump_counts = _sqlite_counts(dump_path)
+        else:
+            try:
+                dump_meta = scan_sql_dump_file(dump_path)
+                dump_counts = {t: (dump_meta.get("counts") or {}).get(t) for t in STAT_TABLES}
+            except OSError:
+                dump_meta = None
+                dump_counts = {t: None for t in STAT_TABLES}
         counts = _merge_counts(counts, dump_counts)
         if any(isinstance(counts.get(t), int) for t in STAT_TABLES):
             _set_progress(
@@ -1077,31 +1060,19 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
         else:
             _set_progress(job, 62, "Panel counts unavailable (live query + dump estimate both empty)")
 
-        # Refuse zip when live/dump panel has data but the dump looks empty.
-        live_users = counts.get("users")
-        if isinstance(live_users, int) and live_users > 0:
-            dump_users = dump_counts.get("users")
-            if db_type == "sqlite":
-                dump_users = _sqlite_counts(dump_path).get("users")
-            elif dump_users is None:
-                try:
-                    sample = dump_path.read_text(encoding="utf-8", errors="ignore")[:2_000_000]
-                except Exception:
-                    sample = ""
-                lower = sample.lower()
-                if (
-                    "copy public.users" in lower
-                    or "copy users" in lower
-                    or "insert into `users`" in lower
-                    or "insert into users" in lower
-                ):
-                    dump_users = live_users
-                elif "create table" in lower and "users" in lower:
-                    dump_users = 0
-            if dump_users == 0:
-                raise RuntimeError(
-                    f"Backup dump has 0 users but panel reports {live_users} — refusing empty dump"
-                )
+        # Refuse only when the dump is *confirmed* empty vs a live panel with users.
+        # Never treat "users DDL early / data late" (Timescale) as empty.
+        live_users = (stats.get("counts") or {}).get("users")
+        sqlite_n = dump_counts.get("users") if db_type == "sqlite" else None
+        refuse_msg = assert_dump_compatible_with_live_users(
+            db_type=db_type,
+            dump_path=dump_path,
+            live_users=live_users if isinstance(live_users, int) else None,
+            dump_meta=dump_meta,
+            sqlite_user_count=sqlite_n if isinstance(sqlite_n, int) else None,
+        )
+        if refuse_msg:
+            raise RuntimeError(refuse_msg)
 
         version = read_env_var(env_text, "APP_VERSION") or None
 
