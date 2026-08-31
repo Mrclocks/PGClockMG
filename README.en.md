@@ -1,4 +1,4 @@
-> 🚀 **`v4.3.7`** — Update-check button restores fully + correct panel Path
+> 🚀 **`v4.3.8`** — Fix Timescale stuck in restoring=on when role postgres is missing
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
