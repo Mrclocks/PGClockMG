@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.3.9`** — پاک‌سازی مقاوم restoring=on حتی با catalog mismatch
+> 🚀 **`v4.3.10`** — ریستور Timescale بدون گیر کردن روی دیسک پر / compose خالی
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

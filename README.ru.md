@@ -1,4 +1,4 @@
-> 🚀 **`v4.3.9`** — Надёжная очистка Timescale restoring=on (catalog mismatch / multi-DB)
+> 🚀 **`v4.3.10`** — Restore Timescale устойчив к ENOSPC / пустому compose
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

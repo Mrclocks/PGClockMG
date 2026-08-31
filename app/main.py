@@ -36,7 +36,7 @@ from app.services.self_uninstall import uninstall_preview, schedule_self_uninsta
 from app.services.auth import COOKIE_NAME, COOKIE_MAX_AGE, ensure_token, token_matches
 from app.config import WEB_PORT
 
-APP_VERSION = "4.3.9"
+APP_VERSION = "4.3.10"
 
 
 @asynccontextmanager
