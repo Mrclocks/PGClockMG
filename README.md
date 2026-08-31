@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.3.8`** — رفع گیر کردن Timescale در restoring=on وقتی نقش postgres نیست
+> 🚀 **`v4.3.9`** — پاک‌سازی مقاوم restoring=on حتی با catalog mismatch
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

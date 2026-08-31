@@ -1,4 +1,4 @@
-> 🚀 **`v4.3.8`** — Fix Timescale stuck in restoring=on when role postgres is missing
+> 🚀 **`v4.3.9`** — Robust Timescale restoring=on clear (catalog mismatch / multi-DB)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

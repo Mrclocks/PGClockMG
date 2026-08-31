@@ -1,4 +1,4 @@
-> 🚀 **`v4.3.8`** — Исправление зависания Timescale в restoring=on без роли postgres
+> 🚀 **`v4.3.9`** — Надёжная очистка Timescale restoring=on (catalog mismatch / multi-DB)
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
