@@ -1,4 +1,4 @@
-> 🚀 **`v4.3.9`** — Robust Timescale restoring=on clear (catalog mismatch / multi-DB)
+> 🚀 **`v4.3.10`** — Timescale restore survives full disk / empty compose
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
