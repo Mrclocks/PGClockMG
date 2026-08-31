@@ -5,9 +5,11 @@
   <a href="README.md">فارسی</a> · <b>English</b> · <a href="README.ru.md">Русский</a>
 </p>
 
-<div align="center">
+<p align="center">
+  <img src="./preview.png" alt="PGClockMG" width="720" />
+</p>
 
-<img src="preview.png" alt="PGClockMG" width="720">
+<div align="center">
 
 # PGClockMG
 
