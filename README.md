@@ -7,15 +7,21 @@
   <b>فارسی</b> · <a href="README.en.md">English</a> · <a href="README.ru.md">Русский</a>
 </p>
 
-<div align="center">
+</div>
 
-<img src="preview.png" alt="PGClockMG" width="720">
+<p align="center">
+  <img src="./preview.png" alt="PGClockMG" width="720" />
+</p>
+
+<div dir="rtl" align="center">
 
 # PGClockMG
 
 🧰 ویزارد ریستور/مهاجرت + پنل بکاپ PasarGuard (نصب جدا)
 
 </div>
+
+<div dir="rtl" align="right">
 
 ---
 
