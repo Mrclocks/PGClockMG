@@ -13,6 +13,9 @@ from app.services.db_auth import (
     mysql_password_candidates,
     postgres_password_candidates,
     postgres_admin_users,
+    postgres_role_candidates,
+    build_postgres_auth_attempts,
+    summarize_pg_auth_errors,
     target_database_name,
 )
 from app.services.db_credentials import get_target_connection
@@ -42,6 +45,44 @@ def test_postgres_admin_users():
     assert users[0] == "pasarguard"
     assert "postgres" in users
     print("OK: postgres admin users")
+
+
+def test_postgres_role_candidates_prefers_app_over_postgres():
+    users = postgres_role_candidates(
+        "DB_USER=pasarguard\nPOSTGRES_USER=pasarguard\n",
+        "pasarguard",
+        container_user="pasarguard",
+    )
+    assert users[0] == "pasarguard"
+    assert users.count("pasarguard") == 1
+    assert users[-1] == "postgres"
+    print("OK: role candidates order")
+
+
+def test_build_postgres_auth_attempts_trust_then_password():
+    attempts = build_postgres_auth_attempts(
+        "DB_USER=pasarguard\nPOSTGRES_PASSWORD=pw\n",
+        preferred_user="pasarguard",
+        preferred_password="pw",
+        include_trust=True,
+    )
+    assert ("pasarguard", None) in attempts
+    assert ("pasarguard", "pw") in attempts
+    # Trust for preferred user comes before its password attempt
+    assert attempts.index(("pasarguard", None)) < attempts.index(("pasarguard", "pw"))
+    print("OK: auth attempts trust-before-password")
+
+
+def test_summarize_pg_auth_errors_deprioritizes_missing_postgres():
+    summary = summarize_pg_auth_errors(
+        [
+            ("postgres", 'FATAL: role "postgres" does not exist'),
+            ("pasarguard", "ERROR: permission denied for function timescaledb_post_restore"),
+        ]
+    )
+    assert "permission denied" in summary.lower()
+    assert summary.lower().index("permission") < summary.lower().index("does not exist")
+    print("OK: summarize deprioritizes missing postgres role")
 
 
 def test_target_database_name_pg():
@@ -456,6 +497,9 @@ def test_mysql_probe_uses_argv_without_password_in_args():
 if __name__ == "__main__":
     test_postgres_password_candidates_order()
     test_postgres_admin_users()
+    test_postgres_role_candidates_prefers_app_over_postgres()
+    test_build_postgres_auth_attempts_trust_then_password()
+    test_summarize_pg_auth_errors_deprioritizes_missing_postgres()
     test_target_database_name_pg()
     test_migration_params_from_connection()
     test_get_target_uses_resolved_conn()

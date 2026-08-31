@@ -1647,19 +1647,57 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
 
     # Wait for PostgreSQL to be ready instead of a fixed sleep
     cur_env = _read_current_env()
-    pw = read_env_var(cur_env, "DB_PASSWORD") or read_env_var(cur_env, "POSTGRES_PASSWORD") or ""
-    pg_user = read_env_var(cur_env, "DB_USER") or "postgres"
-    ready = await _wait_for_postgres_ready(job, "timescaledb", pw, user=pg_user, timeout=120)
-    if not ready:
-        # Try postgres superuser as fallback (fresh container may ignore app user initially)
-        ready = await _wait_for_postgres_ready(job, "timescaledb", pw, user="postgres", timeout=30)
+    from app.services.db_auth import build_postgres_auth_attempts
+
+    container_env = await _read_pg_container_init_env(job, "timescaledb")
+    pw = (
+        read_env_var(cur_env, "POSTGRES_PASSWORD")
+        or read_env_var(cur_env, "DB_PASSWORD")
+        or container_env.get("POSTGRES_PASSWORD")
+        or ""
+    )
+    pg_user = (
+        read_env_var(cur_env, "POSTGRES_USER")
+        or read_env_var(cur_env, "DB_USER")
+        or container_env.get("POSTGRES_USER")
+        or "pasarguard"
+    )
+    ready = False
+    ready_user = pg_user
+    for auth_user, auth_pwd in build_postgres_auth_attempts(
+        cur_env,
+        preferred_user=pg_user,
+        preferred_password=pw,
+        container_user=container_env.get("POSTGRES_USER"),
+        container_password=container_env.get("POSTGRES_PASSWORD"),
+        include_trust=True,
+    ):
+        if auth_pwd is None:
+            ok_t, out_t = await _psql_in_db_container(
+                job, "timescaledb",
+                user=auth_user,
+                password=None,
+                database="postgres",
+                sql="SELECT 1;",
+                timeout=15,
+            )
+            if _psql_exec_succeeded(ok_t, out_t):
+                ready = True
+                ready_user = auth_user
+                break
+            continue
+        if await _wait_for_postgres_ready(job, "timescaledb", auth_pwd, user=auth_user, timeout=40):
+            ready = True
+            ready_user = auth_user
+            pw = auth_pwd
+            break
     if not ready:
         raise RuntimeError("TimescaleDB container did not become ready after image alignment")
 
     # Verify extension version
-    live = await _read_timescaledb_version(job, "timescaledb", pw, user=pg_user)
-    if not live:
-        live = await _read_timescaledb_version(job, "timescaledb", pw, user="postgres")
+    live = await _read_timescaledb_version(job, "timescaledb", pw or "x", user=ready_user)
+    if not live and ready_user != pg_user:
+        live = await _read_timescaledb_version(job, "timescaledb", pw or "x", user=pg_user)
     if live and live != wanted:
         job.log(f"Warning: live TimescaleDB={live} after align (wanted {wanted}) — continuing")
     else:
@@ -1768,6 +1806,67 @@ async def _sync_mysql_passwords(
     )
 
 
+async def _read_pg_container_init_env(
+    job: MigrationJob,
+    svc: str,
+) -> dict[str, str]:
+    """Read POSTGRES_* from the running DB container (image init source of truth)."""
+    out: dict[str, str] = {}
+    for key in ("POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB"):
+        ok, raw = await _run(
+            job,
+            ["docker", "compose", "exec", "-T", svc, "printenv", key],
+            cwd=str(PASARGUARD_DIR),
+            timeout=15,
+            quiet=True,
+        )
+        if not ok:
+            continue
+        val = (raw or "").strip().splitlines()
+        if val and val[-1].strip():
+            out[key] = val[-1].strip()
+    return out
+
+
+def _psql_exec_succeeded(ok: bool, out: str) -> bool:
+    """Treat connection success with FATAL/ERROR lines as failure."""
+    if not ok:
+        return False
+    low = (out or "").lower()
+    if "fatal:" in low:
+        return False
+    # Ignore NOTICE; real SQL failures are ERROR:
+    for line in (out or "").splitlines():
+        s = line.strip().lower()
+        if s.startswith("error:"):
+            return False
+    return True
+
+
+async def _psql_in_db_container(
+    job: MigrationJob,
+    svc: str,
+    *,
+    user: str,
+    password: str | None,
+    database: str,
+    sql: str,
+    timeout: int = 30,
+) -> tuple[bool, str]:
+    cmd = [
+        "docker", "compose", "exec", "-T",
+    ]
+    if password is not None:
+        cmd.extend(["-e", f"PGPASSWORD={password}"])
+    cmd.extend(
+        [
+            svc, "psql", "-U", user, "-d", database,
+            "-v", "ON_ERROR_STOP=0", "-At", "-c", sql,
+        ]
+    )
+    return await _run(job, cmd, cwd=str(PASARGUARD_DIR), timeout=timeout, quiet=True)
+
+
 async def _sync_pg_role_passwords(
     job: MigrationJob,
     svc: str,
@@ -1778,43 +1877,66 @@ async def _sync_pg_role_passwords(
     """Force DB roles to match live .env — fixes SASL auth after globals.sql restore."""
     if not password:
         return
-    roles = []
-    for r in (user, db_name):
-        if r and r not in roles:
-            roles.append(r)
-    pg_super = read_env_var(_read_current_env(), "POSTGRES_USER")
-    if pg_super and pg_super not in roles:
-        roles.append(pg_super)
+
+    from app.services.db_auth import (
+        build_postgres_auth_attempts,
+        postgres_role_candidates,
+        summarize_pg_auth_errors,
+    )
+
+    env_now = _read_current_env()
+    container_env = await _read_pg_container_init_env(job, svc)
+    roles = postgres_role_candidates(
+        env_now,
+        user,
+        db_name,
+        container_user=container_env.get("POSTGRES_USER"),
+        include_postgres_fallback=True,
+    )
+    auth_attempts = build_postgres_auth_attempts(
+        env_now,
+        preferred_user=user,
+        preferred_password=password,
+        extra_users=(db_name, container_env.get("POSTGRES_USER")),
+        container_user=container_env.get("POSTGRES_USER"),
+        container_password=container_env.get("POSTGRES_PASSWORD"),
+        include_trust=True,
+    )
+    # Prefer an admin session that can ALTER ROLE (try app DB then postgres).
+    admin_dbs = []
+    for d in (db_name, container_env.get("POSTGRES_DB"), "pasarguard", "postgres"):
+        if d and d not in admin_dbs:
+            admin_dbs.append(d)
+
     lit = _sql_literal(password)
+    sync_errors: list[tuple[str, str]] = []
     for role in roles:
-        ok, out = await _run(
-            job,
-            [
-                "docker", "compose", "exec", "-T",
-                "-e", f"PGPASSWORD={password}",
-                svc, "psql", "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=0",
-                "-c", f'ALTER ROLE "{role}" WITH PASSWORD {lit};',
-            ],
-            cwd=str(PASARGUARD_DIR),
-            timeout=30,
-        )
-        # Also try as postgres superuser if first attempt failed
-        if not ok and user != "postgres":
-            ok, out = await _run(
-                job,
-                [
-                    "docker", "compose", "exec", "-T",
-                    "-e", f"PGPASSWORD={password}",
-                    svc, "psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=0",
-                    "-c", f'ALTER ROLE "{role}" WITH PASSWORD {lit};',
-                ],
-                cwd=str(PASARGUARD_DIR),
-                timeout=30,
+        sql = f'ALTER ROLE "{role}" WITH PASSWORD {lit};'
+        synced = False
+        for auth_user, auth_pwd in auth_attempts:
+            for admin_db in admin_dbs:
+                ok, out = await _psql_in_db_container(
+                    job, svc,
+                    user=auth_user,
+                    password=auth_pwd,
+                    database=admin_db,
+                    sql=sql,
+                    timeout=30,
+                )
+                if _psql_exec_succeeded(ok, out):
+                    job.log(f"Synced password for role {role} (as {auth_user})")
+                    synced = True
+                    break
+                err = extract_psql_errors(out or "")[:240] or (out or "")[-240:]
+                if err:
+                    sync_errors.append((auth_user, err))
+            if synced:
+                break
+        if not synced:
+            job.log(
+                f"Could not sync password for role {role}: "
+                f"{summarize_pg_auth_errors(sync_errors[-6:]) or 'all auth attempts failed'}"
             )
-        if ok:
-            job.log(f"Synced password for role {role}")
-        else:
-            job.log(f"Could not sync password for role {role}: {(out or '')[-200:]}")
     # Restart pgbouncer so auth cache picks up new SCRAM secrets (ignore if absent)
     if _compose_has_service("pgbouncer"):
         await _compose(job, "restart", "pgbouncer", timeout=90)
@@ -1834,46 +1956,66 @@ async def _ensure_timescaledb_not_in_restore_mode(
     silently crashes on every connect attempt — producing a restart loop with
     no visible error in panel logs (often stops right after alembic Context).
 
-    If the GUC check itself fails (auth/role), still attempt post_restore —
-    leaving restoring=on is worse than a no-op post_restore when already off.
+    Auth strategy (root cause of prior hard-fails):
+    - Prefer roles from .env / container ``POSTGRES_USER`` (not hardcoded postgres).
+    - Try local socket trust first, then password candidates.
+    - Reuse the same credentials that successfully read ``timescaledb.restoring``.
+    - Report useful errors; do not let a missing optional ``postgres`` role mask
+      the real failure from the app/superuser role.
     """
+    from app.services.db_auth import (
+        build_postgres_auth_attempts,
+        summarize_pg_auth_errors,
+    )
+
     svc = await _detect_db_container(job, "timescaledb") or await _detect_db_container(job, "postgresql")
     if not svc:
         return
 
     check_sql = "SELECT current_setting('timescaledb.restoring', true);"
     post_sql = "SELECT timescaledb_post_restore();"
-    users: list[str] = []
-    for cand in ((user or "").strip(), "postgres"):
-        if cand and cand not in users:
-            users.append(cand)
-    if not users:
-        users = ["postgres"]
     dbn = (db_name or "").strip() or "pasarguard"
+    env_now = _read_current_env()
+    container_env = await _read_pg_container_init_env(job, svc)
+    auth_attempts = build_postgres_auth_attempts(
+        env_now,
+        preferred_user=user,
+        preferred_password=password,
+        extra_users=(dbn, container_env.get("POSTGRES_USER")),
+        container_user=container_env.get("POSTGRES_USER"),
+        container_password=container_env.get("POSTGRES_PASSWORD"),
+        include_trust=True,
+    )
+    if not auth_attempts:
+        auth_attempts = [(user or "pasarguard", password or None)]
 
-    async def _psql(u: str, sql: str, *, timeout: int = 20) -> tuple[bool, str]:
-        return await _run(
-            job,
-            [
-                "docker", "compose", "exec", "-T",
-                "-e", f"PGPASSWORD={password}",
-                svc, "psql", "-U", u, "-d", dbn,
-                "-v", "ON_ERROR_STOP=0", "-At", "-c", sql,
-            ],
-            cwd=str(PASARGUARD_DIR),
+    async def _try(sql: str, auth_user: str, auth_pwd: str | None, *, timeout: int = 20) -> tuple[bool, str]:
+        ok, out = await _psql_in_db_container(
+            job, svc,
+            user=auth_user,
+            password=auth_pwd,
+            database=dbn,
+            sql=sql,
             timeout=timeout,
         )
+        return _psql_exec_succeeded(ok, out), out
 
     restoring = ""
     check_ok = False
-    for u in users:
-        ok, out = await _psql(u, check_sql, timeout=20)
+    working_auth: tuple[str, str | None] | None = None
+    check_errors: list[tuple[str, str]] = []
+
+    for auth_user, auth_pwd in auth_attempts:
+        ok, out = await _try(check_sql, auth_user, auth_pwd, timeout=20)
         if not ok:
+            err = extract_psql_errors(out or "")[:240] or (out or "")[-240:]
+            if err:
+                check_errors.append((auth_user, err))
             continue
         val = (out or "").strip().splitlines()
         restoring = val[-1].strip().lower() if val else ""
-        # Empty/off/n/a all count as a successful read of the GUC.
         check_ok = True
+        working_auth = (auth_user, auth_pwd)
         break
 
     need_post = restoring == "on" or not check_ok
@@ -1888,31 +2030,55 @@ async def _ensure_timescaledb_not_in_restore_mode(
             "TimescaleDB restore-mode check inconclusive — "
             "forcing timescaledb_post_restore() before panel start"
         )
+        if check_errors:
+            job.log(f"restore-mode check notes:\n{summarize_pg_auth_errors(check_errors)}")
+
+    # Prefer the auth that already worked for the GUC check.
+    post_attempts = list(auth_attempts)
+    if working_auth is not None:
+        post_attempts = [working_auth] + [a for a in auth_attempts if a != working_auth]
 
     cleared = False
-    last_err = ""
-    for u in users:
-        ok2, out2 = await _psql(u, post_sql, timeout=30)
+    post_errors: list[tuple[str, str]] = []
+    used_user = ""
+    for auth_user, auth_pwd in post_attempts:
+        ok2, out2 = await _try(post_sql, auth_user, auth_pwd, timeout=30)
         if ok2:
-            job.log(f"TimescaleDB restore mode cleared successfully (as {u})")
+            job.log(f"TimescaleDB restore mode cleared successfully (as {auth_user})")
             cleared = True
+            used_user = auth_user
+            working_auth = (auth_user, auth_pwd)
             break
         last_err = extract_psql_errors(out2 or "")[:300] or (out2 or "")[-300:]
+        if last_err:
+            post_errors.append((auth_user, last_err))
+
     if not cleared:
+        detail = summarize_pg_auth_errors(post_errors or check_errors) or "all auth attempts failed"
+        tried = ", ".join(dict.fromkeys(u for u, _ in post_attempts))
         if restoring == "on":
             raise RuntimeError(
                 "TimescaleDB is stuck in restoring=on and timescaledb_post_restore() failed.\n"
-                f"{last_err}\n"
+                f"Tried roles: {tried}\n"
+                f"{detail}\n"
                 "PasarGuard would crash silently after alembic Context — refusing to continue."
             )
-        job.log(f"timescaledb_post_restore warning: {last_err}")
+        job.log(f"timescaledb_post_restore warning: {detail}")
         return
 
-    # Confirm when possible (best-effort).
-    for u in users:
-        ok3, out3 = await _psql(u, check_sql, timeout=20)
-        if not ok3:
-            continue
+    # Confirm when possible with the same working credentials.
+    confirm_auth = working_auth or (used_user, password or None)
+    ok3, out3 = await _try(check_sql, confirm_auth[0], confirm_auth[1], timeout=20)
+    if not ok3:
+        # Best-effort: try remaining auths once
+        for auth_user, auth_pwd in post_attempts:
+            if (auth_user, auth_pwd) == confirm_auth:
+                continue
+            ok3, out3 = await _try(check_sql, auth_user, auth_pwd, timeout=20)
+            if ok3:
+                confirm_auth = (auth_user, auth_pwd)
+                break
+    if ok3:
         val3 = (out3 or "").strip().splitlines()
         after = val3[-1].strip().lower() if val3 else ""
         if after == "on":
@@ -1922,6 +2088,7 @@ async def _ensure_timescaledb_not_in_restore_mode(
             )
         job.log(f"TimescaleDB restore mode confirmed clear ({after or 'off/n/a'})")
         return
+    job.log("TimescaleDB post_restore succeeded; could not re-confirm GUC (auth) — continuing")
 
 
 async def _heal_panel_auth_if_needed(job: MigrationJob, password: str, user: str, db_name: str, db_type: str) -> None:
@@ -1941,7 +2108,7 @@ async def _heal_panel_auth_if_needed(job: MigrationJob, password: str, user: str
     if db_type in ("postgresql", "timescaledb"):
         svc = await _detect_db_container(job, db_type)
         if svc:
-            await _sync_pg_role_passwords(job, svc, password, user or "postgres", db_name or "pasarguard")
+            await _sync_pg_role_passwords(job, svc, password, user or "pasarguard", db_name or "pasarguard")
     elif db_type in ("mysql", "mariadb"):
         svc = await _detect_db_container(job, db_type)
         if svc and password:
@@ -2151,6 +2318,17 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         causes_fa = [
             "خروجی docker compose با نسخه alembic قاطی شده بود — در v2.3.5+ اصلاح شد",
             "اسکیمای target قبلاً با alembic upgrade head ساخته شده و دیگر نیاز به stamp دستی نیست",
+        ]
+    elif "restoring=on" in low or "timescaledb_post_restore" in low or (
+        "timescaledb.restoring" in low and "still on" in low
+    ):
+        fa = "TimescaleDB در حالت ریستور گیر کرده و post_restore موفق نشد."
+        en = "TimescaleDB is stuck in restore mode and post_restore failed."
+        ru = "TimescaleDB застрял в режиме restore и post_restore не удался."
+        causes_fa = [
+            "نقش واقعی سوپریوزر کانتینر معمولاً POSTGRES_USER / DB_USER است — نقش postgres ممکن است اصلاً وجود نداشته باشد",
+            "ویزارد باید با یوزر/رمز .env و متغیرهای داخل کانتینر timescaledb_post_restore را بزند",
+            "اگر دوباره خطا شد، لاگ را برای Tried roles و اولین خطای غیر از missing role postgres ببینید",
         ]
     elif "timescale" in low and "version" in low:
         fa = "نسخه TimescaleDB بکاپ با سرور هم‌خوان نیست."
@@ -3459,38 +3637,88 @@ async def _restore_postgres(
         or read_env_var(backup_env, "POSTGRES_PASSWORD")
         or ""
     )
-    user = read_env_var(current_env, "DB_USER") or read_env_var(backup_env, "DB_USER") or "postgres"
-    db_name = read_env_var(current_env, "DB_NAME") or read_env_var(backup_env, "DB_NAME") or "pasarguard"
+    user = (
+        read_env_var(current_env, "DB_USER")
+        or read_env_var(current_env, "POSTGRES_USER")
+        or read_env_var(backup_env, "DB_USER")
+        or read_env_var(backup_env, "POSTGRES_USER")
+        or "pasarguard"
+    )
+    db_name = (
+        read_env_var(current_env, "DB_NAME")
+        or read_env_var(current_env, "POSTGRES_DB")
+        or read_env_var(backup_env, "DB_NAME")
+        or read_env_var(backup_env, "POSTGRES_DB")
+        or "pasarguard"
+    )
 
     if not password:
         raise RuntimeError("No database password available for PostgreSQL restore")
 
     # Collect all candidate passwords and pick whichever the live container accepts.
     # After a fresh wipe the container initialises with POSTGRES_PASSWORD from compose env;
-    # that value may differ from DB_PASSWORD.  Try current first, then backup, then postgres.
+    # that value may differ from DB_PASSWORD. Also try container POSTGRES_* and socket trust.
+    from app.services.db_auth import build_postgres_auth_attempts, postgres_password_candidates
+
+    container_env = await _read_pg_container_init_env(job, svc)
     password_candidates = list(dict.fromkeys(filter(None, [
         password,
-        read_env_var(backup_env, "POSTGRES_PASSWORD"),
-        read_env_var(backup_env, "DB_PASSWORD"),
+        container_env.get("POSTGRES_PASSWORD"),
+        *postgres_password_candidates(current_env),
+        *postgres_password_candidates(backup_env),
     ])))
-    user_candidates = list(dict.fromkeys(filter(None, [user, "postgres"])))
+    auth_attempts = build_postgres_auth_attempts(
+        current_env or backup_env,
+        preferred_user=user,
+        preferred_password=password,
+        extra_users=(
+            read_env_var(backup_env, "DB_USER"),
+            read_env_var(backup_env, "POSTGRES_USER"),
+            db_name,
+            container_env.get("POSTGRES_USER"),
+        ),
+        extra_passwords=tuple(password_candidates),
+        container_user=container_env.get("POSTGRES_USER"),
+        container_password=container_env.get("POSTGRES_PASSWORD"),
+        include_trust=True,
+    )
 
     effective_password = password
     effective_user = user
     pg_ready = False
-    for pw_try in password_candidates:
-        for u_try in user_candidates:
-            if await _wait_for_postgres_ready(job, svc, pw_try, user=u_try, timeout=60):
-                effective_password = pw_try
-                effective_user = u_try
+    for auth_user, auth_pwd in auth_attempts:
+        # Readiness helper requires a password string; for trust attempts use ""
+        # and also try a direct socket SELECT without PGPASSWORD below.
+        if auth_pwd is None:
+            ok_trust, out_trust = await _psql_in_db_container(
+                job, svc,
+                user=auth_user,
+                password=None,
+                database="postgres",
+                sql="SELECT 1;",
+                timeout=20,
+            )
+            if _psql_exec_succeeded(ok_trust, out_trust):
+                effective_user = auth_user
+                # Keep a real password for later PGPASSWORD-based dump pipes
+                effective_password = (
+                    password
+                    or container_env.get("POSTGRES_PASSWORD")
+                    or next((p for p in password_candidates if p), "")
+                )
                 pg_ready = True
-                if pw_try != password or u_try != user:
-                    job.log(
-                        f"PostgreSQL accepted auth with user={u_try} "
-                        f"(password differs from current .env) — adjusting for restore"
-                    )
+                job.log(f"PostgreSQL ready via local trust as {auth_user}")
                 break
-        if pg_ready:
+            continue
+        if await _wait_for_postgres_ready(job, svc, auth_pwd, user=auth_user, timeout=45):
+            effective_password = auth_pwd
+            effective_user = auth_user
+            pg_ready = True
+            if auth_pwd != password or auth_user != user:
+                job.log(
+                    f"PostgreSQL accepted auth with user={auth_user} "
+                    f"(credentials differ from current .env) — adjusting for restore"
+                )
             break
 
     if not pg_ready:
