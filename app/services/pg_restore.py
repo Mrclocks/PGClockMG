@@ -1806,6 +1806,18 @@ async def _sync_mysql_passwords(
     )
 
 
+def parse_ts_post_restore_catalog_mismatch(text: str) -> tuple[str, str] | None:
+    """Parse ``catalog version mismatch, expected "X" seen "Y"`` from post_restore."""
+    m = re.search(
+        r'catalog version mismatch,\s*expected\s+"([^"]+)"\s+seen\s+"([^"]+)"',
+        text or "",
+        re.I,
+    )
+    if not m:
+        return None
+    return m.group(1).strip(), m.group(2).strip()
+
+
 async def _read_pg_container_init_env(
     job: MigrationJob,
     svc: str,
@@ -1956,12 +1968,13 @@ async def _ensure_timescaledb_not_in_restore_mode(
     silently crashes on every connect attempt — producing a restart loop with
     no visible error in panel logs (often stops right after alembic Context).
 
-    Auth strategy (root cause of prior hard-fails):
-    - Prefer roles from .env / container ``POSTGRES_USER`` (not hardcoded postgres).
-    - Try local socket trust first, then password candidates.
-    - Reuse the same credentials that successfully read ``timescaledb.restoring``.
-    - Report useful errors; do not let a missing optional ``postgres`` role mask
-      the real failure from the app/superuser role.
+    Strategy:
+    1. Auth via .env + container POSTGRES_* + local socket trust (not only postgres).
+    2. Clear restore mode on the app DB and every other connectable DB that is on.
+    3. ``timescaledb_post_restore()`` (twice — known Timescale GUC quirk).
+    4. On catalog version mismatch: align image to the dump catalog version (no wipe).
+    5. Emergency ``ALTER DATABASE … RESET/SET timescaledb.restoring`` + session SET.
+    6. Re-verify on a fresh connection; only hard-fail if still on.
     """
     from app.services.db_auth import (
         build_postgres_auth_attempts,
@@ -1974,6 +1987,19 @@ async def _ensure_timescaledb_not_in_restore_mode(
 
     check_sql = "SELECT current_setting('timescaledb.restoring', true);"
     post_sql = "SELECT timescaledb_post_restore();"
+    # Emergency clear mirrors what post_restore does for the GUC when the function
+    # itself cannot run (permission / catalog check) — enough to stop panel death.
+    emergency_sql = (
+        "DO $ts$ DECLARE db text := current_database(); BEGIN "
+        "EXECUTE format('ALTER DATABASE %I RESET timescaledb.restoring', db); "
+        "EXECUTE format('ALTER DATABASE %I SET timescaledb.restoring = %L', db, 'off'); "
+        "EXCEPTION WHEN OTHERS THEN "
+        "EXECUTE format('ALTER DATABASE %I SET timescaledb.restoring = %L', db, 'off'); "
+        "END $ts$; "
+        "SET timescaledb.restoring TO off;"
+    )
+    grant_sql_tmpl = 'ALTER ROLE "{role}" WITH SUPERUSER;'
+
     dbn = (db_name or "").strip() or "pasarguard"
     env_now = _read_current_env()
     container_env = await _read_pg_container_init_env(job, svc)
@@ -1989,106 +2015,246 @@ async def _ensure_timescaledb_not_in_restore_mode(
     if not auth_attempts:
         auth_attempts = [(user or "pasarguard", password or None)]
 
-    async def _try(sql: str, auth_user: str, auth_pwd: str | None, *, timeout: int = 20) -> tuple[bool, str]:
+    async def _try(
+        sql: str,
+        auth_user: str,
+        auth_pwd: str | None,
+        database: str,
+        *,
+        timeout: int = 20,
+    ) -> tuple[bool, str]:
         ok, out = await _psql_in_db_container(
             job, svc,
             user=auth_user,
             password=auth_pwd,
-            database=dbn,
+            database=database,
             sql=sql,
             timeout=timeout,
         )
         return _psql_exec_succeeded(ok, out), out
 
-    restoring = ""
-    check_ok = False
-    working_auth: tuple[str, str | None] | None = None
-    check_errors: list[tuple[str, str]] = []
+    async def _find_auth_for_db(database: str) -> tuple[tuple[str, str | None] | None, str, list[tuple[str, str]]]:
+        errors: list[tuple[str, str]] = []
+        restoring_val = ""
+        for auth_user, auth_pwd in auth_attempts:
+            ok, out = await _try(check_sql, auth_user, auth_pwd, database, timeout=20)
+            if not ok:
+                err = extract_psql_errors(out or "")[:240] or (out or "")[-240:]
+                if err:
+                    errors.append((auth_user, err))
+                continue
+            val = (out or "").strip().splitlines()
+            restoring_val = val[-1].strip().lower() if val else ""
+            return (auth_user, auth_pwd), restoring_val, errors
+        return None, restoring_val, errors
 
-    for auth_user, auth_pwd in auth_attempts:
-        ok, out = await _try(check_sql, auth_user, auth_pwd, timeout=20)
-        if not ok:
+    async def _list_databases(seed_auth: tuple[str, str | None] | None) -> list[str]:
+        dbs = [dbn]
+        order = list(auth_attempts)
+        if seed_auth is not None:
+            order = [seed_auth] + [a for a in auth_attempts if a != seed_auth]
+        list_sql = (
+            "SELECT datname FROM pg_database "
+            "WHERE datallowconn AND NOT datistemplate ORDER BY 1;"
+        )
+        for auth_user, auth_pwd in order:
+            for probe_db in (dbn, "postgres", container_env.get("POSTGRES_DB") or "pasarguard"):
+                if not probe_db:
+                    continue
+                ok, out = await _try(list_sql, auth_user, auth_pwd, probe_db, timeout=20)
+                if not ok:
+                    continue
+                found = []
+                for line in (out or "").splitlines():
+                    name = line.strip()
+                    if name and re.match(r"^[A-Za-z_][A-Za-z0-9_$]*$", name):
+                        found.append(name)
+                if found:
+                    # App DB first, then the rest.
+                    ordered = [dbn] + [d for d in found if d != dbn]
+                    return list(dict.fromkeys(ordered))
+        return dbs
+
+    async def _promote_superuser(working: tuple[str, str | None], database: str) -> None:
+        role = working[0]
+        sql = grant_sql_tmpl.format(role=role.replace('"', '""'))
+        for auth_user, auth_pwd in auth_attempts:
+            ok, _out = await _try(sql, auth_user, auth_pwd, database, timeout=20)
+            if ok:
+                job.log(f"Granted SUPERUSER to role {role} (as {auth_user}) for post_restore")
+                return
+
+    async def _run_post_restore(
+        database: str,
+        attempts: list[tuple[str, str | None]],
+    ) -> tuple[bool, tuple[str, str | None] | None, list[tuple[str, str]], str | None]:
+        """Returns cleared, working_auth, errors, catalog_seen_version."""
+        errors: list[tuple[str, str]] = []
+        catalog_seen: str | None = None
+        for auth_user, auth_pwd in attempts:
+            ok, out = await _try(post_sql, auth_user, auth_pwd, database, timeout=45)
+            if ok:
+                job.log(f"TimescaleDB restore mode cleared successfully on {database} (as {auth_user})")
+                return True, (auth_user, auth_pwd), errors, catalog_seen
+            err = extract_psql_errors(out or "")[:400] or (out or "")[-400:]
+            if err:
+                errors.append((auth_user, err))
+            mismatch = parse_ts_post_restore_catalog_mismatch(out or "")
+            if mismatch:
+                # Align to the catalog version stored in the restored dump ("seen").
+                catalog_seen = mismatch[1]
+        return False, None, errors, catalog_seen
+
+    async def _emergency_clear(
+        database: str,
+        attempts: list[tuple[str, str | None]],
+    ) -> tuple[bool, tuple[str, str | None] | None, list[tuple[str, str]]]:
+        errors: list[tuple[str, str]] = []
+        for auth_user, auth_pwd in attempts:
+            ok, out = await _try(emergency_sql, auth_user, auth_pwd, database, timeout=30)
+            if ok:
+                job.log(f"Emergency cleared timescaledb.restoring on {database} (as {auth_user})")
+                return True, (auth_user, auth_pwd), errors
             err = extract_psql_errors(out or "")[:240] or (out or "")[-240:]
             if err:
-                check_errors.append((auth_user, err))
-            continue
-        val = (out or "").strip().splitlines()
-        restoring = val[-1].strip().lower() if val else ""
-        check_ok = True
-        working_auth = (auth_user, auth_pwd)
-        break
+                errors.append((auth_user, err))
+        return False, None, errors
 
-    need_post = restoring == "on" or not check_ok
-    if not need_post:
-        job.log(f"TimescaleDB restore mode check: {restoring or 'off/n/a'} — OK")
-        return
-
-    if restoring == "on":
-        job.log("TimescaleDB is still in restore mode — calling timescaledb_post_restore() now")
-    else:
-        job.log(
-            "TimescaleDB restore-mode check inconclusive — "
-            "forcing timescaledb_post_restore() before panel start"
-        )
-        if check_errors:
-            job.log(f"restore-mode check notes:\n{summarize_pg_auth_errors(check_errors)}")
-
-    # Prefer the auth that already worked for the GUC check.
-    post_attempts = list(auth_attempts)
-    if working_auth is not None:
-        post_attempts = [working_auth] + [a for a in auth_attempts if a != working_auth]
-
-    cleared = False
-    post_errors: list[tuple[str, str]] = []
-    used_user = ""
-    for auth_user, auth_pwd in post_attempts:
-        ok2, out2 = await _try(post_sql, auth_user, auth_pwd, timeout=30)
-        if ok2:
-            job.log(f"TimescaleDB restore mode cleared successfully (as {auth_user})")
-            cleared = True
-            used_user = auth_user
-            working_auth = (auth_user, auth_pwd)
-            break
-        last_err = extract_psql_errors(out2 or "")[:300] or (out2 or "")[-300:]
-        if last_err:
-            post_errors.append((auth_user, last_err))
-
-    if not cleared:
-        detail = summarize_pg_auth_errors(post_errors or check_errors) or "all auth attempts failed"
-        tried = ", ".join(dict.fromkeys(u for u, _ in post_attempts))
-        if restoring == "on":
-            raise RuntimeError(
-                "TimescaleDB is stuck in restoring=on and timescaledb_post_restore() failed.\n"
-                f"Tried roles: {tried}\n"
-                f"{detail}\n"
-                "PasarGuard would crash silently after alembic Context — refusing to continue."
-            )
-        job.log(f"timescaledb_post_restore warning: {detail}")
-        return
-
-    # Confirm when possible with the same working credentials.
-    confirm_auth = working_auth or (used_user, password or None)
-    ok3, out3 = await _try(check_sql, confirm_auth[0], confirm_auth[1], timeout=20)
-    if not ok3:
-        # Best-effort: try remaining auths once
-        for auth_user, auth_pwd in post_attempts:
-            if (auth_user, auth_pwd) == confirm_auth:
+    async def _confirm_off(
+        database: str,
+        preferred: tuple[str, str | None] | None,
+    ) -> tuple[bool, str]:
+        order = list(auth_attempts)
+        if preferred is not None:
+            order = [preferred] + [a for a in auth_attempts if a != preferred]
+        for auth_user, auth_pwd in order:
+            ok, out = await _try(check_sql, auth_user, auth_pwd, database, timeout=20)
+            if not ok:
                 continue
-            ok3, out3 = await _try(check_sql, auth_user, auth_pwd, timeout=20)
-            if ok3:
-                confirm_auth = (auth_user, auth_pwd)
-                break
-    if ok3:
-        val3 = (out3 or "").strip().splitlines()
-        after = val3[-1].strip().lower() if val3 else ""
-        if after == "on":
-            raise RuntimeError(
-                "TimescaleDB timescaledb.restoring is still on after post_restore — "
-                "panel would die silently. Refusing to mark restore as success."
+            val = (out or "").strip().splitlines()
+            after = val[-1].strip().lower() if val else ""
+            return True, after
+        return False, ""
+
+    async def _clear_one_database(database: str) -> None:
+        working, restoring, check_errors = await _find_auth_for_db(database)
+        need_post = restoring == "on" or working is None
+        if not need_post:
+            job.log(f"TimescaleDB restore mode on {database}: {restoring or 'off/n/a'} — OK")
+            return
+
+        if restoring == "on":
+            job.log(f"TimescaleDB {database} is still in restore mode — clearing now")
+        else:
+            job.log(
+                f"TimescaleDB restore-mode check inconclusive on {database} — "
+                "forcing post_restore / emergency clear"
             )
-        job.log(f"TimescaleDB restore mode confirmed clear ({after or 'off/n/a'})")
-        return
-    job.log("TimescaleDB post_restore succeeded; could not re-confirm GUC (auth) — continuing")
+            if check_errors:
+                job.log(f"restore-mode check notes ({database}):\n{summarize_pg_auth_errors(check_errors)}")
+
+        attempts = list(auth_attempts)
+        if working is not None:
+            attempts = [working] + [a for a in auth_attempts if a != working]
+            # Reading the GUC does not require SUPERUSER; post_restore does.
+            await _promote_superuser(working, database)
+
+        cleared, used_auth, post_errors, catalog_seen = await _run_post_restore(database, attempts)
+
+        # Known Timescale quirk: first post_restore may leave GUC visible as on.
+        if cleared:
+            ok_c, after = await _confirm_off(database, used_auth)
+            if ok_c and after == "on":
+                job.log(f"timescaledb.restoring still on in {database} after first post_restore — retrying")
+                cleared2, used_auth2, post_errors2, catalog_seen2 = await _run_post_restore(database, attempts)
+                catalog_seen = catalog_seen or catalog_seen2
+                post_errors.extend(post_errors2)
+                if cleared2:
+                    used_auth = used_auth2 or used_auth
+                    cleared = True
+                else:
+                    cleared = False
+
+        if not cleared and catalog_seen:
+            pin = parse_timescale_wanted([catalog_seen]) or catalog_seen
+            job.log(
+                f"timescaledb_post_restore catalog mismatch on {database} — "
+                f"aligning image to dump catalog {pin} (no data wipe)"
+            )
+            try:
+                await _align_timescaledb_image(job, pin, wipe_data=False)
+            except Exception as e:
+                job.log(f"Timescale align after catalog mismatch note: {e}")
+            else:
+                cleared, used_auth, post_errors2, _ = await _run_post_restore(database, attempts)
+                post_errors.extend(post_errors2)
+                if cleared:
+                    ok_c, after = await _confirm_off(database, used_auth)
+                    if ok_c and after == "on":
+                        await _run_post_restore(database, attempts)
+
+        if not cleared:
+            emerg_ok, emerg_auth, emerg_errors = await _emergency_clear(database, attempts)
+            post_errors.extend(emerg_errors)
+            if emerg_ok:
+                cleared = True
+                used_auth = emerg_auth or used_auth
+                # Best-effort: still call post_restore once workers can start.
+                await _run_post_restore(database, attempts)
+
+        if not cleared:
+            detail = summarize_pg_auth_errors(post_errors or check_errors) or "all clear attempts failed"
+            tried = ", ".join(dict.fromkeys(u for u, _ in attempts))
+            if restoring == "on" or working is None:
+                raise RuntimeError(
+                    "TimescaleDB is stuck in restoring=on and timescaledb_post_restore() failed.\n"
+                    f"Database: {database}\n"
+                    f"Tried roles: {tried}\n"
+                    f"{detail}\n"
+                    "PasarGuard would crash silently after alembic Context — refusing to continue."
+                )
+            job.log(f"timescaledb_post_restore warning on {database}: {detail}")
+            return
+
+        ok_c, after = await _confirm_off(database, used_auth)
+        if ok_c and after == "on":
+            # Last resort emergency if post claimed success but DB setting remains.
+            emerg_ok, emerg_auth, _ = await _emergency_clear(database, attempts)
+            if emerg_ok:
+                ok_c, after = await _confirm_off(database, emerg_auth or used_auth)
+            if ok_c and after == "on":
+                raise RuntimeError(
+                    "TimescaleDB timescaledb.restoring is still on after post_restore — "
+                    f"database={database}. Panel would die silently. Refusing to mark restore as success."
+                )
+        if ok_c:
+            job.log(f"TimescaleDB restore mode confirmed clear on {database} ({after or 'off/n/a'})")
+        else:
+            job.log(
+                f"TimescaleDB clear on {database} succeeded; could not re-confirm GUC (auth) — continuing"
+            )
+
+    seed_auth, seed_restoring, _ = await _find_auth_for_db(dbn)
+    databases = await _list_databases(seed_auth)
+    # If the app DB is on, always clear it; also clear any other DB still on.
+    targets: list[str] = []
+    for database in databases:
+        if database == dbn:
+            targets.append(database)
+            continue
+        _auth, restoring, _errs = await _find_auth_for_db(database)
+        if restoring == "on":
+            targets.append(database)
+    if not targets:
+        targets = [dbn]
+
+    if seed_restoring != "on" and seed_auth is not None and targets == [dbn]:
+        # Fast path already confirmed off above in _clear_one when we call it —
+        # still invoke for consistent logging.
+        pass
+
+    for database in targets:
+        await _clear_one_database(database)
 
 
 async def _heal_panel_auth_if_needed(job: MigrationJob, password: str, user: str, db_name: str, db_type: str) -> None:
@@ -2319,6 +2485,15 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
             "خروجی docker compose با نسخه alembic قاطی شده بود — در v2.3.5+ اصلاح شد",
             "اسکیمای target قبلاً با alembic upgrade head ساخته شده و دیگر نیاز به stamp دستی نیست",
         ]
+    elif "catalog version mismatch" in low and "timescale" in low:
+        fa = "نسخه کاتالوگ TimescaleDB بکاپ با ایمیج در حال اجرا یکی نیست (post_restore)."
+        en = "TimescaleDB catalog version in the dump does not match the running image (post_restore)."
+        ru = "Версия каталога TimescaleDB в дампе не совпадает с образом (post_restore)."
+        causes_fa = [
+            "بکاپ multi ممکن است متادیتای 2.27 و 2.28 داشته باشد — ایمیج باید با کاتالوگ دامپ هم‌تراز شود",
+            "ویزارد ایمیج را بدون پاک کردن دیتا هم‌تراز می‌کند و دوباره post_restore می‌زند",
+            "اگر باز هم خطا بود، نسخه timescaledb در docker-compose.yml را با نسخه بکاپ یکی کنید",
+        ]
     elif "restoring=on" in low or "timescaledb_post_restore" in low or (
         "timescaledb.restoring" in low and "still on" in low
     ):
@@ -2327,8 +2502,8 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         ru = "TimescaleDB застрял в режиме restore и post_restore не удался."
         causes_fa = [
             "نقش واقعی سوپریوزر کانتینر معمولاً POSTGRES_USER / DB_USER است — نقش postgres ممکن است اصلاً وجود نداشته باشد",
-            "ویزارد باید با یوزر/رمز .env و متغیرهای داخل کانتینر timescaledb_post_restore را بزند",
-            "اگر دوباره خطا شد، لاگ را برای Tried roles و اولین خطای غیر از missing role postgres ببینید",
+            "گاهی timescaledb_post_restore به‌خاطر catalog version mismatch خطا می‌دهد — ویزارد ایمیج را هم‌تراز و در نهایت GUC را اضطراری خاموش می‌کند",
+            "اگر دوباره خطا شد، لاگ را برای catalog version mismatch / Tried roles / Database: ببینید",
         ]
     elif "timescale" in low and "version" in low:
         fa = "نسخه TimescaleDB بکاپ با سرور هم‌خوان نیست."

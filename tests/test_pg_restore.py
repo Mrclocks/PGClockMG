@@ -90,6 +90,8 @@ def test_ensure_timescaledb_forces_post_restore_when_on():
         if "timescaledb_post_restore" in joined:
             state["phase"] = "after"
             return True, "t\n"
+        if "datname" in joined:
+            return True, "pasarguard\n"
         return True, ""
 
     async def _go():
@@ -126,6 +128,10 @@ def test_ensure_timescaledb_hard_fails_when_still_on():
             return True, "on\n"
         if "timescaledb_post_restore" in joined:
             return True, "t\n"
+        if "ALTER DATABASE" in joined or "timescaledb.restoring TO off" in joined:
+            return False, "ERROR: cannot clear\n"
+        if "datname" in joined:
+            return True, "pasarguard\n"
         return True, ""
 
     async def _go():
@@ -165,6 +171,8 @@ def test_ensure_timescaledb_forces_post_restore_when_check_fails():
         if "timescaledb_post_restore" in joined:
             posts["n"] += 1
             return True, "t\n"
+        if "datname" in joined:
+            return False, "Timeout"
         return True, ""
 
     async def _go():
@@ -217,6 +225,10 @@ def test_ensure_timescaledb_uses_container_user_when_postgres_missing():
                 return False, 'FATAL:  role "postgres" does not exist\n'
             state["phase"] = "after"
             return True, "t\n"
+        if "datname" in joined:
+            if "-U" in cmd and cmd[cmd.index("-U") + 1] == "postgres":
+                return False, 'FATAL:  role "postgres" does not exist\n'
+            return True, "pasarguard\n"
         return True, ""
 
     async def _go():
@@ -262,6 +274,10 @@ def test_ensure_timescaledb_error_prefers_real_auth_failure():
             if "-U" in cmd and cmd[cmd.index("-U") + 1] == "pasarguard":
                 return False, "ERROR:  permission denied for function timescaledb_post_restore\n"
             return False, 'FATAL:  role "postgres" does not exist\n'
+        if "ALTER DATABASE" in joined or "timescaledb.restoring TO off" in joined:
+            return False, "ERROR: permission denied\n"
+        if "datname" in joined:
+            return True, "pasarguard\n"
         return True, ""
 
     async def _go():
@@ -284,6 +300,63 @@ def test_ensure_timescaledb_error_prefers_real_auth_failure():
         # Missing optional postgres role must not be the only/leading clue
         assert "tried roles" in msg
     print("OK: error summary prefers real failure over missing postgres role")
+
+
+def test_ensure_timescaledb_emergency_clear_when_post_restore_fails():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from app.services import pg_restore as mod
+
+    job = MagicMock()
+    job.log = MagicMock()
+    state = {"phase": "check"}
+
+    async def fake_run(_job, cmd, **_kwargs):
+        joined = " ".join(str(c) for c in cmd)
+        if "current_setting" in joined:
+            if state["phase"] == "check":
+                return True, "on\n"
+            return True, "off\n"
+        if "timescaledb_post_restore" in joined:
+            return False, (
+                'ERROR:  catalog version mismatch, expected "2.28.0" seen "2.27.0"\n'
+            )
+        if "ALTER DATABASE" in joined or "timescaledb.restoring TO off" in joined:
+            state["phase"] = "after"
+            return True, "SET\n"
+        if "datname" in joined:
+            return True, "pasarguard\n"
+        return True, ""
+
+    async def _go():
+        with (
+            patch.object(mod, "_detect_db_container", AsyncMock(return_value="timescaledb")),
+            patch.object(mod, "_read_pg_container_init_env", AsyncMock(return_value={})),
+            patch.object(mod, "_read_current_env", return_value="DB_USER=pasarguard\n"),
+            patch.object(
+                mod, "_align_timescaledb_image", AsyncMock(side_effect=RuntimeError("skip align in unit test"))
+            ),
+            patch.object(mod, "_run", side_effect=fake_run),
+        ):
+            await mod._ensure_timescaledb_not_in_restore_mode(
+                job, "secret", "pasarguard", "pasarguard",
+            )
+
+    asyncio.run(_go())
+    log_text = " ".join(str(c.args[0]) for c in job.log.call_args_list if c.args).lower()
+    assert "emergency cleared" in log_text or "confirmed clear" in log_text
+    print("OK: emergency clear after catalog mismatch post_restore failure")
+
+
+def test_parse_ts_post_restore_catalog_mismatch():
+    from app.services.pg_restore import parse_ts_post_restore_catalog_mismatch
+
+    got = parse_ts_post_restore_catalog_mismatch(
+        'ERROR:  catalog version mismatch, expected "2.28.0" seen "2.27.0"'
+    )
+    assert got == ("2.28.0", "2.27.0")
+    assert parse_ts_post_restore_catalog_mismatch("other") is None
+    print("OK: parse post_restore catalog mismatch")
 
 
 def test_filter_timescaledb_extension_sql():
@@ -1199,6 +1272,8 @@ if __name__ == "__main__":
     test_ensure_timescaledb_forces_post_restore_when_check_fails()
     test_ensure_timescaledb_uses_container_user_when_postgres_missing()
     test_ensure_timescaledb_error_prefers_real_auth_failure()
+    test_ensure_timescaledb_emergency_clear_when_post_restore_fails()
+    test_parse_ts_post_restore_catalog_mismatch()
     test_filter_timescaledb_extension_sql()
     test_filter_timescaledb_strip_all_for_plain_pg()
     test_parse_timescale_wanted()
