@@ -81,6 +81,8 @@ def test_ensure_timescaledb_forces_post_restore_when_on():
     async def fake_run(_job, cmd, **_kwargs):
         joined = " ".join(str(c) for c in cmd)
         calls.append(joined)
+        if "printenv" in joined:
+            return False, ""
         if "current_setting" in joined:
             if state["phase"] == "check":
                 return True, "on\n"
@@ -93,6 +95,8 @@ def test_ensure_timescaledb_forces_post_restore_when_on():
     async def _go():
         with (
             patch.object(mod, "_detect_db_container", AsyncMock(return_value="timescaledb")),
+            patch.object(mod, "_read_pg_container_init_env", AsyncMock(return_value={})),
+            patch.object(mod, "_read_current_env", return_value="DB_USER=pasarguard\nPOSTGRES_USER=pasarguard\n"),
             patch.object(mod, "_run", side_effect=fake_run),
         ):
             await mod._ensure_timescaledb_not_in_restore_mode(
@@ -116,6 +120,8 @@ def test_ensure_timescaledb_hard_fails_when_still_on():
 
     async def fake_run(_job, cmd, **_kwargs):
         joined = " ".join(str(c) for c in cmd)
+        if "printenv" in joined:
+            return False, ""
         if "current_setting" in joined:
             return True, "on\n"
         if "timescaledb_post_restore" in joined:
@@ -125,6 +131,8 @@ def test_ensure_timescaledb_hard_fails_when_still_on():
     async def _go():
         with (
             patch.object(mod, "_detect_db_container", AsyncMock(return_value="timescaledb")),
+            patch.object(mod, "_read_pg_container_init_env", AsyncMock(return_value={})),
+            patch.object(mod, "_read_current_env", return_value="DB_USER=pasarguard\n"),
             patch.object(mod, "_run", side_effect=fake_run),
         ):
             await mod._ensure_timescaledb_not_in_restore_mode(
@@ -150,6 +158,8 @@ def test_ensure_timescaledb_forces_post_restore_when_check_fails():
 
     async def fake_run(_job, cmd, **_kwargs):
         joined = " ".join(str(c) for c in cmd)
+        if "printenv" in joined:
+            return False, ""
         if "current_setting" in joined:
             return False, "Timeout"
         if "timescaledb_post_restore" in joined:
@@ -160,6 +170,8 @@ def test_ensure_timescaledb_forces_post_restore_when_check_fails():
     async def _go():
         with (
             patch.object(mod, "_detect_db_container", AsyncMock(return_value="timescaledb")),
+            patch.object(mod, "_read_pg_container_init_env", AsyncMock(return_value={})),
+            patch.object(mod, "_read_current_env", return_value="DB_USER=pasarguard\n"),
             patch.object(mod, "_run", side_effect=fake_run),
         ):
             await mod._ensure_timescaledb_not_in_restore_mode(
@@ -171,6 +183,107 @@ def test_ensure_timescaledb_forces_post_restore_when_check_fails():
     log_text = " ".join(str(c.args[0]) for c in job.log.call_args_list if c.args)
     assert "inconclusive" in log_text.lower()
     print("OK: ensure post_restore when check inconclusive")
+
+
+def test_ensure_timescaledb_uses_container_user_when_postgres_missing():
+    """Root regression: role postgres does not exist must not block post_restore."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from app.services import pg_restore as mod
+
+    job = MagicMock()
+    job.log = MagicMock()
+    state = {"phase": "check"}
+    used_users: list[str] = []
+
+    async def fake_run(_job, cmd, **_kwargs):
+        joined = " ".join(str(c) for c in cmd)
+        # Capture -U value
+        if "psql" in joined:
+            try:
+                u_idx = cmd.index("-U")
+                used_users.append(str(cmd[u_idx + 1]))
+            except (ValueError, IndexError):
+                pass
+        if "current_setting" in joined:
+            # Only pasarguard works; postgres role missing
+            if "-U" in cmd and cmd[cmd.index("-U") + 1] == "postgres":
+                return False, 'FATAL:  role "postgres" does not exist\n'
+            if state["phase"] == "check":
+                return True, "on\n"
+            return True, "off\n"
+        if "timescaledb_post_restore" in joined:
+            if "-U" in cmd and cmd[cmd.index("-U") + 1] == "postgres":
+                return False, 'FATAL:  role "postgres" does not exist\n'
+            state["phase"] = "after"
+            return True, "t\n"
+        return True, ""
+
+    async def _go():
+        with (
+            patch.object(mod, "_detect_db_container", AsyncMock(return_value="timescaledb")),
+            patch.object(
+                mod,
+                "_read_pg_container_init_env",
+                AsyncMock(return_value={"POSTGRES_USER": "pasarguard", "POSTGRES_PASSWORD": "secret"}),
+            ),
+            patch.object(
+                mod,
+                "_read_current_env",
+                return_value="DB_USER=pasarguard\nPOSTGRES_USER=pasarguard\nDB_PASSWORD=secret\n",
+            ),
+            patch.object(mod, "_run", side_effect=fake_run),
+        ):
+            await mod._ensure_timescaledb_not_in_restore_mode(
+                job, "secret", "pasarguard", "pasarguard",
+            )
+
+    asyncio.run(_go())
+    assert "pasarguard" in used_users
+    assert any("cleared successfully" in str(c.args[0]).lower() for c in job.log.call_args_list if c.args)
+    print("OK: post_restore works without role postgres")
+
+
+def test_ensure_timescaledb_error_prefers_real_auth_failure():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from app.services import pg_restore as mod
+
+    job = MagicMock()
+    job.log = MagicMock()
+
+    async def fake_run(_job, cmd, **_kwargs):
+        joined = " ".join(str(c) for c in cmd)
+        if "current_setting" in joined:
+            if "-U" in cmd and cmd[cmd.index("-U") + 1] == "pasarguard":
+                return True, "on\n"
+            return False, 'FATAL:  role "postgres" does not exist\n'
+        if "timescaledb_post_restore" in joined:
+            if "-U" in cmd and cmd[cmd.index("-U") + 1] == "pasarguard":
+                return False, "ERROR:  permission denied for function timescaledb_post_restore\n"
+            return False, 'FATAL:  role "postgres" does not exist\n'
+        return True, ""
+
+    async def _go():
+        with (
+            patch.object(mod, "_detect_db_container", AsyncMock(return_value="timescaledb")),
+            patch.object(mod, "_read_pg_container_init_env", AsyncMock(return_value={})),
+            patch.object(mod, "_read_current_env", return_value="DB_USER=pasarguard\n"),
+            patch.object(mod, "_run", side_effect=fake_run),
+        ):
+            await mod._ensure_timescaledb_not_in_restore_mode(
+                job, "secret", "pasarguard", "pasarguard",
+            )
+
+    try:
+        asyncio.run(_go())
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as e:
+        msg = str(e).lower()
+        assert "permission denied" in msg
+        # Missing optional postgres role must not be the only/leading clue
+        assert "tried roles" in msg
+    print("OK: error summary prefers real failure over missing postgres role")
 
 
 def test_filter_timescaledb_extension_sql():
@@ -1084,6 +1197,8 @@ if __name__ == "__main__":
     test_ensure_timescaledb_forces_post_restore_when_on()
     test_ensure_timescaledb_hard_fails_when_still_on()
     test_ensure_timescaledb_forces_post_restore_when_check_fails()
+    test_ensure_timescaledb_uses_container_user_when_postgres_missing()
+    test_ensure_timescaledb_error_prefers_real_auth_failure()
     test_filter_timescaledb_extension_sql()
     test_filter_timescaledb_strip_all_for_plain_pg()
     test_parse_timescale_wanted()

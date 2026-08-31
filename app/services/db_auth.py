@@ -65,6 +65,117 @@ def postgres_admin_users(env_text: str | None) -> list[str]:
     return users or ["postgres"]
 
 
+def postgres_role_candidates(
+    env_text: str | None,
+    *preferred: str | None,
+    container_user: str | None = None,
+    include_postgres_fallback: bool = True,
+) -> list[str]:
+    """Ordered PostgreSQL login roles for restore/ops.
+
+    Prefer caller/app roles and the container's ``POSTGRES_USER``. The literal
+    role ``postgres`` is only a last resort — many PasarGuard/Timescale images
+    never create it, so treating it as required causes false hard-fails.
+    """
+    text = env_text or ""
+    url_user = None
+    url = read_env_var(text, "SQLALCHEMY_DATABASE_URL") or ""
+    if url:
+        from app.services.env_migration import parse_sqlalchemy_url
+
+        url_user = parse_sqlalchemy_url(url).get("user")
+    users = _unique_strings(
+        *preferred,
+        container_user,
+        read_env_var(text, "DB_USER"),
+        read_env_var(text, "POSTGRES_USER"),
+        url_user,
+        read_env_var(text, "DB_NAME"),
+        read_env_var(text, "POSTGRES_DB"),
+    )
+    if include_postgres_fallback and "postgres" not in users:
+        users.append("postgres")
+    return users or (["postgres"] if include_postgres_fallback else [])
+
+
+def build_postgres_auth_attempts(
+    env_text: str | None,
+    *,
+    preferred_user: str | None = None,
+    preferred_password: str | None = None,
+    extra_users: tuple[str | None, ...] = (),
+    extra_passwords: tuple[str | None, ...] = (),
+    container_user: str | None = None,
+    container_password: str | None = None,
+    include_trust: bool = True,
+) -> list[tuple[str, str | None]]:
+    """Build ``(role, password|None)`` attempts for ``psql`` inside the DB container.
+
+    ``password is None`` means omit ``PGPASSWORD`` and rely on local socket trust
+    (common in official Postgres/Timescale images). Password attempts follow.
+    Missing ``postgres`` role failures should be treated as skippable by callers.
+    """
+    users = postgres_role_candidates(
+        env_text,
+        preferred_user,
+        *extra_users,
+        container_user=container_user,
+    )
+    passwords = _unique_strings(
+        preferred_password,
+        container_password,
+        *extra_passwords,
+        *postgres_password_candidates(env_text),
+    )
+    attempts: list[tuple[str, str | None]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(user: str, password: str | None) -> None:
+        key = (user, "" if password is None else password)
+        if key in seen:
+            return
+        seen.add(key)
+        attempts.append((user, password))
+
+    for user in users:
+        if include_trust:
+            _add(user, None)
+        for pwd in passwords:
+            _add(user, pwd)
+    return attempts
+
+
+def summarize_pg_auth_errors(
+    errors: list[tuple[str, str]],
+    *,
+    limit: int = 4,
+) -> str:
+    """Pick the most useful auth/SQL errors (skip noise from missing optional roles)."""
+    if not errors:
+        return ""
+
+    def _score(item: tuple[str, str]) -> tuple[int, int]:
+        user, err = item
+        low = (err or "").lower()
+        # Deprioritize the classic false lead when role postgres was never created.
+        if user == "postgres" and "does not exist" in low:
+            return (3, 0)
+        if "does not exist" in low and "role" in low:
+            return (2, 0)
+        if "password authentication failed" in low:
+            return (1, 0)
+        return (0, 0)
+
+    ranked = sorted(enumerate(errors), key=lambda pair: (_score(pair[1]), pair[0]))
+    parts: list[str] = []
+    for _, (user, err) in ranked[:limit]:
+        msg = (err or "").strip()
+        if not msg:
+            continue
+        parts.append(f"as {user}: {msg}")
+    return "\n".join(parts)
+
+
 def mysql_admin_users(env_text: str | None) -> list[str]:
     text = env_text or ""
     return _unique_strings(
