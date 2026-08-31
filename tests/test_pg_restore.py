@@ -310,6 +310,11 @@ def test_ensure_timescaledb_emergency_clear_when_post_restore_fails():
     job = MagicMock()
     job.log = MagicMock()
     state = {"phase": "check"}
+    align_calls = {"n": 0}
+
+    async def fake_align(*_a, **_k):
+        align_calls["n"] += 1
+        raise RuntimeError("align should not be required when emergency clear works")
 
     async def fake_run(_job, cmd, **_kwargs):
         joined = " ".join(str(c) for c in cmd)
@@ -333,9 +338,7 @@ def test_ensure_timescaledb_emergency_clear_when_post_restore_fails():
             patch.object(mod, "_detect_db_container", AsyncMock(return_value="timescaledb")),
             patch.object(mod, "_read_pg_container_init_env", AsyncMock(return_value={})),
             patch.object(mod, "_read_current_env", return_value="DB_USER=pasarguard\n"),
-            patch.object(
-                mod, "_align_timescaledb_image", AsyncMock(side_effect=RuntimeError("skip align in unit test"))
-            ),
+            patch.object(mod, "_align_timescaledb_image", side_effect=fake_align),
             patch.object(mod, "_run", side_effect=fake_run),
         ):
             await mod._ensure_timescaledb_not_in_restore_mode(
@@ -343,9 +346,68 @@ def test_ensure_timescaledb_emergency_clear_when_post_restore_fails():
             )
 
     asyncio.run(_go())
+    assert align_calls["n"] == 0, "must emergency-clear before attempting image pull"
     log_text = " ".join(str(c.args[0]) for c in job.log.call_args_list if c.args).lower()
-    assert "emergency cleared" in log_text or "confirmed clear" in log_text
+    assert "emergency" in log_text
     print("OK: emergency clear after catalog mismatch post_restore failure")
+
+
+def test_atomic_write_text_and_compose_guard():
+    import tempfile
+    import shutil
+    from app.services.pg_restore import atomic_write_text, _compose_looks_usable
+
+    td = Path(tempfile.mkdtemp(prefix="pg-atomic-"))
+    try:
+        p = td / "docker-compose.yml"
+        atomic_write_text(p, "services:\n  timescaledb:\n    image: x\n")
+        assert _compose_looks_usable(p.read_text(encoding="utf-8"))
+        assert not _compose_looks_usable("")
+        assert not _compose_looks_usable("   \n")
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    print("OK: atomic write + compose usability guard")
+
+
+def test_align_image_enospc_reverts_compose():
+    import asyncio
+    import tempfile
+    import shutil
+    from unittest.mock import MagicMock, patch
+    from app.services import pg_restore as mod
+
+    td = Path(tempfile.mkdtemp(prefix="pg-align-enospc-"))
+    compose = td / "docker-compose.yml"
+    original = "services:\n  timescaledb:\n    image: timescale/timescaledb:2.28.0-pg17\n"
+    compose.write_text(original, encoding="utf-8")
+
+    async def fake_compose(_job, *args, **_kwargs):
+        if args and args[0] == "pull":
+            return False, "write ...: no space left on device"
+        return True, ""
+
+    job = MagicMock()
+    job.log = MagicMock()
+
+    async def _go():
+        with (
+            patch.object(mod, "PASARGUARD_DIR", td),
+            patch.object(mod, "_compose", side_effect=fake_compose),
+            patch.object(mod, "disk_free_bytes", return_value=50 * 1024 * 1024 * 1024),
+        ):
+            await mod._align_timescaledb_image(job, "2.27.0", wipe_data=False)
+
+    try:
+        raised = False
+        try:
+            asyncio.run(_go())
+        except RuntimeError as e:
+            raised = "could not be pulled" in str(e).lower() or "no space" in str(e).lower()
+        assert raised
+        assert compose.read_text(encoding="utf-8") == original
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    print("OK: ENOSPC pull reverts compose tag")
 
 
 def test_parse_ts_post_restore_catalog_mismatch():
@@ -1273,6 +1335,8 @@ if __name__ == "__main__":
     test_ensure_timescaledb_uses_container_user_when_postgres_missing()
     test_ensure_timescaledb_error_prefers_real_auth_failure()
     test_ensure_timescaledb_emergency_clear_when_post_restore_fails()
+    test_atomic_write_text_and_compose_guard()
+    test_align_image_enospc_reverts_compose()
     test_parse_ts_post_restore_catalog_mismatch()
     test_filter_timescaledb_extension_sql()
     test_filter_timescaledb_strip_all_for_plain_pg()

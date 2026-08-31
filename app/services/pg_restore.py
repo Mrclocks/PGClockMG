@@ -1588,6 +1588,9 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
       rm -rf /var/lib/postgresql/pasarguard
 
     NEVER call with wipe_data=True after a successful dump restore — that empties the panel.
+
+    Compose mutations are atomic and always reverted on pull/ENOSPC failure so we
+    never leave an empty docker-compose.yml (which breaks every later compose exec).
     """
     compose = PASARGUARD_DIR / "docker-compose.yml"
     wanted = parse_timescale_wanted([wanted]) or wanted
@@ -1597,6 +1600,11 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
         job.log(f"Ignoring unusable TimescaleDB version from backup: {wanted!r}")
         return
     text = compose.read_text(encoding="utf-8", errors="ignore")
+    if not _compose_looks_usable(text):
+        raise RuntimeError(
+            f"docker-compose.yml is empty or unusable at {compose} — "
+            "refusing Timescale image align (restore compose from backup first)"
+        )
     m = re.search(r"timescale/timescaledb:([^\s\"']+)", text)
     current_tag = m.group(1) if m else "latest-pg17"
     pg_suf = "pg17"
@@ -1604,6 +1612,17 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
     if m2:
         pg_suf = m2.group(1)
     new_tag = f"{wanted}-{pg_suf}"
+    if current_tag == new_tag:
+        job.log(f"TimescaleDB image already pinned to {new_tag}")
+        return
+
+    free = disk_free_bytes("/var/lib")
+    if free >= 0 and free < _TS_PULL_MIN_FREE_BYTES:
+        raise RuntimeError(
+            f"Not enough free disk to pull TimescaleDB {new_tag} "
+            f"({free // (1024 * 1024)} MiB free; need ≥{_TS_PULL_MIN_FREE_BYTES // (1024 * 1024)} MiB). "
+            "Free disk space or skip image align and clear timescaledb.restoring manually."
+        )
 
     job.log(f"Aligning TimescaleDB image: {current_tag} → {new_tag}")
     new_text = re.sub(
@@ -1612,21 +1631,41 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
         text,
         count=1,
     )
-    compose.write_text(new_text, encoding="utf-8")
+    bak = compose.with_suffix(".yml.pgclockmg.bak")
+    try:
+        atomic_write_text(bak, text)
+        atomic_write_text(compose, new_text)
+    except OSError as e:
+        restore_text_file(compose, text)
+        raise RuntimeError(
+            f"Could not update docker-compose.yml for Timescale align ({e}). "
+            "Compose left unchanged."
+        ) from e
+
+    def _revert_compose(reason: str) -> None:
+        if restore_text_file(compose, text):
+            job.log(f"Reverted timescaledb image tag to {current_tag} ({reason})")
+        else:
+            job.log(
+                f"CRITICAL: could not revert docker-compose.yml after {reason} — "
+                f"restore from {bak} if the file is empty"
+            )
 
     job.set_progress(25, "Pulling TimescaleDB image...")
     # Pull the exact image first so `compose up` never silently uses a stale cached layer
     ok_pull, out_pull = await _compose(job, "pull", "timescaledb", timeout=600)
-    if not ok_pull:
-        # Never stop containers or wipe the volume for a tag we could not fetch
-        compose.write_text(text, encoding="utf-8")
-        job.log(f"Could not pull timescale/timescaledb:{new_tag} — reverted tag to {current_tag}")
+    pull_blob = out_pull or ""
+    if (not ok_pull) or is_enospc_text(pull_blob):
+        _revert_compose("image pull failed" + (" / ENOSPC" if is_enospc_text(pull_blob) else ""))
         if wipe_data:
             raise RuntimeError(
                 f"TimescaleDB image {new_tag} could not be pulled — "
-                f"restore stopped before touching the database:\n{(out_pull or '')[-800:]}"
+                f"restore stopped before touching the database:\n{pull_blob[-800:]}"
             )
-        return
+        raise RuntimeError(
+            f"TimescaleDB image {new_tag} could not be pulled "
+            f"(compose tag reverted):\n{pull_blob[-800:]}"
+        )
 
     job.set_progress(28, "Recreating TimescaleDB with matching version...")
     await _compose(job, "stop", "pasarguard", timeout=120)
@@ -1643,6 +1682,7 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
         job.log("Timescale image tag updated without wiping data volume")
     ok, out = await _compose_up_services(job, "timescaledb", "pgbouncer", timeout=300)
     if not ok:
+        _revert_compose("compose up failed")
         raise RuntimeError(f"Failed to recreate TimescaleDB:\n{out[-2000:]}")
 
     # Wait for PostgreSQL to be ready instead of a fixed sleep
@@ -1692,6 +1732,7 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
             pw = auth_pwd
             break
     if not ready:
+        _revert_compose("DB not ready after align")
         raise RuntimeError("TimescaleDB container did not become ready after image alignment")
 
     # Verify extension version
@@ -1818,6 +1859,65 @@ def parse_ts_post_restore_catalog_mismatch(text: str) -> tuple[str, str] | None:
     return m.group(1).strip(), m.group(2).strip()
 
 
+def is_enospc_text(text: str) -> bool:
+    low = (text or "").lower()
+    return (
+        "no space left on device" in low
+        or "errno 28" in low
+        or "[errno 28]" in low
+        or "enospc" in low
+    )
+
+
+def disk_free_bytes(path: str | Path) -> int:
+    try:
+        return int(shutil.disk_usage(str(path)).free)
+    except OSError:
+        return -1
+
+
+# Docker image pulls for Timescale layers routinely need multiple GB free.
+_TS_PULL_MIN_FREE_BYTES = 3 * 1024 * 1024 * 1024
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    """Write file atomically so a full disk never leaves an empty compose/env."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent),
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def restore_text_file(path: Path, content: str, *, label: str = "file") -> bool:
+    """Best-effort restore of a text file after a failed mutation."""
+    try:
+        atomic_write_text(path, content)
+        return True
+    except OSError:
+        # Last ditch: try non-atomic write so we at least put bytes back.
+        try:
+            path.write_text(content, encoding="utf-8")
+            return True
+        except OSError:
+            return False
+
+
 async def _read_pg_container_init_env(
     job: MigrationJob,
     svc: str,
@@ -1855,6 +1955,51 @@ def _psql_exec_succeeded(ok: bool, out: str) -> bool:
     return True
 
 
+def _compose_looks_usable(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    return "services:" in t.lower() or bool(re.search(r"^\s*\w+\s*:", t, re.M))
+
+
+async def _resolve_running_db_container_id(job: MigrationJob, svc: str) -> str | None:
+    """Find a running container id/name when ``docker compose exec`` is unusable."""
+    # Prefer compose mapping when compose file is still valid.
+    compose = PASARGUARD_DIR / "docker-compose.yml"
+    if compose.is_file() and _compose_looks_usable(compose.read_text(encoding="utf-8", errors="ignore")):
+        ok, out = await _run(
+            job,
+            ["docker", "compose", "ps", "-q", svc],
+            cwd=str(PASARGUARD_DIR),
+            timeout=20,
+            quiet=True,
+        )
+        cid = (out or "").strip().splitlines()
+        if ok and cid and cid[-1].strip():
+            return cid[-1].strip()
+    # Fallback: match running container names.
+    ok2, out2 = await _run(
+        job,
+        ["docker", "ps", "--format", "{{.ID}} {{.Names}}"],
+        timeout=20,
+        quiet=True,
+    )
+    if not ok2:
+        return None
+    svc_l = (svc or "").lower()
+    for line in (out2 or "").splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) < 2:
+            continue
+        cid, name = parts[0], parts[1].lower()
+        if svc_l and svc_l in name:
+            return cid
+        if "timescaledb" in name or "postgres" in name:
+            if svc_l in ("timescaledb", "postgresql", "postgres"):
+                return cid
+    return None
+
+
 async def _psql_in_db_container(
     job: MigrationJob,
     svc: str,
@@ -1865,9 +2010,8 @@ async def _psql_in_db_container(
     sql: str,
     timeout: int = 30,
 ) -> tuple[bool, str]:
-    cmd = [
-        "docker", "compose", "exec", "-T",
-    ]
+    """Run psql inside the DB container; fall back to ``docker exec`` if compose is broken."""
+    cmd = ["docker", "compose", "exec", "-T"]
     if password is not None:
         cmd.extend(["-e", f"PGPASSWORD={password}"])
     cmd.extend(
@@ -1876,7 +2020,35 @@ async def _psql_in_db_container(
             "-v", "ON_ERROR_STOP=0", "-At", "-c", sql,
         ]
     )
-    return await _run(job, cmd, cwd=str(PASARGUARD_DIR), timeout=timeout, quiet=True)
+    ok, out = await _run(job, cmd, cwd=str(PASARGUARD_DIR), timeout=timeout, quiet=True)
+    if ok or not _compose_exec_unusable(out or ""):
+        return ok, out
+
+    cid = await _resolve_running_db_container_id(job, svc)
+    if not cid:
+        return ok, out
+    job.log(f"docker compose exec unusable — falling back to docker exec {cid[:12]}…")
+    cmd2 = ["docker", "exec", "-i"]
+    if password is not None:
+        cmd2.extend(["-e", f"PGPASSWORD={password}"])
+    cmd2.extend(
+        [
+            cid, "psql", "-U", user, "-d", database,
+            "-v", "ON_ERROR_STOP=0", "-At", "-c", sql,
+        ]
+    )
+    return await _run(job, cmd2, timeout=timeout, quiet=True)
+
+
+def _compose_exec_unusable(text: str) -> bool:
+    low = (text or "").lower()
+    return (
+        "empty compose file" in low
+        or "no configuration file provided" in low
+        or "compose.yaml" in low and "not found" in low
+        or "no such service" in low
+        or "cannot find" in low and "compose" in low
+    )
 
 
 async def _sync_pg_role_passwords(
@@ -2176,22 +2348,46 @@ async def _ensure_timescaledb_not_in_restore_mode(
                     cleared = False
 
         if not cleared and catalog_seen:
-            pin = parse_timescale_wanted([catalog_seen]) or catalog_seen
+            # Catalog mismatch (e.g. expected 2.28 seen 2.27): post_restore cannot run
+            # until the image matches. Prefer emergency GUC clear FIRST — it does not
+            # need a multi-GB docker pull (ENOSPC) and unblocks PasarGuard immediately.
+            # Only then optionally try a no-wipe image align when disk allows.
             job.log(
-                f"timescaledb_post_restore catalog mismatch on {database} — "
-                f"aligning image to dump catalog {pin} (no data wipe)"
+                f"timescaledb_post_restore catalog mismatch on {database} "
+                f"(dump catalog {catalog_seen}) — emergency-clearing restoring GUC first"
             )
-            try:
-                await _align_timescaledb_image(job, pin, wipe_data=False)
-            except Exception as e:
-                job.log(f"Timescale align after catalog mismatch note: {e}")
+            emerg_ok, emerg_auth, emerg_errors = await _emergency_clear(database, attempts)
+            post_errors.extend(emerg_errors)
+            if emerg_ok:
+                cleared = True
+                used_auth = emerg_auth or used_auth
             else:
-                cleared, used_auth, post_errors2, _ = await _run_post_restore(database, attempts)
-                post_errors.extend(post_errors2)
-                if cleared:
-                    ok_c, after = await _confirm_off(database, used_auth)
-                    if ok_c and after == "on":
-                        await _run_post_restore(database, attempts)
+                pin = parse_timescale_wanted([catalog_seen]) or catalog_seen
+                free = disk_free_bytes("/var/lib")
+                if free >= 0 and free < _TS_PULL_MIN_FREE_BYTES:
+                    job.log(
+                        f"Skipping Timescale image align to {pin}: only "
+                        f"{free // (1024 * 1024)} MiB free (need ≥"
+                        f"{_TS_PULL_MIN_FREE_BYTES // (1024 * 1024)} MiB)"
+                    )
+                else:
+                    job.log(
+                        f"Emergency clear failed — trying image align to dump catalog "
+                        f"{pin} (no data wipe)"
+                    )
+                    try:
+                        await _align_timescaledb_image(job, pin, wipe_data=False)
+                    except Exception as e:
+                        job.log(f"Timescale align after catalog mismatch note: {e}")
+                    else:
+                        cleared, used_auth, post_errors2, _ = await _run_post_restore(
+                            database, attempts
+                        )
+                        post_errors.extend(post_errors2)
+                        if cleared:
+                            ok_c, after = await _confirm_off(database, used_auth)
+                            if ok_c and after == "on":
+                                await _run_post_restore(database, attempts)
 
         if not cleared:
             emerg_ok, emerg_auth, emerg_errors = await _emergency_clear(database, attempts)
@@ -2484,6 +2680,23 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         causes_fa = [
             "خروجی docker compose با نسخه alembic قاطی شده بود — در v2.3.5+ اصلاح شد",
             "اسکیمای target قبلاً با alembic upgrade head ساخته شده و دیگر نیاز به stamp دستی نیست",
+        ]
+    elif "no space left" in low or "enospc" in low or "errno 28" in low:
+        fa = "فضای دیسک سرور پر است (دانلود ایمیج Timescale یا نوشتن فایل شکست خورد)."
+        en = "Server disk is full (Timescale image pull or file write failed)."
+        ru = "На диске сервера закончилось место (pull образа Timescale / запись файла)."
+        causes_fa = [
+            "لاگ docker: no space left on device — ایمیج Timescale چند گیگابایت فضا می‌خواهد",
+            "دیسک را آزاد کنید (docker image prune / لاگ‌ها) و دوباره ریستور کنید",
+            "ویزارد جدید بدون pull، حالت restoring را اضطراری خاموش می‌کند تا پنل بالا بیاید",
+        ]
+    elif "empty compose file" in low:
+        fa = "فایل docker-compose.yml خالی یا خراب شده است."
+        en = "docker-compose.yml is empty or unusable."
+        ru = "Файл docker-compose.yml пуст или повреждён."
+        causes_fa = [
+            "پر شدن دیسک هنگام تغییر تگ ایمیج ممکن است compose را خراب کند — از .yml.pgclockmg.bak برگردانید",
+            "ویزارد جدید compose را atomic می‌نویسد و در ENOSPC برمی‌گرداند",
         ]
     elif "catalog version mismatch" in low and "timescale" in low:
         fa = "نسخه کاتالوگ TimescaleDB بکاپ با ایمیج در حال اجرا یکی نیست (post_restore)."
