@@ -16,6 +16,12 @@ STARTUP_MARKERS = (
     "Uvicorn running",
 )
 
+# Multi-worker compose uses ROLE=backend instead of all-in-one banner.
+PANEL_BOOT_MARKERS = STARTUP_MARKERS + (
+    "Starting backend",
+    "Starting all-in-one",
+)
+
 FAIL_LOG_PATTERNS = (
     "Database migrations failed",
     "ERROR: Database migrations failed",
@@ -33,6 +39,7 @@ FAIL_LOG_PATTERNS = (
     "Application startup failed",
     "ValueError:",
     "SSL certificate file",
+    "NATS is required when running more than 1 worker",
     "column \"user_template_id\" of relation \"next_plans\" already exists",
 )
 
@@ -163,7 +170,28 @@ def _extract_failure_snippet(output: str) -> str:
     lines = clean.splitlines()
     hits = [ln for ln in lines if _line_indicates_failure(ln)]
     if hits:
-        return "\n".join(hits[-16:])
+        base = hits[-16:]
+        # Multi-worker Uvicorn often prints bare Traceback headers — attach exception lines.
+        extras: list[str] = []
+        for idx, ln in enumerate(lines):
+            if "Traceback (most recent call last)" not in ln:
+                continue
+            for follow in lines[idx + 1 : idx + 24]:
+                fs = follow.strip()
+                if not fs:
+                    continue
+                if fs.startswith("Traceback (most recent call last)"):
+                    break
+                if (
+                    re.match(r"^[A-Za-z_][\w.]*(?:Error|Exception):", fs)
+                    or fs.startswith("RuntimeError:")
+                    or "NATS is required" in fs
+                ):
+                    extras.append(follow)
+                    break
+        if extras:
+            return "\n".join((base + extras)[-20:])
+        return "\n".join(base)
     useful = []
     for ln in lines:
         if not ln.strip() or _is_banner_noise(ln):
@@ -208,8 +236,9 @@ async def fetch_pasarguard_logs(
     since: str | None = None,
 ) -> str:
     """Panel logs only by default — DB restart FATAL lines are not panel failures."""
+    panel_svc = resolve_pasarguard_service()
     pg = await fetch_compose_logs(
-        migrator, ["pasarguard"], tail=tail, timeout=timeout, since=since,
+        migrator, [panel_svc], tail=tail, timeout=timeout, since=since,
     )
     if not include_db:
         return pg
@@ -692,6 +721,8 @@ def _panel_logs_show_startup_activity(output: str) -> bool:
     if not text.strip():
         return False
     if "Starting all-in-one" in text:
+        return True
+    if "Starting backend" in text:
         return True
     return any(m in text for m in _ALEMBIC_ACTIVITY_MARKERS)
 

@@ -2793,13 +2793,30 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         en = "PasarGuard container is not running (crash/restart loop)."
         causes_fa = [
             "بعد از تبدیل، .env هنوز URL اشتباه (مثلاً sqlite) داشت — در v2.3.8+ از .env نصب حفظ می‌شود",
+            "multi-worker: NATS باید قبل از پنل بالا باشد و NATS_URL باید nats://nats:4222 باشد نه localhost",
             "SSL نامعتبر یا خطای اتصال به PostgreSQL/PgBouncer — لاگ واقعی ValueError/asyncpg را ببینید",
             "روی سرور: docker compose -f /opt/pasarguard/docker-compose.yml logs pasarguard --tail 80",
+        ]
+    elif "nats is required" in low or (
+        "nats" in low and "multi-worker" in low
+    ) or (
+        "traceback" in low and "nats" in low and "worker" in low
+    ):
+        fa = "پنل multi-worker بدون NATS سالم بالا نیامد."
+        en = "Multi-worker panel failed because NATS was not ready or NATS_URL was wrong."
+        causes_fa = [
+            "UVICORN_WORKERS>1 نیاز به NATS_ENABLED=1 و سرویس nats در compose دارد",
+            "NATS_URL داخل کانتینر باید nats://nats:4222 باشد — localhost کار نمی‌کند",
+            "ویزارد جدید NATS را قبل از پنل بالا می‌آورد؛ اگر باز خطا بود node-worker/scheduler را هم چک کنید",
         ]
     elif "pasarguard failed to start" in low or "did not reach ready state" in low:
         fa = "پنل PasarGuard بعد از ریستور بالا نیامد."
         en = "PasarGuard panel did not start after restore."
-        causes_fa = ["لاگ pasarguard-1 را ببینید", "ممکن است SSL یا SQLALCHEMY_DATABASE_URL اشتباه باشد"]
+        causes_fa = [
+            "لاگ pasarguard/panel را ببینید",
+            "multi-worker: NATS_URL و بالا بودن nats را چک کنید",
+            "ممکن است SSL یا SQLALCHEMY_DATABASE_URL اشتباه باشد",
+        ]
     elif "cannot stage" in low and ("timescaledb" in low or "postgresql" in low):
         fa = "دامپ Timescale/PostgreSQL برای تبدیل استیج نشد (سرویس مبدأ روی سرور نیست)."
         en = "Could not stage Timescale/PostgreSQL dump for conversion (source engine not running)."
@@ -2862,6 +2879,19 @@ async def _finalize_env_after_restore(
     )
     # Second pass after certs are on disk
     finalized = align_ssl_env_to_disk(finalized)
+    from app.services.multiworker_stack import align_nats_env_for_compose, detect_multiworker_stack
+
+    pre_stack = detect_multiworker_stack(finalized)
+    finalized = align_nats_env_for_compose(finalized)
+    post_stack = detect_multiworker_stack(finalized)
+    if post_stack["uses_nats"]:
+        nats_url = read_env_var(finalized, "NATS_URL") or "?"
+        job.log(
+            f"Multi-worker NATS: enabled (workers={post_stack['uvicorn_workers']}, "
+            f"NATS_URL={nats_url})"
+        )
+    elif pre_stack["has_nats_service"] and not post_stack["uses_nats"]:
+        job.log("NATS service in compose but disabled in .env — leaving single-worker boot path")
 
     if not env_points_to_db(finalized, final_db):
         raise RuntimeError(
@@ -3398,7 +3428,9 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         job.add_secret(bak_db_pass, bak_mysql_root, bak_pg_pass)
 
         job.set_progress(40, "Restoring database...")
-        await _compose(job, "stop", "pasarguard", timeout=120)
+        from app.services.multiworker_stack import stop_panel_stack
+
+        await stop_panel_stack(job)
 
         restore_engine = backup_db
         if backup_db == "sqlite" or analysis.get("layout") == "sqlite_file":
@@ -3711,8 +3743,10 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         # the same DB — Timescale/PG restores hung or the panel vanished mid-Context.
         # Convert path already aligned schema to head — skip re-sync there.
         if should_sync_alembic_before_panel_boot(needs_convert):
-            job.log("Stopping pasarguard before one-shot alembic sync (avoid dual migrate)…")
-            await _compose(job, "stop", "pasarguard", timeout=120)
+            job.log("Stopping panel stack before one-shot alembic sync (avoid dual migrate)…")
+            from app.services.multiworker_stack import stop_panel_stack
+
+            await stop_panel_stack(job)
             try:
                 from app.services.pasarguard_ops import sync_alembic_for_startup
 
@@ -3726,10 +3760,11 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         else:
             job.log("Skipping full alembic re-sync after convert (schema already at head)")
 
-        # Force recreate so panel picks up finalized .env (DB URL / SSL).
-        # Do not fall back to plain `up -d` — that reuses a stale container and
-        # can leave the panel on the old env while health checks pass on old logs.
-        ok, out = await _compose(job, "up", "-d", "--force-recreate", "pasarguard", timeout=300)
+        # Force recreate so panel picks up finalized .env (DB URL / SSL / NATS).
+        # Multi-worker stacks need NATS ready before panel workers boot.
+        from app.services.multiworker_stack import start_panel_stack
+
+        ok, out = await start_panel_stack(job, force_recreate=True)
         if not ok:
             job.log(f"compose recreate warning: {out[-1500:]}")
             mismatch = detect_ts_mismatch_from_text(out)
@@ -3739,9 +3774,7 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                     "retag only, no data wipe after restore"
                 )
                 await _align_timescaledb_image(job, mismatch[0], wipe_data=False)
-                ok, out = await _compose(
-                    job, "up", "-d", "--force-recreate", "pasarguard", timeout=300,
-                )
+                ok, out = await start_panel_stack(job, force_recreate=True)
             if not ok:
                 raise RuntimeError(
                     "PasarGuard failed to start after restore (force-recreate):\n"
