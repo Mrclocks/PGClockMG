@@ -72,9 +72,9 @@ def test_detect_nats_disabled_skips_orchestration():
         patch.object(mws, "resolve_pasarguard_service", return_value="panel"),
     ):
         info = mws.detect_multiworker_stack(env)
-    assert info["orchestrate"] is True  # satellites still present
+    assert info["orchestrate"] is False
     assert info["uses_nats"] is False
-    print("OK: NATS disabled → uses_nats false")
+    print("OK: NATS disabled + single worker → no orchestration")
 
 
 def test_align_nats_env_fixes_localhost():
@@ -128,7 +128,7 @@ def test_start_panel_stack_single_worker():
     print("OK: single-worker start unchanged")
 
 
-def test_compose_file_prefix_uses_multi_when_nats_only_there():
+def test_compose_file_prefix_uses_both_main_and_multi():
     import tempfile
     import shutil
     from app.services import pasarguard_ops as po
@@ -138,20 +138,33 @@ def test_compose_file_prefix_uses_multi_when_nats_only_there():
     po.PASARGUARD_DIR = td
     try:
         (td / "docker-compose.yml").write_text(
-            "services:\n  timescaledb:\n    image: x\n", encoding="utf-8"
+            "services:\n  timescaledb:\n    image: x\n  pasarguard:\n    image: p\n",
+            encoding="utf-8",
         )
         (td / "docker-compose.multi.yml").write_text(
             "services:\n  nats:\n    image: nats\n  panel:\n    image: p\n",
             encoding="utf-8",
         )
         prefix = po.compose_file_prefix()
-        assert prefix == ["-f", str(td / "docker-compose.multi.yml")]
+        assert prefix == [
+            "-f", str(td / "docker-compose.yml"),
+            "-f", str(td / "docker-compose.multi.yml"),
+        ]
+        assert mws.compose_has_service("timescaledb") is True
         assert mws.compose_has_service("nats") is True
-        assert po.panel_compose_service() == "panel"
+        old_env = po.PASARGUARD_ENV
+        (td / ".env").write_text("UVICORN_WORKERS=4\nNATS_ENABLED=1\n", encoding="utf-8")
+        po.PASARGUARD_ENV = td / ".env"
+        try:
+            assert po.resolve_pasarguard_service() == "panel"
+            (td / ".env").write_text("UVICORN_WORKERS=1\nNATS_ENABLED=0\n", encoding="utf-8")
+            assert po.resolve_pasarguard_service() == "pasarguard"
+        finally:
+            po.PASARGUARD_ENV = old_env
     finally:
         po.PASARGUARD_DIR = old
         shutil.rmtree(td, ignore_errors=True)
-    print("OK: compose prefix selects multi file")
+    print("OK: compose prefix merges main + multi")
 
 
 def test_start_panel_stack_multi_worker():
@@ -185,6 +198,20 @@ def test_start_panel_stack_multi_worker():
     print("OK: multi-worker start order nats → panel → satellites")
 
 
+def test_bare_traceback_not_treated_as_failure():
+    from app.services.pasarguard_ops import _check_logs_for_failure
+
+    blob = "\n".join([
+        "panel-1 | Traceback (most recent call last):",
+        "panel-1 |   File \"main.py\", line 1, in <module>",
+        "panel-1 |     raise x",
+    ])
+    assert _check_logs_for_failure(blob) is None
+    blob2 = blob + "\npanel-1 | RuntimeError: NATS is required when running more than 1 worker."
+    assert _check_logs_for_failure(blob2) is not None
+    print("OK: bare traceback ignored until exception line")
+
+
 def test_extract_failure_snippet_includes_exception_line():
     from app.services.pasarguard_ops import _extract_failure_snippet
 
@@ -207,7 +234,8 @@ if __name__ == "__main__":
     test_align_nats_env_noop_without_nats_service()
     test_panel_stack_stop_order()
     test_start_panel_stack_single_worker()
-    test_compose_file_prefix_uses_multi_when_nats_only_there()
+    test_compose_file_prefix_uses_both_main_and_multi()
     test_start_panel_stack_multi_worker()
+    test_bare_traceback_not_treated_as_failure()
     test_extract_failure_snippet_includes_exception_line()
     print("\nAll multiworker restore tests passed")

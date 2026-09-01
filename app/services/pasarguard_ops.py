@@ -127,8 +127,22 @@ def _compose_text() -> str:
     return "\n".join(parts)
 
 
+def _multi_overlay_services(text: str) -> bool:
+    return bool(
+        re.search(
+            r"^\s*(nats|panel|node-worker|scheduler)\s*:",
+            text,
+            re.MULTILINE,
+        )
+    )
+
+
 def _active_compose_paths() -> list[Path]:
-    """Pick the compose file(s) PasarGuard actually uses (incl. multi-worker layout)."""
+    """Pick the compose file(s) PasarGuard actually uses (incl. multi-worker layout).
+
+    When ``docker-compose.multi.yml`` defines worker-stack services, return both the
+    base file and the overlay so DB services and NATS/panel are in one project.
+    """
     main: Path | None = None
     for name in ("docker-compose.yml", "docker-compose.yaml"):
         p = PASARGUARD_DIR / name
@@ -138,10 +152,9 @@ def _active_compose_paths() -> list[Path]:
     multi = PASARGUARD_DIR / "docker-compose.multi.yml"
     if main is not None and multi.exists():
         try:
-            main_text = main.read_text(encoding="utf-8", errors="ignore")
             multi_text = multi.read_text(encoding="utf-8", errors="ignore")
-            if "nats:" in multi_text and "nats:" not in main_text:
-                return [multi]
+            if _multi_overlay_services(multi_text):
+                return [main, multi]
         except OSError:
             pass
         return [main]
@@ -153,11 +166,16 @@ def _active_compose_paths() -> list[Path]:
 
 
 def compose_file_prefix() -> list[str]:
-    """Extra docker compose args when the active file is not the default name."""
+    """Extra docker compose -f args for the active compose file(s)."""
     paths = _active_compose_paths()
-    if len(paths) == 1 and paths[0].name not in ("docker-compose.yml", "docker-compose.yaml"):
-        return ["-f", str(paths[0])]
-    return []
+    if not paths:
+        return []
+    if len(paths) == 1 and paths[0].name in ("docker-compose.yml", "docker-compose.yaml"):
+        return []
+    args: list[str] = []
+    for p in paths:
+        args.extend(["-f", str(p)])
+    return args
 
 
 def panel_compose_service() -> str:
@@ -204,6 +222,10 @@ def _line_indicates_failure(line: str) -> bool:
     if any(b in line for b in BENIGN_LOG_PATTERNS):
         return False
     if _is_banner_noise(line):
+        return False
+    # Multi-worker Uvicorn prints bare Traceback headers while workers retry;
+    # the following Error/Exception line is the actionable signal.
+    if "Traceback (most recent call last)" in line:
         return False
     return any(p in line for p in FAIL_LOG_PATTERNS)
 
@@ -319,6 +341,17 @@ async def _panel_port_is_listening(migrator) -> bool:
     except OSError:
         migrator.job.log(f"Panel port {port} not accepting connections yet")
         return False
+
+
+def _panel_startup_markers_for_stack(stack: dict | None = None) -> tuple[str, ...]:
+    """Multi-worker needs Application startup complete — Uvicorn bind alone is not enough."""
+    if stack and (stack.get("orchestrate") or (stack.get("uvicorn_workers") or 1) > 1):
+        return ("Application startup complete", "Starting backend")
+    return STARTUP_MARKERS
+
+
+def _logs_show_panel_startup(output: str, stack: dict | None = None) -> bool:
+    return any(marker in (output or "") for marker in _panel_startup_markers_for_stack(stack))
 
 
 def _check_logs_for_failure(output: str) -> str | None:
@@ -1153,7 +1186,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
             and not last_upgrade_sig
             and not bootstrap_now
         ):
-            has_startup = any(marker in (out or "") for marker in STARTUP_MARKERS)
+            has_startup = _logs_show_panel_startup(out, stack)
             if not has_startup:
                 silent_loop_healed = True
                 await _heal_silent_restart_loop(migrator)
@@ -1235,7 +1268,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
         not_running_streak = 0
         unknown_streak = 0
         restarting_streak = 0
-        if any(marker in (out or "") for marker in STARTUP_MARKERS):
+        if _logs_show_panel_startup(out, stack):
             stable_ready += 1
             if stable_ready >= 2:
                 if await _panel_port_is_listening(migrator):
@@ -1257,7 +1290,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
             "PasarGuard startup failed.\n" + _extract_failure_snippet(out)
         )
     last_up = last_upgrade_sig or _last_alembic_upgrade_line(out)
-    if last_up and not any(m in (out or "") for m in STARTUP_MARKERS):
+    if last_up and not _logs_show_panel_startup(out, stack):
         raise RuntimeError(
             "PasarGuard did not finish alembic / reach ready state in time.\n"
             f"Last upgrade still in progress or incomplete: {last_up}\n"
@@ -1338,7 +1371,7 @@ def read_source_alembic_version(
 
 async def docker_compose_up(migrator, services: list[str] | None = None) -> bool:
     cwd = str(PASARGUARD_DIR)
-    cmd = ["docker", "compose", "up", "-d"]
+    cmd = ["docker", "compose", *compose_file_prefix(), "up", "-d"]
     if services:
         cmd.extend(services)
     ok, _ = await migrator._run_cmd(cmd, cwd=cwd, timeout=180)
@@ -1346,7 +1379,10 @@ async def docker_compose_up(migrator, services: list[str] | None = None) -> bool
 
 
 async def wait_pasarguard_ready(migrator, max_wait: int = 90, strict: bool = False) -> bool:
+    from app.services.multiworker_stack import detect_multiworker_stack
+
     cwd = str(PASARGUARD_DIR)
+    stack = detect_multiworker_stack()
     migrator.job.log("Waiting for PasarGuard to become ready...")
 
     for attempt in range(max(1, max_wait // 3)):
@@ -1359,7 +1395,7 @@ async def wait_pasarguard_ready(migrator, max_wait: int = 90, strict: bool = Fal
                 )
             migrator.job.log(f"Detected PasarGuard log error: {hit}")
 
-        if any(marker in (out or "") for marker in STARTUP_MARKERS):
+        if _logs_show_panel_startup(out, stack):
             migrator.job.log("PasarGuard ready")
             return True
 
@@ -1541,11 +1577,46 @@ async def run_alembic_upgrade(migrator) -> bool:
 
 
 def resolve_pasarguard_service() -> str:
-    text = _compose_text()
-    for name in PASARGUARD_SERVICE_CANDIDATES:
-        if re.search(rf"^\s*{re.escape(name)}\s*:", text, re.MULTILINE):
-            return name
-    return "pasarguard"
+    """Resolve panel service; overlay wins when multi-worker is active."""
+    paths = _active_compose_paths()
+    if not paths:
+        return "pasarguard"
+
+    per_file: list[str] = []
+    for path in reversed(paths):
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for name in PASARGUARD_SERVICE_CANDIDATES:
+            if re.search(rf"^\s*{re.escape(name)}\s*:", text, re.MULTILINE):
+                per_file.append(name)
+                break
+
+    if not per_file:
+        return "pasarguard"
+
+    if "panel" in per_file and "pasarguard" in per_file:
+        from app.services.env_migration import read_env_var
+
+        env = (
+            PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+            if PASARGUARD_ENV.exists()
+            else ""
+        )
+        workers_raw = read_env_var(env, "UVICORN_WORKERS")
+        try:
+            workers = max(1, int((workers_raw or "1").strip()))
+        except ValueError:
+            workers = 1
+        nats_on = (read_env_var(env, "NATS_ENABLED") or "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        if workers > 1 or nats_on:
+            return "panel"
+        return "pasarguard"
+
+    return per_file[0]
 
 
 def _discover_compose_profiles() -> list[str]:
@@ -1560,7 +1631,7 @@ def _discover_compose_profiles() -> list[str]:
 
 
 def _compose_cmd(*args: str, profiles: list[str] | None = None) -> list[str]:
-    cmd: list[str] = ["docker", "compose"]
+    cmd: list[str] = ["docker", "compose", *compose_file_prefix()]
     for profile in profiles or []:
         cmd.extend(["--profile", profile])
     env_file = PASARGUARD_ENV if PASARGUARD_ENV.exists() else PASARGUARD_DIR / ".env"

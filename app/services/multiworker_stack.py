@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any
 from app.config import PASARGUARD_DIR, PASARGUARD_ENV
 from app.services.env_migration import _set_env_var_simple, read_env_var
 from app.services.pasarguard_ops import (
-    PANEL_BOOT_MARKERS,
     _compose_text,
     compose_file_prefix,
     panel_compose_service,
@@ -68,7 +67,9 @@ def detect_multiworker_stack(env_text: str | None = None) -> dict[str, Any]:
     panel_service = resolve_pasarguard_service()
 
     uses_nats = bool(has_nats and (nats_enabled or workers > 1))
-    orchestrate = bool(uses_nats or satellites)
+    orchestrate = bool(
+        uses_nats or (workers > 1 and (has_nats or satellites))
+    )
 
     return {
         "orchestrate": orchestrate,
@@ -194,8 +195,12 @@ async def ensure_nats_ready(
 
 
 async def wait_for_panel_boot(job: MigrationJob, timeout: int = 120) -> bool:
-    """Wait until panel logs show Uvicorn/startup markers (multi-worker needs longer)."""
+    """Wait until panel logs show startup markers (multi-worker needs stricter markers)."""
+    from app.services.pasarguard_ops import _panel_startup_markers_for_stack
+
     panel = panel_compose_service()
+    info = detect_multiworker_stack()
+    markers = _panel_startup_markers_for_stack(info)
     deadline = max(30, int(timeout))
     for waited in range(0, deadline, 4):
         _ok, logs = await _compose_job(
@@ -209,7 +214,7 @@ async def wait_for_panel_boot(job: MigrationJob, timeout: int = 120) -> bool:
             quiet=True,
         )
         text = logs or ""
-        if any(marker in text for marker in PANEL_BOOT_MARKERS):
+        if any(marker in text for marker in markers):
             job.log("Panel application startup detected")
             return True
         if waited == 0:

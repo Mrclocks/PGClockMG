@@ -1474,18 +1474,20 @@ def _set_env_var(text: str, key: str, value: str | None) -> str:
 
 
 async def _compose(job: MigrationJob, *args: str, timeout: int = 300) -> tuple[bool, str]:
+    return await _run(job, _compose_argv(*args), cwd=str(PASARGUARD_DIR), timeout=timeout)
+
+
+def _compose_argv(*args: str) -> list[str]:
+    """docker compose with active compose file prefix (main + multi overlay when present)."""
     from app.services.pasarguard_ops import compose_file_prefix
 
-    prefix = compose_file_prefix()
-    return await _run(job, ["docker", "compose", *prefix, *args], cwd=str(PASARGUARD_DIR), timeout=timeout)
+    return ["docker", "compose", *compose_file_prefix(), *args]
 
 
 def _compose_has_service(name: str) -> bool:
-    compose = PASARGUARD_DIR / "docker-compose.yml"
-    if not compose.exists() or not name:
-        return False
-    text = compose.read_text(encoding="utf-8", errors="ignore")
-    return bool(re.search(rf"^\s*{re.escape(name)}\s*:", text, re.MULTILINE))
+    from app.services.multiworker_stack import compose_has_service
+
+    return compose_has_service(name)
 
 
 async def _compose_up_services(job: MigrationJob, *services: str, timeout: int = 300) -> tuple[bool, str]:
@@ -1507,7 +1509,12 @@ def _mysql_client_bins(db_type: str, svc: str | None = None) -> list[str]:
 
 
 async def _detect_db_container(job: MigrationJob, db_type: str) -> str | None:
-    ok, out = await _run(job, ["docker", "compose", "ps", "--services"], cwd=str(PASARGUARD_DIR), timeout=30)
+    ok, out = await _run(
+        job,
+        _compose_argv("ps", "--services"),
+        cwd=str(PASARGUARD_DIR),
+        timeout=30,
+    )
     services = set((out or "").split())
     candidates = {
         "timescaledb": ["timescaledb", "postgresql", "postgres"],
@@ -1532,12 +1539,12 @@ async def _detect_db_container(job: MigrationJob, db_type: str) -> str | None:
 async def _read_timescaledb_version(job: MigrationJob, container: str, password: str, user: str = "postgres") -> str | None:
     ok, out = await _run(
         job,
-        [
-            "docker", "compose", "exec", "-T",
+        _compose_argv(
+            "exec", "-T",
             "-e", f"PGPASSWORD={password}", container,
             "psql", "-U", user, "-d", "postgres", "-At",
             "-c", "SELECT default_version FROM pg_available_extensions WHERE name = 'timescaledb';",
-        ],
+        ),
         cwd=str(PASARGUARD_DIR),
         timeout=30,
     )
@@ -1560,9 +1567,11 @@ async def _wait_for_postgres_ready(
     while asyncio.get_event_loop().time() < deadline:
         attempt += 1
         proc = await asyncio.create_subprocess_exec(
-            "docker", "compose", "exec", "-T",
-            "-e", f"PGPASSWORD={password}",
-            svc, "psql", "-U", user, "-d", "postgres", "-c", "SELECT 1;",
+            *_compose_argv(
+                "exec", "-T",
+                "-e", f"PGPASSWORD={password}",
+                svc, "psql", "-U", user, "-d", "postgres", "-c", "SELECT 1;",
+            ),
             cwd=str(PASARGUARD_DIR),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -1671,7 +1680,9 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
         )
 
     job.set_progress(28, "Recreating TimescaleDB with matching version...")
-    await _compose(job, "stop", "pasarguard", timeout=120)
+    from app.services.multiworker_stack import stop_panel_stack
+
+    await stop_panel_stack(job)
     stop_svcs = ["timescaledb"]
     if _compose_has_service("pgbouncer"):
         stop_svcs.append("pgbouncer")
@@ -1930,7 +1941,7 @@ async def _read_pg_container_init_env(
     for key in ("POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB"):
         ok, raw = await _run(
             job,
-            ["docker", "compose", "exec", "-T", svc, "printenv", key],
+            _compose_argv("exec", "-T", svc, "printenv", key),
             cwd=str(PASARGUARD_DIR),
             timeout=15,
             quiet=True,
@@ -1967,12 +1978,13 @@ def _compose_looks_usable(text: str) -> bool:
 
 async def _resolve_running_db_container_id(job: MigrationJob, svc: str) -> str | None:
     """Find a running container id/name when ``docker compose exec`` is unusable."""
-    # Prefer compose mapping when compose file is still valid.
-    compose = PASARGUARD_DIR / "docker-compose.yml"
-    if compose.is_file() and _compose_looks_usable(compose.read_text(encoding="utf-8", errors="ignore")):
+    from app.services.pasarguard_ops import _active_compose_paths
+
+    paths = _active_compose_paths()
+    if paths:
         ok, out = await _run(
             job,
-            ["docker", "compose", "ps", "-q", svc],
+            _compose_argv("ps", "-q", svc),
             cwd=str(PASARGUARD_DIR),
             timeout=20,
             quiet=True,
@@ -2014,7 +2026,7 @@ async def _psql_in_db_container(
     timeout: int = 30,
 ) -> tuple[bool, str]:
     """Run psql inside the DB container; fall back to ``docker exec`` if compose is broken."""
-    cmd = ["docker", "compose", "exec", "-T"]
+    cmd = _compose_argv("exec", "-T")
     if password is not None:
         cmd.extend(["-e", f"PGPASSWORD={password}"])
     cmd.extend(
@@ -2458,11 +2470,14 @@ async def _ensure_timescaledb_not_in_restore_mode(
 
 async def _heal_panel_auth_if_needed(job: MigrationJob, password: str, user: str, db_name: str, db_type: str) -> None:
     """If panel crash-loops on SASL/password, re-sync roles and restart."""
+    from app.services.pasarguard_ops import panel_compose_service
+
     if db_type not in ("postgresql", "timescaledb", "mysql", "mariadb"):
         return
+    panel = panel_compose_service()
     ok, logs = await _run(
         job,
-        ["docker", "compose", "logs", "--tail", "80", "pasarguard"],
+        _compose_argv("logs", "--tail", "80", panel),
         cwd=str(PASARGUARD_DIR),
         timeout=40,
     )
@@ -2483,11 +2498,11 @@ async def _heal_panel_auth_if_needed(job: MigrationJob, password: str, user: str
                 db_type=db_type,
                 db_name=db_name or "pasarguard",
             )
-    await _compose(job, "up", "-d", "--force-recreate", "pasarguard", timeout=120)
+    await _compose(job, "up", "-d", "--force-recreate", panel, timeout=120)
     await asyncio.sleep(6)
     ok2, logs2 = await _run(
         job,
-        ["docker", "compose", "logs", "--tail", "40", "pasarguard"],
+        _compose_argv("logs", "--tail", "40", panel),
         cwd=str(PASARGUARD_DIR),
         timeout=40,
     )
