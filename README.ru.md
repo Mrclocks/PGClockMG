@@ -1,4 +1,4 @@
-> 🚀 **`v4.4.3`** — Root-cause для startup failed + heal NATS/pgbouncer/auth
+> 🚀 **`v4.4.4`** — Предотвращение startup failed: sync DB + recreate PgBouncer + NATS до boot
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

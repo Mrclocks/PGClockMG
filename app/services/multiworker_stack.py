@@ -156,9 +156,15 @@ async def ensure_nats_ready(
     timeout: int = 90,
     *,
     force_recreate: bool = False,
+    required: bool = False,
 ) -> None:
     """Bring NATS up and wait until it accepts connections."""
     if not compose_has_service(NATS_SERVICE):
+        if required:
+            raise RuntimeError(
+                "Multi-worker panel requires a `nats` service in docker-compose "
+                "but none was found. Set UVICORN_WORKERS=1 or add NATS to compose."
+            )
         return
 
     job.log("Starting NATS for multi-worker panel…")
@@ -168,9 +174,13 @@ async def ensure_nats_ready(
     up_args.append(NATS_SERVICE)
     ok, out = await _compose_job(job, *up_args, timeout=120)
     if not ok:
+        msg = f"NATS compose up failed:\n{(out or '')[-800:]}"
+        if required:
+            raise RuntimeError(msg)
         job.log(f"NATS compose up warning: {(out or '')[-500:]}")
 
     deadline = max(15, int(timeout))
+    last_logs = ""
     for waited in range(0, deadline, 3):
         _ok, logs = await _compose_job(
             job,
@@ -183,6 +193,7 @@ async def ensure_nats_ready(
             quiet=True,
         )
         text = logs or ""
+        last_logs = text
         if any(marker in text for marker in NATS_READY_MARKERS):
             job.log("NATS is ready")
             await asyncio.sleep(2)
@@ -191,6 +202,12 @@ async def ensure_nats_ready(
             job.log("Waiting for NATS to become ready…")
         await asyncio.sleep(3)
 
+    msg = (
+        "NATS did not become ready in time — multi-worker panel cannot start.\n"
+        f"{(last_logs or out or '')[-800:]}"
+    )
+    if required:
+        raise RuntimeError(msg)
     job.log("NATS readiness timeout — continuing (panel will retry NATS connection)")
 
 
@@ -242,7 +259,7 @@ async def start_panel_stack(
         return await _compose_job(job, *args, timeout=300)
 
     if info["uses_nats"]:
-        await ensure_nats_ready(job, force_recreate=force_recreate)
+        await ensure_nats_ready(job, force_recreate=force_recreate, required=True)
 
     job.log(
         f"Starting multi-worker panel ({panel}, workers={info['uvicorn_workers']}, "

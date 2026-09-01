@@ -1,4 +1,4 @@
-> 🚀 **`v4.4.3`** — Root-cause extraction for startup failed + NATS/pgbouncer/auth heal
+> 🚀 **`v4.4.4`** — Prevent startup failed: DB sync + PgBouncer recreate + NATS before boot
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

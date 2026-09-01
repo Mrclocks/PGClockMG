@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.4.3`** — استخراج علت واقعی startup failed + heal NATS/pgbouncer/auth
+> 🚀 **`v4.4.4`** — جلوگیری از startup failed: sync DB + recreate PgBouncer + NATS قبل از boot
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

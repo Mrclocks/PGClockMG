@@ -178,13 +178,9 @@ def _compose_db_service() -> str | None:
 
 
 def _compose_has_pgbouncer() -> bool:
-    from app.config import PASARGUARD_DIR
+    from app.services.multiworker_stack import compose_has_service
 
-    compose = PASARGUARD_DIR / "docker-compose.yml"
-    if not compose.exists():
-        return False
-    body = compose.read_text(encoding="utf-8", errors="ignore")
-    return bool(re.search(r"^\s*pgbouncer\s*:", body, re.MULTILINE))
+    return compose_has_service("pgbouncer")
 
 
 def detect_db_type_from_env(text: str, *, prefer_compose: bool = True) -> str | None:

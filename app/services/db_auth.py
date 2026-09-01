@@ -643,6 +643,150 @@ async def sync_mysql_roles_to_password(
     return bool(recovered)
 
 
+def parse_container_env(text: str) -> dict[str, str]:
+    """Parse ``docker inspect`` environment output; later values win."""
+    out: dict[str, str] = {}
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        key = key.strip()
+        if key:
+            out[key] = value
+    return out
+
+
+def pgbouncer_env_mismatch(
+    container_env: dict[str, str],
+    *,
+    user: str,
+    password: str,
+    database: str,
+) -> list[str]:
+    """Keys where running PgBouncer disagrees with finalized panel credentials."""
+    expected = {"DB_USER": user, "DB_PASSWORD": password, "DB_NAME": database}
+    stale: list[str] = []
+    for key, want in expected.items():
+        if not want:
+            continue
+        have = container_env.get(key)
+        if have is None or have == want:
+            continue
+        stale.append(key)
+    return stale
+
+
+async def refresh_pgbouncer_if_stale(
+    migrator,
+    db_type: str,
+    *,
+    env_text: str | None = None,
+    user: str | None = None,
+    password: str | None = None,
+    database: str | None = None,
+) -> bool:
+    """Recreate PgBouncer when its baked-in env disagrees with finalized .env."""
+    import asyncio
+
+    from app.services.env_migration import parse_sqlalchemy_url, read_env_var
+    from app.services.multiworker_stack import compose_has_service
+    from app.services.pasarguard_ops import compose_file_prefix
+
+    if db_type not in ("postgresql", "timescaledb"):
+        return False
+    if not compose_has_service("pgbouncer"):
+        return False
+
+    text = env_text if env_text is not None else read_env_text()
+    url = read_env_var(text, "SQLALCHEMY_DATABASE_URL") or ""
+    parsed = parse_sqlalchemy_url(url, text) if url else {}
+    user = (
+        user
+        or parsed.get("user")
+        or read_env_var(text, "DB_USER")
+        or read_env_var(text, "POSTGRES_USER")
+        or "pasarguard"
+    )
+    password = (
+        password
+        or read_env_var(text, "POSTGRES_PASSWORD")
+        or read_env_var(text, "DB_PASSWORD")
+        or parsed.get("password")
+        or ""
+    )
+    database = (
+        database
+        or read_env_var(text, "DB_NAME")
+        or parsed.get("database")
+        or "pasarguard"
+    )
+    if not password:
+        migrator.job.log("PgBouncer refresh skipped — no password in finalized .env")
+        return False
+
+    cwd = str(PASARGUARD_DIR)
+    prefix = compose_file_prefix()
+    ok, out = await migrator._run_cmd(
+        ["docker", "compose", *prefix, "ps", "-q", "pgbouncer"],
+        cwd=cwd,
+        timeout=30,
+        quiet=True,
+    )
+    cid = (out or "").strip().splitlines()
+    if not ok or not cid or not cid[-1].strip():
+        migrator.job.log("PgBouncer not running yet — will start with panel stack")
+        return False
+
+    container = cid[-1].strip()
+    ok2, env_out = await migrator._run_cmd(
+        [
+            "docker", "inspect", "--format",
+            "{{range .Config.Env}}{{println .}}{{end}}",
+            container,
+        ],
+        timeout=30,
+        quiet=True,
+    )
+    container_env = parse_container_env(env_out) if ok2 else {}
+    stale = pgbouncer_env_mismatch(
+        container_env, user=user, password=password, database=database,
+    )
+    if not stale:
+        migrator.job.log("PgBouncer credentials already match finalized .env")
+        return False
+
+    migrator.job.log(
+        f"PgBouncer holds stale credentials ({', '.join(stale)}) — "
+        "recreating so panel auth on :6432 succeeds..."
+    )
+    ok_cfg, cfg_out = await migrator._run_cmd(
+        ["docker", "compose", *prefix, "config", "-q"],
+        cwd=cwd,
+        timeout=60,
+        quiet=True,
+    )
+    if not ok_cfg:
+        raise RuntimeError(
+            "docker compose config invalid — cannot recreate PgBouncer:\n"
+            f"{(cfg_out or '')[-400:]}"
+        )
+
+    ok3, out3 = await migrator._run_cmd(
+        [
+            "docker", "compose", *prefix,
+            "up", "-d", "--no-deps", "--force-recreate", "pgbouncer",
+        ],
+        cwd=cwd,
+        timeout=180,
+    )
+    if not ok3:
+        raise RuntimeError(f"PgBouncer recreate failed:\n{(out3 or '')[-800:]}")
+    await asyncio.sleep(4)
+    migrator.job.log("PgBouncer recreated with finalized credentials")
+    return True
+
+
 async def sync_postgres_roles_to_app_password(
     migrator,
     db_type: str,
@@ -700,11 +844,14 @@ async def sync_postgres_roles_to_app_password(
     migrator.job.log(f"Syncing PostgreSQL role passwords ({len(roles)} roles)...")
     lit = _lit(app_pwd)
     cwd = str(PASARGUARD_DIR)
+    from app.services.pasarguard_ops import compose_file_prefix
+
+    prefix = compose_file_prefix()
     any_ok = False
     for role in roles:
         sql = f'ALTER ROLE "{role}" WITH PASSWORD {lit};'
         cmd = [
-            "docker", "compose", "exec", "-T",
+            "docker", "compose", *prefix, "exec", "-T",
             "-e", f"PGPASSWORD={admin_pwd}",
             service, "psql", "-U", admin_user, "-d", "postgres",
             "-v", "ON_ERROR_STOP=0", "-c", sql,
@@ -717,15 +864,10 @@ async def sync_postgres_roles_to_app_password(
                 f"PostgreSQL ALTER ROLE {role} note: {(out or '')[-200:]}"
             )
 
-    compose_path = PASARGUARD_DIR / "docker-compose.yml"
-    if compose_path.is_file() and "pgbouncer" in compose_path.read_text(
-        encoding="utf-8", errors="ignore",
-    ):
-        migrator.job.log("Restarting pgbouncer after role password sync...")
-        await migrator._run_cmd(
-            ["docker", "compose", "restart", "pgbouncer"],
-            cwd=cwd,
-            timeout=90,
-        )
-        await asyncio.sleep(4)
+    await refresh_pgbouncer_if_stale(
+        migrator,
+        db_type,
+        env_text=text,
+        password=app_pwd,
+    )
     return any_ok

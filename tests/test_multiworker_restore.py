@@ -212,6 +212,25 @@ def test_bare_traceback_not_treated_as_failure():
     print("OK: bare traceback ignored until exception line")
 
 
+def test_pgbouncer_env_mismatch_detects_stale_credentials():
+    from app.services.db_auth import pgbouncer_env_mismatch
+
+    stale = pgbouncer_env_mismatch(
+        {"DB_USER": "pasarguard", "DB_PASSWORD": "old", "DB_NAME": "pasarguard"},
+        user="pasarguard",
+        password="new-secret",
+        database="pasarguard",
+    )
+    assert stale == ["DB_PASSWORD"]
+    assert pgbouncer_env_mismatch(
+        {"DB_USER": "pasarguard", "DB_PASSWORD": "same", "DB_NAME": "pasarguard"},
+        user="pasarguard",
+        password="same",
+        database="pasarguard",
+    ) == []
+    print("OK: pgbouncer env mismatch detection")
+
+
 def test_extract_failure_snippet_includes_root_before_startup_failed():
     from app.services.pasarguard_ops import _extract_failure_snippet
 
@@ -251,6 +270,7 @@ if __name__ == "__main__":
     test_compose_file_prefix_uses_both_main_and_multi()
     test_start_panel_stack_multi_worker()
     test_bare_traceback_not_treated_as_failure()
+    test_pgbouncer_env_mismatch_detects_stale_credentials()
     test_extract_failure_snippet_includes_root_before_startup_failed()
     test_extract_failure_snippet_includes_exception_line()
     print("\nAll multiworker restore tests passed")

@@ -2136,10 +2136,7 @@ async def _sync_pg_role_passwords(
                 f"Could not sync password for role {role}: "
                 f"{summarize_pg_auth_errors(sync_errors[-6:]) or 'all auth attempts failed'}"
             )
-    # Restart pgbouncer so auth cache picks up new SCRAM secrets (ignore if absent)
-    if _compose_has_service("pgbouncer"):
-        await _compose(job, "restart", "pgbouncer", timeout=90)
-        await asyncio.sleep(3)
+    # PgBouncer recreate happens after finalize when credentials in .env are canonical.
 
 
 async def _ensure_timescaledb_not_in_restore_mode(
@@ -2466,6 +2463,109 @@ async def _ensure_timescaledb_not_in_restore_mode(
 
     for database in targets:
         await _clear_one_database(database)
+
+
+async def _prepare_panel_boot_after_finalize(
+    job: MigrationJob,
+    mini: _RestoreMini,
+    final_engine: str,
+    verify_pass: str,
+    verify_user: str,
+    verify_db: str,
+) -> tuple[str, str, str]:
+    """Prevent panel startup failures: sync DB, PgBouncer, Timescale GUC, NATS."""
+    from app.services.db_auth import (
+        refresh_pgbouncer_if_stale,
+        resolve_live_admin_connection,
+        sync_postgres_roles_to_app_password,
+    )
+    from app.services.env_migration import parse_sqlalchemy_url, read_env_var
+    from app.services.multiworker_stack import (
+        align_nats_env_for_compose,
+        detect_multiworker_stack,
+        ensure_nats_ready,
+    )
+
+    env_now = _read_current_env()
+    url = read_env_var(env_now, "SQLALCHEMY_DATABASE_URL") or ""
+    parsed = parse_sqlalchemy_url(url, env_now) if url else {}
+
+    verify_user = (
+        read_env_var(env_now, "DB_USER")
+        or read_env_var(env_now, "POSTGRES_USER")
+        or parsed.get("user")
+        or verify_user
+    )
+    verify_pass = (
+        read_env_var(env_now, "POSTGRES_PASSWORD")
+        or read_env_var(env_now, "DB_PASSWORD")
+        or parsed.get("password")
+        or verify_pass
+    )
+    verify_db = (
+        read_env_var(env_now, "DB_NAME")
+        or parsed.get("database")
+        or verify_db
+    )
+
+    if final_engine in ("postgresql", "timescaledb") and verify_pass:
+        job.log(
+            "Preparing PostgreSQL/Timescale for panel boot "
+            f"(user={verify_user}, db={verify_db})..."
+        )
+        try:
+            admin = await resolve_live_admin_connection(mini, final_engine, env_text=env_now)
+        except RuntimeError as probe_err:
+            job.log(f"Live admin probe: {probe_err} — syncing with finalized password")
+            admin = {
+                "user": verify_user,
+                "password": verify_pass,
+                "database": verify_db,
+            }
+        synced = await sync_postgres_roles_to_app_password(
+            mini,
+            final_engine,
+            admin,
+            env_text=env_now,
+            password=verify_pass,
+        )
+        if not synced:
+            job.log("PostgreSQL role sync note: no roles updated (may already match)")
+        await refresh_pgbouncer_if_stale(
+            mini,
+            final_engine,
+            env_text=env_now,
+            user=verify_user,
+            password=verify_pass,
+            database=verify_db,
+        )
+        await _ensure_timescaledb_not_in_restore_mode(
+            job, verify_pass, verify_user, verify_db,
+        )
+    elif final_engine in ("mysql", "mariadb") and verify_pass:
+        svc = await _detect_db_container(job, final_engine)
+        if svc:
+            await _sync_mysql_passwords(
+                job,
+                svc,
+                verify_pass,
+                user=verify_user,
+                db_type=final_engine,
+                db_name=verify_db,
+            )
+
+    stack = detect_multiworker_stack(env_now)
+    if stack.get("uses_nats") or int(stack.get("uvicorn_workers") or 1) > 1:
+        aligned = align_nats_env_for_compose(env_now)
+        if aligned != env_now:
+            PASARGUARD_ENV.write_text(aligned, encoding="utf-8")
+            env_now = aligned
+            job.log("Re-aligned NATS settings in .env before panel boot")
+            stack = detect_multiworker_stack(env_now)
+    if stack.get("uses_nats"):
+        await ensure_nats_ready(job, force_recreate=False, required=True)
+
+    return verify_pass, verify_user, verify_db
 
 
 async def _heal_panel_auth_if_needed(job: MigrationJob, password: str, user: str, db_name: str, db_type: str) -> None:
@@ -2820,7 +2920,7 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         en = "Panel crashed during application startup after restore."
         ru = "Панель упала на этапе application startup после restore."
         causes_fa = [
-            "علت واقعی معمولاً چند خط بالاتر در لاگ است — ویزارد v4.4.3+ آن را در پیام خطا می‌آورد",
+            "ویزارد v4.4.4+ قبل از boot پسورد DB را sync و PgBouncer/NATS را آماده می‌کند",
             "multi-worker: NATS باید قبل از پنل بالا باشد و NATS_URL=nats://nats:4222",
             "Timescale/PostgreSQL: mismatch پسورد .env با DB یا PgBouncer stale cache",
             "SSL: فایل cert/key در /var/lib/pasarguard/certs موجود باشد",
@@ -3760,12 +3860,26 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             }
         mini = _RestoreMini(job, mini_params)
 
-        # Timescale stuck in restoring=on → panel dies after alembic Context with
-        # almost no error (seen on timescaledb→timescaledb same-engine restores).
-        if (final_db or restore_engine or "") in ("timescaledb", "postgresql"):
-            await _ensure_timescaledb_not_in_restore_mode(
-                job, verify_pass, verify_user, verify_db,
-            )
+        verify_pass, verify_user, verify_db = await _prepare_panel_boot_after_finalize(
+            job,
+            mini,
+            final_engine,
+            verify_pass,
+            verify_user,
+            verify_db,
+        )
+        mini.params["target_db_password"] = verify_pass
+        mini.params["target_db_user"] = verify_user
+        mini.params["target_db_name"] = verify_db
+        if final_engine in ("postgresql", "timescaledb"):
+            mini.params["_resolved_target_conn"] = {
+                "user": verify_user,
+                "password": verify_pass,
+                "database": verify_db,
+                "host": "127.0.0.1",
+                "port": "5432",
+                "db_type": final_engine,
+            }
 
         # Same-engine / soft-family: run one-shot alembic WHILE the panel is down.
         # Starting the panel first caused dual alembic (all-in-one + one-shot) on
@@ -3781,7 +3895,11 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
 
                 await sync_alembic_for_startup(mini, final_engine)
             except Exception as e:
-                job.log(f"Alembic sync note: {e}")
+                low = str(e).lower()
+                if "already at head" in low:
+                    job.log(f"Alembic sync note: {e}")
+                else:
+                    raise
             if final_engine in ("timescaledb", "postgresql"):
                 await _ensure_timescaledb_not_in_restore_mode(
                     job, verify_pass, verify_user, verify_db,
@@ -3813,14 +3931,6 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
 
         boot_wait = 20 if detect_multiworker_stack().get("orchestrate") else 8
         await asyncio.sleep(boot_wait)
-
-        await _heal_panel_auth_if_needed(
-            job,
-            verify_pass,
-            verify_user,
-            verify_db,
-            final_db or restore_engine or "",
-        )
 
         # Re-read password from finalized .env in case finalize adjusted it
         env_now = _read_current_env()

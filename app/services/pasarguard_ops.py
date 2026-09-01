@@ -648,20 +648,13 @@ async def _try_heal_db_auth_mismatch(migrator, logs: str, *, force: bool = False
 
 
 async def _try_heal_pgbouncer_stale(migrator) -> bool:
-    """After PG/Timescale restore, PgBouncer may cache stale enum OIDs."""
+    """Recreate PgBouncer when its env disagrees with finalized panel credentials."""
+    from app.services.db_auth import refresh_pgbouncer_if_stale
+
     target_db = (migrator.params or {}).get("target_db")
     if target_db not in ("postgresql", "timescaledb"):
         return False
-    if not re.search(r"^\s*pgbouncer\s*:", _compose_text(), re.MULTILINE):
-        return False
-    migrator.job.log("Restarting pgbouncer (clear stale cache after restore)…")
-    await migrator._run_cmd(
-        ["docker", "compose", *compose_file_prefix(), "restart", "pgbouncer"],
-        cwd=str(PASARGUARD_DIR),
-        timeout=120,
-    )
-    await asyncio.sleep(3)
-    return True
+    return await refresh_pgbouncer_if_stale(migrator, target_db)
 
 
 async def _try_heal_nats_multiworker(migrator, logs: str) -> bool:
@@ -699,7 +692,7 @@ async def _try_heal_nats_multiworker(migrator, logs: str) -> bool:
             migrator.job.log("Aligned NATS_URL / NATS_ENABLED in .env for multi-worker boot")
 
         if compose_has_service(NATS_SERVICE):
-            await ensure_nats_ready(migrator.job, force_recreate=True)
+            await ensure_nats_ready(migrator.job, force_recreate=True, required=True)
             return True
         return new_env != env
     except Exception as e:
@@ -1248,6 +1241,12 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                         f"Panel error detected ({hit}) — Marzban pre-boot heal applied, "
                         "recreating panel…"
                     )
+                elif await _try_heal_nats_multiworker(migrator, out):
+                    healed = True
+                    migrator.job.log(
+                        f"Panel error detected ({hit}) — NATS stack heal applied, "
+                        "recreating panel…"
+                    )
                 elif (
                     hit == "Application startup failed"
                     and (migrator.params or {}).get("target_db")
@@ -1262,14 +1261,8 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                 elif await _try_heal_pgbouncer_stale(migrator):
                     healed = True
                     migrator.job.log(
-                        f"Panel error detected ({hit}) — pgbouncer restarted, "
+                        f"Panel error detected ({hit}) — pgbouncer recreated, "
                         "recreating panel stack…"
-                    )
-                elif await _try_heal_nats_multiworker(migrator, out):
-                    healed = True
-                    migrator.job.log(
-                        f"Panel error detected ({hit}) — NATS stack heal applied, "
-                        "recreating panel…"
                     )
                 if not healed:
                     migrator.job.log(
