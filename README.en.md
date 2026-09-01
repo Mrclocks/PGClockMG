@@ -1,4 +1,4 @@
-> 🚀 **`v4.3.10`** — Timescale restore survives full disk / empty compose
+> 🚀 **`v4.4.0`** — Multi-worker restore with NATS (URL fix + stack boot order)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

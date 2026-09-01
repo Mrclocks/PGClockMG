@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.3.10`** — ریستور Timescale بدون گیر کردن روی دیسک پر / compose خالی
+> 🚀 **`v4.4.0`** — ریستور multi-worker با NATS (NATS_URL + بالا آوردن stack)
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

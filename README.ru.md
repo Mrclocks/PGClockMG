@@ -1,4 +1,4 @@
-> 🚀 **`v4.3.10`** — Restore Timescale устойчив к ENOSPC / пустому compose
+> 🚀 **`v4.4.0`** — Restore multi-worker с NATS (NATS_URL + порядок запуска stack)
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
