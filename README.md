@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.4.2`** — ادغام compose دو فایلی + health check دقیق‌تر multi-worker
+> 🚀 **`v4.4.3`** — استخراج علت واقعی startup failed + heal NATS/pgbouncer/auth
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

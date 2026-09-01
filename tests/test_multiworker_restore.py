@@ -212,6 +212,20 @@ def test_bare_traceback_not_treated_as_failure():
     print("OK: bare traceback ignored until exception line")
 
 
+def test_extract_failure_snippet_includes_root_before_startup_failed():
+    from app.services.pasarguard_ops import _extract_failure_snippet
+
+    blob = "\n".join([
+        "pasarguard-1 | asyncpg.exceptions.InvalidPasswordError: password authentication failed for user \"pasarguard\"",
+        "pasarguard-1 | ERROR:    2026-09-01 18:49:57,022 - Application startup failed. Exiting.",
+        "pasarguard-1 | ERROR:    2026-09-01 18:49:57,032 - Application startup failed. Exiting.",
+    ])
+    out = _extract_failure_snippet(blob)
+    assert "InvalidPasswordError" in out
+    assert "Application startup failed" in out
+    print("OK: root cause before startup failed included")
+
+
 def test_extract_failure_snippet_includes_exception_line():
     from app.services.pasarguard_ops import _extract_failure_snippet
 
@@ -237,5 +251,6 @@ if __name__ == "__main__":
     test_compose_file_prefix_uses_both_main_and_multi()
     test_start_panel_stack_multi_worker()
     test_bare_traceback_not_treated_as_failure()
+    test_extract_failure_snippet_includes_root_before_startup_failed()
     test_extract_failure_snippet_includes_exception_line()
     print("\nAll multiworker restore tests passed")

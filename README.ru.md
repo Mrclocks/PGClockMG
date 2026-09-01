@@ -1,4 +1,4 @@
-> 🚀 **`v4.4.2`** — Merge main+multi compose + строже health check multi-worker
+> 🚀 **`v4.4.3`** — Root-cause для startup failed + heal NATS/pgbouncer/auth
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

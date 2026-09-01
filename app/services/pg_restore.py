@@ -2815,6 +2815,17 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
             "SSL نامعتبر یا خطای اتصال به PostgreSQL/PgBouncer — لاگ واقعی ValueError/asyncpg را ببینید",
             "روی سرور: docker compose -f /opt/pasarguard/docker-compose.yml logs pasarguard --tail 80",
         ]
+    elif "application startup failed" in low:
+        fa = "پنل بعد از ریستور در مرحله startup کرش کرد (Application startup failed)."
+        en = "Panel crashed during application startup after restore."
+        ru = "Панель упала на этапе application startup после restore."
+        causes_fa = [
+            "علت واقعی معمولاً چند خط بالاتر در لاگ است — ویزارد v4.4.3+ آن را در پیام خطا می‌آورد",
+            "multi-worker: NATS باید قبل از پنل بالا باشد و NATS_URL=nats://nats:4222",
+            "Timescale/PostgreSQL: mismatch پسورد .env با DB یا PgBouncer stale cache",
+            "SSL: فایل cert/key در /var/lib/pasarguard/certs موجود باشد",
+            "روی سرور: docker compose logs pasarguard --tail 200",
+        ]
     elif "nats is required" in low or (
         "nats" in low and "multi-worker" in low
     ) or (

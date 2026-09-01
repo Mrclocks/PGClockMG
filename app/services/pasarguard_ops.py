@@ -233,8 +233,42 @@ def _line_indicates_failure(line: str) -> bool:
 def _extract_failure_snippet(output: str) -> str:
     clean = _strip_ansi(output or "")
     lines = clean.splitlines()
+
+    # Uvicorn often prints the real exception *before* generic startup failed lines.
+    root_causes: list[str] = []
+    for idx, ln in enumerate(lines):
+        if "Application startup failed" not in ln:
+            continue
+        for prev in lines[max(0, idx - 45) : idx]:
+            if not prev.strip() or _is_banner_noise(prev):
+                continue
+            pl = prev.strip()
+            if any(
+                x in pl
+                for x in (
+                    "Traceback",
+                    "Error:",
+                    "Exception:",
+                    "ERROR:",
+                    "ValueError",
+                    "asyncpg",
+                    "sqlalchemy",
+                    "NATS",
+                    "SSL",
+                    "could not connect",
+                    "connection refused",
+                    "password authentication",
+                    "SASL authentication",
+                    "Can't locate revision",
+                    "FATAL:",
+                    "Database migrations failed",
+                )
+            ):
+                if prev not in root_causes:
+                    root_causes.append(prev)
+
     hits = [ln for ln in lines if _line_indicates_failure(ln)]
-    if hits:
+    if hits or root_causes:
         base = hits[-16:]
         # Multi-worker Uvicorn often prints bare Traceback headers — attach exception lines.
         extras: list[str] = []
@@ -254,8 +288,9 @@ def _extract_failure_snippet(output: str) -> str:
                 ):
                     extras.append(follow)
                     break
-        if extras:
-            return "\n".join((base + extras)[-20:])
+        merged = (root_causes + base + extras)[-24:]
+        if merged:
+            return "\n".join(merged)
         return "\n".join(base)
     useful = []
     for ln in lines:
@@ -316,6 +351,11 @@ async def fetch_pasarguard_logs(
         )
         return f"{pg}\n{db_logs}"
     return pg
+
+
+async def fetch_extended_panel_logs(migrator, tail: int = 500) -> str:
+    """Full recent panel logs (no --since) for root-cause extraction after startup failure."""
+    return await fetch_pasarguard_logs(migrator, tail=tail, since=None)
 
 
 async def _panel_port_is_listening(migrator) -> bool:
@@ -494,14 +534,11 @@ async def _pasarguard_container_running(migrator) -> bool:
 
 
 async def _ensure_pasarguard_up(migrator) -> None:
-    cwd = str(PASARGUARD_DIR)
-    panel = panel_compose_service()
-    prefix = compose_file_prefix()
-    await migrator._run_cmd(
-        ["docker", "compose", *prefix, "up", "-d", panel],
-        cwd=cwd,
-        timeout=180,
-    )
+    from app.services.multiworker_stack import start_panel_stack
+
+    ok, out = await start_panel_stack(migrator.job, force_recreate=True)
+    if not ok:
+        migrator.job.log(f"Panel stack restart warning: {(out or '')[-500:]}")
 
 
 async def _try_heal_duplicate_unique_names(migrator, logs: str) -> bool:
@@ -526,7 +563,7 @@ async def _try_heal_duplicate_unique_names(migrator, logs: str) -> bool:
         return False
 
 
-async def _try_heal_db_auth_mismatch(migrator, logs: str) -> bool:
+async def _try_heal_db_auth_mismatch(migrator, logs: str, *, force: bool = False) -> bool:
     """If panel logs show Access denied / SASL fail, re-sync DB users to .env password."""
     low = (logs or "").lower()
     auth_hit = any(
@@ -538,7 +575,7 @@ async def _try_heal_db_auth_mismatch(migrator, logs: str) -> bool:
             "authentication failed",
         )
     )
-    if not auth_hit:
+    if not auth_hit and not force:
         return False
 
     target_db = (migrator.params or {}).get("target_db")
@@ -607,6 +644,66 @@ async def _try_heal_db_auth_mismatch(migrator, logs: str) -> bool:
         return True
     except Exception as e:
         migrator.job.log(f"DB auth heal note: {e}")
+        return False
+
+
+async def _try_heal_pgbouncer_stale(migrator) -> bool:
+    """After PG/Timescale restore, PgBouncer may cache stale enum OIDs."""
+    target_db = (migrator.params or {}).get("target_db")
+    if target_db not in ("postgresql", "timescaledb"):
+        return False
+    if not re.search(r"^\s*pgbouncer\s*:", _compose_text(), re.MULTILINE):
+        return False
+    migrator.job.log("Restarting pgbouncer (clear stale cache after restore)…")
+    await migrator._run_cmd(
+        ["docker", "compose", *compose_file_prefix(), "restart", "pgbouncer"],
+        cwd=str(PASARGUARD_DIR),
+        timeout=120,
+    )
+    await asyncio.sleep(3)
+    return True
+
+
+async def _try_heal_nats_multiworker(migrator, logs: str) -> bool:
+    """Align NATS env and bring NATS up before panel workers retry."""
+    from app.services.multiworker_stack import (
+        NATS_SERVICE,
+        align_nats_env_for_compose,
+        compose_has_service,
+        detect_multiworker_stack,
+        ensure_nats_ready,
+    )
+    from app.services.env_migration import read_env_text
+
+    stack = detect_multiworker_stack()
+    workers = int(stack.get("uvicorn_workers") or 1)
+    if workers <= 1 and not stack.get("uses_nats"):
+        return False
+
+    low = (logs or "").lower()
+    if workers <= 1 and "nats" not in low:
+        return False
+
+    if workers > 1 and not compose_has_service(NATS_SERVICE):
+        migrator.job.log(
+            f"UVICORN_WORKERS={workers} but no `{NATS_SERVICE}` service in compose — "
+            "set UVICORN_WORKERS=1 or add NATS to docker-compose"
+        )
+        return False
+
+    try:
+        env = read_env_text()
+        new_env = align_nats_env_for_compose(env)
+        if new_env != env:
+            PASARGUARD_ENV.write_text(new_env, encoding="utf-8")
+            migrator.job.log("Aligned NATS_URL / NATS_ENABLED in .env for multi-worker boot")
+
+        if compose_has_service(NATS_SERVICE):
+            await ensure_nats_ready(migrator.job, force_recreate=True)
+            return True
+        return new_env != env
+    except Exception as e:
+        migrator.job.log(f"NATS multi-worker heal note: {e}")
         return False
 
 
@@ -1131,6 +1228,9 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
 
         hit = _check_logs_for_failure(out)
         if hit:
+            out_full = await fetch_extended_panel_logs(migrator, tail=500)
+            if out_full.strip():
+                out = out_full
             # Give crash-loop a moment and one recreate before hard-fail
             if not healed_once:
                 healed_once = True
@@ -1142,15 +1242,38 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                         f"Panel error detected ({hit}) — DB auth healed, recreating panel…"
                     )
                 # Marzban dumps: unique names / orphan FKs that block alembic
-                if await _try_heal_duplicate_unique_names(migrator, out):
+                elif await _try_heal_duplicate_unique_names(migrator, out):
                     healed = True
                     migrator.job.log(
                         f"Panel error detected ({hit}) — Marzban pre-boot heal applied, "
                         "recreating panel…"
                     )
+                elif (
+                    hit == "Application startup failed"
+                    and (migrator.params or {}).get("target_db")
+                    in ("postgresql", "timescaledb", "mysql", "mariadb")
+                    and await _try_heal_db_auth_mismatch(migrator, out, force=True)
+                ):
+                    healed = True
+                    migrator.job.log(
+                        f"Panel error detected ({hit}) — DB credentials re-synced, "
+                        "recreating panel…"
+                    )
+                elif await _try_heal_pgbouncer_stale(migrator):
+                    healed = True
+                    migrator.job.log(
+                        f"Panel error detected ({hit}) — pgbouncer restarted, "
+                        "recreating panel stack…"
+                    )
+                elif await _try_heal_nats_multiworker(migrator, out):
+                    healed = True
+                    migrator.job.log(
+                        f"Panel error detected ({hit}) — NATS stack heal applied, "
+                        "recreating panel…"
+                    )
                 if not healed:
                     migrator.job.log(
-                        f"Panel error detected ({hit}) — recreating pasarguard once…"
+                        f"Panel error detected ({hit}) — recreating panel stack once…"
                     )
                 await _ensure_pasarguard_up(migrator)
                 await asyncio.sleep(10)
@@ -1163,9 +1286,11 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                     db_logs = await fetch_compose_logs(migrator, [db_svc], tail=40)
                     if db_logs.strip():
                         db_hint = f"\n\n--- {db_svc} (reference) ---\n{db_logs[-1500:]}"
+            ext = await fetch_extended_panel_logs(migrator, tail=500)
+            snippet_src = ext if ext.strip() else out
             raise RuntimeError(
                 "PasarGuard failed to start — see container logs.\n"
-                + _extract_failure_snippet(out)
+                + _extract_failure_snippet(snippet_src)
                 + db_hint
             )
 

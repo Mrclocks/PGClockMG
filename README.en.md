@@ -1,4 +1,4 @@
-> 🚀 **`v4.4.2`** — Dual compose merge + stricter multi-worker health checks
+> 🚀 **`v4.4.3`** — Root-cause extraction for startup failed + NATS/pgbouncer/auth heal
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
