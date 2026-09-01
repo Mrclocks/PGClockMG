@@ -8,7 +8,13 @@ from typing import TYPE_CHECKING, Any
 
 from app.config import PASARGUARD_DIR, PASARGUARD_ENV
 from app.services.env_migration import _set_env_var_simple, read_env_var
-from app.services.pasarguard_ops import _compose_text, resolve_pasarguard_service
+from app.services.pasarguard_ops import (
+    PANEL_BOOT_MARKERS,
+    _compose_text,
+    compose_file_prefix,
+    panel_compose_service,
+    resolve_pasarguard_service,
+)
 
 if TYPE_CHECKING:
     from app.services.migrators.base import MigrationJob
@@ -99,7 +105,7 @@ def align_nats_env_for_compose(text: str) -> str:
 
 def panel_stack_stop_services() -> list[str]:
     """Satellite workers first, then the panel/backend service."""
-    panel = resolve_pasarguard_service()
+    panel = panel_compose_service()
     ordered: list[str] = []
     for svc in SATELLITE_SERVICES:
         if compose_has_service(svc) and svc not in ordered:
@@ -117,9 +123,10 @@ async def _compose_job(
 ) -> tuple[bool, str]:
     from app.services.pg_restore import _run
 
+    prefix = compose_file_prefix()
     return await _run(
         job,
-        ["docker", "compose", *args],
+        ["docker", "compose", *prefix, *args],
         cwd=str(PASARGUARD_DIR),
         timeout=timeout,
         quiet=quiet,
@@ -143,13 +150,22 @@ async def stop_panel_stack(job: MigrationJob) -> None:
         await _compose_job(job, "stop", *services, timeout=120)
 
 
-async def ensure_nats_ready(job: MigrationJob, timeout: int = 90) -> None:
+async def ensure_nats_ready(
+    job: MigrationJob,
+    timeout: int = 90,
+    *,
+    force_recreate: bool = False,
+) -> None:
     """Bring NATS up and wait until it accepts connections."""
     if not compose_has_service(NATS_SERVICE):
         return
 
     job.log("Starting NATS for multi-worker panel…")
-    ok, out = await _compose_job(job, "up", "-d", NATS_SERVICE, timeout=120)
+    up_args: list[str] = ["up", "-d"]
+    if force_recreate:
+        up_args.append("--force-recreate")
+    up_args.append(NATS_SERVICE)
+    ok, out = await _compose_job(job, *up_args, timeout=120)
     if not ok:
         job.log(f"NATS compose up warning: {(out or '')[-500:]}")
 
@@ -168,12 +184,39 @@ async def ensure_nats_ready(job: MigrationJob, timeout: int = 90) -> None:
         text = logs or ""
         if any(marker in text for marker in NATS_READY_MARKERS):
             job.log("NATS is ready")
+            await asyncio.sleep(2)
             return
         if waited == 0:
             job.log("Waiting for NATS to become ready…")
         await asyncio.sleep(3)
 
     job.log("NATS readiness timeout — continuing (panel will retry NATS connection)")
+
+
+async def wait_for_panel_boot(job: MigrationJob, timeout: int = 120) -> bool:
+    """Wait until panel logs show Uvicorn/startup markers (multi-worker needs longer)."""
+    panel = panel_compose_service()
+    deadline = max(30, int(timeout))
+    for waited in range(0, deadline, 4):
+        _ok, logs = await _compose_job(
+            job,
+            "logs",
+            "--no-color",
+            "--tail",
+            "80",
+            panel,
+            timeout=25,
+            quiet=True,
+        )
+        text = logs or ""
+        if any(marker in text for marker in PANEL_BOOT_MARKERS):
+            job.log("Panel application startup detected")
+            return True
+        if waited == 0:
+            job.log("Waiting for panel workers to finish boot…")
+        await asyncio.sleep(4)
+    job.log("Panel boot wait timed out — continuing to health check")
+    return False
 
 
 async def start_panel_stack(
@@ -194,7 +237,7 @@ async def start_panel_stack(
         return await _compose_job(job, *args, timeout=300)
 
     if info["uses_nats"]:
-        await ensure_nats_ready(job)
+        await ensure_nats_ready(job, force_recreate=force_recreate)
 
     job.log(
         f"Starting multi-worker panel ({panel}, workers={info['uvicorn_workers']}, "
@@ -208,10 +251,16 @@ async def start_panel_stack(
     if not ok:
         return ok, out
 
+    await wait_for_panel_boot(job)
+
     satellites = info["satellite_services"]
     if satellites:
         job.log(f"Starting stack workers: {', '.join(satellites)}")
-        ok2, out2 = await _compose_job(job, "up", "-d", *satellites, timeout=180)
+        sat_args: list[str] = ["up", "-d"]
+        if force_recreate:
+            sat_args.append("--force-recreate")
+        sat_args.extend(satellites)
+        ok2, out2 = await _compose_job(job, *sat_args, timeout=180)
         if not ok2:
             return ok2, (out or "") + "\n" + (out2 or "")
         out = (out or "") + "\n" + (out2 or "")

@@ -118,8 +118,51 @@ def mysql_admin_bins(db_type: str = "", service: str | None = None) -> list[str]
 
 
 def _compose_text() -> str:
-    compose = PASARGUARD_DIR / "docker-compose.yml"
-    return compose.read_text(encoding="utf-8", errors="ignore") if compose.exists() else ""
+    parts: list[str] = []
+    for p in _active_compose_paths():
+        try:
+            parts.append(p.read_text(encoding="utf-8", errors="ignore"))
+        except OSError:
+            continue
+    return "\n".join(parts)
+
+
+def _active_compose_paths() -> list[Path]:
+    """Pick the compose file(s) PasarGuard actually uses (incl. multi-worker layout)."""
+    main: Path | None = None
+    for name in ("docker-compose.yml", "docker-compose.yaml"):
+        p = PASARGUARD_DIR / name
+        if p.exists():
+            main = p
+            break
+    multi = PASARGUARD_DIR / "docker-compose.multi.yml"
+    if main is not None and multi.exists():
+        try:
+            main_text = main.read_text(encoding="utf-8", errors="ignore")
+            multi_text = multi.read_text(encoding="utf-8", errors="ignore")
+            if "nats:" in multi_text and "nats:" not in main_text:
+                return [multi]
+        except OSError:
+            pass
+        return [main]
+    if main is not None:
+        return [main]
+    if multi.exists():
+        return [multi]
+    return []
+
+
+def compose_file_prefix() -> list[str]:
+    """Extra docker compose args when the active file is not the default name."""
+    paths = _active_compose_paths()
+    if len(paths) == 1 and paths[0].name not in ("docker-compose.yml", "docker-compose.yaml"):
+        return ["-f", str(paths[0])]
+    return []
+
+
+def panel_compose_service() -> str:
+    """Compose service name for the PasarGuard panel/backend container."""
+    return resolve_pasarguard_service()
 
 
 def resolve_db_service(target_db: str) -> str | None:
@@ -214,7 +257,8 @@ async def fetch_compose_logs(
 ) -> str:
     """Fetch compose logs quietly — do not echo every line into the job UI."""
     cwd = str(PASARGUARD_DIR)
-    cmd = ["docker", "compose", "logs", "--no-color", "--tail", str(tail)]
+    prefix = compose_file_prefix()
+    cmd = ["docker", "compose", *prefix, "logs", "--no-color", "--tail", str(tail)]
     if since:
         cmd.extend(["--since", since])
     cmd.extend(services)
@@ -294,9 +338,11 @@ async def _pasarguard_container_state(migrator) -> str:
     (do not confuse a dead/missing panel with a flaky docker daemon).
     """
     cwd = str(PASARGUARD_DIR)
+    panel = panel_compose_service()
+    prefix = compose_file_prefix()
     # Quiet + short timeouts: during MySQL bigint ALTER, docker can stall.
     ok, out = await migrator._run_cmd(
-        ["docker", "compose", "ps", "--format", "{{.Name}} {{.Status}}", "pasarguard"],
+        ["docker", "compose", *prefix, "ps", "--format", "{{.Name}} {{.Status}}", panel],
         cwd=cwd,
         timeout=12,
         quiet=True,
@@ -311,7 +357,7 @@ async def _pasarguard_container_state(migrator) -> str:
             return "exited"
 
     ok2, ids = await migrator._run_cmd(
-        ["docker", "compose", "ps", "-q", "pasarguard"],
+        ["docker", "compose", *prefix, "ps", "-q", panel],
         cwd=cwd,
         timeout=10,
         quiet=True,
@@ -335,8 +381,8 @@ async def _pasarguard_container_state(migrator) -> str:
     if ok2 and not (ids or "").strip():
         ok_a, out_a = await migrator._run_cmd(
             [
-                "docker", "compose", "ps", "-a",
-                "--format", "{{.Status}}", "pasarguard",
+                "docker", "compose", *prefix, "ps", "-a",
+                "--format", "{{.Status}}", panel,
             ],
             cwd=cwd,
             timeout=10,
@@ -416,8 +462,10 @@ async def _pasarguard_container_running(migrator) -> bool:
 
 async def _ensure_pasarguard_up(migrator) -> None:
     cwd = str(PASARGUARD_DIR)
+    panel = panel_compose_service()
+    prefix = compose_file_prefix()
     await migrator._run_cmd(
-        ["docker", "compose", "up", "-d", "pasarguard"],
+        ["docker", "compose", *prefix, "up", "-d", panel],
         cwd=cwd,
         timeout=180,
     )
@@ -555,13 +603,13 @@ async def _heal_silent_restart_loop(migrator) -> bool:
         migrator.job.log(f"alembic stamp note: {e}")
 
     cwd = str(PASARGUARD_DIR)
-    await migrator._run_cmd(["docker", "compose", "stop", "pasarguard"], cwd=cwd, timeout=60)
+    from app.services.multiworker_stack import start_panel_stack, stop_panel_stack
+
+    await stop_panel_stack(migrator.job)
     await asyncio.sleep(3)
-    await migrator._run_cmd(
-        ["docker", "compose", "up", "-d", "--force-recreate", "pasarguard"],
-        cwd=cwd,
-        timeout=180,
-    )
+    ok, out = await start_panel_stack(migrator.job, force_recreate=True)
+    if not ok:
+        migrator.job.log(f"Silent heal recreate warning: {(out or '')[-500:]}")
     return True
 
 
@@ -799,8 +847,17 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
     start so a previous boot's "Application startup complete" cannot false-pass.
     """
     from datetime import datetime, timezone
+    from app.services.multiworker_stack import detect_multiworker_stack
 
+    stack = detect_multiworker_stack()
     soft_budget = max(60, int(max_wait))
+    if stack["orchestrate"]:
+        soft_budget = max(soft_budget, 240)
+        migrator.job.log(
+            f"Multi-worker stack (workers={stack['uvicorn_workers']}, "
+            f"nats={'yes' if stack['uses_nats'] else 'no'}) — "
+            f"health budget {soft_budget}s"
+        )
     # Hard ceiling: large Marzban→PG chains (esp. bigint id) can take a long time.
     absolute_cap = max(soft_budget * 4, 3600)
     # Same revision with no new upgrade line for this long ⇒ treat as stuck.
@@ -1307,7 +1364,10 @@ async def wait_pasarguard_ready(migrator, max_wait: int = 90, strict: bool = Fal
             return True
 
         ok_run, running = await migrator._run_cmd(
-            ["docker", "compose", "ps", "--status", "running", "-q", "pasarguard"],
+            [
+                "docker", "compose", *compose_file_prefix(),
+                "ps", "--status", "running", "-q", panel_compose_service(),
+            ],
             cwd=cwd,
             timeout=15,
         )
@@ -1327,28 +1387,28 @@ async def wait_pasarguard_ready(migrator, max_wait: int = 90, strict: bool = Fal
 
 
 async def start_pasarguard(migrator, wait: bool = True, recreate: bool = False) -> None:
-    cwd = str(PASARGUARD_DIR)
-    cmd = ["docker", "compose", "up", "-d"]
-    if recreate:
-        cmd.extend(["--force-recreate", "pasarguard"])
-    else:
-        cmd.append("pasarguard")
-    await migrator._run_cmd(cmd, cwd=cwd, timeout=180)
+    from app.services.multiworker_stack import start_panel_stack
+
+    ok, out = await start_panel_stack(migrator.job, force_recreate=recreate)
+    if not ok:
+        raise RuntimeError(f"PasarGuard start failed:\n{(out or '')[-1500:]}")
     if wait:
         await wait_pasarguard_ready(migrator)
 
 
 async def restart_pasarguard(migrator, wait: bool = True) -> None:
     cwd = str(PASARGUARD_DIR)
+    panel = panel_compose_service()
+    prefix = compose_file_prefix()
     migrator.job.log("Restarting PasarGuard (docker compose)...")
     ok, _ = await migrator._run_cmd(
-        ["docker", "compose", "restart", "pasarguard"],
+        ["docker", "compose", *prefix, "restart", panel],
         cwd=cwd,
         timeout=120,
     )
     if not ok:
         await migrator._run_cmd(
-            ["docker", "compose", "up", "-d", "--force-recreate", "pasarguard"],
+            ["docker", "compose", *prefix, "up", "-d", "--force-recreate", panel],
             cwd=cwd,
             timeout=180,
         )
@@ -1992,8 +2052,9 @@ async def sync_alembic_for_startup(migrator, target_db: str) -> None:
     Align alembic_version with physical schema BEFORE PasarGuard all-in-one starts.
     Prevents DuplicateColumnError on panel restart after cross-DB migration.
     """
-    cwd = str(PASARGUARD_DIR)
-    await migrator._run_cmd(["docker", "compose", "stop", "pasarguard"], cwd=cwd, timeout=120)
+    from app.services.multiworker_stack import stop_panel_stack
+
+    await stop_panel_stack(migrator.job)
 
     if target_db == "sqlite":
         migrator.job.log("SQLite target — running alembic upgrade head (one-shot)...")
@@ -2028,18 +2089,18 @@ async def safe_start_pasarguard(migrator, *, health_max_wait: int | None = None)
         if re.search(r"^\s*pgbouncer\s*:", text, re.M):
             migrator.job.log("Restarting pgbouncer before panel start (clear type cache)...")
             await migrator._run_cmd(
-                ["docker", "compose", "restart", "pgbouncer"],
+                ["docker", "compose", *compose_file_prefix(), "restart", "pgbouncer"],
                 cwd=cwd,
                 timeout=120,
             )
             await asyncio.sleep(3)
 
     migrator.job.log("Starting PasarGuard panel...")
-    await migrator._run_cmd(
-        ["docker", "compose", "up", "-d", "--force-recreate", "pasarguard"],
-        cwd=cwd,
-        timeout=180,
-    )
+    from app.services.multiworker_stack import start_panel_stack
+
+    ok, out = await start_panel_stack(migrator.job, force_recreate=True)
+    if not ok:
+        raise RuntimeError(f"PasarGuard start failed:\n{(out or '')[-2000:]}")
     wait = 180 if health_max_wait is None else int(health_max_wait)
     await verify_pasarguard_healthy(migrator, max_wait=wait)
 
@@ -2235,7 +2296,9 @@ async def ensure_schema_initialized(
         migrator.job.log(f"Target SQLite path: {sqlite_path}")
 
     migrator.job.log("Stopping PasarGuard before schema init...")
-    await migrator._run_cmd(["docker", "compose", "stop", "pasarguard"], cwd=cwd, timeout=120)
+    from app.services.multiworker_stack import stop_panel_stack
+
+    await stop_panel_stack(migrator.job)
 
     revision = source_version or "head"
     migrator.job.log(f"Running alembic upgrade {revision} (one-shot, no panel startup)...")

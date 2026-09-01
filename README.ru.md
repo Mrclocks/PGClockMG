@@ -1,4 +1,4 @@
-> 🚀 **`v4.4.0`** — Restore multi-worker с NATS (NATS_URL + порядок запуска stack)
+> 🚀 **`v4.4.1`** — Health check для panel + полный NATS/stack orchestration
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

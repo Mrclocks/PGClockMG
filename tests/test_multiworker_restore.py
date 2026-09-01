@@ -97,7 +97,7 @@ def test_align_nats_env_noop_without_nats_service():
 
 def test_panel_stack_stop_order():
     with patch.object(mws, "_compose_text", return_value=MULTI_COMPOSE):
-        with patch.object(mws, "resolve_pasarguard_service", return_value="panel"):
+        with patch.object(mws, "panel_compose_service", return_value="panel"):
             services = mws.panel_stack_stop_services()
     assert services == ["node-worker", "scheduler", "panel"]
     print("OK: stop order satellites before panel")
@@ -128,12 +128,40 @@ def test_start_panel_stack_single_worker():
     print("OK: single-worker start unchanged")
 
 
+def test_compose_file_prefix_uses_multi_when_nats_only_there():
+    import tempfile
+    import shutil
+    from app.services import pasarguard_ops as po
+
+    td = Path(tempfile.mkdtemp(prefix="pg-compose-"))
+    old = po.PASARGUARD_DIR
+    po.PASARGUARD_DIR = td
+    try:
+        (td / "docker-compose.yml").write_text(
+            "services:\n  timescaledb:\n    image: x\n", encoding="utf-8"
+        )
+        (td / "docker-compose.multi.yml").write_text(
+            "services:\n  nats:\n    image: nats\n  panel:\n    image: p\n",
+            encoding="utf-8",
+        )
+        prefix = po.compose_file_prefix()
+        assert prefix == ["-f", str(td / "docker-compose.multi.yml")]
+        assert mws.compose_has_service("nats") is True
+        assert po.panel_compose_service() == "panel"
+    finally:
+        po.PASARGUARD_DIR = old
+        shutil.rmtree(td, ignore_errors=True)
+    print("OK: compose prefix selects multi file")
+
+
 def test_start_panel_stack_multi_worker():
     calls: list[tuple] = []
 
     async def fake_compose(job, *args, **kwargs):
         calls.append(args)
         if args and args[0] == "logs":
+            if args[-1] == "panel":
+                return True, "Application startup complete\n"
             return True, "Server is ready\n"
         return True, ""
 
@@ -151,9 +179,9 @@ def test_start_panel_stack_multi_worker():
     ):
         ok, _ = asyncio.run(mws.start_panel_stack(job, force_recreate=True))
     assert ok is True
-    assert ("up", "-d", "nats") in calls
+    assert ("up", "-d", "--force-recreate", "nats") in calls
     assert ("up", "-d", "--force-recreate", "panel") in calls
-    assert ("up", "-d", "node-worker", "scheduler") in calls
+    assert ("up", "-d", "--force-recreate", "node-worker", "scheduler") in calls
     print("OK: multi-worker start order nats → panel → satellites")
 
 
@@ -179,6 +207,7 @@ if __name__ == "__main__":
     test_align_nats_env_noop_without_nats_service()
     test_panel_stack_stop_order()
     test_start_panel_stack_single_worker()
+    test_compose_file_prefix_uses_multi_when_nats_only_there()
     test_start_panel_stack_multi_worker()
     test_extract_failure_snippet_includes_exception_line()
     print("\nAll multiworker restore tests passed")

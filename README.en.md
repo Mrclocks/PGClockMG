@@ -1,4 +1,4 @@
-> 🚀 **`v4.4.0`** — Multi-worker restore with NATS (URL fix + stack boot order)
+> 🚀 **`v4.4.1`** — Fix panel service health check + full NATS/stack orchestration
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

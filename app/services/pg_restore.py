@@ -1474,7 +1474,10 @@ def _set_env_var(text: str, key: str, value: str | None) -> str:
 
 
 async def _compose(job: MigrationJob, *args: str, timeout: int = 300) -> tuple[bool, str]:
-    return await _run(job, ["docker", "compose", *args], cwd=str(PASARGUARD_DIR), timeout=timeout)
+    from app.services.pasarguard_ops import compose_file_prefix
+
+    prefix = compose_file_prefix()
+    return await _run(job, ["docker", "compose", *prefix, *args], cwd=str(PASARGUARD_DIR), timeout=timeout)
 
 
 def _compose_has_service(name: str) -> bool:
@@ -3780,7 +3783,10 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                     "PasarGuard failed to start after restore (force-recreate):\n"
                     f"{out[-2000:]}"
                 )
-        await asyncio.sleep(8)
+        from app.services.multiworker_stack import detect_multiworker_stack
+
+        boot_wait = 20 if detect_multiworker_stack().get("orchestrate") else 8
+        await asyncio.sleep(boot_wait)
 
         await _heal_panel_auth_if_needed(
             job,

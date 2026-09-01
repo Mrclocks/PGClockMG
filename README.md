@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.4.0`** — ریستور multi-worker با NATS (NATS_URL + بالا آوردن stack)
+> 🚀 **`v4.4.1`** — رفع health check سرویس panel + orchestration کامل NATS/stack
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
