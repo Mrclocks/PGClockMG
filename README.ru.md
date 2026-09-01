@@ -1,4 +1,4 @@
-> 🚀 **`v4.4.1`** — Health check для panel + полный NATS/stack orchestration
+> 🚀 **`v4.4.2`** — Merge main+multi compose + строже health check multi-worker
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

@@ -1,4 +1,4 @@
-> 🚀 **`v4.4.1`** — Fix panel service health check + full NATS/stack orchestration
+> 🚀 **`v4.4.2`** — Dual compose merge + stricter multi-worker health checks
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

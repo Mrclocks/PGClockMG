@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.4.1`** — رفع health check سرویس panel + orchestration کامل NATS/stack
+> 🚀 **`v4.4.2`** — ادغام compose دو فایلی + health check دقیق‌تر multi-worker
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
