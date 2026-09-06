@@ -26,7 +26,6 @@ PROTECTED_GETS = (
     "/api/pasarguard/status",
     "/api/upload/whatever/analysis",
     "/api/self-uninstall",
-    "/static/js/app.js",
 )
 
 
@@ -135,3 +134,17 @@ def test_env_token_is_persisted_to_disk(tmp_path, monkeypatch):
     token = ensure_token()
     assert token == "abcdef0123456789abcdef0123456789abcdef0123456789"
     assert token_file.read_text(encoding="utf-8").strip() == token
+
+def test_static_assets_are_public_without_token(client):
+    """JS/CSS must not depend on the auth cookie — otherwise UI boots empty."""
+    for path in ("/static/js/app.js", "/static/js/i18n.js", "/static/css/style.css"):
+        r = client.get(path)
+        assert r.status_code == 200, path
+        assert "text/html" not in (r.headers.get("content-type") or "").lower()
+
+
+def test_static_html_shells_still_require_token(client):
+    # Asset public rule must not expose the HTML shells under /static/.
+    assert client.get("/static/index.html").status_code == 401
+    assert client.get("/static/backup.html").status_code == 401
+

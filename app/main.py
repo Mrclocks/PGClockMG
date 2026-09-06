@@ -36,7 +36,7 @@ from app.services.self_uninstall import uninstall_preview, schedule_self_uninsta
 from app.services.auth import COOKIE_NAME, COOKIE_MAX_AGE, ensure_token, token_matches
 from app.config import WEB_PORT
 
-APP_VERSION = "4.4.4"
+APP_VERSION = "4.4.5"
 
 
 @asynccontextmanager
@@ -53,6 +53,26 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 PUBLIC_PATHS = frozenset({"/login", "/favicon.ico"})
 
+# JS/CSS/fonts must load even when the auth cookie is missing/expired.
+# Otherwise the browser executes the HTML login page as JavaScript → blank UI
+# (empty labels/buttons). HTML shells under /static stay protected.
+_STATIC_ASSET_SUFFIXES = (
+    ".js",
+    ".css",
+    ".map",
+    ".svg",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".gif",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".otf",
+    ".ico",
+)
+
 
 def _is_public_path(path: str) -> bool:
     if path in PUBLIC_PATHS:
@@ -60,6 +80,9 @@ def _is_public_path(path: str) -> bool:
     # One-time stream receive tokens authenticate the request themselves.
     if path.startswith("/api/stream/receive/"):
         return True
+    if path.startswith("/static/"):
+        lower = path.lower()
+        return lower.endswith(_STATIC_ASSET_SUFFIXES)
     return False
 
 _LOGIN_PAGE = """<!doctype html>

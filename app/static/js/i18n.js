@@ -1481,7 +1481,7 @@ function applySocialI18n() {
 
 function setLang(lang) {
   state.lang = lang;
-  localStorage.setItem('pg-migrator-lang', lang);
+  try { localStorage.setItem('pg-migrator-lang', lang); } catch (_) {}
   document.documentElement.lang = lang;
   document.documentElement.dir = lang === 'fa' ? 'rtl' : 'ltr';
   syncLangSwitch(lang);

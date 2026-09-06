@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.4.4`** — جلوگیری از startup failed: sync DB + recreate PgBouncer + NATS قبل از boot
+> 🚀 **`v4.4.5`** — فیکس لود خالی پنل (متن/دکمه) + جلوگیری از startup failed
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

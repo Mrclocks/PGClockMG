@@ -1,7 +1,20 @@
 /* PG-Migrator Wizard */
 
+function _safeStorageGet(key, fallback) {
+  try {
+    const value = localStorage.getItem(key);
+    return value == null ? fallback : value;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function _safeStorageSet(key, value) {
+  try { localStorage.setItem(key, value); } catch (_) {}
+}
+
 const state = {
-  lang: localStorage.getItem('pg-migrator-lang') || 'fa',
+  lang: _safeStorageGet('pg-migrator-lang', 'fa') || 'fa',
   currentStep: 0,
   panels: [],
   subscriptionLabels: {},

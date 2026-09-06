@@ -640,7 +640,25 @@ const I18N = {
   },
 };
 
-let lang = localStorage.getItem("pg_backup_lang") || "fa";
+/** localStorage can throw in private/restricted browsers — never kill the panel script. */
+function storageGet(key, fallback) {
+  try {
+    const value = localStorage.getItem(key);
+    return value == null ? fallback : value;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function storageSet(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch (_) {
+    /* ignore quota / privacy mode */
+  }
+}
+
+let lang = storageGet("pg_backup_lang", "fa") || "fa";
 let setupMode = false;
 let pollTimer = null;
 let backupProgressFadeTimer = null;
@@ -750,11 +768,13 @@ function t(key) {
 
 function setBackupLang(next) {
   lang = next;
-  localStorage.setItem("pg_backup_lang", next);
+  storageSet("pg_backup_lang", next);
   document.documentElement.lang = next;
   document.documentElement.dir = next === "fa" ? "rtl" : "ltr";
   syncLangMenu(next);
   applyI18n();
+  // Skip dashboard refresh while panels are still hidden for boot.
+  if (document.documentElement.classList.contains("is-booting")) return;
   if (!document.getElementById("panel-auth")?.classList.contains("active")) {
     refreshDashboard().catch(() => {});
     if (document.getElementById("panel-list")?.classList.contains("active")) {
@@ -905,21 +925,36 @@ function applyI18n() {
   document.getElementById("btnAuthSubmit").textContent = setupMode ? t("btnSetup") : t("btnLogin");
 }
 
+const API_TIMEOUT_MS = 10000;
+
 async function api(path, opts = {}) {
+  const timeoutMs = Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : API_TIMEOUT_MS;
+  const fetchOpts = { ...opts };
+  delete fetchOpts.timeoutMs;
+
+  const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
   let res;
   try {
     res = await fetch(path, {
       credentials: "same-origin",
-      headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
-      ...opts,
+      headers: { "Content-Type": "application/json", ...(fetchOpts.headers || {}) },
+      ...fetchOpts,
+      signal: ctrl ? ctrl.signal : fetchOpts.signal,
     });
   } catch (e) {
     const raw = (e && e.message) || "";
+    const name = (e && e.name) || "";
     // Safari/WebKit often reports transient fetch failures as "Load failed".
-    if (/load failed|failed to fetch|networkerror|network request failed/i.test(raw)) {
+    if (
+      name === "AbortError"
+      || /load failed|failed to fetch|networkerror|network request failed|aborted/i.test(raw)
+    ) {
       throw new Error(t("errNetwork"));
     }
     throw new Error(raw || t("errNetwork"));
+  } finally {
+    if (timer) clearTimeout(timer);
   }
   let data = null;
   const ct = res.headers.get("content-type") || "";
@@ -1024,14 +1059,25 @@ function esc(s) {
 }
 
 async function boot() {
-  setBackupLang(lang);
+  let settled = false;
+  const safety = setTimeout(() => {
+    if (settled) return;
+    // Never leave the UI blank if setup/session probes hang on slow links.
+    finishBoot();
+    if (!document.querySelector(".panel.active")) showPanel("panel-auth");
+  }, 5000);
+  window.__pgBootSafety = safety;
+
   try {
-    const st = await api("/api/setup/status");
-    document.getElementById("appVersion").textContent = "v" + (st.version || "4.3.2");
+    // Paint i18n first while panels are still hidden, then reveal ASAP.
+    setBackupLang(lang);
+    const st = await api("/api/setup/status", { timeoutMs: 8000 });
+    const verEl = document.getElementById("appVersion");
+    if (verEl) verEl.textContent = "v" + (st.version || "4.4.5");
     setupMode = !st.password_set;
     window.__setupTokenRequired = !!st.setup_token_required;
-    document.getElementById("authConfirmWrap").classList.toggle("hidden", !setupMode);
-    document.getElementById("authSetupTokenWrap").classList.toggle(
+    document.getElementById("authConfirmWrap")?.classList.toggle("hidden", !setupMode);
+    document.getElementById("authSetupTokenWrap")?.classList.toggle(
       "hidden",
       !(setupMode && window.__setupTokenRequired)
     );
@@ -1040,15 +1086,18 @@ async function boot() {
     if (!setupMode) {
       try {
         // Lightweight session probe — do not load the heavy dashboard twice.
-        await api("/api/session");
+        await api("/api/session", { timeoutMs: 5000 });
+        settled = true;
         finishBoot();
         enterApp();
         return;
       } catch (_) { /* need login */ }
     }
+    settled = true;
     finishBoot();
     showPanel("panel-auth");
   } catch (e) {
+    settled = true;
     finishBoot();
     showPanel("panel-auth");
     const err = document.getElementById("authError");
@@ -1056,13 +1105,26 @@ async function boot() {
       err.textContent = e.message || String(e);
       err.classList.remove("hidden");
     }
+  } finally {
+    if (!settled) {
+      settled = true;
+      finishBoot();
+      if (!document.querySelector(".panel.active")) showPanel("panel-auth");
+    }
   }
 }
 
 function finishBoot() {
+  if (window.__pgBootSafety) {
+    clearTimeout(window.__pgBootSafety);
+    window.__pgBootSafety = null;
+  }
   document.documentElement.classList.remove("is-booting");
   document.body.classList.add("is-booted");
+  const splash = document.getElementById("bootSplash");
+  if (splash) splash.hidden = true;
 }
+
 
 function enterApp() {
   showBackupTab("dash");
