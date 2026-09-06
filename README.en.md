@@ -1,4 +1,4 @@
-> 🚀 **`v4.4.4`** — Prevent startup failed: DB sync + PgBouncer recreate + NATS before boot
+> 🚀 **`v4.4.5`** — Fix blank panel UI (missing text/buttons) + prevent startup failed
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

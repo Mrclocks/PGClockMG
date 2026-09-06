@@ -1,4 +1,4 @@
-> 🚀 **`v4.4.4`** — Предотвращение startup failed: sync DB + recreate PgBouncer + NATS до boot
+> 🚀 **`v4.4.5`** — Исправление пустой панели (текст/кнопки) + предотвращение startup failed
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

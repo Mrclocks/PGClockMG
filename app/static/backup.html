@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#0f1218">
   <title>PGClockMG Backup</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=4.4.4">
-  <link rel="stylesheet" href="/static/css/backup.css?v=4.4.4">
+  <link rel="stylesheet" href="/static/css/style.css?v=4.4.5">
+  <link rel="stylesheet" href="/static/css/backup.css?v=4.4.5">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
@@ -16,11 +16,52 @@
     html.is-booting .panel { display: none !important; }
     html.is-booting .backup-tabs,
     html.is-booting #btnLogout { visibility: hidden; }
+    .boot-splash {
+      display: none;
+      min-height: 40vh;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 10px;
+      color: #9aa3b5;
+      font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+      font-size: 0.95rem;
+      letter-spacing: 0.01em;
+    }
+    html.is-booting .boot-splash { display: flex; }
+    .boot-splash-dot {
+      width: 28px; height: 28px; border-radius: 50%;
+      border: 2px solid #3d7dff; border-top-color: transparent;
+      animation: bootspin 0.8s linear infinite;
+    }
+    @keyframes bootspin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
-  <script>document.documentElement.classList.add("is-booting");</script>
+  <script>
+    document.documentElement.classList.add("is-booting");
+    // Last-resort reveal if backup.js fails to load/parse (blank UI otherwise).
+    window.__pgBootSafety = setTimeout(function () {
+      var root = document.documentElement;
+      if (!root.classList.contains("is-booting")) return;
+      root.classList.remove("is-booting");
+      document.body.classList.add("is-booted");
+      var splash = document.getElementById("bootSplash");
+      if (splash) splash.hidden = true;
+      var auth = document.getElementById("panel-auth");
+      if (auth && !document.querySelector(".panel.active")) auth.classList.add("active");
+    }, 6000);
+  </script>
+  <noscript>
+    <div style="max-width:420px;margin:15vh auto;padding:24px;background:#182031;color:#e6e9ef;border-radius:12px;font-family:system-ui,sans-serif;line-height:1.6">
+      JavaScript is required for PGClockMG Backup / برای پنل بکاپ باید JavaScript فعال باشد.
+    </div>
+  </noscript>
   <div class="app backup-app">
+    <div id="bootSplash" class="boot-splash" role="status" aria-live="polite">
+      <div class="boot-splash-dot" aria-hidden="true"></div>
+      <span>Loading…</span>
+    </div>
 
     <header class="header">
       <div class="header-brand">
@@ -35,7 +76,7 @@
         </div>
         <div class="header-titles">
           <h1>PGClockMG Backup</h1>
-          <p class="header-version" id="appVersion">v4.4.4</p>
+          <p class="header-version" id="appVersion">v4.4.5</p>
         </div>
       </div>
       <div class="header-meta">
@@ -84,13 +125,13 @@
             <div class="choice-icon icon-tone-orange" aria-hidden="true">
               <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
             </div>
-            <h2 id="authTitle"></h2>
-            <p class="desc" id="authDesc"></p>
+            <h2 id="authTitle">ورود به پنل بکاپ</h2>
+            <p class="desc" id="authDesc">با رمز همین پنل وارد شوید.</p>
           </div>
           <div class="welcome-body">
             <div id="authError" class="warning-card hidden"></div>
             <div class="form-group">
-              <label id="lblPassword"></label>
+              <label id="lblPassword">رمز عبور</label>
               <input type="password" id="authPassword" autocomplete="new-password" class="text-input">
             </div>
             <div class="form-group hidden" id="authConfirmWrap">
@@ -104,7 +145,7 @@
               <p class="desc-sm" id="authSetupTokenHint"></p>
             </div>
             <div class="actions actions-center">
-              <button type="button" class="btn btn-primary" id="btnAuthSubmit" onclick="submitAuth()"></button>
+              <button type="button" class="btn btn-primary" id="btnAuthSubmit" onclick="submitAuth()">ورود</button>
             </div>
           </div>
         </div>
@@ -564,6 +605,6 @@
     </div>
   </div>
 
-  <script src="/static/js/backup.js?v=4.4.4"></script>
+  <script src="/static/js/backup.js?v=4.4.5"></script>
 </body>
 </html>
