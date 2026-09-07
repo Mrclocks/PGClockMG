@@ -53,11 +53,17 @@ def migration_primary_key(candidates: list[dict], db_type: str | None) -> str | 
     if not candidates:
         return None
     if db_type in ("mysql", "mariadb"):
-        order = ["MYSQL_ROOT_PASSWORD", "MYSQL_PASSWORD", "DB_PASSWORD"]
+        order = [
+            "MYSQL_ROOT_PASSWORD", "MYSQL_PASSWORD", "DB_PASSWORD",
+            "SQLALCHEMY_DATABASE_URL",
+        ]
     elif db_type in ("postgresql", "timescaledb"):
-        order = ["POSTGRES_PASSWORD", "DB_PASSWORD"]
+        order = ["POSTGRES_PASSWORD", "DB_PASSWORD", "SQLALCHEMY_DATABASE_URL"]
     else:
-        order = ["DB_PASSWORD", "MYSQL_ROOT_PASSWORD", "MYSQL_PASSWORD", "POSTGRES_PASSWORD"]
+        order = [
+            "DB_PASSWORD", "MYSQL_ROOT_PASSWORD", "MYSQL_PASSWORD",
+            "POSTGRES_PASSWORD", "SQLALCHEMY_DATABASE_URL",
+        ]
     keys = {c["key"] for c in candidates}
     for key in order:
         if key in keys:
@@ -66,7 +72,12 @@ def migration_primary_key(candidates: list[dict], db_type: str | None) -> str | 
 
 
 def extract_env_password_candidates(text: str, db_type: str | None = None) -> list[dict]:
-    """Return distinct password keys/values found in a panel .env file."""
+    """Return distinct password keys/values found in a panel .env file.
+
+    Named keys (MYSQL_ROOT_PASSWORD / DB_PASSWORD / …) are preferred. When the
+    password only exists inside ``SQLALCHEMY_DATABASE_URL`` (common PasarGuard
+    installs), that URL password is also surfaced so the wizard can auto-fill.
+    """
     if not text:
         return []
 
@@ -80,19 +91,34 @@ def extract_env_password_candidates(text: str, db_type: str | None = None) -> li
 
     seen_vals: set[str] = set()
     candidates: list[dict] = []
-    for key in keys:
-        val = read_env_var(text, key)
+
+    def _add(key: str, val: str | None) -> None:
         if not val:
-            continue
-        dup = val in seen_vals
+            return
+        # Skip identical secrets under a second label — keeps the Confirm UI tidy.
+        if val in seen_vals:
+            return
         seen_vals.add(val)
         candidates.append({
             "key": key,
             "value": val,
             "masked": mask_password(val),
             "quoted_preview": f'"{mask_password(val)}"',
-            "duplicate_value": dup,
+            "duplicate_value": False,
         })
+
+    for key in keys:
+        _add(key, read_env_var(text, key))
+
+    # Compose installer block (DB_PASSWORD) — covered by keys above when the
+    # var exists; kept via read_compose for consistency with db_auth.
+    compose_pwd = read_compose_db_credentials(text).get("password")
+    _add("DB_PASSWORD", compose_pwd)
+
+    url = read_env_var(text, "SQLALCHEMY_DATABASE_URL") or ""
+    if url:
+        url_pwd = parse_sqlalchemy_url(url, text).get("password")
+        _add("SQLALCHEMY_DATABASE_URL", url_pwd)
 
     primary = migration_primary_key(candidates, db_type)
     for c in candidates:
@@ -105,11 +131,17 @@ def pick_primary_env_password(candidates: list[dict], db_type: str | None) -> st
         return None
     order: list[str]
     if db_type in ("mysql", "mariadb"):
-        order = ["MYSQL_ROOT_PASSWORD", "MYSQL_PASSWORD", "DB_PASSWORD"]
+        order = [
+            "MYSQL_ROOT_PASSWORD", "MYSQL_PASSWORD", "DB_PASSWORD",
+            "SQLALCHEMY_DATABASE_URL",
+        ]
     elif db_type in ("postgresql", "timescaledb"):
-        order = ["POSTGRES_PASSWORD", "DB_PASSWORD"]
+        order = ["POSTGRES_PASSWORD", "DB_PASSWORD", "SQLALCHEMY_DATABASE_URL"]
     else:
-        order = ["DB_PASSWORD", "MYSQL_ROOT_PASSWORD", "MYSQL_PASSWORD", "POSTGRES_PASSWORD"]
+        order = [
+            "DB_PASSWORD", "MYSQL_ROOT_PASSWORD", "MYSQL_PASSWORD",
+            "POSTGRES_PASSWORD", "SQLALCHEMY_DATABASE_URL",
+        ]
     by_key = {c["key"]: c["value"] for c in candidates}
     for key in order:
         if key in by_key:
