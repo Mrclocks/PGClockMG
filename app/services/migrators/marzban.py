@@ -49,6 +49,12 @@ class MarzbanMigrator(BaseMigrator):
         marzban_exists = MARZBAN_DIR.exists() or MARZBAN_DATA.exists()
 
         self.job.log("Marzban migration (fresh PasarGuard install)")
+        # Default ON: skip broken user rows and continue (still abort if zero users land).
+        if "skip_bad_user_rows" not in params:
+            params["skip_bad_user_rows"] = True
+            self.params["skip_bad_user_rows"] = True
+        if params.get("skip_bad_user_rows"):
+            self.job.log("Optimization: skip broken user rows and continue with report")
         if params.get("relocate_inbound_certs"):
             self.job.log("Optimization: relocate inbound TLS certs into PasarGuard certs/")
         self.job.set_progress(5, "Starting Marzban → PasarGuard migration...")
@@ -169,6 +175,7 @@ class MarzbanMigrator(BaseMigrator):
         if target_db == "sqlite":
             self.job.set_progress(90, "Starting PasarGuard on SQLite...")
             await safe_start_pasarguard(self)
+            await self._assert_target_pasarguard_ready("sqlite")
             return
 
         self.job.set_progress(65, f"Converting PasarGuard SQLite → {target_db} (restore-grade)...")
@@ -177,6 +184,7 @@ class MarzbanMigrator(BaseMigrator):
             await self._copy_marzban_assets(extra_data_dir)
         self.job.set_progress(90, "Starting PasarGuard...")
         await safe_start_pasarguard(self)
+        await self._assert_target_pasarguard_ready(target_db)
 
     async def _migrate_mysql_like_restore(
         self,
@@ -229,6 +237,7 @@ class MarzbanMigrator(BaseMigrator):
         await self._finalize_env_after_convert(target_db, install_env_snapshot)
         self.job.set_progress(90, "Starting PasarGuard...")
         await safe_start_pasarguard(self)
+        await self._assert_target_pasarguard_ready(target_db)
 
     async def _convert_pg_sqlite_to_target(
         self, sqlite_path: Path, target_db: str, install_env_snapshot: str,
@@ -451,14 +460,67 @@ class MarzbanMigrator(BaseMigrator):
         self._assert_pasarguard_shape_ready(found, tables_present=tables, engine="sqlite")
 
     async def _assert_target_pasarguard_ready(self, target_db: str) -> None:
-        """Post-boot readiness for same-family MySQL/MariaDB (and sqlite fallback)."""
+        """Post-boot readiness for live target engines (sqlite/mysql/pg/ts)."""
         if target_db == "sqlite":
             self._assert_sqlite_pasarguard_ready(PASARGUARD_DATA / "db.sqlite3")
             return
-        if target_db not in ("mysql", "mariadb"):
+        if target_db in ("mysql", "mariadb"):
+            found, tables = self._count_mysql_pasarguard_tables(target_db)
+            self._assert_pasarguard_shape_ready(found, tables_present=tables, engine=target_db)
             return
-        found, tables = self._count_mysql_pasarguard_tables(target_db)
-        self._assert_pasarguard_shape_ready(found, tables_present=tables, engine=target_db)
+        if target_db in ("postgresql", "timescaledb"):
+            found, tables = self._count_postgres_pasarguard_tables(target_db)
+            self._assert_pasarguard_shape_ready(found, tables_present=tables, engine=target_db)
+            return
+
+    def _count_postgres_pasarguard_tables(
+        self, target_db: str,
+    ) -> tuple[dict[str, int], set[str]]:
+        """Count critical PasarGuard tables on live PostgreSQL/Timescale."""
+        import psycopg2
+
+        from app.services.db_credentials import migration_port
+
+        conn = get_target_connection(self.params)
+        host = conn.get("host") or "127.0.0.1"
+        port = int(migration_port(conn, target_db))
+        user = conn.get("user") or "pasarguard"
+        password = conn.get("password") or ""
+        database = conn.get("database") or "pasarguard"
+        critical = (
+            "users", "admins", "hosts", "inbounds", "nodes", "groups", "core_configs",
+        )
+        found: dict[str, int] = {}
+        tables: set[str] = set()
+        try:
+            with psycopg2.connect(
+                host=host,
+                port=port,
+                user=user,
+                password=password,
+                dbname=database,
+                connect_timeout=10,
+            ) as db:
+                db.autocommit = True
+                with db.cursor() as cur:
+                    cur.execute(
+                        "SELECT tablename FROM pg_catalog.pg_tables "
+                        "WHERE schemaname='public'"
+                    )
+                    tables = {str(r[0]).lower() for r in cur.fetchall() if r and r[0]}
+                    for t in critical:
+                        if t not in tables:
+                            continue
+                        cur.execute(f'SELECT COUNT(*) FROM "{t}"')
+                        row = cur.fetchone()
+                        n = int(row[0] or 0) if row else 0
+                        if n > 0:
+                            found[t] = n
+        except Exception as e:
+            raise RuntimeError(
+                f"Could not verify upgraded {target_db} PasarGuard tables: {e}"
+            ) from e
+        return found, tables
 
     def _count_mysql_pasarguard_tables(
         self, target_db: str,
@@ -1087,6 +1149,9 @@ class MarzbanMigrator(BaseMigrator):
         }
         if self.copy_report:
             out["copy_report"] = self.copy_report
+            skips = (self.copy_report or {}).get("row_skips") or {}
+            if skips:
+                out["skip_report"] = skips
         return out
 
     def _get_panel_url(self) -> str:

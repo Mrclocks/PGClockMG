@@ -12,6 +12,8 @@ from app.services.migrators.pasarguard_db import PasarguardDbMigrator
 
 from app.services.migrators.remnawave import RemnawaveMigrator
 
+from app.services.panel_job_lock import PanelJobAlreadyRunning, ensure_panel_idle
+
 MIGRATORS = {
     "marzban": MarzbanMigrator,
     "3x-ui": XuiMigrator,
@@ -44,15 +46,8 @@ def get_running_migration_job() -> MigrationJob | None:
     return None
 
 
-class MigrationAlreadyRunning(RuntimeError):
-    """Raised when a second migrate is requested while one is active."""
-
-    def __init__(self, job: MigrationJob):
-        self.job = job
-        super().__init__(
-            f"A migration is already running (job_id={job.job_id}, "
-            f"progress={job.progress}%). Wait for it to finish before starting another."
-        )
+# Backward-compatible alias used by API / older imports.
+MigrationAlreadyRunning = PanelJobAlreadyRunning
 
 
 async def start_migration(params: dict, on_log: Callable | None = None) -> MigrationJob:
@@ -61,9 +56,7 @@ async def start_migration(params: dict, on_log: Callable | None = None) -> Migra
     if not migrator_cls:
         raise ValueError(f"Unsupported panel: {panel}")
 
-    existing = get_running_migration_job()
-    if existing:
-        raise MigrationAlreadyRunning(existing)
+    ensure_panel_idle()
 
     _prune_finished_jobs()
     job = MigrationJob()

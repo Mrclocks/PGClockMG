@@ -1,4 +1,4 @@
-> 🚀 **`v4.5.0`** — Миграция Marzban: опциональный перенос TLS inbound в `certs/` PasarGuard + защита от пустых inbound
+> 🚀 **`v4.6.0`** — Стабильнее миграция Marzban: skip битых users + общий lock migrate/restore + guards core_configs
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

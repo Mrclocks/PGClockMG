@@ -935,6 +935,7 @@ function buildMigrationBody() {
     upload_bundle_id: state.uploadBundleId,
     install_redirect: document.getElementById('installRedirect')?.checked ?? true,
     relocate_inbound_certs: document.getElementById('chkRelocateInboundCerts')?.checked ?? false,
+    skip_bad_user_rows: document.getElementById('chkSkipBadUserRows')?.checked ?? true,
     remnawave_url: document.getElementById('remnawaveUrl')?.value || null,
     remnawave_token: document.getElementById('remnawaveToken')?.value || null,
     marzban_mode: 'fresh',
@@ -1211,9 +1212,13 @@ function renderSummary() {
     const title = document.getElementById('migrateOptimizeTitle');
     const lbl = document.getElementById('chkRelocateInboundCertsLabel');
     const hint = document.getElementById('chkRelocateInboundCertsHint');
+    const skipLbl = document.getElementById('chkSkipBadUserRowsLabel');
+    const skipHint = document.getElementById('chkSkipBadUserRowsHint');
     if (title) title.textContent = s4.optimizeTitle || '';
     if (lbl) lbl.textContent = s4.relocateInboundCerts || '';
     if (hint) hint.textContent = s4.relocateInboundCertsHint || '';
+    if (skipLbl) skipLbl.textContent = s4.skipBadUserRows || '';
+    if (skipHint) skipHint.textContent = s4.skipBadUserRowsHint || '';
   }
 
   const warnEl = document.getElementById('finalWarnings');
@@ -1431,8 +1436,9 @@ function renderPostMigrateSection(result) {
   const showGroupTip = panelId === 'marzban' || panelId === 'pasarguard';
   const report = result?.copy_report;
   const incomplete = report?.incomplete || [];
+  const rowSkips = report?.row_skips || result?.skip_report || {};
 
-  if (!showGroupTip && !incomplete.length) {
+  if (!showGroupTip && !incomplete.length && !Object.keys(rowSkips).length) {
     section.classList.add('hidden');
     return;
   }
@@ -1441,7 +1447,7 @@ function renderPostMigrateSection(result) {
   tipEl.textContent = showGroupTip ? t('step6.groupBulkTip') : '';
   tipEl.classList.toggle('hidden', !showGroupTip);
 
-  if (!incomplete.length) {
+  if (!incomplete.length && !Object.keys(rowSkips).length) {
     titleEl.classList.add('hidden');
     grid.innerHTML = '';
     return;
@@ -1449,7 +1455,7 @@ function renderPostMigrateSection(result) {
 
   titleEl.classList.remove('hidden');
   titleEl.textContent = t('step6.incompleteTitle');
-  grid.innerHTML = incomplete.map((item) => {
+  const incompleteHtml = incomplete.map((item) => {
     const name = transferTableLabel(item.table);
     const copied = fmtMsg(t('step6.incompleteCopied'), {
       copied: item.copied,
@@ -1463,6 +1469,23 @@ function renderPostMigrateSection(result) {
         <div class="itc-stat itc-missing">${missing}</div>
       </div>`;
   }).join('');
+  const skipHtml = Object.entries(rowSkips).map(([table, info]) => {
+    const name = transferTableLabel(table);
+    const skipped = Number(info?.skipped || 0);
+    if (!skipped) return '';
+    const samples = (info?.samples || []).slice(0, 3).map((s) => {
+      const who = s.username || s.id || '';
+      const err = s.error || '';
+      return `<div class="itc-stat">${who ? `${who}: ` : ''}${err}</div>`;
+    }).join('');
+    return `
+      <div class="incomplete-transfer-card">
+        <div class="itc-name">${name}</div>
+        <div class="itc-stat itc-missing">${fmtMsg(t('step6.skippedRows'), { skipped })}</div>
+        ${samples}
+      </div>`;
+  }).join('');
+  grid.innerHTML = incompleteHtml + skipHtml;
 }
 
 async function showSuccess(result) {

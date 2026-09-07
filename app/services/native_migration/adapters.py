@@ -14,6 +14,7 @@ from app.services.native_migration.copy_core import (
     SUBSCRIPTION_TABLES,
     MIGRATION_ABORT_IF_ZERO,
     STRICT_COMPLETE_TABLES,
+    SOFT_USER_RELATED_TABLES,
     OPTIONAL_FK_COLUMNS,
     TARGET_INSERT_DEFAULTS,
     JSON_COLUMNS,
@@ -346,7 +347,17 @@ class SqliteWriter(TableWriter):
         values = self._coerce_row(table, columns, values)
         cols = ", ".join(f'"{c}"' for c in columns)
         ph = ", ".join(["?"] * len(columns))
-        self._conn.execute(f'INSERT INTO "{table}" ({cols}) VALUES ({ph})', values)
+        # Per-row savepoint so a bad row does not wipe earlier successful inserts.
+        self._conn.execute("SAVEPOINT pgmig_row")
+        try:
+            self._conn.execute(f'INSERT INTO "{table}" ({cols}) VALUES ({ph})', values)
+            self._conn.execute("RELEASE SAVEPOINT pgmig_row")
+        except Exception:
+            try:
+                self._conn.execute("ROLLBACK TO SAVEPOINT pgmig_row")
+            except Exception:
+                pass
+            raise
 
     def reset_sequence(self, table: str) -> None:
         pass
@@ -374,7 +385,11 @@ class SqliteWriter(TableWriter):
         return int(cur.fetchone()[0])
 
     def recover(self) -> None:
-        self._conn.rollback()
+        """Rollback failed row only — never wipe successful inserts in this table."""
+        try:
+            self._conn.execute("ROLLBACK TO SAVEPOINT pgmig_row")
+        except Exception:
+            pass
 
     def close(self) -> None:
         self._conn.close()
@@ -1253,6 +1268,7 @@ _COPY_COMMIT_EVERY = 2_500
 def build_copy_report(
     source_counts: dict[str, int],
     stats: dict[str, int],
+    soft_incomplete_tables: frozenset[str] | set[str] | None = None,
 ) -> dict:
     """Summarize tables that were not fully copied (for post-migration UI).
 
@@ -1260,10 +1276,14 @@ def build_copy_report(
     Best-effort history tables (usages, subscription updates, hwids, …) may
     appear in ``incomplete`` / ``soft_incomplete`` without failing the job —
     SQLite often keeps orphan FK rows that PostgreSQL correctly rejects.
+
+    ``soft_incomplete_tables`` (e.g. users when skip_bad_user_rows) are treated
+    like soft history: listed in the report but do not set ``has_gaps``.
     """
     incomplete: list[dict] = []
     seen: set[str] = set()
-    critical = STRICT_COMPLETE_TABLES | SUBSCRIPTION_TABLES | MIGRATION_ABORT_IF_ZERO
+    soft_extra = frozenset(soft_incomplete_tables or ())
+    critical = (STRICT_COMPLETE_TABLES | SUBSCRIPTION_TABLES | MIGRATION_ABORT_IF_ZERO) - soft_extra
     for table in list(TABLE_ORDER) + sorted(source_counts.keys()):
         if table in seen:
             continue
@@ -1296,9 +1316,11 @@ def copy_tables_universal(
     source_version: str | None = None,
     fail_hard: bool = True,
     stamp_alembic: bool = True,
+    soft_incomplete_tables: frozenset[str] | set[str] | None = None,
 ) -> tuple[dict[str, int], dict]:
     """Copy shared PasarGuard/Marzban tables from any reader to any writer."""
     stats: dict[str, int] = {}
+    soft_tables = frozenset(soft_incomplete_tables or ())
     # Let writers emit diagnostics (e.g. whether FK enforcement was disabled).
     try:
         setattr(writer, "_log", log)
@@ -1366,6 +1388,7 @@ def copy_tables_universal(
             source_version=source_version,
             fail_hard=fail_hard,
             stamp_alembic=stamp_alembic,
+            soft_incomplete_tables=soft_tables,
             ordered=ordered,
             source_tables=source_tables,
             source_counts=source_counts,
@@ -1388,6 +1411,7 @@ def _copy_tables_universal_body(
     source_version: str | None,
     fail_hard: bool,
     stamp_alembic: bool,
+    soft_incomplete_tables: frozenset[str],
     ordered: list[str],
     source_tables: set[str],
     source_counts: dict[str, int],
@@ -1395,6 +1419,7 @@ def _copy_tables_universal_body(
     table_first_errors: dict[str, str],
     stats: dict[str, int],
 ) -> tuple[dict[str, int], dict]:
+    row_skips: dict[str, dict] = {}
     for table in ordered:
         if table in SKIP_TABLES or table not in source_tables:
             continue
@@ -1479,12 +1504,30 @@ def _copy_tables_universal_body(
                 errors += 1
                 if first_error is None:
                     first_error = row_err
+                skip_bucket = row_skips.setdefault(
+                    table,
+                    {"skipped": 0, "copied": 0, "source": src_total, "samples": []},
+                )
+                skip_bucket["skipped"] += 1
+                if len(skip_bucket["samples"]) < 20:
+                    sample: dict = {"error": (row_err or "")[:240]}
+                    if table == "users":
+                        for label, col in (("id", "id"), ("username", "username")):
+                            if col in src_index:
+                                try:
+                                    sample[label] = row[src_index[col]]
+                                except Exception:
+                                    pass
+                    skip_bucket["samples"].append(sample)
                 log_limit = errors <= 3 or table in SUBSCRIPTION_TABLES or table in STRICT_COMPLETE_TABLES
                 if log_limit:
                     log(f"Row skip {table}: {(row_err or '')[:200]}")
                 elif errors == 4:
                     log(f"Row skip {table}: … further skips suppressed (non-critical orphans)")
         stats[table] = count
+        if table in row_skips:
+            row_skips[table]["copied"] = count
+            row_skips[table]["source"] = src_total
         if first_error:
             table_first_errors[table] = first_error
         if errors:
@@ -1509,12 +1552,16 @@ def _copy_tables_universal_body(
                 log(f"Count verify {table}: inserted {count}, committed {verified}")
                 count = verified
                 stats[table] = count
+                if table in row_skips:
+                    row_skips[table]["copied"] = count
         except Exception as exc:
             writer.recover()
             log(f"Commit warning {table}: {str(exc)[:120]}")
             verified = writer.row_count(table)
             if verified >= 0:
                 stats[table] = verified
+                if table in row_skips:
+                    row_skips[table]["copied"] = verified
 
     if stamp_alembic and source_version and source_version != "head":
         from app.services.native_migration.source_version import alembic_revisions_for_stamp
@@ -1565,6 +1612,8 @@ def _copy_tables_universal_body(
                 )
 
         for table in STRICT_COMPLETE_TABLES:
+            if table in soft_incomplete_tables:
+                continue
             src_n = source_counts.get(table, 0)
             dst_n = stats.get(table, 0)
             if src_n > 0 and dst_n < src_n and table in attempted_tables:
@@ -1575,12 +1624,23 @@ def _copy_tables_universal_body(
                     + ". Nothing should be lost — fix and retry."
                 )
 
-    report = build_copy_report(source_counts, stats)
+    report = build_copy_report(
+        source_counts, stats, soft_incomplete_tables=soft_incomplete_tables,
+    )
     report["source_counts"] = dict(source_counts)
     report["copied_counts"] = dict(stats)
+    report["row_skips"] = row_skips
+    report["first_errors"] = dict(table_first_errors)
+    if soft_incomplete_tables:
+        report["soft_policy_tables"] = sorted(soft_incomplete_tables)
     for item in report.get("incomplete", []):
         tbl = item["table"]
-        if tbl in SUBSCRIPTION_TABLES or tbl in STRICT_COMPLETE_TABLES:
+        if tbl in soft_incomplete_tables:
+            log(
+                f"Soft-incomplete {tbl}: {item['copied']}/{item['source']} copied "
+                f"({item['missing']} skipped) — continuing"
+            )
+        elif tbl in SUBSCRIPTION_TABLES or tbl in STRICT_COMPLETE_TABLES:
             log(
                 f"INCOMPLETE {tbl}: {item['copied']}/{item['source']} copied "
                 f"({item['missing']} missing) — check row-skip errors above"

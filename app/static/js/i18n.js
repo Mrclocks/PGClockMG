@@ -303,6 +303,8 @@ const I18N = {
       desc: 'Check the summary before starting.',
       redirect: 'Install redirect server to keep old subscription links working (recommended)',
       optimizeTitle: 'Optimization options',
+      skipBadUserRows: 'Skip broken users and continue',
+      skipBadUserRowsHint: 'If some users cannot be copied (bad FK/data), skip them and finish migration. A report is shown at the end. Still fails if no users transfer. Recommended on.',
       relocateInboundCerts: 'Move inbound TLS certificates into PasarGuard certs/',
       relocateInboundCertsHint: 'Copies domain TLS cert/key files into /var/lib/pasarguard/certs/<domain>/, sets read permissions, and updates inbound paths in xray_config. Off = previous behavior.',
       start: 'Start Migration',
@@ -346,6 +348,7 @@ const I18N = {
       incompleteTitle: 'Not fully transferred',
       incompleteCopied: '{copied} of {source} copied',
       incompleteMissing: '{missing} missing',
+      skippedRows: '{skipped} row(s) skipped',
       error: 'Migration failed',
       retry: 'Try again',
       transferTables: {
@@ -772,6 +775,8 @@ const I18N = {
       desc: 'خلاصه را بررسی کنید.',
       redirect: 'نصب redirect برای حفظ لینک‌های قدیمی اشتراک (توصیه‌شده)',
       optimizeTitle: 'گزینه‌های بهینه‌سازی',
+      skipBadUserRows: 'رد کردن کاربران خراب و ادامه مهاجرت',
+      skipBadUserRowsHint: 'اگر بعضی کاربران به‌خاطر داده/FK خراب منتقل نشوند، رد می‌شوند و مهاجرت تمام می‌شود. در انتها گزارش نشان داده می‌شود. اگر هیچ کاربری منتقل نشود باز هم متوقف می‌شود. روشن توصیه می‌شود.',
       relocateInboundCerts: 'انتقال سرتیفیکیت TLS اینباندها به پوشه certs پاسارگارد',
       relocateInboundCertsHint: 'فایل‌های cert/key دامنه را به /var/lib/pasarguard/certs/<دامنه>/ کپی می‌کند، دسترسی خواندن می‌دهد و مسیر داخل اینباندها را در xray_config به‌روز می‌کند. خاموش = رفتار قبلی.',
       start: 'شروع مهاجرت',
@@ -812,6 +817,7 @@ const I18N = {
       incompleteTitle: 'موارد منتقل‌نشده یا ناقص',
       incompleteCopied: '{copied} از {source} منتقل شد',
       incompleteMissing: '{missing} مورد باقی‌مانده',
+      skippedRows: '{skipped} ردیف رد شد',
       error: 'خطا در مهاجرت',
       retry: 'تلاش مجدد',
       transferTables: {
@@ -1238,6 +1244,8 @@ const I18N = {
       desc: 'Проверьте сводку.',
       redirect: 'Установить redirect для старых ссылок подписки (рекомендуется)',
       optimizeTitle: 'Опции оптимизации',
+      skipBadUserRows: 'Пропускать битых пользователей и продолжать',
+      skipBadUserRowsHint: 'Если часть пользователей не копируется (битые FK/данные), они пропускаются и миграция завершается. В конце показывается отчёт. Если не перенесён ни один пользователь — всё равно ошибка. Рекомендуется включить.',
       relocateInboundCerts: 'Перенести TLS-сертификаты inbound в certs PasarGuard',
       relocateInboundCertsHint: 'Копирует cert/key доменов в /var/lib/pasarguard/certs/<domain>/, выставляет права чтения и обновляет пути inbound в xray_config. Выкл. = прежнее поведение.',
       start: 'Начать миграцию',
@@ -1278,6 +1286,7 @@ const I18N = {
       incompleteTitle: 'Перенесено не полностью',
       incompleteCopied: '{copied} из {source} перенесено',
       incompleteMissing: 'не хватает {missing}',
+      skippedRows: 'пропущено строк: {skipped}',
       error: 'Ошибка миграции',
       retry: 'Повторить',
       transferTables: {
@@ -1532,6 +1541,10 @@ function applyI18n() {
   if (migrateOptTitle) migrateOptTitle.textContent = t('step4.optimizeTitle');
   if (relocateLbl) relocateLbl.textContent = t('step4.relocateInboundCerts');
   if (relocateHint) relocateHint.textContent = t('step4.relocateInboundCertsHint');
+  const skipLbl = document.getElementById('chkSkipBadUserRowsLabel');
+  const skipHint = document.getElementById('chkSkipBadUserRowsHint');
+  if (skipLbl) skipLbl.textContent = t('step4.skipBadUserRows');
+  if (skipHint) skipHint.textContent = t('step4.skipBadUserRowsHint');
   const successH2 = document.querySelector('#resultSuccess h2');
   if (successH2) successH2.textContent = t('step6.success');
   document.querySelector('#resultError h2') && (document.querySelector('#resultError h2').textContent = t('step6.error'));

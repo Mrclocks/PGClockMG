@@ -138,6 +138,7 @@ async def _exercise_sqlite_land(target_db: str) -> dict:
             patch.object(preboot_mod, "heal_marzban_preboot", side_effect=fake_preboot),
             patch.object(m, "_stop_panel", fake_stop),
             patch.object(m, "_assert_sqlite_pasarguard_ready", fake_assert),
+            patch.object(m, "_assert_target_pasarguard_ready", AsyncMock()),
             patch.object(m, "_convert_pg_sqlite_to_target", fake_convert),
             patch.object(m, "_force_env_sqlite", AsyncMock()),
             patch.object(preboot_mod, "get_target_connection") as gtc,

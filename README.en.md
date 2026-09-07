@@ -1,4 +1,4 @@
-> 🚀 **`v4.5.0`** — Marzban migrate: optional inbound TLS cert relocate into PasarGuard `certs/` + empty-inbound guards
+> 🚀 **`v4.6.0`** — More stable Marzban migrate: skip bad users + shared migrate/restore lock + core_configs guards
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

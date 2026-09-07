@@ -11,6 +11,16 @@ from app.services.native_migration.adapters import (
     create_reader,
     create_writer,
 )
+from app.services.native_migration.copy_core import SOFT_USER_RELATED_TABLES
+
+
+def _soft_tables_from_params(params: dict | None) -> frozenset[str]:
+    """When skip_bad_user_rows is enabled, soften user-related completeness checks."""
+    if not params:
+        return frozenset()
+    if params.get("skip_bad_user_rows", True):
+        return frozenset(SOFT_USER_RELATED_TABLES)
+    return frozenset()
 
 
 async def copy_database_universal(
@@ -73,6 +83,7 @@ async def copy_database_universal(
         stats, report = copy_tables_universal(
             reader, writer, log, source_version, fail_hard=fail_hard,
             stamp_alembic=stamp_alembic,
+            soft_incomplete_tables=_soft_tables_from_params(getattr(migrator, "params", None)),
         )
         migrator.copy_report = report
         total = sum(v for v in stats.values() if isinstance(v, int) and v >= 0)

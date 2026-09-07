@@ -109,6 +109,19 @@ VERIFY_TABLES = (
     "core_configs",
 )
 
+# When skip_bad_user_rows is enabled, partial copies of these tables are reported
+# but do not abort the job (still abort if users copies zero rows).
+SOFT_USER_RELATED_TABLES = frozenset({
+    "users",
+    "users_groups_association",
+    "exclude_inbounds_association",
+    "next_plans",
+    "user_hwids",
+    "notification_reminders",
+    "user_subscription_updates",
+    "node_user_usages",
+})
+
 # PasarGuard ALPN enum labels (Marzban aliases → canonical)
 HOST_ALPN_MAP = {
     "h1": "http/1.1",
