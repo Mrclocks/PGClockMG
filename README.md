@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.4.5`** — فیکس لود خالی پنل (متن/دکمه) + جلوگیری از startup failed
+> 🚀 **`v4.4.6`** — تشخیص بهتر خطای import مای‌اسکیوال (exit 137) + preflight رم advisory + preamble سشن امن
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

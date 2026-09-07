@@ -1,4 +1,4 @@
-> 🚀 **`v4.4.5`** — Исправление пустой панели (текст/кнопки) + предотвращение startup failed
+> 🚀 **`v4.4.6`** — Более понятные ошибки MySQL import (exit 137) + advisory RAM preflight + безопасный SESSION preamble
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
