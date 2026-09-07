@@ -1,4 +1,4 @@
-> 🚀 **`v4.4.7`** — Wizard auto-fills DB password from SQLALCHEMY_DATABASE_URL
+> 🚀 **`v4.4.8`** — Fix wizard stuck at 100%; open Result after successful migrate
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
