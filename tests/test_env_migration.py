@@ -110,6 +110,45 @@ MYSQL_ROOT_PASSWORD = "rootpass"
     print("OK: password candidates")
 
 
+def test_extract_env_password_candidates_from_sqlalchemy_url_only():
+    """Wizard auto-fill must work when password lives only in the URL."""
+    text = (
+        'SQLALCHEMY_DATABASE_URL = '
+        '"mysql+asyncmy://pasarguard:Secret%40Pass@mysql:3306/pasarguard"\n'
+    )
+    cands = extract_env_password_candidates(text, "mysql")
+    assert len(cands) == 1
+    assert cands[0]["key"] == "SQLALCHEMY_DATABASE_URL"
+    assert cands[0]["value"] == "Secret@Pass"
+    assert cands[0]["used_for_migration"] is True
+    assert pick_primary_env_password(cands, "mysql") == "Secret@Pass"
+    print("OK: password candidates from SQLALCHEMY URL")
+
+
+def test_extract_env_password_candidates_url_dedupes_named_key():
+    text = '''
+MYSQL_ROOT_PASSWORD = "samepass"
+SQLALCHEMY_DATABASE_URL = "mysql+asyncmy://root:samepass@127.0.0.1:3306/pasarguard"
+'''
+    cands = extract_env_password_candidates(text, "mysql")
+    keys = [c["key"] for c in cands]
+    assert keys == ["MYSQL_ROOT_PASSWORD"]
+    assert pick_primary_env_password(cands, "mysql") == "samepass"
+    print("OK: URL password deduped against named key")
+
+
+def test_extract_env_password_candidates_postgres_url_only():
+    text = (
+        'SQLALCHEMY_DATABASE_URL = '
+        '"postgresql+asyncpg://pasarguard:pgsecret@timescaledb:5432/pasarguard"\n'
+    )
+    cands = extract_env_password_candidates(text, "timescaledb")
+    assert len(cands) == 1
+    assert cands[0]["value"] == "pgsecret"
+    assert cands[0]["used_for_migration"] is True
+    print("OK: postgres/timescale URL password candidates")
+
+
 def test_url_replacement_survives_backslashes():
     """Regression: raw dynamic strings (Windows paths, or any password containing a
     backslash) were passed directly as the `repl` argument to re.sub(), which
@@ -147,5 +186,8 @@ if __name__ == "__main__":
     test_mysql_dump_file_rewrite_streams()
     test_read_env_var()
     test_extract_env_password_candidates()
+    test_extract_env_password_candidates_from_sqlalchemy_url_only()
+    test_extract_env_password_candidates_url_dedupes_named_key()
+    test_extract_env_password_candidates_postgres_url_only()
     test_url_replacement_survives_backslashes()
     print("\nAll env migration tests passed.")
