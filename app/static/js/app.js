@@ -862,21 +862,25 @@ function updateStepButtons() {
   }
 }
 
-async function goStep(n) {
+async function goStep(n, opts = {}) {
   state.phase = 'migrate';
-  if (n > state.currentStep) {
+  const force = !!(opts && opts.force);
+  // Gate forward navigation — but NEVER re-validate when opening the result
+  // step (6). Post-migrate .env/DB state often fails validate-migration and
+  // previously trapped the UI on step 5 at 100% "Migration completed".
+  if (!force && n > state.currentStep && n < 6) {
     let block = null;
     if (n >= 2) block = canProceedStep1();
     if (!block && n >= 3) block = canProceedStep2();
     if (!block && n >= 4) block = canProceedStep2() || canProceedStep3();
-    if (!block && n >= 5) {
+    if (!block && n === 5) {
       const v = await validateMigrationRequest();
       if (!v.ok) block = tr(v.errors[0], state.lang) || t('block.validationFailed');
     }
     if (block) {
       showStepBlock(state.currentStep, block);
       updateStepButtons();
-      return;
+      return false;
     }
   }
 
@@ -892,6 +896,7 @@ async function goStep(n) {
   if (typeof renderFlowSteps === 'function') renderFlowSteps();
   showStepBlock(n, null);
   updateStepButtons();
+  return true;
 }
 
 async function validateMigrationRequest() {
@@ -1269,8 +1274,27 @@ function connectWebSocket(jobId) {
   let finished = false;
   const terminal = document.getElementById('logTerminal');
 
+  const finishOnce = (ok, payload, errMsg) => {
+    if (finished) return;
+    finished = true;
+    state._migrateWs = null;
+    try {
+      if (ok) void showSuccess(payload);
+      else void showError(errMsg || payload?.error || 'Error', terminal?.textContent || '');
+    } catch (e) {
+      console.error('migrate finish handler failed:', e);
+      void showError(e.message || 'Error', terminal?.textContent || '');
+    }
+  };
+
   ws.onmessage = (ev) => {
-    const msg = JSON.parse(ev.data);
+    let msg;
+    try {
+      msg = JSON.parse(ev.data);
+    } catch (e) {
+      console.error('migrate ws bad json:', e);
+      return;
+    }
     if (msg.type === 'log') {
       terminal.textContent += msg.message + '\n';
       terminal.scrollTop = terminal.scrollHeight;
@@ -1288,12 +1312,15 @@ function connectWebSocket(jobId) {
         document.getElementById('progressText').textContent = msg.progress + '%';
       }
       if (msg.message) document.getElementById('statusMsg').textContent = msg.message;
+      // Safety net: terminal status without a following `done` frame.
+      if (msg.status === 'success' && !msg.result?.error) finishOnce(true, msg.result);
+      else if (msg.status === 'error' || msg.result?.error) {
+        finishOnce(false, msg.result, msg.result?.error || msg.message || 'Error');
+      }
     }
     if (msg.type === 'done') {
-      finished = true;
-      state._migrateWs = null;
-      if (msg.status === 'success' && !msg.result?.error) showSuccess(msg.result);
-      else showError(msg.result?.error || msg.message || 'Error', terminal.textContent);
+      if (msg.status === 'success' && !msg.result?.error) finishOnce(true, msg.result);
+      else finishOnce(false, msg.result, msg.result?.error || msg.message || 'Error');
     }
   };
   ws.onerror = () => { if (!finished) pollStatus(jobId); };
@@ -1335,12 +1362,12 @@ async function pollStatus(jobId) {
       if (data.status === 'success' && !data.result?.error) {
         clearInterval(interval);
         state._migratePollInterval = null;
-        showSuccess(data.result);
+        void showSuccess(data.result);
       }
       if (data.status === 'error' || data.result?.error) {
         clearInterval(interval);
         state._migratePollInterval = null;
-        showError(data.result?.error || data.message, data.logs.join('\n'));
+        void showError(data.result?.error || data.message, data.logs.join('\n'));
       }
     } catch (e) { /* retry */ }
   }, 1500);
@@ -1423,8 +1450,8 @@ function renderPostMigrateSection(result) {
   }).join('');
 }
 
-function showSuccess(result) {
-  goStep(6);
+async function showSuccess(result) {
+  await goStep(6, { force: true });
   document.getElementById('resultSuccess').classList.remove('hidden');
   document.getElementById('resultError').classList.add('hidden');
   document.querySelector('#resultSuccess h2').textContent = t('step6.success');
@@ -1451,9 +1478,10 @@ function showSuccess(result) {
   const accessUrl = (typeof resolveLoginUrl === 'function')
     ? resolveLoginUrl(state.panelAccess || state.systemCheck?.panel_access)
     : (state.panelAccess?.login_url || state.systemCheck?.panel_access?.login_url || '');
+  const hostFallback = (state.serverIp && String(state.serverIp).split(':')[0]) || '127.0.0.1';
   const panelUrl = result?.panel_url
     || accessUrl
-    || `https://${state.serverIp.split(':')[0]}:${port}${dash}`.replace(/([^:]\/)\/+/g, '$1');
+    || `https://${hostFallback}:${port}${dash}`.replace(/([^:]\/)\/+/g, '$1');
   document.getElementById('panelLink').href = panelUrl;
 
   const mode = result?.subscription_mode || state.selectedPanel?.subscription_mode;
@@ -1587,8 +1615,8 @@ function renderRedirectVerifyBox(result) {
   });
 }
 
-function showError(msg, logs) {
-  goStep(6);
+async function showError(msg, logs) {
+  await goStep(6, { force: true });
   document.getElementById('resultError').classList.remove('hidden');
   document.getElementById('resultSuccess').classList.add('hidden');
   document.getElementById('errorMessage').textContent = msg;
