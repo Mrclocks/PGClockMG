@@ -1,16 +1,32 @@
-"""Diagnostics for MySQL/MariaDB dump import failures (compose exec path).
+"""Diagnostics + safe helpers for MySQL/MariaDB dump import (compose exec path).
 
-Pure helpers + best-effort Docker probes. Must never change a successful import:
-callers use these only for heartbeats / error messages.
+Design rules for migration safety:
+- Advisory RAM preflight never blocks an import.
+- SESSION preamble uses only widely-supported session toggles (same ones
+  mysqldump itself emits); it dies with the import connection.
+- Docker probes are best-effort and must not abort healthy imports.
 """
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 MysqlImportKind = Literal["killed", "auth", "sql", "client", "unknown"]
+MysqlImportRamLevel = Literal["ok", "info", "warn"]
+
+# SESSION-only. No GLOBAL. No sql_log_bin / flush / sql_mode changes.
+# These match what official mysqldump headers typically set for bulk load.
+MYSQL_IMPORT_SESSION_PREAMBLE = (
+    "-- PGClockMG MySQL import session preamble (SESSION scope only)\n"
+    "SET SESSION FOREIGN_KEY_CHECKS=0;\n"
+    "SET SESSION UNIQUE_CHECKS=0;\n"
+)
+
+_MI = 1024 * 1024
+_GI = 1024 * _MI
 
 # docker/mysql client often surfaces 128+signal; asyncio may also report -signal.
 _SIGKILL_CODES = {137, -9, 128 + 9}
@@ -73,6 +89,118 @@ class MysqlImportFailure:
     exit_code: int | None
     summary: str
     guidance: str
+
+
+@dataclass(frozen=True)
+class MysqlImportRamAdvice:
+    """Advisory only — callers must log, never raise/abort on this."""
+
+    level: MysqlImportRamLevel
+    dump_bytes: int
+    mem_available_bytes: int | None
+    message: str
+
+
+def mysql_import_session_preamble_sql() -> str:
+    return MYSQL_IMPORT_SESSION_PREAMBLE
+
+
+def write_mysql_import_stdin_file(dump_path: Path, dest: Path) -> Path:
+    """Stream ``preamble + dump`` into ``dest`` without loading the dump in RAM.
+
+    Keeps the caller's ``stdin=file`` import path identical to before.
+    """
+    dump_path = Path(dump_path)
+    dest = Path(dest)
+    if not dump_path.is_file():
+        raise FileNotFoundError(f"MySQL dump not found: {dump_path}")
+    preamble = mysql_import_session_preamble_sql().encode("utf-8")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with dest.open("wb") as out, dump_path.open("rb") as inp:
+        out.write(preamble)
+        while True:
+            chunk = inp.read(1024 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+    return dest
+
+
+def read_mem_available_bytes() -> int | None:
+    """Best-effort MemAvailable from /proc; None if unreadable."""
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1]) * 1024
+    except Exception:
+        return None
+    return None
+
+
+def assess_mysql_import_ram(
+    dump_bytes: int,
+    mem_available_bytes: int | None = None,
+) -> MysqlImportRamAdvice:
+    """Compare dump size to free RAM. Never means 'abort migration'."""
+    dump_bytes = max(0, int(dump_bytes or 0))
+    if mem_available_bytes is None:
+        mem_available_bytes = read_mem_available_bytes()
+
+    dump_mb = dump_bytes / _MI
+    if mem_available_bytes is None:
+        return MysqlImportRamAdvice(
+            "info",
+            dump_bytes,
+            None,
+            f"MySQL import preflight: dump {dump_mb:.1f} MiB; free RAM unknown "
+            f"(continuing — advisory only).",
+        )
+
+    free_mb = mem_available_bytes / _MI
+    # Soft thresholds only. Small dumps on healthy hosts stay at ok/info.
+    if mem_available_bytes < 256 * _MI:
+        return MysqlImportRamAdvice(
+            "warn",
+            dump_bytes,
+            mem_available_bytes,
+            f"MySQL import preflight: low free RAM ({free_mb:.0f} MiB) while importing "
+            f"{dump_mb:.1f} MiB dump. Continuing anyway; if import exits 137, add RAM/swap "
+            f"or check DB container OOM.",
+        )
+    # Large dump relative to free RAM (8x headroom heuristic).
+    if dump_bytes >= 50 * _MI and mem_available_bytes < max(512 * _MI, 8 * dump_bytes):
+        return MysqlImportRamAdvice(
+            "warn",
+            dump_bytes,
+            mem_available_bytes,
+            f"MySQL import preflight: dump {dump_mb:.1f} MiB is large vs free RAM "
+            f"({free_mb:.0f} MiB). Continuing anyway; watch for exit 137 / OOMKilled.",
+        )
+    if dump_bytes > mem_available_bytes:
+        return MysqlImportRamAdvice(
+            "warn",
+            dump_bytes,
+            mem_available_bytes,
+            f"MySQL import preflight: dump ({dump_mb:.1f} MiB) exceeds free RAM "
+            f"({free_mb:.0f} MiB). Continuing anyway; failure is more likely under memory pressure.",
+        )
+    if mem_available_bytes < 1 * _GI and dump_bytes >= 100 * _MI:
+        return MysqlImportRamAdvice(
+            "info",
+            dump_bytes,
+            mem_available_bytes,
+            f"MySQL import preflight: dump {dump_mb:.1f} MiB with {free_mb:.0f} MiB free RAM "
+            f"(continuing).",
+        )
+    return MysqlImportRamAdvice(
+        "ok",
+        dump_bytes,
+        mem_available_bytes,
+        f"MySQL import preflight: dump {dump_mb:.1f} MiB, free RAM {free_mb:.0f} MiB — ok.",
+    )
 
 
 def classify_mysql_import_failure(
