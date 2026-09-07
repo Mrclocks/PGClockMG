@@ -1,4 +1,4 @@
-> 🚀 **`v4.4.9`** — Fix MySQL→MariaDB restore/migrate (strip GTID/SQL_LOG_BIN dump preamble)
+> 🚀 **`v4.4.10`** — Fix Marzban migrate: abort on empty inbounds + copy assets on live MySQL
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

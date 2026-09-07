@@ -1,4 +1,4 @@
-> 🚀 **`v4.4.9`** — Исправление restore/migrate MySQL→MariaDB (удаление GTID/SQL_LOG_BIN из дампа)
+> 🚀 **`v4.4.10`** — Исправление миграции Marzban: abort при пустых inbounds + копирование assets для live MySQL
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
