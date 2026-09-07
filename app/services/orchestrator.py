@@ -56,6 +56,11 @@ async def start_migration(params: dict, on_log: Callable | None = None) -> Migra
     if not migrator_cls:
         raise ValueError(f"Unsupported panel: {panel}")
 
+    # Global default for every migrate panel (Marzban / 3x-ui / Hiddify / Change-DB / …):
+    # soft-skip broken user rows so one bad user does not abort the whole job.
+    if "skip_bad_user_rows" not in params:
+        params["skip_bad_user_rows"] = True
+
     ensure_panel_idle()
 
     _prune_finished_jobs()
@@ -69,6 +74,8 @@ async def start_migration(params: dict, on_log: Callable | None = None) -> Migra
         try:
             job.status = "running"
             job.set_progress(0, "Starting migration...")
+            if params.get("skip_bad_user_rows", True):
+                job.log("Policy: skip broken user rows and continue (report at end)")
             migrator = migrator_cls(job, params)
             result = await migrator.run(params)
             job.result = result

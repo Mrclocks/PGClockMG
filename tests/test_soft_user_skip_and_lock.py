@@ -156,12 +156,48 @@ def test_strict_user_rows_still_abort_without_soft_policy():
 
 
 def test_migration_request_defaults():
-    from app.models import MigrationRequest
+    from app.models import MigrationRequest, PasarguardRestoreRequest
 
     req = MigrationRequest(source_panel="marzban", source_db="sqlite", target_db="sqlite")
     assert req.skip_bad_user_rows is True
     assert req.relocate_inbound_certs is False
-    print("OK: migration request defaults")
+    restore = PasarguardRestoreRequest(upload_id="u1", confirmed=True)
+    assert restore.skip_bad_user_rows is True
+    print("OK: migration/restore request defaults")
+
+
+def test_orchestrator_defaults_skip_for_all_panels():
+    from app.services.orchestrator import start_migration
+
+    setup_function()
+
+    async def _run():
+        class FakeMigrator:
+            def __init__(self, job, params):
+                self.job = job
+
+            async def run(self, params):
+                return {"ok": True}
+
+        with patch.dict(
+            "app.services.orchestrator.MIGRATORS",
+            {"3x-ui": FakeMigrator, "hiddify": FakeMigrator, "pasarguard": FakeMigrator},
+            clear=False,
+        ):
+            for panel in ("3x-ui", "hiddify", "pasarguard"):
+                params = {"source_panel": panel}
+                job = await start_migration(params)
+                assert params.get("skip_bad_user_rows") is True
+                # Wait for background task to finish so lock clears
+                for _ in range(50):
+                    if job.status in ("success", "error"):
+                        break
+                    await asyncio.sleep(0.01)
+                assert job.status == "success"
+
+    asyncio.run(_run())
+    teardown_function()
+    print("OK: orchestrator defaults skip_bad_user_rows for all panels")
 
 
 if __name__ == "__main__":
@@ -169,4 +205,5 @@ if __name__ == "__main__":
     test_soft_user_rows_do_not_abort_partial_users()
     test_strict_user_rows_still_abort_without_soft_policy()
     test_migration_request_defaults()
+    test_orchestrator_defaults_skip_for_all_panels()
     print("All soft-skip / lock tests passed")

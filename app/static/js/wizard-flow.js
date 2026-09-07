@@ -1084,6 +1084,9 @@ function renderRestoreOptions(a) {
   const lbl = document.getElementById('chkDisableNodesLabel');
   const hint = document.getElementById('chkDisableNodesHint');
   const chk = document.getElementById('chkDisableNodes');
+  const skipLbl = document.getElementById('chkRestoreSkipBadUserRowsLabel');
+  const skipHint = document.getElementById('chkRestoreSkipBadUserRowsHint');
+  const skipChk = document.getElementById('chkRestoreSkipBadUserRows');
   if (!opts) return;
   if (!a || !a.ok || a.convert_blocked) {
     opts.classList.add('hidden');
@@ -1094,6 +1097,9 @@ function renderRestoreOptions(a) {
   if (lbl) lbl.textContent = s.disableNodes;
   if (hint) hint.textContent = s.disableNodesHint;
   if (chk) chk.checked = false;
+  if (skipLbl) skipLbl.textContent = s.skipBadUserRows || '';
+  if (skipHint) skipHint.textContent = s.skipBadUserRowsHint || '';
+  if (skipChk && skipChk.dataset.touched !== '1') skipChk.checked = true;
   opts.classList.remove('hidden');
 }
 
@@ -1302,6 +1308,7 @@ async function startRestore() {
   if (term) term.textContent = '';
 
   const disableNodes = document.getElementById('chkDisableNodes')?.checked || false;
+  const skipBadUserRows = document.getElementById('chkRestoreSkipBadUserRows')?.checked ?? true;
   const uploadId = await applyCleanupBeforeRestore(term);
 
   try {
@@ -1316,6 +1323,7 @@ async function startRestore() {
         target_db: state.restoreAnalysis.installed_db || undefined,
         accept_experimental: true,
         disable_nodes_after_restore: disableNodes,
+        skip_bad_user_rows: skipBadUserRows,
       }),
     });
     const data = await res.json();
@@ -1428,7 +1436,22 @@ function showRestoreDone(result) {
   }
   const tipsEl = document.getElementById('restorePostSuccessTips');
   if (tipsEl) {
-    tipsEl.innerHTML = `<p class="warn-line">${typeof statusIcon === 'function' ? statusIcon('warn') : '⚠️'}<span>${t('restore.disableOldPanelTip')}</span></p>`;
+    const tips = [
+      `<p class="warn-line">${typeof statusIcon === 'function' ? statusIcon('warn') : '⚠️'}<span>${t('restore.disableOldPanelTip')}</span></p>`,
+    ];
+    const rowSkips = result?.copy_report?.row_skips || result?.skip_report || {};
+    const skipParts = Object.entries(rowSkips)
+      .map(([table, info]) => {
+        const n = Number(info?.skipped || 0);
+        return n > 0 ? `${table}: ${n}` : '';
+      })
+      .filter(Boolean);
+    if (skipParts.length) {
+      tips.push(
+        `<p class="warn-line">${typeof statusIcon === 'function' ? statusIcon('warn') : '⚠️'}<span>${t('restore.skippedUsersNote')}: ${skipParts.join(', ')}</span></p>`,
+      );
+    }
+    tipsEl.innerHTML = tips.join('');
     tipsEl.classList.remove('hidden');
   }
   const nodesNote = document.getElementById('restoreNodesDisabledNote');

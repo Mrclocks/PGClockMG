@@ -153,7 +153,7 @@ def test_kill_switch_disables_both_endpoints(client, monkeypatch):
 
 
 def test_existing_restore_contract_unchanged(client):
-    """The restore endpoint still takes only upload_id — cleanup added no coupling."""
+    """Restore request fields stay explicit; soft-skip is an optional defaulted flag."""
     from app.models import PasarguardRestoreRequest
 
     fields = set(PasarguardRestoreRequest.model_fields)
@@ -164,8 +164,10 @@ def test_existing_restore_contract_unchanged(client):
         "target_db",
         "accept_experimental",
         "disable_nodes_after_restore",
+        "skip_bad_user_rows",
     }, fields
-    print("OK: restore request contract unchanged")
+    assert PasarguardRestoreRequest.model_fields["skip_bad_user_rows"].default is True
+    print("OK: restore request contract includes skip_bad_user_rows default True")
 
 
 if __name__ == "__main__":

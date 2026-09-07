@@ -1205,8 +1205,11 @@ function renderSummary() {
 
   const optBox = document.getElementById('migrateOptimizeOptions');
   const isMarzban = panel.id === 'marzban';
-  if (optBox) optBox.classList.toggle('hidden', !isMarzban);
-  if (isMarzban) {
+  // Soft-skip is global for every migrate panel; cert relocate stays Marzban-only.
+  if (optBox) optBox.classList.remove('hidden');
+  const relocateRow = document.getElementById('migrateRelocateCertsRow');
+  if (relocateRow) relocateRow.classList.toggle('hidden', !isMarzban);
+  {
     const lang = state.lang;
     const s4 = (I18N[lang] || I18N.fa).step4 || {};
     const title = document.getElementById('migrateOptimizeTitle');

@@ -70,3 +70,4 @@ class PasarguardRestoreRequest(BaseModel):
     target_db: Optional[str] = None
     accept_experimental: bool = False
     disable_nodes_after_restore: bool = False
+    skip_bad_user_rows: bool = True

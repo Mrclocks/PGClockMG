@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.0`** — Стабильнее миграция Marzban: skip битых users + общий lock migrate/restore + guards core_configs
+> 🚀 **`v4.6.1`** — Soft-skip битых users глобально для migrate / restore / Change-DB (по умолчанию ВКЛ)
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

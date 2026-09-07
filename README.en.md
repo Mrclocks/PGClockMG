@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.0`** — More stable Marzban migrate: skip bad users + shared migrate/restore lock + core_configs guards
+> 🚀 **`v4.6.1`** — Soft-skip broken users globally for all migrate / restore / Change-DB (default ON)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
