@@ -702,6 +702,23 @@ class MarzbanMigrator(BaseMigrator):
         changed = rewrite_mysql_dump_file_for_pasarguard(dump_file, fixed)
         self.job.log(f"Dump rewrite complete ({changed} lines changed)")
 
+        from app.services.mysql_import_diagnostics import (
+            assess_mysql_import_ram,
+            classify_mysql_import_failure,
+            compose_service_diagnostics,
+            compose_service_oom_killed,
+            compose_service_running,
+            format_mysql_import_error,
+            write_mysql_import_stdin_file,
+        )
+
+        # Advisory only — never aborts. Small dumps on healthy hosts stay quiet/ok.
+        ram_advice = assess_mysql_import_ram(fixed.stat().st_size)
+        if ram_advice.level == "warn":
+            self.job.log(f"WARNING: {ram_advice.message}")
+        else:
+            self.job.log(ram_advice.message)
+
         svc = resolve_db_service("mysql") or resolve_db_service("mariadb") or "mysql"
         await self._run_cmd(["docker", "compose", "up", "-d", svc], cwd=str(PASARGUARD_DIR))
         await self._wait_compose_mysql_ready(svc, user, pwd, host)
@@ -737,9 +754,28 @@ class MarzbanMigrator(BaseMigrator):
             f"({size_mb:.1f} MB — large dumps can take a long time)..."
         )
 
+        # SESSION preamble on the same connection as the dump (FK/unique checks off).
+        # If preparing the combined file fails, fall back to the plain rewritten dump
+        # so a disk glitch cannot block an otherwise healthy migration.
+        import_path = fixed
+        session_file = dump_file.parent / "fixed_import_session.sql"
+        try:
+            write_mysql_import_stdin_file(fixed, session_file)
+            import_path = session_file
+            self.job.log(
+                "SESSION import preamble applied "
+                "(FOREIGN_KEY_CHECKS=0, UNIQUE_CHECKS=0; connection-local only)"
+            )
+        except OSError as exc:
+            self.job.log(
+                f"SESSION import preamble skipped — using plain rewritten dump ({exc})"
+            )
+
         # Prefer exec+stdin over shell redirect so host paths outside mounts work
         # and passwords/special chars are not re-parsed by a shell.
-        with fixed.open("rb") as fh:
+        # Same argv as before; only the stdin file may include a tiny SESSION preamble.
+        container_died = False
+        with import_path.open("rb") as fh:
             proc = await asyncio.create_subprocess_exec(
                 "docker", "compose", "exec", "-T", svc,
                 "mysql", "-u", user, f"-p{pwd}", "-h", host, db,
@@ -778,24 +814,54 @@ class MarzbanMigrator(BaseMigrator):
                         f"({size_mb:.0f} MB, {elapsed}s)...",
                     )
                     self.job.log(f"Still importing MySQL dump... ({elapsed}s elapsed)")
+                    # Best-effort liveness: only abort when the DB service is
+                    # definitively down. Probe failures return None and are ignored
+                    # so flaky docker CLI cannot break healthy imports.
+                    running = await compose_service_running(str(PASARGUARD_DIR), svc)
+                    if running is False:
+                        container_died = True
+                        self.job.log(
+                            f"DB service `{svc}` is no longer running during import — "
+                            f"stopping wait and collecting diagnostics"
+                        )
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                        break
             await proc.wait()
             if not drain_task.done():
                 await drain_task
             elapsed = int(time.monotonic() - started)
 
-        if proc.returncode != 0:
-            tail = "\n".join(output_lines[-40:])
+        if proc.returncode != 0 or container_died:
+            # If we did not catch death mid-loop, still detect a dead service now.
+            if not container_died:
+                running = await compose_service_running(str(PASARGUARD_DIR), svc)
+                if running is False:
+                    container_died = True
+            oom = await compose_service_oom_killed(str(PASARGUARD_DIR), svc)
+            failure = classify_mysql_import_failure(
+                proc.returncode,
+                "\n".join(output_lines),
+                container_died=container_died,
+                oom_killed=oom,
+            )
+            diag = await compose_service_diagnostics(str(PASARGUARD_DIR), svc)
             raise RuntimeError(
-                f"Failed to import Marzban MySQL dump into PasarGuard "
-                f"(exit {proc.returncode}). Check DB credentials and container logs."
-                + (f"\n{tail}" if tail else "")
+                format_mysql_import_error(
+                    failure,
+                    output_tail="\n".join(output_lines[-40:]),
+                    diag_tail=diag,
+                )
             )
         self.job.log(f"MySQL dump import finished ({elapsed}s)")
-        try:
-            if fixed.exists() and fixed.resolve() != dump_file.resolve():
-                fixed.unlink()
-        except OSError:
-            pass
+        for path in (fixed, session_file):
+            try:
+                if path.exists() and path.resolve() != dump_file.resolve():
+                    path.unlink()
+            except OSError:
+                pass
 
     async def _update_env_paths(self, source_db: str, target_db: str):
         env_path = PASARGUARD_DIR / ".env"
