@@ -1,4 +1,4 @@
-> 🚀 **`v4.4.6`** — Более понятные ошибки MySQL import (exit 137) + advisory RAM preflight + безопасный SESSION preamble
+> 🚀 **`v4.4.7`** — Автозаполнение пароля БД в визарде из SQLALCHEMY_DATABASE_URL
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

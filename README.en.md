@@ -1,4 +1,4 @@
-> 🚀 **`v4.4.6`** — Clearer MySQL import exit 137 diagnostics + advisory RAM preflight + safe SESSION preamble
+> 🚀 **`v4.4.7`** — Wizard auto-fills DB password from SQLALCHEMY_DATABASE_URL
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

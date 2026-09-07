@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.4.6`** — تشخیص بهتر خطای import مای‌اسکیوال (exit 137) + preflight رم advisory + preamble سشن امن
+> 🚀 **`v4.4.7`** — خواندن خودکار رمز دیتابیس از SQLALCHEMY_DATABASE_URL در ویزارد
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
