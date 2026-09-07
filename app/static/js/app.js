@@ -934,6 +934,7 @@ function buildMigrationBody() {
     upload_id: state.uploadId,
     upload_bundle_id: state.uploadBundleId,
     install_redirect: document.getElementById('installRedirect')?.checked ?? true,
+    relocate_inbound_certs: document.getElementById('chkRelocateInboundCerts')?.checked ?? false,
     remnawave_url: document.getElementById('remnawaveUrl')?.value || null,
     remnawave_token: document.getElementById('remnawaveToken')?.value || null,
     marzban_mode: 'fresh',
@@ -1200,6 +1201,20 @@ function renderSummary() {
     'hidden',
     panel.id !== '3x-ui' && panel.id !== 'hiddify',
   );
+
+  const optBox = document.getElementById('migrateOptimizeOptions');
+  const isMarzban = panel.id === 'marzban';
+  if (optBox) optBox.classList.toggle('hidden', !isMarzban);
+  if (isMarzban) {
+    const lang = state.lang;
+    const s4 = (I18N[lang] || I18N.fa).step4 || {};
+    const title = document.getElementById('migrateOptimizeTitle');
+    const lbl = document.getElementById('chkRelocateInboundCertsLabel');
+    const hint = document.getElementById('chkRelocateInboundCertsHint');
+    if (title) title.textContent = s4.optimizeTitle || '';
+    if (lbl) lbl.textContent = s4.relocateInboundCerts || '';
+    if (hint) hint.textContent = s4.relocateInboundCertsHint || '';
+  }
 
   const warnEl = document.getElementById('finalWarnings');
   const warnings = tr(panel.warnings, lang);

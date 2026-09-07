@@ -1,4 +1,4 @@
-> 🚀 **`v4.4.10`** — Исправление миграции Marzban: abort при пустых inbounds + копирование assets для live MySQL
+> 🚀 **`v4.5.0`** — Миграция Marzban: опциональный перенос TLS inbound в `certs/` PasarGuard + защита от пустых inbound
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

@@ -42,6 +42,7 @@ class MigrationRequest(BaseModel):
     upload_id: Optional[str] = None
     upload_bundle_id: Optional[str] = None
     install_redirect: bool = True
+    relocate_inbound_certs: bool = False
     remnawave_url: Optional[str] = None
     remnawave_token: Optional[str] = None
     marzban_mode: Optional[Literal["fresh"]] = "fresh"

@@ -302,6 +302,9 @@ const I18N = {
       h2: 'Review & Confirm',
       desc: 'Check the summary before starting.',
       redirect: 'Install redirect server to keep old subscription links working (recommended)',
+      optimizeTitle: 'Optimization options',
+      relocateInboundCerts: 'Move inbound TLS certificates into PasarGuard certs/',
+      relocateInboundCertsHint: 'Copies domain TLS cert/key files into /var/lib/pasarguard/certs/<domain>/, sets read permissions, and updates inbound paths in xray_config. Off = previous behavior.',
       start: 'Start Migration',
       back: '← Back',
       summary: {
@@ -768,6 +771,9 @@ const I18N = {
       h2: 'تأیید نهایی',
       desc: 'خلاصه را بررسی کنید.',
       redirect: 'نصب redirect برای حفظ لینک‌های قدیمی اشتراک (توصیه‌شده)',
+      optimizeTitle: 'گزینه‌های بهینه‌سازی',
+      relocateInboundCerts: 'انتقال سرتیفیکیت TLS اینباندها به پوشه certs پاسارگارد',
+      relocateInboundCertsHint: 'فایل‌های cert/key دامنه را به /var/lib/pasarguard/certs/<دامنه>/ کپی می‌کند، دسترسی خواندن می‌دهد و مسیر داخل اینباندها را در xray_config به‌روز می‌کند. خاموش = رفتار قبلی.',
       start: 'شروع مهاجرت',
       back: '→ بازگشت',
       summary: {
@@ -1231,6 +1237,9 @@ const I18N = {
       h2: 'Подтверждение',
       desc: 'Проверьте сводку.',
       redirect: 'Установить redirect для старых ссылок подписки (рекомендуется)',
+      optimizeTitle: 'Опции оптимизации',
+      relocateInboundCerts: 'Перенести TLS-сертификаты inbound в certs PasarGuard',
+      relocateInboundCertsHint: 'Копирует cert/key доменов в /var/lib/pasarguard/certs/<domain>/, выставляет права чтения и обновляет пути inbound в xray_config. Выкл. = прежнее поведение.',
       start: 'Начать миграцию',
       back: '← Назад',
       summary: {
@@ -1517,6 +1526,12 @@ function applyI18n() {
     if (el) el.textContent = t(k);
   }
   document.querySelector('#redirectOption span') && (document.querySelector('#redirectOption span').textContent = t('step4.redirect'));
+  const migrateOptTitle = document.getElementById('migrateOptimizeTitle');
+  const relocateLbl = document.getElementById('chkRelocateInboundCertsLabel');
+  const relocateHint = document.getElementById('chkRelocateInboundCertsHint');
+  if (migrateOptTitle) migrateOptTitle.textContent = t('step4.optimizeTitle');
+  if (relocateLbl) relocateLbl.textContent = t('step4.relocateInboundCerts');
+  if (relocateHint) relocateHint.textContent = t('step4.relocateInboundCertsHint');
   const successH2 = document.querySelector('#resultSuccess h2');
   if (successH2) successH2.textContent = t('step6.success');
   document.querySelector('#resultError h2') && (document.querySelector('#resultError h2').textContent = t('step6.error'));

@@ -1,4 +1,4 @@
-> 🚀 **`v4.4.10`** — Fix Marzban migrate: abort on empty inbounds + copy assets on live MySQL
+> 🚀 **`v4.5.0`** — Marzban migrate: optional inbound TLS cert relocate into PasarGuard `certs/` + empty-inbound guards
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

@@ -35,6 +35,7 @@ from app.services.pasarguard_ops import (
 from app.services.backup_analyzer import resolve_extract_root, find_file_in_upload
 from app.services.pg_restore import soft_db_family
 from app.services.pg_access import get_panel_access_info
+from app.services.marzban_inbound_certs import relocate_inbound_certs_in_xray_config
 
 
 class MarzbanMigrator(BaseMigrator):
@@ -48,6 +49,8 @@ class MarzbanMigrator(BaseMigrator):
         marzban_exists = MARZBAN_DIR.exists() or MARZBAN_DATA.exists()
 
         self.job.log("Marzban migration (fresh PasarGuard install)")
+        if params.get("relocate_inbound_certs"):
+            self.job.log("Optimization: relocate inbound TLS certs into PasarGuard certs/")
         self.job.set_progress(5, "Starting Marzban → PasarGuard migration...")
 
         return await self._migrate(
@@ -157,6 +160,7 @@ class MarzbanMigrator(BaseMigrator):
         await heal_marzban_preboot(self)
         self.job.set_progress(50, "Upgrading Marzban schema via PasarGuard panel boot...")
         # Long Marzban→PG alembic chains (bigint id, etc.) need a large health budget.
+        self._maybe_relocate_inbound_certs()
         await safe_start_pasarguard(self, health_max_wait=1800)
         self.params["target_db"] = orig_target or target_db
         await self._stop_panel()
@@ -204,6 +208,7 @@ class MarzbanMigrator(BaseMigrator):
             await heal_marzban_preboot(self)
             self.job.set_progress(70, "Upgrading Marzban MySQL schema via panel boot...")
             # Large dumps: alembic may spend a long time on "use bigint for id column".
+            self._maybe_relocate_inbound_certs()
             await safe_start_pasarguard(self, health_max_wait=1800)
             await self._assert_target_pasarguard_ready(target_db)
             return
@@ -214,6 +219,7 @@ class MarzbanMigrator(BaseMigrator):
         if extra_data_dir:
             await self._copy_marzban_assets(extra_data_dir)
         self.job.set_progress(50, f"Two-phase: {source_db} → {target_db} (panel-upgrade intermediate)...")
+        self._maybe_relocate_inbound_certs()
         await run_cross_db_migration(
             self, str(source_sql), source_db, target_db,
             upgrade_via_panel=True,
@@ -775,6 +781,31 @@ class MarzbanMigrator(BaseMigrator):
             self.job.log("Copied xray_config.json → /var/lib/pasarguard/")
             break
         self._pin_xray_json_env()
+        self._maybe_relocate_inbound_certs()
+
+    def _maybe_relocate_inbound_certs(self) -> None:
+        """Optional optimization: move inbound TLS files under PasarGuard certs/."""
+        if not self.params.get("relocate_inbound_certs"):
+            return
+        xray = PASARGUARD_DATA / "xray_config.json"
+        try:
+            summary = relocate_inbound_certs_in_xray_config(
+                xray,
+                certs_root=PASARGUARD_DATA / "certs",
+                log=self.job.log,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Inbound TLS cert relocate failed: {e}. "
+                "Disable the optimization switch and retry, or fix cert paths manually."
+            ) from e
+        # Soft note when pairs were referenced but missing — do not abort migration;
+        # empty-inbound guards still catch broken seed outcomes.
+        missing = summary.get("missing") or []
+        if missing and not summary.get("copied") and not summary.get("rewritten"):
+            self.job.log(
+                f"Warning: relocate found {len(missing)} cert pair(s) but no files on disk"
+            )
 
     async def _dump_marzban_mysql(self, work_dir: Path) -> Path:
         conn = get_source_connection(self.params)
