@@ -78,9 +78,12 @@ def prepare_mysql_dump_for_staging(sql_text: str, staging_db: str) -> tuple[str,
     Importing that into ``pgmig_*`` still switches context, so tables land in
     ``pasarguard`` while Phase1 reads ``pgmig_*`` → 0 rows and aborted convert.
     Strip CREATE/DROP/USE database redirects; the client already selects staging_db.
+    Also neutralize mysqldump GTID/SQL_LOG_BIN preamble.
 
     Returns (rewritten_sql, number_of_stripped_lines).
     """
+    from app.services.env_migration import sanitize_mysql_dump_line_for_import
+
     _safe_mysql_ident(staging_db)  # validate only
     out: list[str] = []
     stripped = 0
@@ -96,7 +99,10 @@ def prepare_mysql_dump_for_staging(sql_text: str, staging_db: str) -> tuple[str,
         ):
             stripped += 1
             continue
-        out.append(line)
+        new_line, did = sanitize_mysql_dump_line_for_import(line)
+        if did:
+            stripped += 1
+        out.append(new_line)
     return "".join(out), stripped
 
 
@@ -105,7 +111,10 @@ def write_mysql_dump_for_staging(dump_path: Path, staging_db: str) -> tuple[Path
 
     Streams line-by-line — large Marzban dumps (hundreds of MB) must not be
     loaded entirely into memory via ``read_text()``.
+    Also neutralizes mysqldump GTID/SQL_LOG_BIN preamble for MariaDB imports.
     """
+    from app.services.env_migration import sanitize_mysql_dump_line_for_import
+
     dump_path = Path(dump_path)
     _safe_mysql_ident(staging_db)  # validate only
     if not dump_path.exists():
@@ -128,7 +137,10 @@ def write_mysql_dump_for_staging(dump_path: Path, staging_db: str) -> tuple[Path
             ):
                 stripped += 1
                 continue
-            fout.write(line)
+            new_line, did = sanitize_mysql_dump_line_for_import(line)
+            if did:
+                stripped += 1
+            fout.write(new_line)
 
     if stripped == 0:
         # No redirects stripped — reuse original and drop the identical copy.
