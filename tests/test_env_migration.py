@@ -62,6 +62,65 @@ def test_mysql_dump_fix():
     print("OK: mysql dump fix")
 
 
+def test_mysql_dump_strips_gtid_and_sql_log_bin():
+    from app.services.env_migration import (
+        fix_mysql_dump_for_pasarguard,
+        rewrite_mysql_dump_file_for_import,
+        sanitize_mysql_dump_line_for_import,
+    )
+
+    preamble = (
+        "SET @MYSQLDUMP_TEMP_LOG_BIN = @@SESSION.SQL_LOG_BIN;\n"
+        "SET @@SESSION.SQL_LOG_BIN= 0;\n"
+        "SET @@GLOBAL.GTID_PURGED=/*!80000 '+'*/ '';\n"
+        "SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;\n"
+        "CREATE DATABASE marzban;\n"
+        "USE marzban;\n"
+        "INSERT INTO users VALUES (1);\n"
+        "SET foreign_key_checks=0;\n"
+    )
+    out = fix_mysql_dump_for_pasarguard(preamble)
+    assert "GTID_PURGED" not in out or "pgclockmg-stripped" in out
+    assert "CREATE DATABASE pasarguard" in out
+    assert "INSERT INTO users VALUES (1);" in out
+    assert "SET foreign_key_checks=0;" in out
+    # Stripped lines become comments — executable SET GTID/SQL_LOG_BIN gone
+    for line in out.splitlines():
+        body = line.strip()
+        if body.startswith("--"):
+            continue
+        assert "GTID_PURGED" not in body
+        assert "SQL_LOG_BIN" not in body
+        assert "MYSQLDUMP_TEMP_LOG_BIN" not in body
+
+    # PasarGuard restore path: sanitize only (no marzban rename)
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "dump.sql"
+        dest = Path(td) / "safe.sql"
+        src.write_text(preamble, encoding="utf-8")
+        n = rewrite_mysql_dump_file_for_import(src, dest)
+        assert n >= 4
+        text = dest.read_text(encoding="utf-8")
+        assert "CREATE DATABASE marzban" in text  # rename not applied
+        assert "INSERT INTO users VALUES (1);" in text
+        for line in text.splitlines():
+            body = line.strip()
+            if body.startswith("--"):
+                continue
+            assert "GTID_PURGED" not in body
+            assert "SQL_LOG_BIN" not in body
+
+    line, changed = sanitize_mysql_dump_line_for_import(
+        "SET @@GLOBAL.GTID_PURGED=/*!80000 '+'*/ '';\n"
+    )
+    assert changed is True
+    assert line.startswith("-- pgclockmg-stripped:")
+    print("OK: mysql dump strips GTID/SQL_LOG_BIN")
+
+
 def test_mysql_dump_file_rewrite_streams(tmp_path=None):
     """File rewrite must match in-memory fix and support in-place rewrite."""
     import tempfile
@@ -183,6 +242,7 @@ if __name__ == "__main__":
     test_mysql_env_uses_root_password()
     test_compose_transform()
     test_mysql_dump_fix()
+    test_mysql_dump_strips_gtid_and_sql_log_bin()
     test_mysql_dump_file_rewrite_streams()
     test_read_env_var()
     test_extract_env_password_candidates()

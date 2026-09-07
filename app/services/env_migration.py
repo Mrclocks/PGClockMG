@@ -1217,8 +1217,50 @@ def transform_xray_config(text: str) -> str:
     return text.replace("/var/lib/marzban", "/var/lib/pasarguard").replace("/opt/marzban", "/opt/pasarguard")
 
 
+# mysqldump replication preamble — breaks MariaDB (GTID_PURGED) and non-SUPER restores
+# (SQL_LOG_BIN needs BINLOG ADMIN). Safe to strip: data rows do not depend on these SETs.
+_MYSQL_DUMP_REPLICATION_PREAMBLE_RE = re.compile(
+    r"(?is)^(?:/\*![\d\s]*\*/\s*)?"
+    r"SET\s+(?:"
+    r"@@(?:GLOBAL|SESSION)\.(?:GTID_PURGED|GTID_EXECUTED|SQL_LOG_BIN)"
+    r"|@MYSQLDUMP_TEMP_LOG_BIN"
+    r")\b"
+)
+
+
+def is_mysql_dump_replication_preamble(line: str) -> bool:
+    """True for mysqldump GTID / SQL_LOG_BIN session lines (not table data)."""
+    body = (line or "").strip()
+    if not body or body.startswith("--") or body.startswith("#"):
+        return False
+    # Conditional comments wrapping SET: /*!80000 SET ... */
+    if body.startswith("/*!") and "SET" in body.upper():
+        inner = re.sub(r"^/\*!\d+\s*", "", body)
+        inner = re.sub(r"\*/\s*$", "", inner).strip()
+        body = inner or body
+    return bool(_MYSQL_DUMP_REPLICATION_PREAMBLE_RE.match(body))
+
+
+def sanitize_mysql_dump_line_for_import(line: str) -> tuple[str, bool]:
+    """Neutralize one dump line for MySQL↔MariaDB import.
+
+    Returns ``(output_line, changed)``. Replication preamble becomes a SQL comment
+    so import continues; all other lines are unchanged.
+    """
+    if not is_mysql_dump_replication_preamble(line):
+        return line, False
+    body = line.strip().rstrip(";")
+    preview = body if len(body) <= 120 else body[:117] + "..."
+    nl = "\n" if line.endswith("\n") else ("\r\n" if line.endswith("\r\n") else "\n")
+    return f"-- pgclockmg-stripped: {preview}{nl}", True
+
+
 def fix_mysql_dump_line_for_pasarguard(line: str) -> str:
-    """Rewrite one dump line: CREATE/USE db name, then safe marzban→pasarguard."""
+    """Rewrite one dump line: strip unsafe mysqldump preamble, then db rename."""
+    line, _ = sanitize_mysql_dump_line_for_import(line)
+    # Do not rename inside our strip comments.
+    if line.lstrip().startswith("-- pgclockmg-stripped:"):
+        return line
     line = re.sub(r"(?i)^(CREATE DATABASE.*)\bmarzban\b", r"\1pasarguard", line)
     line = re.sub(r"(?i)^(USE )\bmarzban\b", r"\1pasarguard", line)
     return line.replace("marzban", "pasarguard")
@@ -1234,10 +1276,43 @@ def fix_mysql_dump_for_pasarguard(sql_text: str) -> str:
     )
 
 
+def rewrite_mysql_dump_file_for_import(src: Path, dest: Path) -> int:
+    """Stream-sanitize mysqldump GTID/SQL_LOG_BIN preamble for safe import.
+
+    Used by PasarGuard backup restore (no Marzban rename). Returns changed lines.
+    """
+    src = Path(src)
+    dest = Path(dest)
+    if not src.exists():
+        raise RuntimeError(f"MySQL dump not found: {src}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    changed = 0
+    tmp = dest if dest.resolve() != src.resolve() else dest.with_suffix(dest.suffix + ".sanitizing")
+    try:
+        with src.open("r", encoding="utf-8", errors="ignore") as fin, tmp.open(
+            "w", encoding="utf-8", newline=""
+        ) as fout:
+            for line in fin:
+                new_line, did = sanitize_mysql_dump_line_for_import(line)
+                if did:
+                    changed += 1
+                fout.write(new_line)
+        if tmp != dest:
+            tmp.replace(dest)
+    finally:
+        if tmp != dest and tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+    return changed
+
+
 def rewrite_mysql_dump_file_for_pasarguard(src: Path, dest: Path) -> int:
     """Stream-rewrite a dump file without loading the whole SQL into memory.
 
     Returns the number of lines that changed. Safe for multi-hundred-MB dumps.
+    Includes GTID/SQL_LOG_BIN sanitization + marzban→pasarguard rename.
     """
     src = Path(src)
     dest = Path(dest)

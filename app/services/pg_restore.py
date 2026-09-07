@@ -4128,6 +4128,24 @@ async def _restore_mysql(
     await _compose(job, "up", "-d", svc, timeout=180)
     await asyncio.sleep(5)
 
+    # Strip mysqldump GTID/SQL_LOG_BIN preamble (MySQL 8 → MariaDB / non-SUPER).
+    # Does not rename schemas — PasarGuard restore only.
+    from app.services.env_migration import rewrite_mysql_dump_file_for_import
+
+    import_dump = dump
+    sanitized = dump.parent / f"{dump.name}.import-safe.sql"
+    try:
+        stripped = rewrite_mysql_dump_file_for_import(dump, sanitized)
+        if stripped:
+            job.log(
+                f"Sanitized {stripped} mysqldump preamble line(s) "
+                f"(GTID_PURGED / SQL_LOG_BIN) before MySQL/MariaDB restore"
+            )
+            import_dump = sanitized
+    except OSError as exc:
+        job.log(f"Dump sanitize skipped ({exc}) — importing original dump")
+        import_dump = dump
+
     attempts = []
     if root_pw:
         attempts.append(("root", root_pw, None))
@@ -4143,6 +4161,7 @@ async def _restore_mysql(
         attempts.append((db_user, c_pass, db_name))
 
     last_err = ""
+    best_err = ""
     for user, pwd, db in attempts:
         for mysql_cmd in client_bins:
             cmd = [
@@ -4152,7 +4171,7 @@ async def _restore_mysql(
             if db:
                 cmd.append(db)
             job.log(f"Trying MySQL restore as {user}" + (f"/{db}" if db else "") + f" ({mysql_cmd})")
-            with open(dump, "rb") as dump_fh:
+            with open(import_dump, "rb") as dump_fh:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     cwd=str(PASARGUARD_DIR),
@@ -4164,10 +4183,28 @@ async def _restore_mysql(
             out = (out_b or b"").decode("utf-8", errors="replace")
             if proc.returncode == 0:
                 job.log("MySQL/MariaDB dump restored")
+                try:
+                    if sanitized.exists() and sanitized.resolve() != dump.resolve():
+                        sanitized.unlink()
+                except OSError:
+                    pass
                 return
             last_err = out[-1500:]
             job.log(f"Attempt failed: {last_err[:300]}")
-    raise RuntimeError(f"MySQL restore failed after password attempts:\n{last_err}")
+            # Prefer real SQL errors over "mysql binary missing" noise for the final raise.
+            low = out.lower()
+            if "error " in low or "access denied" in low:
+                best_err = last_err
+            elif not best_err:
+                best_err = last_err
+    try:
+        if sanitized.exists() and sanitized.resolve() != dump.resolve():
+            sanitized.unlink()
+    except OSError:
+        pass
+    raise RuntimeError(
+        f"MySQL restore failed after password attempts:\n{best_err or last_err}"
+    )
 
 
 async def _restore_postgres(
