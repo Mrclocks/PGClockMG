@@ -62,8 +62,15 @@ def test_settings_mask_secrets(tmp_path, monkeypatch):
 
 
 def test_telegram_caption_and_chunk_math():
-    from app.services.backup_telegram import clip_caption, format_caption, human_size, resolve_admin_chat_id
+    from app.services.backup_telegram import (
+        clip_caption,
+        format_caption,
+        human_size,
+        resolve_admin_chat_id,
+        telegram_part_filename,
+    )
     import math
+    from pathlib import Path
     from app.config import TELEGRAM_BOT_MAX_BYTES
 
     text = format_caption(
@@ -81,6 +88,11 @@ def test_telegram_caption_and_chunk_math():
     clipped = clip_caption("x" * 2000, 1024)
     assert len(clipped) == 1024
     assert clipped.endswith("…")
+    p = Path("pgclockmg-20260908-020711.zip")
+    assert telegram_part_filename(p, 1, 1) == "pgclockmg-20260908-020711.zip"
+    assert telegram_part_filename(p, 1, 2) == "pgclockmg-20260908-020711-1-2.zip"
+    assert telegram_part_filename(p, 2, 2) == "pgclockmg-20260908-020711-2-2.zip"
+    assert telegram_part_filename(p, 1, 2).endswith(".zip")
     print("OK: telegram caption + chunk sizing")
 
 
