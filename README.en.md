@@ -1,4 +1,4 @@
-> 🚀 **`v4.4.10`** — Telegram split parts keep `.zip` last (`…-1-2.zip`)
+> 🚀 **`v4.5.0`** — Marzban inbound guards + soft-skip bad users (global) + optional cert relocate + shared migrate/restore lock
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
@@ -111,7 +111,8 @@ journalctl -u pg-migrator -f
 journalctl -u pg-backup -f
 ```
 
-Pre-v4 restore point: `restore-point-pre-v4.0.0`
+Pre-v4 restore point: `restore-point-pre-v4.0.0`  
+Pre-v4.5.0 restore point: `restore-point-pre-v4.5.0`
 
 ---
 

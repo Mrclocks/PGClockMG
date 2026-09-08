@@ -42,6 +42,8 @@ class MigrationRequest(BaseModel):
     upload_id: Optional[str] = None
     upload_bundle_id: Optional[str] = None
     install_redirect: bool = True
+    relocate_inbound_certs: bool = False
+    skip_bad_user_rows: bool = True
     remnawave_url: Optional[str] = None
     remnawave_token: Optional[str] = None
     marzban_mode: Optional[Literal["fresh"]] = "fresh"
@@ -68,3 +70,4 @@ class PasarguardRestoreRequest(BaseModel):
     target_db: Optional[str] = None
     accept_experimental: bool = False
     disable_nodes_after_restore: bool = False
+    skip_bad_user_rows: bool = True

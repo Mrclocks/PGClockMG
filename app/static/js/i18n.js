@@ -167,6 +167,9 @@ const I18N = {
       },
       disableNodes: 'Keep nodes disabled after restore',
       disableNodesHint: 'If your previous panel is still active, it is better to turn this option on to avoid disruption in node connections. Nodes are restored to the database but remain disabled — enable them from the panel when ready.',
+      skipBadUserRows: 'Skip broken users and continue',
+      skipBadUserRowsHint: 'If some users cannot be copied (bad FK/data), skip them and finish restore/Change-DB. A report is shown at the end. Still fails if no users transfer. Recommended on.',
+      skippedUsersNote: 'Some broken user rows were skipped',
       nodesDisabledNote: 'Nodes were left disabled as requested. Enable them from the panel.',
       cleanup: {
         title: 'Slim down this backup (optional)',
@@ -302,6 +305,11 @@ const I18N = {
       h2: 'Review & Confirm',
       desc: 'Check the summary before starting.',
       redirect: 'Install redirect server to keep old subscription links working (recommended)',
+      optimizeTitle: 'Optimization options',
+      skipBadUserRows: 'Skip broken users and continue',
+      skipBadUserRowsHint: 'If some users cannot be copied (bad FK/data), skip them and finish the job (migrate / restore / Change-DB). A report is shown at the end. Still fails if no users transfer. Recommended on.',
+      relocateInboundCerts: 'Move inbound TLS certificates into PasarGuard certs/',
+      relocateInboundCertsHint: 'Copies domain TLS cert/key files into /var/lib/pasarguard/certs/<domain>/, sets read permissions, and updates inbound paths in xray_config. Off = previous behavior.',
       start: 'Start Migration',
       back: '← Back',
       summary: {
@@ -343,6 +351,7 @@ const I18N = {
       incompleteTitle: 'Not fully transferred',
       incompleteCopied: '{copied} of {source} copied',
       incompleteMissing: '{missing} missing',
+      skippedRows: '{skipped} row(s) skipped',
       error: 'Migration failed',
       retry: 'Try again',
       transferTables: {
@@ -633,6 +642,9 @@ const I18N = {
       },
       disableNodes: 'نودها بعد از ریستور غیرفعال بمانند',
       disableNodesHint: 'اگر پنل قبلی شما همچنان فعال است، بهتر است این گزینه را روشن کنید تا در اتصال نودها اختلال ایجاد نشود. نودها در دیتابیس ریستور می‌شوند ولی غیرفعال می‌مانند — هر وقت آماده شدید از پنل فعالشان کنید.',
+      skipBadUserRows: 'رد کردن کاربران خراب و ادامه',
+      skipBadUserRowsHint: 'اگر بعضی کاربران به‌خاطر داده/FK خراب منتقل نشوند، رد می‌شوند و ریستور / Change-DB تمام می‌شود. در انتها گزارش نشان داده می‌شود. اگر هیچ کاربری منتقل نشود باز هم متوقف می‌شود. روشن توصیه می‌شود.',
+      skippedUsersNote: 'برخی ردیف‌های خراب کاربران رد شدند',
       cleanup: {
         title: 'سبک کردن این بکاپ (اختیاری)',
         desc: 'تاریخچه ترافیک معمولاً بیشترِ حجم بکاپ است و ریستور را خیلی کند می‌کند. می‌توانید نیاورید — پنل دوباره از ترافیک زنده می‌سازدش.',
@@ -768,6 +780,11 @@ const I18N = {
       h2: 'تأیید نهایی',
       desc: 'خلاصه را بررسی کنید.',
       redirect: 'نصب redirect برای حفظ لینک‌های قدیمی اشتراک (توصیه‌شده)',
+      optimizeTitle: 'گزینه‌های بهینه‌سازی',
+      skipBadUserRows: 'رد کردن کاربران خراب و ادامه',
+      skipBadUserRowsHint: 'اگر بعضی کاربران به‌خاطر داده/FK خراب منتقل نشوند، رد می‌شوند و کار تمام می‌شود (مهاجرت / ریستور / Change-DB). در انتها گزارش نشان داده می‌شود. اگر هیچ کاربری منتقل نشود باز هم متوقف می‌شود. روشن توصیه می‌شود.',
+      relocateInboundCerts: 'انتقال سرتیفیکیت TLS اینباندها به پوشه certs پاسارگارد',
+      relocateInboundCertsHint: 'فایل‌های cert/key دامنه را به /var/lib/pasarguard/certs/<دامنه>/ کپی می‌کند، دسترسی خواندن می‌دهد و مسیر داخل اینباندها را در xray_config به‌روز می‌کند. خاموش = رفتار قبلی.',
       start: 'شروع مهاجرت',
       back: '→ بازگشت',
       summary: {
@@ -806,6 +823,7 @@ const I18N = {
       incompleteTitle: 'موارد منتقل‌نشده یا ناقص',
       incompleteCopied: '{copied} از {source} منتقل شد',
       incompleteMissing: '{missing} مورد باقی‌مانده',
+      skippedRows: '{skipped} ردیف رد شد',
       error: 'خطا در مهاجرت',
       retry: 'تلاش مجدد',
       transferTables: {
@@ -1096,6 +1114,9 @@ const I18N = {
       },
       disableNodes: 'Оставить узлы отключёнными после восстановления',
       disableNodesHint: 'Если предыдущая панель ещё активна, рекомендуется включить эту опцию, чтобы избежать конфликтов подключения узлов. Узлы будут восстановлены в БД, но останутся отключёнными — включите их из панели когда будете готовы.',
+      skipBadUserRows: 'Пропускать битых пользователей и продолжать',
+      skipBadUserRowsHint: 'Если часть пользователей не копируется (битые FK/данные), они пропускаются и restore/Change-DB завершается. В конце показывается отчёт. Если не перенесён ни один пользователь — всё равно ошибка. Рекомендуется включить.',
+      skippedUsersNote: 'Некоторые битые строки пользователей были пропущены',
       cleanup: {
         title: 'Уменьшить этот бэкап (необязательно)',
         desc: 'История трафика обычно занимает бóльшую часть бэкапа и сильно замедляет восстановление. Её можно не переносить — панель наполнит её заново из живого трафика.',
@@ -1231,6 +1252,11 @@ const I18N = {
       h2: 'Подтверждение',
       desc: 'Проверьте сводку.',
       redirect: 'Установить redirect для старых ссылок подписки (рекомендуется)',
+      optimizeTitle: 'Опции оптимизации',
+      skipBadUserRows: 'Пропускать битых пользователей и продолжать',
+      skipBadUserRowsHint: 'Если часть пользователей не копируется (битые FK/данные), они пропускаются и задание завершается (миграция / restore / Change-DB). В конце показывается отчёт. Если не перенесён ни один пользователь — всё равно ошибка. Рекомендуется включить.',
+      relocateInboundCerts: 'Перенести TLS-сертификаты inbound в certs PasarGuard',
+      relocateInboundCertsHint: 'Копирует cert/key доменов в /var/lib/pasarguard/certs/<domain>/, выставляет права чтения и обновляет пути inbound в xray_config. Выкл. = прежнее поведение.',
       start: 'Начать миграцию',
       back: '← Назад',
       summary: {
@@ -1269,6 +1295,7 @@ const I18N = {
       incompleteTitle: 'Перенесено не полностью',
       incompleteCopied: '{copied} из {source} перенесено',
       incompleteMissing: 'не хватает {missing}',
+      skippedRows: 'пропущено строк: {skipped}',
       error: 'Ошибка миграции',
       retry: 'Повторить',
       transferTables: {
@@ -1517,6 +1544,16 @@ function applyI18n() {
     if (el) el.textContent = t(k);
   }
   document.querySelector('#redirectOption span') && (document.querySelector('#redirectOption span').textContent = t('step4.redirect'));
+  const migrateOptTitle = document.getElementById('migrateOptimizeTitle');
+  const relocateLbl = document.getElementById('chkRelocateInboundCertsLabel');
+  const relocateHint = document.getElementById('chkRelocateInboundCertsHint');
+  if (migrateOptTitle) migrateOptTitle.textContent = t('step4.optimizeTitle');
+  if (relocateLbl) relocateLbl.textContent = t('step4.relocateInboundCerts');
+  if (relocateHint) relocateHint.textContent = t('step4.relocateInboundCertsHint');
+  const skipLbl = document.getElementById('chkSkipBadUserRowsLabel');
+  const skipHint = document.getElementById('chkSkipBadUserRowsHint');
+  if (skipLbl) skipLbl.textContent = t('step4.skipBadUserRows');
+  if (skipHint) skipHint.textContent = t('step4.skipBadUserRowsHint');
   const successH2 = document.querySelector('#resultSuccess h2');
   if (successH2) successH2.textContent = t('step6.success');
   document.querySelector('#resultError h2') && (document.querySelector('#resultError h2').textContent = t('step6.error'));

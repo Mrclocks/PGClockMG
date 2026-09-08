@@ -1,4 +1,4 @@
-> 🚀 **`v4.4.10`** — Части Telegram с `.zip` в конце (`…-1-2.zip`)
+> 🚀 **`v4.5.0`** — guards inbound Marzban + soft-skip users (глобально) + optional cert relocate + общий lock migrate/restore
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
@@ -87,7 +87,8 @@ systemctl status pg-migrator
 systemctl status pg-backup
 ```
 
-Точка отката до v4: `restore-point-pre-v4.0.0`
+Точка отката до v4: `restore-point-pre-v4.0.0`  
+Точка отката до v4.5.0: `restore-point-pre-v4.5.0`
 
 ---
 

@@ -50,6 +50,14 @@ def get_restore_job(job_id: str) -> MigrationJob | None:
     return _restore_jobs.get(job_id)
 
 
+def get_running_restore_job() -> MigrationJob | None:
+    """Return the in-flight restore job if any (pending/running)."""
+    for job in _restore_jobs.values():
+        if job.status in ("pending", "running"):
+            return job
+    return None
+
+
 def soft_db_family(a: str | None, b: str | None) -> bool:
     """True when engines are interchangeable for *native* restore (no convert).
 
@@ -1369,6 +1377,8 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
 
 
 async def start_pasarguard_restore(params: dict) -> MigrationJob:
+    from app.services.panel_job_lock import ensure_panel_idle
+
     if not is_pasarguard_installed():
         raise ValueError("PasarGuard is not installed")
     upload_id = params.get("upload_id")
@@ -1389,7 +1399,11 @@ async def start_pasarguard_restore(params: dict) -> MigrationJob:
         "target_db": target_db or backup_db,
         # Auto-convert when backup engine ≠ installed engine (no UI confirmation)
         "accept_experimental": True,
+        # Soft-skip broken user rows on convert so one bad row does not abort Change-DB.
+        "skip_bad_user_rows": bool(params.get("skip_bad_user_rows", True)),
     }
+
+    ensure_panel_idle()
 
     _prune_finished_restore_jobs()
     job = MigrationJob()

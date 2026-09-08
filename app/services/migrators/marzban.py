@@ -35,6 +35,7 @@ from app.services.pasarguard_ops import (
 from app.services.backup_analyzer import resolve_extract_root, find_file_in_upload
 from app.services.pg_restore import soft_db_family
 from app.services.pg_access import get_panel_access_info
+from app.services.marzban_inbound_certs import relocate_inbound_certs_in_xray_config
 
 
 class MarzbanMigrator(BaseMigrator):
@@ -48,6 +49,14 @@ class MarzbanMigrator(BaseMigrator):
         marzban_exists = MARZBAN_DIR.exists() or MARZBAN_DATA.exists()
 
         self.job.log("Marzban migration (fresh PasarGuard install)")
+        # Default ON: skip broken user rows and continue (still abort if zero users land).
+        if "skip_bad_user_rows" not in params:
+            params["skip_bad_user_rows"] = True
+            self.params["skip_bad_user_rows"] = True
+        if params.get("skip_bad_user_rows"):
+            self.job.log("Optimization: skip broken user rows and continue with report")
+        if params.get("relocate_inbound_certs"):
+            self.job.log("Optimization: relocate inbound TLS certs into PasarGuard certs/")
         self.job.set_progress(5, "Starting Marzban → PasarGuard migration...")
 
         return await self._migrate(
@@ -85,8 +94,15 @@ class MarzbanMigrator(BaseMigrator):
             shutil.copy2(src, source_sqlite)
             extra_data_dir = MARZBAN_DATA
             self.job.log(f"Using live Marzban database: {src}")
+            await self._apply_live_marzban_env(target_db)
         elif marzban_exists and source_db in ("mysql", "mariadb"):
             source_sql = await self._dump_marzban_mysql(work_dir)
+            # Same as live SQLite: copy certs/xray_config and merge .env so panel
+            # alembic can seed core_configs/inbounds (previously left extra_data_dir=None).
+            if MARZBAN_DATA.exists():
+                extra_data_dir = MARZBAN_DATA
+                self.job.log(f"Using live Marzban data dir for assets: {MARZBAN_DATA}")
+            await self._apply_live_marzban_env(target_db)
         else:
             raise RuntimeError(
                 "Marzban backup required — upload ZIP or separate files in the wizard."
@@ -150,6 +166,7 @@ class MarzbanMigrator(BaseMigrator):
         await heal_marzban_preboot(self)
         self.job.set_progress(50, "Upgrading Marzban schema via PasarGuard panel boot...")
         # Long Marzban→PG alembic chains (bigint id, etc.) need a large health budget.
+        self._maybe_relocate_inbound_certs()
         await safe_start_pasarguard(self, health_max_wait=1800)
         self.params["target_db"] = orig_target or target_db
         await self._stop_panel()
@@ -158,6 +175,7 @@ class MarzbanMigrator(BaseMigrator):
         if target_db == "sqlite":
             self.job.set_progress(90, "Starting PasarGuard on SQLite...")
             await safe_start_pasarguard(self)
+            await self._assert_target_pasarguard_ready("sqlite")
             return
 
         self.job.set_progress(65, f"Converting PasarGuard SQLite → {target_db} (restore-grade)...")
@@ -166,6 +184,7 @@ class MarzbanMigrator(BaseMigrator):
             await self._copy_marzban_assets(extra_data_dir)
         self.job.set_progress(90, "Starting PasarGuard...")
         await safe_start_pasarguard(self)
+        await self._assert_target_pasarguard_ready(target_db)
 
     async def _migrate_mysql_like_restore(
         self,
@@ -197,7 +216,9 @@ class MarzbanMigrator(BaseMigrator):
             await heal_marzban_preboot(self)
             self.job.set_progress(70, "Upgrading Marzban MySQL schema via panel boot...")
             # Large dumps: alembic may spend a long time on "use bigint for id column".
+            self._maybe_relocate_inbound_certs()
             await safe_start_pasarguard(self, health_max_wait=1800)
+            await self._assert_target_pasarguard_ready(target_db)
             return
 
         self.job.set_progress(40, "Preparing two-phase Marzban MySQL → target...")
@@ -206,14 +227,17 @@ class MarzbanMigrator(BaseMigrator):
         if extra_data_dir:
             await self._copy_marzban_assets(extra_data_dir)
         self.job.set_progress(50, f"Two-phase: {source_db} → {target_db} (panel-upgrade intermediate)...")
+        self._maybe_relocate_inbound_certs()
         await run_cross_db_migration(
             self, str(source_sql), source_db, target_db,
             upgrade_via_panel=True,
         )
         self._abort_if_copy_gaps()
+        self._abort_if_inbounds_missing_from_stats(getattr(self, "copy_stats", None))
         await self._finalize_env_after_convert(target_db, install_env_snapshot)
         self.job.set_progress(90, "Starting PasarGuard...")
         await safe_start_pasarguard(self)
+        await self._assert_target_pasarguard_ready(target_db)
 
     async def _convert_pg_sqlite_to_target(
         self, sqlite_path: Path, target_db: str, install_env_snapshot: str,
@@ -300,6 +324,13 @@ class MarzbanMigrator(BaseMigrator):
         """Refuse success when source SQLite had rows but convert copied nothing."""
         stats = stats or {}
         copied = sum(int(stats.get(k, 0) or 0) for k in ("users", "admins", "hosts", "inbounds", "nodes", "groups"))
+        users_copied = int(stats.get("users", 0) or 0)
+        inbounds_copied = int(stats.get("inbounds", 0) or 0)
+        if users_copied > 0 and inbounds_copied <= 0:
+            raise RuntimeError(
+                f"Convert copied users={users_copied} but inbounds=0. "
+                "Marzban proxies→inbounds upgrade did not land before convert. Aborting."
+            )
         if copied > 0:
             return
         src_users = 0
@@ -323,6 +354,17 @@ class MarzbanMigrator(BaseMigrator):
             raise RuntimeError(
                 f"Convert produced empty target but SQLite source still has users={src_users}. "
                 "Aborting so the panel is not left empty."
+            )
+
+    def _abort_if_inbounds_missing_from_stats(self, stats: dict | None) -> None:
+        """Abort two-phase success when users landed without inbounds."""
+        stats = stats or {}
+        users = int(stats.get("users", 0) or 0)
+        inbounds = int(stats.get("inbounds", 0) or 0)
+        if users > 0 and inbounds <= 0:
+            raise RuntimeError(
+                f"Migration copied users={users} but inbounds=0. "
+                "Panel-boot proxies→inbounds transform likely skipped. Aborting."
             )
 
     async def _finalize_env_after_convert(self, target_db: str, install_env_snapshot: str) -> None:
@@ -390,8 +432,11 @@ class MarzbanMigrator(BaseMigrator):
         """Ensure panel-boot upgrade produced PasarGuard-shaped data."""
         if not path.exists():
             raise RuntimeError("SQLite intermediate missing after schema upgrade")
-        critical = ("users", "admins", "hosts", "inbounds", "nodes", "groups")
+        critical = (
+            "users", "admins", "hosts", "inbounds", "nodes", "groups", "core_configs",
+        )
         found: dict[str, int] = {}
+        tables: set[str] = set()
         try:
             conn = sqlite3.connect(str(path))
             try:
@@ -412,15 +457,192 @@ class MarzbanMigrator(BaseMigrator):
         except Exception as e:
             raise RuntimeError(f"Could not verify upgraded SQLite: {e}") from e
 
-        if "inbounds" not in found and "hosts" not in found and "users" not in found:
+        self._assert_pasarguard_shape_ready(found, tables_present=tables, engine="sqlite")
+
+    async def _assert_target_pasarguard_ready(self, target_db: str) -> None:
+        """Post-boot readiness for live target engines (sqlite/mysql/pg/ts)."""
+        if target_db == "sqlite":
+            self._assert_sqlite_pasarguard_ready(PASARGUARD_DATA / "db.sqlite3")
+            return
+        if target_db in ("mysql", "mariadb"):
+            found, tables = self._count_mysql_pasarguard_tables(target_db)
+            self._assert_pasarguard_shape_ready(found, tables_present=tables, engine=target_db)
+            return
+        if target_db in ("postgresql", "timescaledb"):
+            found, tables = self._count_postgres_pasarguard_tables(target_db)
+            self._assert_pasarguard_shape_ready(found, tables_present=tables, engine=target_db)
+            return
+
+    def _count_postgres_pasarguard_tables(
+        self, target_db: str,
+    ) -> tuple[dict[str, int], set[str]]:
+        """Count critical PasarGuard tables on live PostgreSQL/Timescale."""
+        import psycopg2
+
+        from app.services.db_credentials import migration_port
+
+        conn = get_target_connection(self.params)
+        host = conn.get("host") or "127.0.0.1"
+        port = int(migration_port(conn, target_db))
+        user = conn.get("user") or "pasarguard"
+        password = conn.get("password") or ""
+        database = conn.get("database") or "pasarguard"
+        critical = (
+            "users", "admins", "hosts", "inbounds", "nodes", "groups", "core_configs",
+        )
+        found: dict[str, int] = {}
+        tables: set[str] = set()
+        try:
+            with psycopg2.connect(
+                host=host,
+                port=port,
+                user=user,
+                password=password,
+                dbname=database,
+                connect_timeout=10,
+            ) as db:
+                db.autocommit = True
+                with db.cursor() as cur:
+                    cur.execute(
+                        "SELECT tablename FROM pg_catalog.pg_tables "
+                        "WHERE schemaname='public'"
+                    )
+                    tables = {str(r[0]).lower() for r in cur.fetchall() if r and r[0]}
+                    for t in critical:
+                        if t not in tables:
+                            continue
+                        cur.execute(f'SELECT COUNT(*) FROM "{t}"')
+                        row = cur.fetchone()
+                        n = int(row[0] or 0) if row else 0
+                        if n > 0:
+                            found[t] = n
+        except Exception as e:
+            raise RuntimeError(
+                f"Could not verify upgraded {target_db} PasarGuard tables: {e}"
+            ) from e
+        return found, tables
+
+    def _count_mysql_pasarguard_tables(
+        self, target_db: str,
+    ) -> tuple[dict[str, int], set[str]]:
+        """Count critical PasarGuard tables on the live MySQL/MariaDB target."""
+        import pymysql
+
+        from app.services.db_credentials import migration_port
+
+        conn = get_target_connection(self.params)
+        host = conn.get("host") or "127.0.0.1"
+        port = int(migration_port(conn, target_db))
+        user = conn.get("user") or "root"
+        password = conn.get("password") or ""
+        database = conn.get("database") or "pasarguard"
+        critical = (
+            "users", "admins", "hosts", "inbounds", "nodes", "groups", "core_configs",
+        )
+        found: dict[str, int] = {}
+        tables: set[str] = set()
+        try:
+            with pymysql.connect(
+                host=host,
+                port=port,
+                user=user,
+                password=password,
+                database=database,
+                charset="utf8mb4",
+                connect_timeout=10,
+                read_timeout=30,
+            ) as db:
+                with db.cursor() as cur:
+                    cur.execute(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema=%s",
+                        (database,),
+                    )
+                    tables = {str(r[0]).lower() for r in cur.fetchall() if r and r[0]}
+                    for t in critical:
+                        if t not in tables:
+                            continue
+                        cur.execute(f"SELECT COUNT(*) FROM `{t}`")
+                        row = cur.fetchone()
+                        n = int(row[0] or 0) if row else 0
+                        if n > 0:
+                            found[t] = n
+        except Exception as e:
+            raise RuntimeError(
+                f"Could not verify upgraded {target_db} PasarGuard tables: {e}"
+            ) from e
+        return found, tables
+
+    def _assert_pasarguard_shape_ready(
+        self,
+        found: dict[str, int],
+        *,
+        tables_present: set[str],
+        engine: str,
+    ) -> None:
+        """Refuse success when users/hosts landed without inbounds/core_configs."""
+        tables_l = {t.lower() for t in tables_present}
+        users = int(found.get("users", 0) or 0)
+        hosts = int(found.get("hosts", 0) or 0)
+        inbounds = int(found.get("inbounds", 0) or 0)
+        core_configs = int(found.get("core_configs", 0) or 0)
+
+        if users <= 0 and hosts <= 0 and inbounds <= 0:
             raise RuntimeError(
                 "Marzban → PasarGuard schema upgrade left critical tables empty "
-                "(users/hosts/inbounds). Aborting before convert."
+                f"(users/hosts/inbounds on {engine}). Aborting."
+            )
+        if (users > 0 or hosts > 0) and inbounds <= 0:
+            raise RuntimeError(
+                f"Marzban → PasarGuard left inbounds empty while "
+                f"users={users} hosts={hosts} ({engine}). "
+                "proxies→inbounds / XRAY_JSON seeding likely failed. Aborting."
+            )
+        if (
+            (users > 0 or hosts > 0)
+            and "core_configs" in tables_l
+            and core_configs <= 0
+        ):
+            raise RuntimeError(
+                f"Marzban → PasarGuard left core_configs empty while "
+                f"users={users} hosts={hosts} ({engine}). "
+                "xray_config.json was missing or XRAY_JSON did not resolve. Aborting."
             )
         self.job.log(
-            "PasarGuard SQLite ready: "
-            + ", ".join(f"{k}={v}" for k, v in found.items())
+            f"PasarGuard {engine} ready: "
+            + (", ".join(f"{k}={v}" for k, v in found.items()) or "(empty)")
         )
+
+    async def _apply_live_marzban_env(self, target_db: str) -> None:
+        """Merge live Marzban .env keys (incl. XRAY_JSON) into PasarGuard .env."""
+        if not PASARGUARD_ENV.exists():
+            return
+        env_file = MARZBAN_DIR / ".env"
+        if not env_file.exists():
+            self.job.log("Live Marzban .env not found — skipping env merge")
+            return
+        marzban_env = env_file.read_text(encoding="utf-8", errors="ignore")
+        pg_env = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+        pwd = (
+            get_source_connection(self.params).get("password")
+            or read_env_var(marzban_env, "MYSQL_ROOT_PASSWORD")
+        )
+        merged = merge_marzban_env_into_pasarguard(pg_env, marzban_env, target_db, pwd)
+        self._backup_file(PASARGUARD_ENV, BACKUP_DIR)
+        PASARGUARD_ENV.write_text(merged, encoding="utf-8")
+        self.job.log("Merged live Marzban .env settings into PasarGuard .env")
+
+    def _pin_xray_json_env(self) -> None:
+        """Point panel alembic at the copied xray_config (not relative ./xray_config.json)."""
+        xray = PASARGUARD_DATA / "xray_config.json"
+        if not xray.exists() or not PASARGUARD_ENV.exists():
+            return
+        text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+        pinned = "/var/lib/pasarguard/xray_config.json"
+        new_text = _set_env_var_simple(text, "XRAY_JSON", pinned)
+        if new_text != text:
+            PASARGUARD_ENV.write_text(new_text, encoding="utf-8")
+            self.job.log(f"Pinned XRAY_JSON → {pinned}")
 
     # ─── Helpers ─────────────────────────────────────────────────────
 
@@ -601,6 +823,10 @@ class MarzbanMigrator(BaseMigrator):
                         break
             dst = PASARGUARD_DATA / item
             if src.exists():
+                # Don't wipe a good certs tree with an empty directory.
+                if item == "certs" and src.is_dir() and not any(src.iterdir()):
+                    self.job.log(f"Skip empty {item}/ (keeping existing PasarGuard certs)")
+                    continue
                 if dst.exists():
                     shutil.rmtree(dst, ignore_errors=True)
                 shutil.copytree(src, dst)
@@ -616,6 +842,32 @@ class MarzbanMigrator(BaseMigrator):
             dst.write_text(text, encoding="utf-8")
             self.job.log("Copied xray_config.json → /var/lib/pasarguard/")
             break
+        self._pin_xray_json_env()
+        self._maybe_relocate_inbound_certs()
+
+    def _maybe_relocate_inbound_certs(self) -> None:
+        """Optional optimization: move inbound TLS files under PasarGuard certs/."""
+        if not self.params.get("relocate_inbound_certs"):
+            return
+        xray = PASARGUARD_DATA / "xray_config.json"
+        try:
+            summary = relocate_inbound_certs_in_xray_config(
+                xray,
+                certs_root=PASARGUARD_DATA / "certs",
+                log=self.job.log,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Inbound TLS cert relocate failed: {e}. "
+                "Disable the optimization switch and retry, or fix cert paths manually."
+            ) from e
+        # Soft note when pairs were referenced but missing — do not abort migration;
+        # empty-inbound guards still catch broken seed outcomes.
+        missing = summary.get("missing") or []
+        if missing and not summary.get("copied") and not summary.get("rewritten"):
+            self.job.log(
+                f"Warning: relocate found {len(missing)} cert pair(s) but no files on disk"
+            )
 
     async def _dump_marzban_mysql(self, work_dir: Path) -> Path:
         conn = get_source_connection(self.params)
@@ -897,6 +1149,9 @@ class MarzbanMigrator(BaseMigrator):
         }
         if self.copy_report:
             out["copy_report"] = self.copy_report
+            skips = (self.copy_report or {}).get("row_skips") or {}
+            if skips:
+                out["skip_report"] = skips
         return out
 
     def _get_panel_url(self) -> str:

@@ -19,6 +19,9 @@ class PasarguardDbMigrator(BaseMigrator):
         source_db = params["source_db"]
         target_db = params["target_db"]
         upload_path = params.get("upload_path")
+        if "skip_bad_user_rows" not in params:
+            params["skip_bad_user_rows"] = True
+            self.params["skip_bad_user_rows"] = True
 
         self.job.set_progress(5, "Checking PasarGuard installation...")
 

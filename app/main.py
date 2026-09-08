@@ -18,6 +18,7 @@ from app.panels import (
 )
 from app.services.prerequisites import check_prerequisites, get_recommended_target_dbs, get_system_status
 from app.services.orchestrator import start_migration, get_job, MigrationAlreadyRunning
+from app.services.panel_job_lock import PanelJobAlreadyRunning
 from app.services.validation import validate_migration
 from app.services.upload import save_upload, get_upload_path, get_upload_analysis
 from app.services.upload_bundle import (
@@ -36,7 +37,7 @@ from app.services.self_uninstall import uninstall_preview, schedule_self_uninsta
 from app.services.auth import COOKIE_NAME, COOKIE_MAX_AGE, ensure_token, token_matches
 from app.config import WEB_PORT
 
-APP_VERSION = "4.4.10"
+APP_VERSION = "4.5.0"
 
 
 @asynccontextmanager
@@ -280,6 +281,22 @@ async def api_pasarguard_restore(req: PasarguardRestoreRequest):
         raise HTTPException(400, "Confirmation required")
     try:
         job = await start_pasarguard_restore(req.model_dump())
+    except PanelJobAlreadyRunning as e:
+        kind_fa = "مهاجرت" if getattr(e, "kind", "") == "migrate" else "ریستور"
+        raise HTTPException(
+            409,
+            {
+                "en": str(e),
+                "fa": (
+                    f"یک {kind_fa} در حال اجرا است (job={e.job.job_id}، "
+                    f"{e.job.progress}٪). تا پایان صبر کنید."
+                ),
+                "ru": str(e),
+                "job_id": e.job.job_id,
+                "progress": e.job.progress,
+                "kind": getattr(e, "kind", "restore"),
+            },
+        )
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:

@@ -281,6 +281,16 @@
                 <span class="toggle-hint" id="chkDisableNodesHint"></span>
               </div>
             </div>
+            <div class="toggle-row">
+              <label class="ios-toggle" for="chkRestoreSkipBadUserRows">
+                <input type="checkbox" id="chkRestoreSkipBadUserRows" role="switch" checked>
+                <span class="ios-toggle-track"><span class="ios-toggle-thumb"></span></span>
+              </label>
+              <div class="toggle-text">
+                <span class="toggle-label" id="chkRestoreSkipBadUserRowsLabel"></span>
+                <span class="toggle-hint" id="chkRestoreSkipBadUserRowsHint"></span>
+              </div>
+            </div>
           </div>
 
           <div class="actions">
@@ -505,6 +515,29 @@
             <input type="checkbox" id="installRedirect" checked>
             <span></span>
           </label>
+        </div>
+        <div id="migrateOptimizeOptions" class="restore-options hidden">
+          <p class="desc-sm" id="migrateOptimizeTitle" style="margin:0 0 10px"></p>
+          <div class="toggle-row">
+            <label class="ios-toggle" for="chkSkipBadUserRows">
+              <input type="checkbox" id="chkSkipBadUserRows" role="switch" checked>
+              <span class="ios-toggle-track"><span class="ios-toggle-thumb"></span></span>
+            </label>
+            <div class="toggle-text">
+              <span class="toggle-label" id="chkSkipBadUserRowsLabel"></span>
+              <span class="toggle-hint" id="chkSkipBadUserRowsHint"></span>
+            </div>
+          </div>
+          <div class="toggle-row hidden" id="migrateRelocateCertsRow">
+            <label class="ios-toggle" for="chkRelocateInboundCerts">
+              <input type="checkbox" id="chkRelocateInboundCerts" role="switch">
+              <span class="ios-toggle-track"><span class="ios-toggle-thumb"></span></span>
+            </label>
+            <div class="toggle-text">
+              <span class="toggle-label" id="chkRelocateInboundCertsLabel"></span>
+              <span class="toggle-hint" id="chkRelocateInboundCertsHint"></span>
+            </div>
+          </div>
         </div>
         <div class="warning-card" id="finalWarnings"></div>
         <div id="step4Block" class="block-msg hidden"></div>
