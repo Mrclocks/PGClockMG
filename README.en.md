@@ -1,4 +1,4 @@
-> 🚀 **`v4.4.9`** — Fix MySQL→MariaDB restore/migrate (strip GTID/SQL_LOG_BIN dump preamble)
+> 🚀 **`v4.4.10`** — Telegram split parts keep `.zip` last (`…-1-2.zip`)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
