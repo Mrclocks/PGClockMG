@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.6.1`** — رد کاربران خراب به‌صورت سراسری برای همه مهاجرت‌ها، ریستور و Change-DB (پیش‌فرض روشن)
+> 🚀 **`v4.5.0`** — گارد اینباند مرزبان + رد کاربران خراب (سراسری) + انتقال اختیاری cert + قفل مشترک migrate/restore
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
@@ -130,7 +130,8 @@ journalctl -u pg-backup -f
 sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG/main/install.sh?v='$(date +%s))"
 ```
 
-نقطهٔ ریستور قبل از خانوادهٔ ۴: `restore-point-pre-v4.0.0`
+نقطهٔ ریستور قبل از خانوادهٔ ۴: `restore-point-pre-v4.0.0`  
+نقطهٔ ریستور قبل از `v4.5.0`: `restore-point-pre-v4.5.0`
 
 ---
 

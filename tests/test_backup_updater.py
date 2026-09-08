@@ -127,7 +127,8 @@ def test_apply_update_returns_immediately(monkeypatch, tmp_path):
     elapsed = time.time() - t0
     assert elapsed < 0.25, f"apply_update blocked for {elapsed:.2f}s"
     assert job["status"] == "running"
-    assert job["progress"] == 5
+    # Worker may advance past the initial 5% before this assert runs.
+    assert job["progress"] >= 5
 
     # Wait for worker to finish
     for _ in range(50):

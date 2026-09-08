@@ -28,6 +28,20 @@ TELEGRAM_CAPTION_MAX = 1024
 TELEGRAM_TEXT_MAX = 4000
 
 
+def telegram_part_filename(path: Path, part_index: int, parts: int) -> str:
+    """Build a Telegram part name that keeps the real archive extension last.
+
+    Single part: ``backup.zip``
+    Multi part:  ``backup-1-2.zip``, ``backup-2-2.zip``  (reads as 1/2, 2/2)
+    Slash is avoided so downloads stay valid on Windows/Linux.
+    """
+    if parts <= 1:
+        return path.name
+    stem = path.stem or path.name
+    suffix = path.suffix or ".zip"
+    return f"{stem}-{part_index}-{parts}{suffix}"
+
+
 def _proxy_url(tg: dict) -> str | None:
     if not tg.get("proxy_enabled"):
         return None
@@ -277,7 +291,7 @@ def _send_document_parts(
             chunk = fh.read(max_part)
             if not chunk:
                 break
-            part_name = path.name if parts == 1 else f"{path.name}.{idx + 1:03d}-of-{parts:03d}"
+            part_name = telegram_part_filename(path, idx + 1, parts)
             if parts == 1:
                 caption = full_caption
             elif idx == 0:
