@@ -659,6 +659,7 @@ async def _try_heal_pgbouncer_stale(migrator) -> bool:
 
 async def _try_heal_nats_multiworker(migrator, logs: str) -> bool:
     """Align NATS env and bring NATS up before panel workers retry."""
+    from app.services.db_auth import read_env_text
     from app.services.multiworker_stack import (
         NATS_SERVICE,
         align_nats_env_for_compose,
@@ -666,7 +667,6 @@ async def _try_heal_nats_multiworker(migrator, logs: str) -> bool:
         detect_multiworker_stack,
         ensure_nats_ready,
     )
-    from app.services.env_migration import read_env_text
 
     stack = detect_multiworker_stack()
     workers = int(stack.get("uvicorn_workers") or 1)
@@ -697,6 +697,49 @@ async def _try_heal_nats_multiworker(migrator, logs: str) -> bool:
         return new_env != env
     except Exception as e:
         migrator.job.log(f"NATS multi-worker heal note: {e}")
+        return False
+
+
+async def _try_heal_alembic_duplicate_from_logs(migrator, logs: str) -> bool:
+    """If panel alembic failed because objects already exist, align alembic_version."""
+    text = logs or ""
+    if not _is_duplicate_schema_error(text):
+        return False
+
+    low = text.lower()
+    # Gate: only heal real panel migration failures, not incidental restore noise
+    # like "CREATE ROLE … already exists".
+    migration_fail = (
+        "database migrations failed" in low
+        or "duplicatecolumn" in low
+        or (
+            ("table" in low or "relation" in low or "column" in low)
+            and "already exists" in low
+            and any(
+                marker in low
+                for marker in (
+                    "sqlalchemy",
+                    "operationalerror",
+                    "asyncmy",
+                    "asyncpg",
+                    "programmingerror",
+                )
+            )
+        )
+    )
+    if not migration_fail:
+        return False
+
+    target_db = (migrator.params or {}).get("target_db")
+    if target_db not in ("postgresql", "timescaledb", "mysql", "mariadb", "sqlite"):
+        return False
+    try:
+        migrator.job.log(
+            "Alembic duplicate schema in panel logs — healing alembic_version…"
+        )
+        return await _heal_alembic_duplicate_schema(migrator, target_db, text)
+    except Exception as e:
+        migrator.job.log(f"Alembic duplicate-schema heal note: {e}")
         return False
 
 
@@ -1240,6 +1283,13 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                     migrator.job.log(
                         f"Panel error detected ({hit}) — Marzban pre-boot heal applied, "
                         "recreating panel…"
+                    )
+                # Schema already applied but alembic_version lags (e.g. Table already exists)
+                elif await _try_heal_alembic_duplicate_from_logs(migrator, out):
+                    healed = True
+                    migrator.job.log(
+                        f"Panel error detected ({hit}) — alembic_version healed for "
+                        "duplicate schema, recreating panel…"
                     )
                 elif await _try_heal_nats_multiworker(migrator, out):
                     healed = True
