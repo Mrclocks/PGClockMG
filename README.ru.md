@@ -1,4 +1,4 @@
-> 🚀 **`v4.5.0`** — guards inbound Marzban + soft-skip users (глобально) + optional cert relocate + общий lock migrate/restore
+> 🚀 **`v4.5.1`** — fix ImportError restore (`read_env_text`) + heal duplicate alembic tables
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

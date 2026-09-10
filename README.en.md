@@ -1,4 +1,4 @@
-> 🚀 **`v4.5.0`** — Marzban inbound guards + soft-skip bad users (global) + optional cert relocate + shared migrate/restore lock
+> 🚀 **`v4.5.1`** — fix restore ImportError (`read_env_text`) + alembic duplicate-table heal
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

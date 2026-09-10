@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.5.0`** — گارد اینباند مرزبان + رد کاربران خراب (سراسری) + انتقال اختیاری cert + قفل مشترک migrate/restore
+> 🚀 **`v4.5.1`** — فیکس ImportError ریستور (`read_env_text`) + heal جدول تکراری alembic
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
