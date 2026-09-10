@@ -216,6 +216,13 @@ def test_alembic_duplicate_heal_helpers():
     assert _is_duplicate_schema_error("column already exists") is True
     assert _is_duplicate_schema_error("ok") is False
 
+    mysql_1050 = (
+        'sqlalchemy.exc.OperationalError: (asyncmy.errors.OperationalError) '
+        '(1050, "Table \'api_keys\' already exists")\n'
+        "ERROR: Database migrations failed"
+    )
+    assert _is_duplicate_schema_error(mysql_1050) is True
+
     missing = (
         "ERROR [alembic.util.messaging] Can't locate revision identified by '5b41f7d2e9a1'"
     )
@@ -223,6 +230,53 @@ def test_alembic_duplicate_heal_helpers():
     assert _is_missing_revision_error(missing) is True
     assert _is_missing_revision_error(log) is False
     print("OK: alembic duplicate/missing revision heal helpers")
+
+
+def test_try_heal_alembic_duplicate_from_logs_mysql_1050():
+    """Panel MySQL 1050 (table already exists) should trigger alembic_version heal."""
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.pasarguard_ops import _try_heal_alembic_duplicate_from_logs
+    from app.services.migrators.base import MigrationJob
+
+    logs = (
+        'pasarguard-1 | sqlalchemy.exc.OperationalError: '
+        '(asyncmy.errors.OperationalError) (1050, "Table \'api_keys\' already exists")\n'
+        "pasarguard-1 | ERROR: Database migrations failed"
+    )
+
+    class _Mig:
+        def __init__(self):
+            self.job = MigrationJob(job_id="dup-schema")
+            self.params = {"target_db": "mysql"}
+
+    mig = _Mig()
+
+    with patch(
+        "app.services.pasarguard_ops._heal_alembic_duplicate_schema",
+        new_callable=AsyncMock,
+        return_value=True,
+    ) as heal:
+        ok = asyncio.run(_try_heal_alembic_duplicate_from_logs(mig, logs))
+    assert ok is True
+    heal.assert_awaited_once()
+    assert heal.await_args.args[1] == "mysql"
+
+    # Benign CREATE ROLE noise must not stamp
+    with patch(
+        "app.services.pasarguard_ops._heal_alembic_duplicate_schema",
+        new_callable=AsyncMock,
+        return_value=True,
+    ) as heal2:
+        ok2 = asyncio.run(
+            _try_heal_alembic_duplicate_from_logs(
+                mig, 'ERROR: role "pasarguard" already exists'
+            )
+        )
+    assert ok2 is False
+    heal2.assert_not_awaited()
+    print("OK: alembic duplicate heal from panel MySQL 1050 logs")
 
 
 def test_alembic_still_running_helpers():
@@ -598,6 +652,7 @@ if __name__ == "__main__":
     test_parse_sqlalchemy_urls()
     test_read_sqlite_alembic_version()
     test_alembic_duplicate_heal_helpers()
+    test_try_heal_alembic_duplicate_from_logs_mysql_1050()
     test_alembic_still_running_helpers()
     test_write_alembic_version_on_sqlite_conn()
     test_heal_unknown_refuses_live_mysql()

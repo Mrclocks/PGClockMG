@@ -259,6 +259,35 @@ def test_extract_failure_snippet_includes_exception_line():
     print("OK: failure snippet includes exception line")
 
 
+def test_try_heal_nats_imports_read_env_text_from_db_auth():
+    """Regression: read_env_text lives in db_auth, not env_migration."""
+    import asyncio
+    import inspect
+
+    from app.services.pasarguard_ops import _try_heal_nats_multiworker
+    from app.services.migrators.base import MigrationJob
+
+    src = inspect.getsource(_try_heal_nats_multiworker)
+    assert "from app.services.db_auth import read_env_text" in src
+    assert "from app.services.env_migration import read_env_text" not in src
+
+    class _Mig:
+        def __init__(self):
+            self.job = MigrationJob(job_id="nats-import")
+            self.params = {"target_db": "mysql"}
+
+    with patch.object(mws, "detect_multiworker_stack", return_value={
+        "uvicorn_workers": 1,
+        "uses_nats": False,
+        "orchestrate": False,
+    }):
+        result = asyncio.run(
+            _try_heal_nats_multiworker(_Mig(), "Database migrations failed")
+        )
+    assert result is False
+    print("OK: NATS heal imports read_env_text from db_auth (no ImportError)")
+
+
 if __name__ == "__main__":
     test_detect_single_worker_stack()
     test_detect_multiworker_with_nats()
@@ -273,4 +302,5 @@ if __name__ == "__main__":
     test_pgbouncer_env_mismatch_detects_stale_credentials()
     test_extract_failure_snippet_includes_root_before_startup_failed()
     test_extract_failure_snippet_includes_exception_line()
+    test_try_heal_nats_imports_read_env_text_from_db_auth()
     print("\nAll multiworker restore tests passed")
