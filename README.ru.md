@@ -1,4 +1,4 @@
-> 🚀 **`v4.5.2`** — heal orphan FK rows при restore (`notification_reminders` и аналоги)
+> 🚀 **`v4.5.3`** — импорт PG dump от superuser, чтобы orphan FK heal реально сработал
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

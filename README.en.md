@@ -1,4 +1,4 @@
-> 🚀 **`v4.5.2`** — heal orphan FK rows on restore (`notification_reminders` and similar)
+> 🚀 **`v4.5.3`** — PG dump import as superuser so orphan FK heal actually runs
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

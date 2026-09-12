@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.5.2`** — heal ردیف‌های یتیم FK هنگام ریستور (`notification_reminders` و مشابه)
+> 🚀 **`v4.5.3`** — ریستور دامپ PG با superuser تا heal یتیم‌های FK واقعاً اجرا شود
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
