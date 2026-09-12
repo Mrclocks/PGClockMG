@@ -32,7 +32,74 @@ def test_logs_indicate_orphan_fk():
     )
     assert logs_indicate_orphan_fk(sample) is True
     assert logs_indicate_orphan_fk("Duplicate entry 'usa-reality'") is False
+
+    pg_sample = (
+        'ERROR: insert or update on table "notification_reminders" '
+        'violates foreign key constraint "fk_notification_reminders_user_id_users"\n'
+        "DETAIL: Key (user_id)=(26) is not present in table \"users\"."
+    )
+    assert logs_indicate_orphan_fk(pg_sample) is True
     print("OK: orphan fk log detector")
+
+
+def test_cleanup_orphans_sqlite_removes_notification_reminders():
+    """PasarGuard dumps with orphan reminders must heal without inventing users."""
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "db.sqlite3"
+        db = sqlite3.connect(str(path))
+        db.executescript(
+            """
+            CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT);
+            CREATE TABLE admins (id INTEGER PRIMARY KEY, username TEXT);
+            CREATE TABLE notification_reminders (
+                id INTEGER PRIMARY KEY, user_id INTEGER
+            );
+            CREATE TABLE admin_notification_reminders (
+                id INTEGER PRIMARY KEY, admin_id INTEGER
+            );
+            CREATE TABLE user_hwids (id INTEGER PRIMARY KEY, user_id INTEGER);
+
+            INSERT INTO users VALUES (1, 'alive');
+            INSERT INTO admins VALUES (1, 'root');
+            INSERT INTO notification_reminders VALUES (1, 1);
+            INSERT INTO notification_reminders VALUES (2, 26);  -- orphan
+            INSERT INTO admin_notification_reminders VALUES (1, 1);
+            INSERT INTO admin_notification_reminders VALUES (2, 99);  -- orphan
+            INSERT INTO user_hwids VALUES (1, 1);
+            INSERT INTO user_hwids VALUES (2, 26);  -- orphan
+            """
+        )
+        db.commit()
+        db.close()
+
+        deleted, nulled = cleanup_orphans_sqlite(path)
+        assert deleted == 3
+        assert nulled == 0
+
+        db = sqlite3.connect(str(path))
+        assert [r[0] for r in db.execute("SELECT id FROM notification_reminders")] == [1]
+        assert [r[0] for r in db.execute("SELECT id FROM admin_notification_reminders")] == [1]
+        assert [r[0] for r in db.execute("SELECT id FROM user_hwids")] == [1]
+        assert [r[0] for r in db.execute("SELECT id FROM users")] == [1]
+        db.close()
+        assert cleanup_orphans_sqlite(path) == (0, 0)
+    print("OK: sqlite notification_reminders orphan cleanup")
+
+
+def test_write_orphan_tolerant_pg_dump_wraps_session_role():
+    from app.services.marzban_preboot_heal import write_orphan_tolerant_pg_dump
+
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "dump.sql"
+        dest = Path(td) / "wrapped.sql"
+        src.write_text("COPY public.users FROM stdin;\n1\tfoo\n\\.\n", encoding="utf-8")
+        write_orphan_tolerant_pg_dump(src, dest)
+        text = dest.read_text(encoding="utf-8")
+        assert "session_replication_role" in text
+        assert "COPY public.users FROM stdin;" in text
+        assert text.index("replica") < text.index("COPY public.users")
+        assert text.rindex("origin") > text.index("COPY public.users")
+    print("OK: orphan-tolerant pg dump wrap")
 
 
 def test_cleanup_orphans_sqlite_removes_only_orphans():
@@ -227,6 +294,8 @@ if __name__ == "__main__":
     test_orphan_delete_sql_shape()
     test_logs_indicate_orphan_fk()
     test_cleanup_orphans_sqlite_removes_only_orphans()
+    test_cleanup_orphans_sqlite_removes_notification_reminders()
+    test_write_orphan_tolerant_pg_dump_wraps_session_role()
     test_cleanup_orphans_noop_on_clean_db()
     test_shrink_heavy_usage_sqlite_threshold()
     test_orphan_null_falls_back_to_delete_when_not_null()

@@ -2960,6 +2960,20 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
             "multi-worker: NATS_URL و بالا بودن nats را چک کنید",
             "ممکن است SSL یا SQLALCHEMY_DATABASE_URL اشتباه باشد",
         ]
+    elif (
+        "violates foreign key" in low
+        or "foreign key constraint" in low
+        or "is not present in table" in low
+        or ("1452" in low and "foreign key" in low)
+    ):
+        fa = "دامپ بکاپ ردیف یتیم دارد (ارجاع به کاربر/نود حذف‌شده)."
+        en = "Backup dump has orphan rows (references to deleted users/nodes)."
+        ru = "В дампе есть осиротевшие строки (ссылки на удалённых пользователей/ноды)."
+        causes_fa = [
+            "مثلاً notification_reminders به user_idای اشاره می‌کند که در users نیست",
+            "ویزارد جدید این ردیف‌های یتیم را هنگام ریستور حذف می‌کند — دوباره تلاش کنید",
+            "دادهٔ اصلی کاربران/نودها دست‌نخورده می‌ماند؛ فقط یادآورها/لاگ‌های یتیم پاک می‌شوند",
+        ]
     elif "cannot stage" in low and ("timescaledb" in low or "postgresql" in low):
         fa = "دامپ Timescale/PostgreSQL برای تبدیل استیج نشد (سرویس مبدأ روی سرور نیست)."
         en = "Could not stage Timescale/PostgreSQL dump for conversion (source engine not running)."
@@ -4176,6 +4190,81 @@ async def _restore_mysql(
 
     last_err = ""
     best_err = ""
+    from app.services.marzban_preboot_heal import (
+        orphan_delete_sql,
+        ORPHAN_DELETE_SPECS,
+        ORPHAN_NULL_SPECS,
+        write_orphan_tolerant_mysql_dump,
+    )
+
+    wrapped_dump = import_dump.parent / f".{import_dump.name}.orphan-tolerant.sql"
+    try:
+        write_orphan_tolerant_mysql_dump(import_dump, wrapped_dump)
+        pipe_dump = wrapped_dump
+    except OSError as exc:
+        job.log(f"MySQL orphan-tolerant wrap skipped ({exc}) — importing dump as-is")
+        pipe_dump = import_dump
+
+    async def _heal_mysql_orphans_after_restore(
+        *, mysql_cmd: str, user: str, pwd: str, db: str | None,
+    ) -> None:
+        """Best-effort delete of dangling FK child rows after dump import."""
+        target_db = db or db_name
+        if not target_db:
+            return
+        deleted = 0
+        for child, child_col, parent, parent_col in ORPHAN_DELETE_SPECS:
+            sql = orphan_delete_sql(child, child_col, parent, parent_col) + ";"
+            cmd = [
+                "docker", "compose", "exec", "-T",
+                "-e", f"MYSQL_PWD={pwd}", svc, mysql_cmd, "-u", user, target_db,
+                "-e", sql,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=str(PASARGUARD_DIR),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out_b, _ = await proc.communicate()
+            if proc.returncode == 0:
+                # mysql CLI does not always print rowcounts; treat success as soft progress
+                deleted += 1
+        # NULL-style specs: attempt UPDATE; if it fails (NOT NULL), DELETE instead.
+        from app.services.marzban_preboot_heal import orphan_null_sql
+
+        for child, child_col, parent, parent_col in ORPHAN_NULL_SPECS:
+            sql = orphan_null_sql(child, child_col, parent, parent_col) + ";"
+            cmd = [
+                "docker", "compose", "exec", "-T",
+                "-e", f"MYSQL_PWD={pwd}", svc, mysql_cmd, "-u", user, target_db,
+                "-e", sql,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=str(PASARGUARD_DIR),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            await proc.communicate()
+            if proc.returncode != 0:
+                sql = orphan_delete_sql(child, child_col, parent, parent_col) + ";"
+                cmd[-1] = sql
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(PASARGUARD_DIR),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                await proc.communicate()
+        if deleted:
+            job.log(
+                f"Orphan FK heal after MySQL dump import: scanned {deleted} child "
+                "table spec(s) (reminders / usages / associations)"
+            )
+        else:
+            job.log("Orphan FK heal after MySQL dump import: no matching child tables")
+
     for user, pwd, db in attempts:
         for mysql_cmd in client_bins:
             cmd = [
@@ -4185,7 +4274,7 @@ async def _restore_mysql(
             if db:
                 cmd.append(db)
             job.log(f"Trying MySQL restore as {user}" + (f"/{db}" if db else "") + f" ({mysql_cmd})")
-            with open(import_dump, "rb") as dump_fh:
+            with open(pipe_dump, "rb") as dump_fh:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     cwd=str(PASARGUARD_DIR),
@@ -4198,8 +4287,19 @@ async def _restore_mysql(
             if proc.returncode == 0:
                 job.log("MySQL/MariaDB dump restored")
                 try:
+                    await _heal_mysql_orphans_after_restore(
+                        mysql_cmd=mysql_cmd, user=user, pwd=pwd, db=db,
+                    )
+                except Exception as heal_exc:
+                    job.log(f"MySQL orphan FK heal note: {heal_exc}")
+                try:
                     if sanitized.exists() and sanitized.resolve() != dump.resolve():
                         sanitized.unlink()
+                except OSError:
+                    pass
+                try:
+                    if wrapped_dump.exists():
+                        wrapped_dump.unlink()
                 except OSError:
                     pass
                 return
@@ -4214,6 +4314,11 @@ async def _restore_mysql(
     try:
         if sanitized.exists() and sanitized.resolve() != dump.resolve():
             sanitized.unlink()
+    except OSError:
+        pass
+    try:
+        if wrapped_dump.exists():
+            wrapped_dump.unlink()
     except OSError:
         pass
     raise RuntimeError(
@@ -4393,15 +4498,80 @@ async def _restore_postgres(
         return n >= 3, f"core_tables={n}"
 
     async def restore_dump_file(dbn: str, path: Path, *, tolerant: bool) -> tuple[bool, str]:
-        ok, out = await psql("", db=dbn, use_file=path, on_error_stop=not tolerant)
+        """Import a plain-SQL dump with orphan-FK tolerance, then heal leftovers.
+
+        Dirty PasarGuard dumps may reference deleted users (e.g. notification_reminders).
+        We defer FK checks for the import session when permitted, then delete orphan
+        child rows so constraints hold again — clean dumps are unchanged (heal is a no-op).
+        """
+        from app.services.marzban_preboot_heal import (
+            logs_indicate_orphan_fk,
+            write_orphan_tolerant_pg_dump,
+        )
+
+        wrapped = path.parent / f".{path.name}.orphan-tolerant.sql"
+        ok, out = False, ""
+
+        async def _import_wrapped(*, pg_user: str, pg_password: str) -> tuple[bool, str]:
+            stop = "ON_ERROR_STOP=1" if not tolerant else "ON_ERROR_STOP=0"
+            cmd = [
+                "docker", "compose", "exec", "-T",
+                "-e", f"PGPASSWORD={pg_password}",
+                svc, "psql", "-v", stop, "-U", pg_user, "-d", dbn,
+            ]
+            with open(wrapped, "rb") as sql_fh:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(PASARGUARD_DIR),
+                    stdin=sql_fh,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                out_b, _ = await proc.communicate()
+            return proc.returncode == 0, (out_b or b"").decode("utf-8", errors="replace")
+
+        try:
+            write_orphan_tolerant_pg_dump(path, wrapped)
+            ok, out = await _import_wrapped(pg_user=user, pg_password=password)
+            # Non-superuser sessions cannot set session_replication_role=replica, so
+            # orphan COPYs still abort. Retry once as the container bootstrap role.
+            if (
+                not ok
+                and not tolerant
+                and logs_indicate_orphan_fk(out or "")
+            ):
+                su = (container_env.get("POSTGRES_USER") or "").strip()
+                sp = container_env.get("POSTGRES_PASSWORD") or password
+                if su and (su != user or sp != password):
+                    job.log(
+                        f"Orphan FK during dump import — retrying as container role `{su}` "
+                        "with FK checks deferred…"
+                    )
+                    ok2, out2 = await _import_wrapped(pg_user=su, pg_password=sp or password)
+                    if ok2:
+                        ok, out = ok2, out2
+                    else:
+                        out = (out or "") + "\n" + (out2 or "")
+        finally:
+            try:
+                wrapped.unlink(missing_ok=True)
+            except TypeError:
+                try:
+                    if wrapped.exists():
+                        wrapped.unlink()
+                except OSError:
+                    pass
+            except OSError:
+                pass
+
         if tolerant:
-            # Non-zero is OK if leftover Timescale noise failed — verify panel tables
             verified, detail = await verify_app_tables(dbn)
             if verified:
                 errs = extract_psql_errors(out)
                 if errs:
                     job.log(f"Dump import had non-fatal errors (ignored):\n{errs[:600]}")
                 job.log(f"Verified app schema after tolerant restore ({detail})")
+                await _heal_pg_orphans_after_restore(dbn)
                 return True, out
             return False, (
                 f"Tolerant restore did not create core tables ({detail}).\n"
@@ -4409,7 +4579,49 @@ async def _restore_postgres(
             )
         if not ok:
             return False, extract_psql_errors(out) or out
+        await _heal_pg_orphans_after_restore(dbn)
         return True, out
+
+    async def _heal_pg_orphans_after_restore(dbn: str) -> None:
+        from app.services.marzban_preboot_heal import orphan_cleanup_sql_script
+
+        script = orphan_cleanup_sql_script()
+        tmp = Path(f"/tmp/pgclockmg-orphan-heal-{dbn}.sql")
+        try:
+            tmp.write_text(script, encoding="utf-8")
+            ok, out = await psql("", db=dbn, use_file=tmp, on_error_stop=False)
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except TypeError:
+                try:
+                    if tmp.exists():
+                        tmp.unlink()
+                except OSError:
+                    pass
+            except OSError:
+                pass
+        # Prefer counting DELETE lines from psql notice/output when present.
+        deleted_hint = 0
+        for line in (out or "").splitlines():
+            s = line.strip()
+            if s.upper().startswith("DELETE "):
+                try:
+                    deleted_hint += int(s.split()[-1])
+                except ValueError:
+                    pass
+        if deleted_hint:
+            job.log(
+                f"Orphan FK heal after dump import on `{dbn}`: removed {deleted_hint} "
+                "dangling child row(s) (reminders / usages / associations)"
+            )
+        elif ok:
+            job.log(f"Orphan FK heal after dump import on `{dbn}`: no dangling rows")
+        else:
+            job.log(
+                f"Orphan FK heal note on `{dbn}`: "
+                f"{(extract_psql_errors(out) or out or '')[:400]}"
+            )
 
     layout = analysis.get("layout")
     manifest = root / "pg_dump" / "manifest.tsv"

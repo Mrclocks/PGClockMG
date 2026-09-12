@@ -785,6 +785,20 @@ def test_explain_schema_name_chunk_error():
     print("OK: explain schema_name chunk error")
 
 
+def test_explain_orphan_fk_notification_reminders():
+    exc = RuntimeError(
+        'PostgreSQL dump restore failed: ERROR: insert or update on table '
+        '"notification_reminders" violates foreign key constraint '
+        '"fk_notification_reminders_user_id_users"\n'
+        "DETAIL: Key (user_id)=(26) is not present in table \"users\"."
+    )
+    info = explain_restore_error(exc, "postgresql", "timescaledb")
+    blob = (info.get("en") or "") + (info.get("fa") or "")
+    assert "orphan" in blob.lower() or "یتیم" in blob
+    assert info.get("causes_fa")
+    print("OK: explain orphan FK notification_reminders")
+
+
 def test_collect_backup_ts_from_compose_and_catalog():
     import tempfile
     import shutil
@@ -1357,6 +1371,7 @@ if __name__ == "__main__":
     test_align_image_failed_pull_keeps_data_and_tag()
     test_explain_newer_ts_backup_error()
     test_explain_schema_name_chunk_error()
+    test_explain_orphan_fk_notification_reminders()
     test_collect_backup_ts_from_compose_and_catalog()
     test_is_auth_failure_text()
     test_sql_literal_escapes_quotes()
