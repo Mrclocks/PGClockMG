@@ -1,4 +1,4 @@
-> 🚀 **`v4.5.4`** — keep user↔group links when orphan-FK dump fallback strips soft rows
+> 🚀 **`v4.5.5`** — Timescale restore no longer collides on metadata/install_timestamp
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
