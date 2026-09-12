@@ -212,16 +212,15 @@ def write_orphan_tolerant_pg_dump(
 
 # Soft child tables whose *data* may be dropped as a last-resort restore fallback
 # when no PostgreSQL superuser is available to defer FK checks. Schema is kept.
-# Keep this narrower than ORPHAN_DELETE_SPECS — wiping node_*_usages wholesale
-# would discard valid traffic history; reminders/hwids/associations are safe to
-# empty when their parent rows are missing.
+# Keep this narrower than ORPHAN_DELETE_SPECS — never wholesale-strip tables that
+# VERIFY / STRICT_COMPLETE require (users_groups_association, exclude_inbounds_*).
+# Those stay in the dump; orphan rows are removed after import by orphan heal.
+# Wiping associations made restores look "successful" then fail verify with 0 links.
 _SOFT_ORPHAN_COPY_TABLES = frozenset({
     "notification_reminders",
     "admin_notification_reminders",
     "user_hwids",
     "user_subscription_updates",
-    "users_groups_association",
-    "exclude_inbounds_association",
     "next_plans",
 })
 
