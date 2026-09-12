@@ -1,4 +1,4 @@
-> 🚀 **`v4.5.3`** — импорт PG dump от superuser, чтобы orphan FK heal реально сработал
+> 🚀 **`v4.5.4`** — сохраняем связи user↔group при fallback очистки orphan FK
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
