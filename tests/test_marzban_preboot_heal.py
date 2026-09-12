@@ -99,7 +99,53 @@ def test_write_orphan_tolerant_pg_dump_wraps_session_role():
         assert "COPY public.users FROM stdin;" in text
         assert text.index("replica") < text.index("COPY public.users")
         assert text.rindex("origin") > text.index("COPY public.users")
+
+        strict_dest = Path(td) / "strict.sql"
+        write_orphan_tolerant_pg_dump(
+            src, strict_dest, strict=True, set_role="pasarguard",
+        )
+        st = strict_dest.read_text(encoding="utf-8")
+        assert "SET session_replication_role = replica;" in st
+        assert "SET ROLE pasarguard;" in st
+        assert "RESET ROLE;" in st
+        assert "SET session_replication_role = origin;" in st
+        assert "DO $pgclockmg_fk$" not in st
     print("OK: orphan-tolerant pg dump wrap")
+
+
+def test_strip_soft_orphan_copy_data_from_pg_dump():
+    from app.services.marzban_preboot_heal import strip_soft_orphan_copy_data_from_pg_dump
+
+    dump = "\n".join([
+        "CREATE TABLE public.users (id integer);",
+        "COPY public.users (id) FROM stdin;",
+        "1",
+        "26",
+        "\\.",
+        "CREATE TABLE public.notification_reminders (id integer, user_id integer);",
+        "COPY public.notification_reminders (id, user_id) FROM stdin;",
+        "1\t1",
+        "2\t26",
+        "\\.",
+        "COPY public.hosts (id, remark) FROM stdin;",
+        "9\tok",
+        "\\.",
+        "",
+    ])
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "in.sql"
+        dest = Path(td) / "out.sql"
+        src.write_text(dump, encoding="utf-8")
+        stats = strip_soft_orphan_copy_data_from_pg_dump(src, dest)
+        assert stats.get("notification_reminders") == 2
+        assert "hosts" not in stats
+        out = dest.read_text(encoding="utf-8")
+        assert "COPY public.users (id) FROM stdin;\n1\n26\n\\.\n" in out
+        assert "COPY public.notification_reminders (id, user_id) FROM stdin;\n\\.\n" in out
+        assert "2\t26" not in out
+        assert "COPY public.hosts (id, remark) FROM stdin;\n9\tok\n\\.\n" in out
+        assert "CREATE TABLE public.notification_reminders" in out
+    print("OK: strip soft orphan COPY data from pg dump")
 
 
 def test_cleanup_orphans_sqlite_removes_only_orphans():
@@ -296,6 +342,7 @@ if __name__ == "__main__":
     test_cleanup_orphans_sqlite_removes_only_orphans()
     test_cleanup_orphans_sqlite_removes_notification_reminders()
     test_write_orphan_tolerant_pg_dump_wraps_session_role()
+    test_strip_soft_orphan_copy_data_from_pg_dump()
     test_cleanup_orphans_noop_on_clean_db()
     test_shrink_heavy_usage_sqlite_threshold()
     test_orphan_null_falls_back_to_delete_when_not_null()
