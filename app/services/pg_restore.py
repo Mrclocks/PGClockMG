@@ -4651,9 +4651,10 @@ async def _restore_postgres(
                         break
                     out = (out or "") + "\n" + (out2 or "")
 
-                # Last resort: no usable superuser — strip soft child COPY payloads
-                # (reminders/usages/associations) so FK orphans cannot abort import.
-                # Schema is preserved; only dangling soft-table *data* is skipped.
+                # Last resort: no usable superuser — strip disposable soft child
+                # COPY payloads (reminders/hwids/next_plans only). Never strip
+                # users_groups_association / exclude_inbounds — those are required
+                # for a usable panel and by restore verification.
                 if not ok and logs_indicate_orphan_fk(out or ""):
                     from app.services.marzban_preboot_heal import (
                         strip_soft_orphan_copy_data_from_pg_dump,
@@ -4664,9 +4665,9 @@ async def _restore_postgres(
                         stats = strip_soft_orphan_copy_data_from_pg_dump(path, stripped)
                         if stats:
                             job.log(
-                                "No usable superuser for FK deferral — stripping soft "
-                                "orphan table DATA from dump and retrying "
-                                f"(skipped rows: {stats})"
+                                "No usable superuser for FK deferral — stripping "
+                                "disposable soft-table DATA (not user↔group links) "
+                                f"and retrying (skipped rows: {stats})"
                             )
                             write_orphan_tolerant_pg_dump(
                                 stripped, wrapped, strict=False, set_role=None,

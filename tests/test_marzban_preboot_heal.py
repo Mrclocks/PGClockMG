@@ -127,6 +127,13 @@ def test_strip_soft_orphan_copy_data_from_pg_dump():
         "1\t1",
         "2\t26",
         "\\.",
+        "COPY public.users_groups_association (user_id, group_id) FROM stdin;",
+        "1\t1",
+        "26\t2",
+        "\\.",
+        "COPY public.exclude_inbounds_association (user_id, inbound_id) FROM stdin;",
+        "1\t9",
+        "\\.",
         "COPY public.hosts (id, remark) FROM stdin;",
         "9\tok",
         "\\.",
@@ -139,10 +146,14 @@ def test_strip_soft_orphan_copy_data_from_pg_dump():
         stats = strip_soft_orphan_copy_data_from_pg_dump(src, dest)
         assert stats.get("notification_reminders") == 2
         assert "hosts" not in stats
+        assert "users_groups_association" not in stats
+        assert "exclude_inbounds_association" not in stats
         out = dest.read_text(encoding="utf-8")
         assert "COPY public.users (id) FROM stdin;\n1\n26\n\\.\n" in out
         assert "COPY public.notification_reminders (id, user_id) FROM stdin;\n\\.\n" in out
         assert "2\t26" not in out
+        assert "COPY public.users_groups_association (user_id, group_id) FROM stdin;\n1\t1\n26\t2\n\\.\n" in out
+        assert "COPY public.exclude_inbounds_association (user_id, inbound_id) FROM stdin;\n1\t9\n\\.\n" in out
         assert "COPY public.hosts (id, remark) FROM stdin;\n9\tok\n\\.\n" in out
         assert "CREATE TABLE public.notification_reminders" in out
     print("OK: strip soft orphan COPY data from pg dump")
