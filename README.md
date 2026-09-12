@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.5.1`** — فیکس ImportError ریستور (`read_env_text`) + heal جدول تکراری alembic
+> 🚀 **`v4.5.2`** — heal ردیف‌های یتیم FK هنگام ریستور (`notification_reminders` و مشابه)
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

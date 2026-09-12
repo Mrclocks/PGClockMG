@@ -1,4 +1,4 @@
-> 🚀 **`v4.5.1`** — fix restore ImportError (`read_env_text`) + alembic duplicate-table heal
+> 🚀 **`v4.5.2`** — heal orphan FK rows on restore (`notification_reminders` and similar)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
