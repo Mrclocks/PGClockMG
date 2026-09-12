@@ -1,4 +1,4 @@
-> 🚀 **`v4.5.4`** — сохраняем связи user↔group при fallback очистки orphan FK
+> 🚀 **`v4.5.5`** — restore Timescale больше не падает на metadata/install_timestamp
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

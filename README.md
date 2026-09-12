@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.5.4`** — حفظ لینک کاربر↔گروه هنگام fallback پاک‌سازی orphan FK
+> 🚀 **`v4.5.5`** — ریستور Timescale بدون برخورد metadata/install_timestamp
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
