@@ -12,15 +12,15 @@ from app.services.pasarguard_ops import resolve_db_service, docker_compose_up, _
 
 
 def _filter_timescaledb_extension_sql(sql: str) -> str:
-    """Strip CREATE/DROP EXTENSION timescaledb lines (handled around import)."""
-    return "\n".join(
-        ln for ln in sql.splitlines()
-        if not re.search(
-            r"^\s*(DROP|CREATE)\s+EXTENSION\s+(IF\s+(EXISTS|NOT\s+EXISTS)\s+)?timescaledb\b",
-            ln,
-            re.I,
-        )
-    )
+    """Strip CREATE/DROP EXTENSION timescaledb and clear extension catalog seeds.
+
+    Staging creates the extension before import; dumps still COPY metadata rows
+    like install_timestamp. Reuse the shared Timescale→Timescale filter so
+    metadata_pkey collisions cannot abort staging the way panel restore used to.
+    """
+    from app.services.pg_restore import filter_timescaledb_extension_sql
+
+    return filter_timescaledb_extension_sql(sql, strip_all=False)
 
 
 def _compose_has_service(name: str) -> bool:
@@ -319,13 +319,16 @@ async def _import_via_compose_service(
     filtered: Path | None = None
     import_path = dump_path
     if use_ts:
+        from app.services.pg_restore import TIMESCALEDB_CATALOG_SEED_CLEAR_SQL
+
         for sql in (
             "CREATE EXTENSION IF NOT EXISTS timescaledb;",
             "SELECT timescaledb_pre_restore();",
+            TIMESCALEDB_CATALOG_SEED_CLEAR_SQL,
         ):
             p = await asyncio.create_subprocess_shell(
                 f'cd "{cwd}" && docker compose exec -T {service} '
-                f'env PGPASSWORD="{pwd}" psql -U {user} -d {staging_db} -c "{sql}"'
+                f'env PGPASSWORD="{pwd}" psql -U {user} -d {staging_db} -c {repr(sql)}'
             )
             await p.wait()
         filtered = dump_path.with_suffix(dump_path.suffix + ".staging-filtered")
@@ -853,6 +856,8 @@ async def _import_via_ephemeral_postgres(
         import_path = dump_path
         filtered: Path | None = None
         if use_ts:
+            from app.services.pg_restore import TIMESCALEDB_CATALOG_SEED_CLEAR_SQL
+
             await _psql_ephemeral_retry(
                 container, pwd, staging_db,
                 "CREATE EXTENSION IF NOT EXISTS timescaledb;",
@@ -860,6 +865,11 @@ async def _import_via_ephemeral_postgres(
             await _psql_ephemeral_retry(
                 container, pwd, staging_db,
                 "SELECT timescaledb_pre_restore();",
+                on_error_stop=False,
+            )
+            await _psql_ephemeral_retry(
+                container, pwd, staging_db,
+                TIMESCALEDB_CATALOG_SEED_CLEAR_SQL,
                 on_error_stop=False,
             )
             filtered = dump_path.with_suffix(dump_path.suffix + ".ephemeral-filtered")

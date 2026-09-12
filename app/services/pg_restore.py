@@ -103,15 +103,74 @@ def extract_psql_errors(text: str, limit: int = 12) -> str:
     return "\n".join(lines[:limit])
 
 
+# CREATE EXTENSION timescaledb inserts seed rows (install_timestamp, default
+# bgw jobs, …). Logical dumps COPY the same PKs and abort with metadata_pkey /
+# bgw_job_pkey on builds without the newer upsert trigger. Clear those seeds
+# before dump import so COPY can reload catalog data from the backup.
+TIMESCALEDB_CATALOG_SEED_CLEAR_SQL = """\
+-- PGClockMG: clear extension-seeded Timescale catalog rows before dump COPY
+DO $pgclockmg_ts_catalog$
+DECLARE
+  r regclass;
+BEGIN
+  FOR r IN
+    SELECT (quote_ident(n.nspname) || '.' || quote_ident(c.relname))::regclass
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind = 'r'
+      AND n.nspname LIKE '\\_timescaledb%' ESCAPE '\\'
+      AND c.relname IN (
+        'bgw_job_stat_history',
+        'bgw_job_stat',
+        'bgw_job',
+        'metadata'
+      )
+    ORDER BY CASE c.relname
+      WHEN 'bgw_job_stat_history' THEN 1
+      WHEN 'bgw_job_stat' THEN 2
+      WHEN 'bgw_job' THEN 3
+      WHEN 'metadata' THEN 4
+      ELSE 5
+    END
+  LOOP
+    EXECUTE format('DELETE FROM %s', r);
+  END LOOP;
+END
+$pgclockmg_ts_catalog$;
+"""
+
+
+def logs_indicate_timescaledb_catalog_seed_conflict(text: str) -> bool:
+    """True when dump import hit extension-seeded catalog PK collisions."""
+    low = (text or "").lower()
+    if "metadata_pkey" in low:
+        return True
+    if "duplicate key" in low and "install_timestamp" in low:
+        return True
+    if "duplicate key" in low and "exported_uuid" in low:
+        return True
+    if "duplicate key" in low and re.search(r"\bcopy\s+metadata\b", low):
+        return True
+    if "duplicate key" in low and "bgw_job" in low:
+        return True
+    return False
+
+
 def filter_timescaledb_extension_sql(sql: str, *, strip_all: bool = False) -> str:
     """Strip TimescaleDB extension / toolkit DDL that plain PostgreSQL cannot run.
 
     When restoring a Timescale backup into stock PostgreSQL, set strip_all=True to
     also drop hypertable helpers and any other timescaledb-qualified statements.
+
+    For Timescale→Timescale restores (strip_all=False), prepend catalog seed
+    clear so CREATE EXTENSION's install_timestamp does not collide with dump COPY.
     """
-    return "\n".join(
+    body = "\n".join(
         ln for ln in sql.splitlines() if not _ts_extension_line_dropped(ln, strip_all)
     )
+    if strip_all:
+        return body
+    return TIMESCALEDB_CATALOG_SEED_CLEAR_SQL.rstrip() + "\n" + body
 
 
 def _ts_extension_line_dropped(ln: str, strip_all: bool) -> bool:
@@ -161,6 +220,9 @@ def filter_timescaledb_extension_sql_file(
     """Stream `src` into `dest`, dropping the same lines as the in-memory filter."""
     with open(src, "r", encoding="utf-8", errors="ignore") as fh, \
             open(dest, "w", encoding="utf-8") as out:
+        if not strip_all:
+            out.write(TIMESCALEDB_CATALOG_SEED_CLEAR_SQL.rstrip())
+            out.write("\n")
         for raw in fh:
             ln = raw.rstrip("\n").rstrip("\r")
             if _ts_extension_line_dropped(ln, strip_all):
@@ -4852,11 +4914,42 @@ async def _restore_postgres(
                         f"{extract_psql_errors(out_ext)}"
                     )
                 await psql("SELECT timescaledb_pre_restore();", db=dbn)
+                await psql(TIMESCALEDB_CATALOG_SEED_CLEAR_SQL, db=dbn)
                 filtered = filter_timescaledb_extension_sql_file(
                     dump_path, dump_path.with_suffix(dump_path.suffix + ".filtered"),
                 )
                 restore_file = filtered
                 ok, out = await restore_dump_file(dbn, restore_file, tolerant=False)
+                if (
+                    not ok
+                    and logs_indicate_timescaledb_catalog_seed_conflict(out or "")
+                ):
+                    job.log(
+                        "Timescale catalog seed conflict during dump import — "
+                        "recreating database and retrying with cleared seeds…"
+                    )
+                    await psql(f'DROP DATABASE IF EXISTS "{dbn}";')
+                    ok_re, out_re = await psql(
+                        f'CREATE DATABASE "{dbn}" OWNER "{owner_q}";'
+                    )
+                    if not ok_re:
+                        raise RuntimeError(
+                            f"CREATE DATABASE {dbn} failed on catalog-seed retry:\n"
+                            f"{out_re[-1000:]}"
+                        )
+                    await psql(
+                        "CREATE EXTENSION IF NOT EXISTS timescaledb;", db=dbn,
+                    )
+                    await psql("SELECT timescaledb_pre_restore();", db=dbn)
+                    await psql(TIMESCALEDB_CATALOG_SEED_CLEAR_SQL, db=dbn)
+                    filtered = filter_timescaledb_extension_sql_file(
+                        dump_path,
+                        dump_path.with_suffix(dump_path.suffix + ".filtered"),
+                    )
+                    restore_file = filtered
+                    ok, out = await restore_dump_file(
+                        dbn, restore_file, tolerant=False,
+                    )
                 ok_post, out_post = await psql("SELECT timescaledb_post_restore();", db=dbn)
                 if not ok_post:
                     job.log(f"timescaledb_post_restore warning: {extract_psql_errors(out_post)[:300]}")
@@ -4903,6 +4996,7 @@ async def _restore_postgres(
                             )
                         await psql("CREATE EXTENSION IF NOT EXISTS timescaledb;", db=dbn)
                         await psql("SELECT timescaledb_pre_restore();", db=dbn)
+                        await psql(TIMESCALEDB_CATALOG_SEED_CLEAR_SQL, db=dbn)
                         filtered2 = filter_timescaledb_extension_sql_file(
                             dump_path, dump_path.with_suffix(dump_path.suffix + ".filtered"),
                         )
@@ -4973,10 +5067,34 @@ async def _restore_postgres(
                 f"Target cannot create timescaledb extension:\n{extract_psql_errors(out_ext)}"
             )
         await psql("SELECT timescaledb_pre_restore();", db=db_name)
+        await psql(TIMESCALEDB_CATALOG_SEED_CLEAR_SQL, db=db_name)
         filtered = filter_timescaledb_extension_sql_file(
             dump, root / "db_backup_filtered.sql",
         )
         ok, out = await restore_dump_file(db_name, filtered, tolerant=False)
+        if (
+            not ok
+            and logs_indicate_timescaledb_catalog_seed_conflict(out or "")
+        ):
+            job.log(
+                "Timescale catalog seed conflict during single-dump import — "
+                "recreating database and retrying with cleared seeds…"
+            )
+            await psql(
+                f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                f"WHERE datname = '{db_name}' AND pid <> pg_backend_pid();"
+            )
+            await psql(f'DROP DATABASE IF EXISTS "{db_name}";')
+            ok_re, out_re = await psql(f'CREATE DATABASE "{db_name}" OWNER "{user}";')
+            if not ok_re:
+                raise RuntimeError(
+                    f"CREATE DATABASE failed on catalog-seed retry:\n{out_re[-1000:]}"
+                )
+            await psql("CREATE EXTENSION IF NOT EXISTS timescaledb;", db=db_name)
+            await psql("SELECT timescaledb_pre_restore();", db=db_name)
+            await psql(TIMESCALEDB_CATALOG_SEED_CLEAR_SQL, db=db_name)
+            filter_timescaledb_extension_sql_file(dump, filtered)
+            ok, out = await restore_dump_file(db_name, filtered, tolerant=False)
         if not ok:
             wanted = wanted_ts_for_restore_retry(out or "", analysis) or ""
             if not wanted and is_ts_catalog_mismatch_error(out or ""):
@@ -5002,6 +5120,7 @@ async def _restore_postgres(
                     )
                 await psql("CREATE EXTENSION IF NOT EXISTS timescaledb;", db=db_name)
                 await psql("SELECT timescaledb_pre_restore();", db=db_name)
+                await psql(TIMESCALEDB_CATALOG_SEED_CLEAR_SQL, db=db_name)
                 filter_timescaledb_extension_sql_file(dump, filtered)
                 ok, out = await restore_dump_file(db_name, filtered, tolerant=False)
         ok_post_s, out_post_s = await psql("SELECT timescaledb_post_restore();", db=db_name)
