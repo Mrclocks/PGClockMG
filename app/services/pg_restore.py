@@ -4501,8 +4501,11 @@ async def _restore_postgres(
         """Import a plain-SQL dump with orphan-FK tolerance, then heal leftovers.
 
         Dirty PasarGuard dumps may reference deleted users (e.g. notification_reminders).
-        We defer FK checks for the import session when permitted, then delete orphan
-        child rows so constraints hold again — clean dumps are unchanged (heal is a no-op).
+        FK deferral requires a superuser session; we probe for one (container
+        POSTGRES_USER / postgres / current) and import with a *strict*
+        ``session_replication_role=replica`` wrap. Soft DO/NOTICE wraps are only
+        a last resort — they previously let non-superuser imports continue and
+        abort mid-COPY before orphan heal could run.
         """
         from app.services.marzban_preboot_heal import (
             logs_indicate_orphan_fk,
@@ -4530,28 +4533,167 @@ async def _restore_postgres(
                 out_b, _ = await proc.communicate()
             return proc.returncode == 0, (out_b or b"").decode("utf-8", errors="replace")
 
+        async def _role_is_superuser(pg_user: str, pg_password: str) -> bool:
+            cmd = [
+                "docker", "compose", "exec", "-T",
+                "-e", f"PGPASSWORD={pg_password}",
+                svc, "psql", "-v", "ON_ERROR_STOP=1", "-U", pg_user, "-d", "postgres",
+                "-tAc", "SELECT current_setting('is_superuser')",
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=str(PASARGUARD_DIR),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out_b, _ = await proc.communicate()
+            text = (out_b or b"").decode("utf-8", errors="replace")
+            if proc.returncode != 0:
+                return False
+            return "on" in text.lower()
+
+        async def _resolve_import_role() -> tuple[str, str, bool]:
+            """Return (user, password, is_superuser) for dump import."""
+            cu = (container_env.get("POSTGRES_USER") or "").strip()
+            cp = container_env.get("POSTGRES_PASSWORD") or password
+            candidates: list[tuple[str, str]] = []
+            if cu and cp:
+                candidates.append((cu, cp))
+            if cp:
+                candidates.append(("postgres", cp))
+            candidates.append((user, password))
+            if cu and password and password != cp:
+                candidates.append((cu, password))
+            candidates.append(("postgres", password))
+            seen: set[tuple[str, str]] = set()
+            for u, p in candidates:
+                if not u or not p or (u, p) in seen:
+                    continue
+                seen.add((u, p))
+                try:
+                    if await _role_is_superuser(u, p):
+                        return u, p, True
+                except Exception:
+                    continue
+            return user, password, False
+
+        import_user, import_password, is_super = await _resolve_import_role()
+        if is_super:
+            if import_user != user:
+                job.log(
+                    f"Dump import as superuser `{import_user}` "
+                    f"(SET ROLE {user} for object ownership; FK checks deferred)"
+                )
+            else:
+                job.log(
+                    f"Dump import as superuser `{import_user}` "
+                    "(FK checks deferred via session_replication_role=replica)"
+                )
+        else:
+            job.log(
+                f"Dump import as `{import_user}` without confirmed superuser — "
+                "orphan FK deferral may fail; will escalate if needed"
+            )
+
         try:
-            write_orphan_tolerant_pg_dump(path, wrapped)
-            ok, out = await _import_wrapped(pg_user=user, pg_password=password)
-            # Non-superuser sessions cannot set session_replication_role=replica, so
-            # orphan COPYs still abort. Retry once as the container bootstrap role.
+            write_orphan_tolerant_pg_dump(
+                path,
+                wrapped,
+                strict=is_super,
+                set_role=(user if is_super and import_user != user else None),
+            )
+            ok, out = await _import_wrapped(
+                pg_user=import_user, pg_password=import_password,
+            )
+
+            # Escalate: orphan FK means deferral did not apply. Probe every
+            # remaining superuser candidate (including postgres) and retry.
             if (
                 not ok
                 and not tolerant
                 and logs_indicate_orphan_fk(out or "")
             ):
-                su = (container_env.get("POSTGRES_USER") or "").strip()
-                sp = container_env.get("POSTGRES_PASSWORD") or password
-                if su and (su != user or sp != password):
+                cu = (container_env.get("POSTGRES_USER") or "").strip()
+                cp = container_env.get("POSTGRES_PASSWORD") or password
+                retry_roles: list[tuple[str, str]] = []
+                for u, p in (
+                    (cu, cp),
+                    ("postgres", cp),
+                    ("postgres", password),
+                    (cu, password),
+                ):
+                    if not u or not p:
+                        continue
+                    if (u, p) == (import_user, import_password):
+                        continue
+                    if (u, p) not in retry_roles:
+                        retry_roles.append((u, p))
+                for su, sp in retry_roles:
+                    try:
+                        if not await _role_is_superuser(su, sp):
+                            continue
+                    except Exception:
+                        continue
                     job.log(
-                        f"Orphan FK during dump import — retrying as container role `{su}` "
-                        "with FK checks deferred…"
+                        f"Orphan FK during dump import — retrying as superuser `{su}` "
+                        "with strict FK deferral…"
                     )
-                    ok2, out2 = await _import_wrapped(pg_user=su, pg_password=sp or password)
+                    write_orphan_tolerant_pg_dump(
+                        path,
+                        wrapped,
+                        strict=True,
+                        set_role=(user if su != user else None),
+                    )
+                    ok2, out2 = await _import_wrapped(pg_user=su, pg_password=sp)
                     if ok2:
                         ok, out = ok2, out2
-                    else:
-                        out = (out or "") + "\n" + (out2 or "")
+                        is_super = True
+                        break
+                    out = (out or "") + "\n" + (out2 or "")
+
+                # Last resort: no usable superuser — strip soft child COPY payloads
+                # (reminders/usages/associations) so FK orphans cannot abort import.
+                # Schema is preserved; only dangling soft-table *data* is skipped.
+                if not ok and logs_indicate_orphan_fk(out or ""):
+                    from app.services.marzban_preboot_heal import (
+                        strip_soft_orphan_copy_data_from_pg_dump,
+                    )
+
+                    stripped = path.parent / f".{path.name}.orphan-data-stripped.sql"
+                    try:
+                        stats = strip_soft_orphan_copy_data_from_pg_dump(path, stripped)
+                        if stats:
+                            job.log(
+                                "No usable superuser for FK deferral — stripping soft "
+                                "orphan table DATA from dump and retrying "
+                                f"(skipped rows: {stats})"
+                            )
+                            write_orphan_tolerant_pg_dump(
+                                stripped, wrapped, strict=False, set_role=None,
+                            )
+                            ok3, out3 = await _import_wrapped(
+                                pg_user=user, pg_password=password,
+                            )
+                            if ok3:
+                                ok, out = ok3, out3
+                            else:
+                                out = (out or "") + "\n" + (out3 or "")
+                        else:
+                            job.log(
+                                "Orphan FK persists but dump has no soft COPY payloads "
+                                "to strip — cannot auto-heal further"
+                            )
+                    finally:
+                        try:
+                            stripped.unlink(missing_ok=True)
+                        except TypeError:
+                            try:
+                                if stripped.exists():
+                                    stripped.unlink()
+                            except OSError:
+                                pass
+                        except OSError:
+                            pass
         finally:
             try:
                 wrapped.unlink(missing_ok=True)

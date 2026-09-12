@@ -131,49 +131,137 @@ def logs_indicate_orphan_fk(logs: str) -> bool:
     )
 
 
-def orphan_fk_defer_prefix_sql() -> str:
-    """Best-effort PG session preamble so dirty dumps can load before orphan heal.
+def orphan_fk_defer_prefix_sql(
+    *,
+    strict: bool = False,
+    set_role: str | None = None,
+) -> str:
+    """PG session preamble so dirty dumps can load before orphan heal.
 
-    ``session_replication_role=replica`` skips FK triggers (superuser). When the
-    role lacks privilege the DO block only raises a NOTICE and import continues;
-    a subsequent orphan heal still cleans whatever landed, and a hard FK abort
-    still surfaces for the caller to retry with a privileged role if needed.
+    ``session_replication_role=replica`` skips FK triggers (superuser).
+
+    - ``strict=True``: bare ``SET`` so a non-superuser fails immediately instead of
+      continuing into a doomed COPY that aborts mid-dump.
+    - ``set_role``: after deferring FKs, assume the app DB owner so newly created
+      objects keep the correct owner when import runs as bootstrap superuser.
     """
-    return (
-        "-- PGClockMG: defer FK checks for orphan-tolerant dump import\n"
-        "DO $pgclockmg_fk$ BEGIN\n"
-        "  PERFORM set_config('session_replication_role', 'replica', false);\n"
-        "EXCEPTION\n"
-        "  WHEN insufficient_privilege THEN\n"
-        "    RAISE NOTICE 'session_replication_role=replica denied (non-superuser)';\n"
-        "  WHEN OTHERS THEN\n"
-        "    RAISE NOTICE 'session_replication_role=replica skipped: %', SQLERRM;\n"
-        "END $pgclockmg_fk$;\n"
-    )
+    parts = ["-- PGClockMG: defer FK checks for orphan-tolerant dump import\n"]
+    if strict:
+        parts.append("SET session_replication_role = replica;\n")
+    else:
+        parts.append(
+            "DO $pgclockmg_fk$ BEGIN\n"
+            "  PERFORM set_config('session_replication_role', 'replica', false);\n"
+            "EXCEPTION\n"
+            "  WHEN insufficient_privilege THEN\n"
+            "    RAISE NOTICE 'session_replication_role=replica denied (non-superuser)';\n"
+            "  WHEN OTHERS THEN\n"
+            "    RAISE NOTICE 'session_replication_role=replica skipped: %', SQLERRM;\n"
+            "END $pgclockmg_fk$;\n"
+        )
+    role = (set_role or "").strip()
+    if role:
+        parts.append(f"SET ROLE {_ident(role)};\n")
+    return "".join(parts)
 
 
-def orphan_fk_defer_suffix_sql() -> str:
-    return (
-        "\nDO $pgclockmg_fk$ BEGIN\n"
-        "  PERFORM set_config('session_replication_role', 'origin', false);\n"
-        "EXCEPTION WHEN OTHERS THEN\n"
-        "  NULL;\n"
-        "END $pgclockmg_fk$;\n"
-    )
+def orphan_fk_defer_suffix_sql(
+    *,
+    strict: bool = False,
+    set_role: str | None = None,
+) -> str:
+    parts = ["\n"]
+    if (set_role or "").strip():
+        parts.append("RESET ROLE;\n")
+    if strict:
+        parts.append("SET session_replication_role = origin;\n")
+    else:
+        parts.append(
+            "DO $pgclockmg_fk$ BEGIN\n"
+            "  PERFORM set_config('session_replication_role', 'origin', false);\n"
+            "EXCEPTION WHEN OTHERS THEN\n"
+            "  NULL;\n"
+            "END $pgclockmg_fk$;\n"
+        )
+    return "".join(parts)
 
 
-def write_orphan_tolerant_pg_dump(src: Path, dest: Path) -> Path:
+def write_orphan_tolerant_pg_dump(
+    src: Path,
+    dest: Path,
+    *,
+    strict: bool = False,
+    set_role: str | None = None,
+) -> Path:
     """Copy ``src`` to ``dest`` wrapped with FK-defer preamble/epilogue."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     with open(src, "rb") as inf, open(dest, "wb") as outf:
-        outf.write(orphan_fk_defer_prefix_sql().encode("utf-8"))
+        outf.write(
+            orphan_fk_defer_prefix_sql(strict=strict, set_role=set_role).encode("utf-8")
+        )
         while True:
             chunk = inf.read(1024 * 1024)
             if not chunk:
                 break
             outf.write(chunk)
-        outf.write(orphan_fk_defer_suffix_sql().encode("utf-8"))
+        outf.write(
+            orphan_fk_defer_suffix_sql(strict=strict, set_role=set_role).encode("utf-8")
+        )
     return dest
+
+
+# Soft child tables whose *data* may be dropped as a last-resort restore fallback
+# when no PostgreSQL superuser is available to defer FK checks. Schema is kept.
+# Keep this narrower than ORPHAN_DELETE_SPECS — wiping node_*_usages wholesale
+# would discard valid traffic history; reminders/hwids/associations are safe to
+# empty when their parent rows are missing.
+_SOFT_ORPHAN_COPY_TABLES = frozenset({
+    "notification_reminders",
+    "admin_notification_reminders",
+    "user_hwids",
+    "user_subscription_updates",
+    "users_groups_association",
+    "exclude_inbounds_association",
+    "next_plans",
+})
+
+_COPY_TABLE_RE = re.compile(
+    r'^COPY\s+(?:public\.)?"?([A-Za-z_][A-Za-z0-9_]*)"?\s*\([^;]*\)\s+FROM\s+stdin\s*;\s*$',
+    re.IGNORECASE,
+)
+
+
+def strip_soft_orphan_copy_data_from_pg_dump(src: Path, dest: Path) -> dict[str, int]:
+    """Keep schema but drop COPY payloads for soft orphan-prone child tables.
+
+    Used when dump import cannot defer FK checks (no superuser). Empty COPY
+    blocks remain so the table still exists; only row data is skipped.
+    Returns ``{table: skipped_row_count}``.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    skipped: dict[str, int] = {}
+    skipping: str | None = None
+    with open(src, "r", encoding="utf-8", errors="replace") as inf, open(
+        dest, "w", encoding="utf-8"
+    ) as outf:
+        for line in inf:
+            if skipping is not None:
+                if line.startswith("\\.") or line.strip() == "\\.":
+                    outf.write(line)
+                    skipping = None
+                else:
+                    # data row (or comment inside COPY) — drop it
+                    if line.strip() and not line.startswith("--"):
+                        skipped[skipping] = skipped.get(skipping, 0) + 1
+                continue
+            m = _COPY_TABLE_RE.match(line.rstrip("\n"))
+            if m and m.group(1).lower() in _SOFT_ORPHAN_COPY_TABLES:
+                skipping = m.group(1).lower()
+                skipped.setdefault(skipping, 0)
+                outf.write(line)
+                continue
+            outf.write(line)
+    return {k: v for k, v in skipped.items() if v > 0}
 
 
 def mysql_fk_checks_off_sql() -> str:
