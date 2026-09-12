@@ -12,6 +12,9 @@ sys.path.insert(0, str(ROOT))
 from app.services.pg_restore import (
     soft_db_family,
     filter_timescaledb_extension_sql,
+    filter_timescaledb_extension_sql_file,
+    logs_indicate_timescaledb_catalog_seed_conflict,
+    TIMESCALEDB_CATALOG_SEED_CLEAR_SQL,
     filter_globals_sql,
     parse_timescale_wanted,
     detect_ts_mismatch_from_text,
@@ -427,12 +430,21 @@ def test_filter_timescaledb_extension_sql():
         "CREATE EXTENSION timescaledb CASCADE;",
         "CREATE EXTENSION IF NOT EXISTS timescaledb;",
         "DROP EXTENSION IF EXISTS timescaledb;",
+        "COPY metadata (key, value, include_in_telemetry) FROM stdin;",
+        "install_timestamp\t2026-06-13 14:38:48.338307+00\tt",
+        "\\.",
         "INSERT INTO t VALUES (1);",
     ])
     out = filter_timescaledb_extension_sql(sql)
     assert "CREATE TABLE" in out
     assert "INSERT INTO" in out
-    assert "timescaledb" not in out.lower()
+    assert "COPY metadata" in out
+    assert "install_timestamp" in out
+    assert "CREATE EXTENSION" not in out
+    assert "DROP EXTENSION" not in out
+    # Timescale→Timescale keeps dump rows but clears extension seeds first.
+    assert "pgclockmg_ts_catalog" in out
+    assert out.index("pgclockmg_ts_catalog") < out.index("COPY metadata")
     print("OK: filter timescaledb extension sql")
 
 
@@ -450,7 +462,50 @@ def test_filter_timescaledb_strip_all_for_plain_pg():
     assert "INSERT INTO users" in out
     assert "timescaledb" not in out.lower()
     assert "create_hypertable" not in out.lower()
+    assert "pgclockmg_ts_catalog" not in out
     print("OK: strip_all timescaledb for plain PostgreSQL")
+
+
+def test_timescaledb_catalog_seed_conflict_detection_and_file_filter():
+    import tempfile
+    import shutil
+
+    err = (
+        'Failed restoring pasarguard: ERROR:  duplicate key value violates '
+        'unique constraint "metadata_pkey"\n'
+        "DETAIL:  Key (key)=(install_timestamp) already exists.\n"
+        'CONTEXT:  COPY metadata, line 1: "install_timestamp\t2026-06-13..."'
+    )
+    assert logs_indicate_timescaledb_catalog_seed_conflict(err)
+    assert logs_indicate_timescaledb_catalog_seed_conflict(
+        'ERROR: duplicate key value violates unique constraint "bgw_job_pkey"'
+    )
+    assert not logs_indicate_timescaledb_catalog_seed_conflict(
+        "ERROR: relation users does not exist"
+    )
+    assert "DELETE FROM" in TIMESCALEDB_CATALOG_SEED_CLEAR_SQL
+    assert "metadata" in TIMESCALEDB_CATALOG_SEED_CLEAR_SQL
+
+    td = Path(tempfile.mkdtemp(prefix="pg-ts-meta-"))
+    try:
+        src = td / "in.sql"
+        dest = td / "out.sql"
+        src.write_text(
+            "CREATE EXTENSION IF NOT EXISTS timescaledb;\n"
+            "COPY metadata (key) FROM stdin;\n"
+            "install_timestamp\n"
+            "\\.\n",
+            encoding="utf-8",
+        )
+        filter_timescaledb_extension_sql_file(src, dest)
+        body = dest.read_text(encoding="utf-8")
+        assert "pgclockmg_ts_catalog" in body
+        assert "CREATE EXTENSION" not in body
+        assert "COPY metadata" in body
+        assert body.index("pgclockmg_ts_catalog") < body.index("COPY metadata")
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    print("OK: timescale catalog seed conflict detection + file filter")
 
 
 def test_parse_timescale_wanted():
@@ -1354,6 +1409,7 @@ if __name__ == "__main__":
     test_parse_ts_post_restore_catalog_mismatch()
     test_filter_timescaledb_extension_sql()
     test_filter_timescaledb_strip_all_for_plain_pg()
+    test_timescaledb_catalog_seed_conflict_detection_and_file_filter()
     test_parse_timescale_wanted()
     test_detect_ts_mismatch_from_official_error()
     test_is_ts_catalog_mismatch_error_schema_name()
