@@ -30,12 +30,23 @@ def _ident(name: str) -> str:
 
 
 # Matches PasarGuard panel migration orphan cleanup (delete side).
+# Soft child tables (reminders / hwids / associations) are included so dirty
+# PasarGuard dumps with leftover rows after soft-skipped users do not abort
+# same-engine PG restore (ON_ERROR_STOP) or alembic FK rebuilds.
 ORPHAN_DELETE_SPECS: tuple[tuple[str, str, str, str], ...] = (
     ("node_usages", "node_id", "nodes", "id"),
     ("node_user_usages", "node_id", "nodes", "id"),
     ("node_user_usages", "user_id", "users", "id"),
     ("node_usage_reset_logs", "node_id", "nodes", "id"),
     ("next_plans", "user_id", "users", "id"),
+    ("notification_reminders", "user_id", "users", "id"),
+    ("admin_notification_reminders", "admin_id", "admins", "id"),
+    ("user_hwids", "user_id", "users", "id"),
+    ("user_subscription_updates", "user_id", "users", "id"),
+    ("users_groups_association", "user_id", "users", "id"),
+    ("users_groups_association", "group_id", "groups", "id"),
+    ("exclude_inbounds_association", "user_id", "users", "id"),
+    ("exclude_inbounds_association", "inbound_id", "inbounds", "id"),
 )
 
 # SET NULL style refs (parent missing → null child column).
@@ -80,7 +91,7 @@ def orphan_null_sql(child: str, child_col: str, parent: str, parent_col: str = "
 
 
 def logs_indicate_orphan_fk(logs: str) -> bool:
-    """True when panel/alembic logs show an orphan FK failure we can heal."""
+    """True when panel/alembic/restore logs show an orphan FK failure we can heal."""
     low = (logs or "").lower()
     if not any(
         s in low
@@ -90,6 +101,7 @@ def logs_indicate_orphan_fk(logs: str) -> bool:
             "violates foreign key",
             "1452",
             "integrityerror",
+            "is not present in table",
         )
     ):
         return False
@@ -100,12 +112,142 @@ def logs_indicate_orphan_fk(logs: str) -> bool:
             "node_user_usages",
             "node_usage_reset",
             "next_plans",
+            "notification_reminders",
+            "admin_notification_reminders",
+            "user_hwids",
+            "user_subscription_updates",
+            "users_groups_association",
+            "exclude_inbounds_association",
             "node_id",
             "inbound_tag",
+            "user_id",
+            "admin_id",
             "references nodes",
             "references users",
+            "references admins",
+            "references groups",
+            "references inbounds",
         )
     )
+
+
+def orphan_fk_defer_prefix_sql() -> str:
+    """Best-effort PG session preamble so dirty dumps can load before orphan heal.
+
+    ``session_replication_role=replica`` skips FK triggers (superuser). When the
+    role lacks privilege the DO block only raises a NOTICE and import continues;
+    a subsequent orphan heal still cleans whatever landed, and a hard FK abort
+    still surfaces for the caller to retry with a privileged role if needed.
+    """
+    return (
+        "-- PGClockMG: defer FK checks for orphan-tolerant dump import\n"
+        "DO $pgclockmg_fk$ BEGIN\n"
+        "  PERFORM set_config('session_replication_role', 'replica', false);\n"
+        "EXCEPTION\n"
+        "  WHEN insufficient_privilege THEN\n"
+        "    RAISE NOTICE 'session_replication_role=replica denied (non-superuser)';\n"
+        "  WHEN OTHERS THEN\n"
+        "    RAISE NOTICE 'session_replication_role=replica skipped: %', SQLERRM;\n"
+        "END $pgclockmg_fk$;\n"
+    )
+
+
+def orphan_fk_defer_suffix_sql() -> str:
+    return (
+        "\nDO $pgclockmg_fk$ BEGIN\n"
+        "  PERFORM set_config('session_replication_role', 'origin', false);\n"
+        "EXCEPTION WHEN OTHERS THEN\n"
+        "  NULL;\n"
+        "END $pgclockmg_fk$;\n"
+    )
+
+
+def write_orphan_tolerant_pg_dump(src: Path, dest: Path) -> Path:
+    """Copy ``src`` to ``dest`` wrapped with FK-defer preamble/epilogue."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(src, "rb") as inf, open(dest, "wb") as outf:
+        outf.write(orphan_fk_defer_prefix_sql().encode("utf-8"))
+        while True:
+            chunk = inf.read(1024 * 1024)
+            if not chunk:
+                break
+            outf.write(chunk)
+        outf.write(orphan_fk_defer_suffix_sql().encode("utf-8"))
+    return dest
+
+
+def mysql_fk_checks_off_sql() -> str:
+    return "SET FOREIGN_KEY_CHECKS=0;\n"
+
+
+def mysql_fk_checks_on_sql() -> str:
+    return "\nSET FOREIGN_KEY_CHECKS=1;\n"
+
+
+def write_orphan_tolerant_mysql_dump(src: Path, dest: Path) -> Path:
+    """Copy ``src`` to ``dest`` with FOREIGN_KEY_CHECKS toggled around the dump."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(src, "rb") as inf, open(dest, "wb") as outf:
+        outf.write(mysql_fk_checks_off_sql().encode("utf-8"))
+        while True:
+            chunk = inf.read(1024 * 1024)
+            if not chunk:
+                break
+            outf.write(chunk)
+        outf.write(mysql_fk_checks_on_sql().encode("utf-8"))
+    return dest
+
+
+def orphan_cleanup_sql_script() -> str:
+    """Idempotent DELETE/UPDATE script for all orphan specs (PostgreSQL)."""
+    parts: list[str] = [
+        "-- PGClockMG: remove orphan FK rows after dump import (no-op when clean)\n"
+    ]
+    for child, child_col, parent, parent_col in ORPHAN_DELETE_SPECS:
+        c, cc, p, pc = map(_ident, (child, child_col, parent, parent_col))
+        parts.append(
+            f"DO $pgclockmg_orphan$ BEGIN\n"
+            f"  IF to_regclass('public.{c}') IS NOT NULL\n"
+            f"     AND to_regclass('public.{p}') IS NOT NULL\n"
+            f"     AND EXISTS (\n"
+            f"       SELECT 1 FROM information_schema.columns\n"
+            f"       WHERE table_schema='public' AND table_name='{c}'\n"
+            f"         AND column_name='{cc}'\n"
+            f"     ) THEN\n"
+            f"    {orphan_delete_sql(c, cc, p, pc)};\n"
+            f"  END IF;\n"
+            f"EXCEPTION WHEN OTHERS THEN\n"
+            f"  RAISE NOTICE 'orphan delete skipped on {c}.{cc}: %', SQLERRM;\n"
+            f"END $pgclockmg_orphan$;\n"
+        )
+    for child, child_col, parent, parent_col in ORPHAN_NULL_SPECS:
+        c, cc, p, pc = map(_ident, (child, child_col, parent, parent_col))
+        parts.append(
+            f"DO $pgclockmg_orphan$ BEGIN\n"
+            f"  IF EXISTS (\n"
+            f"       SELECT 1 FROM information_schema.columns\n"
+            f"       WHERE table_schema='public' AND table_name='{c}'\n"
+            f"         AND column_name='{cc}' AND is_nullable='YES'\n"
+            f"     )\n"
+            f"     AND EXISTS (\n"
+            f"       SELECT 1 FROM information_schema.columns\n"
+            f"       WHERE table_schema='public' AND table_name='{p}'\n"
+            f"         AND column_name='{pc}'\n"
+            f"     ) THEN\n"
+            f"    {orphan_null_sql(c, cc, p, pc)};\n"
+            f"  ELSIF EXISTS (\n"
+            f"       SELECT 1 FROM information_schema.columns\n"
+            f"       WHERE table_schema='public' AND table_name='{c}'\n"
+            f"         AND column_name='{cc}' AND is_nullable='NO'\n"
+            f"     )\n"
+            f"     AND to_regclass('public.{p}') IS NOT NULL THEN\n"
+            f"    {orphan_delete_sql(c, cc, p, pc)};\n"
+            f"  END IF;\n"
+            f"EXCEPTION WHEN OTHERS THEN\n"
+            f"  RAISE NOTICE 'orphan null/delete skipped on {c}.{cc}: %', SQLERRM;\n"
+            f"END $pgclockmg_orphan$;\n"
+        )
+    return "".join(parts)
 
 
 def _sqlite_table_exists(db: sqlite3.Connection, table: str) -> bool:
@@ -393,6 +535,13 @@ def cleanup_orphans_postgres_conn(
                 )
                 if not cur.fetchone():
                     continue
+                cur.execute(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema='public' AND table_name=%s AND column_name=%s LIMIT 1",
+                    (child, child_col),
+                )
+                if not cur.fetchone():
+                    continue
                 cur.execute(orphan_delete_sql(child, child_col, parent, parent_col))
                 deleted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
             for child, child_col, parent, parent_col in ORPHAN_NULL_SPECS:
@@ -578,7 +727,7 @@ async def heal_orphan_fk_refs(migrator) -> tuple[int, int]:
     if deleted or nulled:
         migrator.job.log(
             f"Orphan FK heal: deleted {deleted} row(s), nulled {nulled} ref(s) "
-            f"(node_usages/node_user_usages/…)"
+            f"(reminders / usages / associations / …)"
         )
     else:
         migrator.job.log("Orphan FK heal: no orphan references found")
