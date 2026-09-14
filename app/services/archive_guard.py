@@ -136,17 +136,35 @@ def safe_extract_zip_file(path: str | Path, dest: Path) -> ZipPreflight:
 def safe_extract(zf: zipfile.ZipFile, dest: Path) -> ZipPreflight:
     report = preflight_zip(zf)
     dest.mkdir(parents=True, exist_ok=True)
+    dest_resolved = dest.resolve()
     extracted_total = 0
     for info in zf.infolist():
         name = info.filename.replace("\\", "/")
+        if not name or name.startswith("/") or ".." in name.split("/"):
+            raise ValueError(f"Unsafe zip entry: {info.filename}")
         target = dest / name
+        try:
+            resolved = target.resolve()
+            resolved.relative_to(dest_resolved)
+        except (ValueError, OSError) as exc:
+            raise ValueError(f"Unsafe zip entry: {info.filename}") from exc
         if info.is_dir():
             target.mkdir(parents=True, exist_ok=True)
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
+        written = 0
         with zf.open(info) as src, open(target, "wb") as out:
-            shutil.copyfileobj(src, out)
-        extracted_total += info.file_size
+            while True:
+                chunk = src.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                written += len(chunk)
+                if written > MAX_ZIP_ENTRY_BYTES:
+                    raise ValueError(f"Zip entry too large: {info.filename}")
+                if extracted_total + written > MAX_ZIP_TOTAL_BYTES:
+                    raise ValueError("Zip expands beyond the safe extraction limit")
+        extracted_total += written
         if extracted_total > MAX_ZIP_TOTAL_BYTES:
             raise ValueError("Zip expands beyond the safe extraction limit")
     return report

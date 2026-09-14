@@ -10,13 +10,13 @@ import subprocess
 import tempfile
 import threading
 import time
-import zipfile
 from pathlib import Path
 from typing import Any
 
 import httpx
 
 from app.config import BACKUP_HOME
+from app.services.archive_guard import safe_extract_zip_file
 
 log = logging.getLogger("pgclockmg.backup_updater")
 
@@ -257,8 +257,7 @@ def _download_release_archive(tag: str, dest_zip: Path, *, timeout: float = 120.
 
 def _extract_zip(archive: Path, dest_dir: Path) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(archive, "r") as zf:
-        zf.extractall(dest_dir)
+    safe_extract_zip_file(archive, dest_dir)
     return _find_app_dir(dest_dir)
 
 

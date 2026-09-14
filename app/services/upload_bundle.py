@@ -6,7 +6,6 @@ import json
 import shutil
 import tempfile
 import uuid
-import zipfile
 from pathlib import Path
 
 from app.config import UPLOAD_DIR
@@ -162,9 +161,13 @@ def save_bundle_slot(
                 slot_meta["error"] = str(e)
 
         if slot in ("bundle_zip", "database", "certs", "templates"):
+            # Preserve zip-extract failures (zip slip / bomb) — do not overwrite ok.
+            extract_failed = slot_meta.get("ok") is False and bool(slot_meta.get("error"))
             analysis = analyze_upload_directory(sdir)
             slot_meta["analysis"] = analysis
-            if slot == "bundle_zip":
+            if extract_failed:
+                slot_meta["ok"] = False
+            elif slot == "bundle_zip":
                 slot_meta["ok"] = analysis.get("backup_ok", False)
             elif slot == "database":
                 slot_meta["ok"] = _database_slot_ok(
@@ -365,8 +368,7 @@ def prepare_bundle_workspace(bundle_id: str) -> Path:
     if slot:
         src = Path(slot["path"])
         if src.suffix.lower() == ".zip":
-            with zipfile.ZipFile(src, "r") as zf:
-                zf.extractall(work / "db_extracted")
+            safe_extract_zip_file(src, work / "db_extracted")
         else:
             # Preserve panel-specific names (x-ui.db); normalize other sqlite dumps
             lower = src.name.lower()
@@ -391,8 +393,7 @@ def prepare_bundle_workspace(bundle_id: str) -> Path:
         dest = work / folder
         dest.mkdir(parents=True, exist_ok=True)
         if src.suffix.lower() == ".zip":
-            with zipfile.ZipFile(src, "r") as zf:
-                zf.extractall(dest)
+            safe_extract_zip_file(src, dest)
         else:
             shutil.copytree(src, dest, dirs_exist_ok=True)
 

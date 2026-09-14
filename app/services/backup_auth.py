@@ -215,9 +215,13 @@ def _clean_token(value: str | None) -> str:
 
 
 def verify_setup_token(provided: str | None) -> bool:
-    """Check setup token without consuming it. Never raises on length mismatch."""
+    """Check setup token without consuming it. Never raises on length mismatch.
+
+    Fail-closed: if the installer did not write ``.setup_token``, setup is refused
+    (no open password takeover when the token file is missing).
+    """
     if not setup_token_is_required():
-        return True
+        return False
     expected = _clean_token(BACKUP_SETUP_TOKEN_FILE.read_text(encoding="utf-8"))
     got = _clean_token(provided)
     if not expected or not got or len(got) != len(expected):
@@ -229,8 +233,6 @@ def consume_setup_token(provided: str | None) -> bool:
     """Validate and delete the setup token. Returns False on mismatch/missing."""
     if not verify_setup_token(provided):
         return False
-    if not setup_token_is_required():
-        return True
     try:
         BACKUP_SETUP_TOKEN_FILE.unlink(missing_ok=True)
     except OSError:
