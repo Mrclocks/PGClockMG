@@ -1,4 +1,4 @@
-> 🚀 **`v4.5.5`** — Timescale restore no longer collides on metadata/install_timestamp
+> 🚀 **`v4.5.6`** — Phase 1/2 hardening + scoped password autofill vault
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

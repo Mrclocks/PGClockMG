@@ -1,4 +1,4 @@
-> 🚀 **`v4.5.5`** — restore Timescale больше не падает на metadata/install_timestamp
+> 🚀 **`v4.5.6`** — hardening фазы 1/2 + безопасный autofill паролей (vault)
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
