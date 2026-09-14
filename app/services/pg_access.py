@@ -9,6 +9,7 @@ from pathlib import Path
 from app.config import PASARGUARD_ENV
 from app.services.env_migration import read_env_var
 from app.services.prerequisites import is_pasarguard_installed, get_pasarguard_db_type, get_pasarguard_env_summary
+from app.services.env_migration import public_env_summary
 
 
 def _server_ip() -> str:
@@ -331,7 +332,7 @@ def get_panel_access_info(prefer_host: str | None = None) -> dict:
         "ssh_tunnel": ssh_tunnel,
         "owner_cmd": owner_cmd,
         "db_type": get_pasarguard_db_type() if installed else None,
-        "env": get_pasarguard_env_summary() if installed else None,
+        "env": public_env_summary(get_pasarguard_env_summary()) if installed else None,
         "guide": guide,
         "no_ssl_notes": no_ssl_notes,
         "owner_notes": owner_notes,

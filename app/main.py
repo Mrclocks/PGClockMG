@@ -34,7 +34,10 @@ from app.services.pg_restore import (
     analyze_pasarguard_backup, start_pasarguard_restore, get_restore_job,
 )
 from app.services.self_uninstall import uninstall_preview, schedule_self_uninstall
-from app.services.auth import COOKIE_NAME, COOKIE_MAX_AGE, ensure_token, token_matches
+from app.services.auth import (
+    COOKIE_NAME, COOKIE_MAX_AGE, ensure_token, token_matches,
+    login_is_throttled, record_login_failure, clear_login_failures,
+)
 from app.config import WEB_PORT
 
 APP_VERSION = "4.5.5"
@@ -47,7 +50,25 @@ async def _lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="PGClockMG", version=APP_VERSION, lifespan=_lifespan)
+app = FastAPI(
+    title="PGClockMG",
+    version=APP_VERSION,
+    lifespan=_lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    if request.url.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
+
 
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -156,9 +177,15 @@ async def require_access_token(request: Request, call_next):
 
 
 @app.get("/login")
-async def login(token: str = ""):
+async def login(request: Request, token: str = ""):
+    client_key = (request.client.host if request.client else None) or "unknown"
+    if login_is_throttled(client_key):
+        return HTMLResponse(_login_page(error=True), status_code=429)
     if not token_matches(token):
+        if token:
+            record_login_failure(client_key)
         return HTMLResponse(_login_page(error=bool(token)), status_code=401)
+    clear_login_failures(client_key)
     response = RedirectResponse("/", status_code=303)
     response.set_cookie(
         COOKIE_NAME, token, httponly=True, samesite="lax",
