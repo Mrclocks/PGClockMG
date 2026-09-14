@@ -39,7 +39,8 @@ def save_upload(src_path: str | Path, filename: str) -> dict:
             except ValueError as e:
                 zip_error = str(e)
 
-        analysis = analyze_upload_directory(dest_dir)
+        from app.services.secret_vault import upload_scope
+        analysis = analyze_upload_directory(dest_dir, vault_scope=upload_scope(upload_id))
         detected = _legacy_detected(analysis)
 
         result = {
@@ -93,7 +94,8 @@ def get_upload_analysis(upload_id: str) -> dict | None:
     upload_dir = get_upload_dir(upload_id)
     if not upload_dir:
         return None
-    return analyze_upload_directory(upload_dir)
+    from app.services.secret_vault import upload_scope
+    return analyze_upload_directory(upload_dir, vault_scope=upload_scope(upload_id))
 
 
 def _legacy_detected(analysis: dict) -> dict:

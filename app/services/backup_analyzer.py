@@ -122,7 +122,7 @@ def detect_db_from_env(text: str) -> str | None:
     return detect_db_type_from_env(text)
 
 
-def analyze_upload_directory(upload_dir: Path) -> dict:
+def analyze_upload_directory(upload_dir: Path, vault_scope: str | None = None) -> dict:
     root = resolve_extract_root(upload_dir)
     inventory: list[dict] = []
     categories: dict[str, int] = {}
@@ -269,6 +269,10 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
     xui_schema = None
     if panel_hint == "3x-ui" and sqlite_path:
         xui_schema = _detect_xui_schema(Path(sqlite_path))
+
+    if vault_scope and password_candidates:
+        from app.services import secret_vault
+        secret_vault.put_candidates(vault_scope, password_candidates, db_type=detected_source_db)
 
     return {
         "extract_root": str(root.relative_to(upload_dir)).replace("\\", "/") if root != upload_dir else ".",

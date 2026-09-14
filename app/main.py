@@ -241,6 +241,32 @@ async def api_info():
     }
 
 
+
+@app.get("/api/credentials/candidates")
+async def api_credential_candidates(scope: str):
+    """Scoped autofill: return plaintext password candidates for one vault scope.
+
+    Broad endpoints (``/api/info``) stay scrubbed. This route is authenticated and
+    limited to a single scope such as ``live:pasarguard``, ``live:marzban``,
+    ``upload:<id>``, or ``bundle:<id>``.
+    """
+    from app.services import secret_vault
+
+    scope = (scope or "").strip()
+    allowed_prefixes = ("live:", "upload:", "bundle:")
+    if not scope or not scope.startswith(allowed_prefixes) or "/" in scope or ".." in scope:
+        raise HTTPException(400, "invalid_scope")
+    if scope.startswith("live:") and scope not in (secret_vault.LIVE_PASARGUARD, secret_vault.LIVE_MARZBAN):
+        raise HTTPException(400, "invalid_scope")
+    cands = secret_vault.get_candidates(scope)
+    return {
+        "scope": scope,
+        "candidates": cands,
+        "primary": secret_vault.get_primary(scope),
+        "server_held": bool(secret_vault.get_primary(scope)),
+    }
+
+
 @app.get("/api/pasarguard/status")
 async def api_pasarguard_status():
     return get_panel_access_info()
@@ -500,15 +526,19 @@ def _resolve_upload_params(params: dict) -> dict:
 
 @app.post("/api/validate-migration")
 async def api_validate_migration(req: MigrationRequest):
+    from app.services.secret_vault import apply_vault_passwords
     params = req.model_dump()
     params = _resolve_upload_params(params)
+    params = apply_vault_passwords(params)
     return validate_migration(params)
 
 
 @app.post("/api/migrate")
 async def api_migrate(req: MigrationRequest):
+    from app.services.secret_vault import apply_vault_passwords
     params = req.model_dump()
     params = _resolve_upload_params(params)
+    params = apply_vault_passwords(params)
 
     validation = validate_migration(params)
     if not validation["ok"]:

@@ -162,7 +162,10 @@ def save_bundle_slot(
                 slot_meta["error"] = str(e)
 
         if slot in ("bundle_zip", "database", "certs", "templates"):
-            analysis = analyze_upload_directory(sdir)
+            from app.services.secret_vault import bundle_scope
+            analysis = analyze_upload_directory(
+                sdir, vault_scope=bundle_scope(bundle_id) if slot in ("bundle_zip", "database", "env") else None
+            )
             slot_meta["analysis"] = analysis
             if slot == "bundle_zip":
                 slot_meta["ok"] = analysis.get("backup_ok", False)
@@ -176,6 +179,20 @@ def save_bundle_slot(
             slot_meta["ok"] = dest.exists()
             text = dest.read_text(encoding="utf-8", errors="ignore")
             slot_meta["has_mysql_password"] = "MYSQL_ROOT_PASSWORD" in text or "MYSQL_PASSWORD" in text
+            # Separate-file uploads: put env secrets in the vault so autofill/autopass work
+            # without putting plaintext back on broad analysis APIs.
+            try:
+                from app.services import secret_vault
+                from app.services.env_migration import extract_env_password_candidates
+
+                cands = extract_env_password_candidates(text, source_db)
+                if cands:
+                    secret_vault.put_candidates(
+                        secret_vault.bundle_scope(bundle_id), cands, db_type=source_db,
+                    )
+                    slot_meta["password_candidate_keys"] = [c["key"] for c in cands]
+            except Exception:
+                pass
         elif slot == "xray_config":
             slot_meta["ok"] = dest.exists() and dest.suffix.lower() == ".json"
         else:
@@ -313,6 +330,22 @@ def validate_bundle(
     db_meta = manifest["slots"].get("database") or zip_slot
     if db_meta:
         analysis = db_meta.get("analysis")
+
+    # Enrich scrubbed analysis with env-slot password metadata (values stay in vault).
+    env_meta = manifest["slots"].get("env")
+    if env_meta and env_meta.get("ok") and env_meta.get("password_candidate_keys"):
+        from app.services import secret_vault
+        from app.services.env_migration import public_password_candidates
+
+        held = secret_vault.get_candidates(secret_vault.bundle_scope(bundle_id) or "")
+        if held:
+            public_cands = public_password_candidates(held)
+            if analysis is None:
+                analysis = {}
+            else:
+                analysis = dict(analysis)
+            analysis["password_candidates"] = public_cands
+            analysis["mysql_password_found"] = True
 
     return {
         "ok": complete,

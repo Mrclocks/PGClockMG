@@ -407,8 +407,8 @@ const I18N = {
     dbCred: {
       sourceHint: 'Open your Marzban .env on the server, copy DB values, and paste them below.',
       targetHint: 'Passwords were read from PasarGuard .env — confirm each value below.',
-      confirmTitle: 'Passwords from .env — edit if needed, then confirm',
-      confirmHint: 'Passwords are not sent by the API. Enter each password (placeholder shows a mask), then confirm. The one marked “used for migration” is sent to the migrator.',
+      confirmTitle: 'Passwords from .env — autofilled when available',
+      confirmHint: 'Secrets stay off broad APIs. When the server already holds them, fields autofill and confirm. Otherwise enter each password (mask in placeholder), then confirm. The one marked “used for migration” is used by the migrator.',
       confirmBtn: 'Confirm',
       confirmedBtn: 'Confirmed',
       usedForMigration: 'Used for migration',
@@ -886,8 +886,8 @@ const I18N = {
     dbCred: {
       sourceHint: 'فایل .env مرزبان را با nano باز کنید، مقادیر دیتابیس را کپی و در فیلدهای زیر وارد کنید.',
       targetHint: 'رمزها از .env پاسارگارد خوانده شد — هر کدام را تأیید کنید.',
-      confirmTitle: 'رمزهای .env — در صورت نیاز ویرایش کنید و تأیید بزنید',
-      confirmHint: 'رمز به‌صورت متن ساده از API نمی‌آید. هر رمز را وارد کنید (جای‌نگهدار ماسک است) و تأیید کنید. رمزی که «برای مهاجرت» مشخص شده به موتور مهاجرت ارسال می‌شود.',
+      confirmTitle: 'رمزهای .env — در صورت وجود به‌صورت خودکار پر می‌شوند',
+      confirmHint: 'رمز در APIهای عمومی نمی‌آید. اگر سرور رمز را نگه داشته باشد، فیلدها خودکار پر و تأیید می‌شوند؛ وگرنه هر رمز را وارد کنید (ماسک در جای‌نگهدار) و تأیید کنید. رمزی که «برای مهاجرت» مشخص شده استفاده می‌شود.',
       confirmBtn: 'تأیید',
       confirmedBtn: 'تأیید شد',
       usedForMigration: 'برای مهاجرت',
@@ -1365,8 +1365,8 @@ const I18N = {
     dbCred: {
       sourceHint: 'Откройте .env Marzban через nano, скопируйте данные БД и введите ниже.',
       targetHint: 'Пароли прочитаны из .env PasarGuard — подтвердите каждый.',
-      confirmTitle: 'Пароли из .env — при необходимости измените и подтвердите',
-      confirmHint: 'Пароли больше не приходят открытым текстом из API. Введите каждый пароль (в подсказке маска) и подтвердите. Пароль «для миграции» передаётся в движок.',
+      confirmTitle: 'Пароли из .env — автозаполнение при наличии',
+      confirmHint: 'Секреты не отдаются широкими API. Если сервер уже хранит пароли, поля заполняются и подтверждаются сами; иначе введите каждый пароль (маска в подсказке) и подтвердите. Пароль «для миграции» используется движком.',
       confirmBtn: 'Подтвердить',
       confirmedBtn: 'Подтверждено',
       usedForMigration: 'Для миграции',
