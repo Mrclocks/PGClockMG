@@ -423,10 +423,19 @@ async function continueAfterPgReady() {
 }
 
 function backFromRestore() {
+  if (state.restoreStage === 'running') {
+    const msg = t('restore.runningBackHint');
+    if (msg && msg !== 'restore.runningBackHint' && !window.confirm(msg)) return;
+    // Leaving the screen does NOT stop the server-side restore job.
+    if (typeof stopRestorePoll === 'function') stopRestorePoll();
+  }
   showPhase('welcome');
 }
 
 function cancelMigrationRun() {
+  // UI only: hide progress. The migration job keeps running on the server.
+  const msg = t('step5.hideProgressHint');
+  if (msg && msg !== 'step5.hideProgressHint' && !window.confirm(msg)) return;
   if (typeof stopMigrationPoll === 'function') stopMigrationPoll();
   else if (window._migrationPollTimer) {
     clearTimeout(window._migrationPollTimer);
@@ -614,8 +623,8 @@ function applyPhaseI18n() {
   set('restoreErrorDetailToggle', 'restore.errorDetail');
   set('btnRestoreErrorBack', 'restore.back');
   set('btnRestoreRetry', 'restore.retry');
-  set('btnRestoreRunningBack', 'restore.cancel');
-  set('btnStep5Back', 'step4.back');
+  set('btnRestoreRunningBack', 'restore.hideProgress');
+  set('btnStep5Back', 'step5.hideProgress');
   set('restoreConvertNoteText', 'restore.autoConvertNote');
   set('btnCopyRestorePath', 'copy');
   // Re-render options labels in case language changed while analysis is showing
@@ -1293,6 +1302,8 @@ async function startRestore() {
     }
     return;
   }
+  if (state.restoreStage === 'running' || window._restoreStartLock) return;
+  window._restoreStartLock = true;
 
   stopRestorePoll();
   setRestoreStage('running');
@@ -1328,8 +1339,10 @@ async function startRestore() {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(typeof data.detail === 'string' ? data.detail : (data.detail?.msg || JSON.stringify(data)));
+    window._restoreStartLock = false;
     pollRestore(data.job_id);
   } catch (e) {
+    window._restoreStartLock = false;
     showRestoreError({ fa: e.message, en: e.message, causes_fa: [], detail: e.message });
   }
 }

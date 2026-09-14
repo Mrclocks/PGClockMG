@@ -34,10 +34,13 @@ from app.services.pg_restore import (
     analyze_pasarguard_backup, start_pasarguard_restore, get_restore_job,
 )
 from app.services.self_uninstall import uninstall_preview, schedule_self_uninstall
-from app.services.auth import COOKIE_NAME, COOKIE_MAX_AGE, ensure_token, token_matches
+from app.services.auth import (
+    COOKIE_NAME, COOKIE_MAX_AGE, ensure_token, token_matches,
+    login_is_throttled, record_login_failure, clear_login_failures,
+)
 from app.config import WEB_PORT
 
-APP_VERSION = "4.5.5"
+APP_VERSION = "4.5.6"
 
 
 @asynccontextmanager
@@ -47,7 +50,25 @@ async def _lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="PGClockMG", version=APP_VERSION, lifespan=_lifespan)
+app = FastAPI(
+    title="PGClockMG",
+    version=APP_VERSION,
+    lifespan=_lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    if request.url.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
+
 
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -156,9 +177,15 @@ async def require_access_token(request: Request, call_next):
 
 
 @app.get("/login")
-async def login(token: str = ""):
+async def login(request: Request, token: str = ""):
+    client_key = (request.client.host if request.client else None) or "unknown"
+    if login_is_throttled(client_key):
+        return HTMLResponse(_login_page(error=True), status_code=429)
     if not token_matches(token):
+        if token:
+            record_login_failure(client_key)
         return HTMLResponse(_login_page(error=bool(token)), status_code=401)
+    clear_login_failures(client_key)
     response = RedirectResponse("/", status_code=303)
     response.set_cookie(
         COOKIE_NAME, token, httponly=True, samesite="lax",
@@ -211,6 +238,32 @@ async def api_info():
             "non_sqlite_to_sqlite": False,
             "cross_engine": True,
         },
+    }
+
+
+
+@app.get("/api/credentials/candidates")
+async def api_credential_candidates(scope: str):
+    """Scoped autofill: return plaintext password candidates for one vault scope.
+
+    Broad endpoints (``/api/info``) stay scrubbed. This route is authenticated and
+    limited to a single scope such as ``live:pasarguard``, ``live:marzban``,
+    ``upload:<id>``, or ``bundle:<id>``.
+    """
+    from app.services import secret_vault
+
+    scope = (scope or "").strip()
+    allowed_prefixes = ("live:", "upload:", "bundle:")
+    if not scope or not scope.startswith(allowed_prefixes) or "/" in scope or ".." in scope:
+        raise HTTPException(400, "invalid_scope")
+    if scope.startswith("live:") and scope not in (secret_vault.LIVE_PASARGUARD, secret_vault.LIVE_MARZBAN):
+        raise HTTPException(400, "invalid_scope")
+    cands = secret_vault.get_candidates(scope)
+    return {
+        "scope": scope,
+        "candidates": cands,
+        "primary": secret_vault.get_primary(scope),
+        "server_held": bool(secret_vault.get_primary(scope)),
     }
 
 
@@ -473,15 +526,19 @@ def _resolve_upload_params(params: dict) -> dict:
 
 @app.post("/api/validate-migration")
 async def api_validate_migration(req: MigrationRequest):
+    from app.services.secret_vault import apply_vault_passwords
     params = req.model_dump()
     params = _resolve_upload_params(params)
+    params = apply_vault_passwords(params)
     return validate_migration(params)
 
 
 @app.post("/api/migrate")
 async def api_migrate(req: MigrationRequest):
+    from app.services.secret_vault import apply_vault_passwords
     params = req.model_dump()
     params = _resolve_upload_params(params)
+    params = apply_vault_passwords(params)
 
     validation = validate_migration(params)
     if not validation["ok"]:

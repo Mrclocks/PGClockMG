@@ -10,7 +10,11 @@ from app.config import (
     MARZBAN_DIR, MARZBAN_DATA, XUI_DB_PATHS, HIDDIFY_DIR,
 )
 from app.panels import PANELS, DATABASE_TYPES, TARGET_DB_RECOMMENDATIONS
-from app.services.env_migration import extract_env_summary, detect_db_type_from_env, extract_env_password_candidates
+from app.services.env_migration import (
+    extract_env_summary, detect_db_type_from_env, extract_env_password_candidates,
+    public_env_summary, public_password_candidates,
+)
+from app.services import secret_vault
 
 
 def _run(cmd: list[str], timeout: int = 30) -> tuple[bool, str]:
@@ -197,6 +201,12 @@ def get_system_status() -> dict:
     marzban = is_marzban_installed()
     pg_db = get_pasarguard_db_type()
     mz_db = get_marzban_db_type()
+    pg_cands = _password_candidates_from_env(PASARGUARD_ENV, pg_db) if pg else []
+    mz_cands = _password_candidates_from_env(MARZBAN_DIR / ".env", mz_db) if marzban else []
+    if pg_cands:
+        secret_vault.put_candidates(secret_vault.LIVE_PASARGUARD, pg_cands, db_type=pg_db)
+    if mz_cands:
+        secret_vault.put_candidates(secret_vault.LIVE_MARZBAN, mz_cands, db_type=mz_db)
     return {
         "pasarguard": pg,
         "marzban": marzban,
@@ -207,12 +217,14 @@ def get_system_status() -> dict:
         "marzban_db": mz_db,
         "pasarguard_path": str(PASARGUARD_DIR) if pg else None,
         "marzban_path": str(MARZBAN_DIR) if MARZBAN_DIR.exists() else None,
-        "pasarguard_env": get_pasarguard_env_summary(),
-        "pasarguard_password_candidates": _password_candidates_from_env(PASARGUARD_ENV, pg_db) if pg else [],
-        "marzban_env": extract_env_summary(
-            (MARZBAN_DIR / ".env").read_text(encoding="utf-8", errors="ignore")
-        ) if marzban and (MARZBAN_DIR / ".env").exists() else None,
-        "marzban_password_candidates": _password_candidates_from_env(MARZBAN_DIR / ".env", mz_db) if marzban else [],
+        "pasarguard_env": public_env_summary(get_pasarguard_env_summary()),
+        "pasarguard_password_candidates": public_password_candidates(pg_cands),
+        "marzban_env": public_env_summary(
+            extract_env_summary(
+                (MARZBAN_DIR / ".env").read_text(encoding="utf-8", errors="ignore")
+            ) if marzban and (MARZBAN_DIR / ".env").exists() else None
+        ),
+        "marzban_password_candidates": public_password_candidates(mz_cands),
         "resources": _resource_status(),
     }
 

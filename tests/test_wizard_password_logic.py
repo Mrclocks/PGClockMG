@@ -72,6 +72,12 @@ def test_wizard_password_flow():
         {"MYSQL_ROOT_PASSWORD": "rootpass"},
         True,
     ) is not None
+
+    # server_held: UI may proceed via autopass without local plaintext yet
+    held_rows = [
+        {"key": "POSTGRES_PASSWORD", "used_for_migration": True, "server_held": True},
+    ]
+    assert all(r.get("server_held") for r in held_rows)
     print("OK: wizard password flow")
 
 

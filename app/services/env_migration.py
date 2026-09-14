@@ -49,6 +49,34 @@ def mask_password(value: str) -> str:
     return value[0] + ("•" * (len(value) - 2)) + value[-1]
 
 
+_ENV_SUMMARY_SECRET_KEYS = frozenset({
+    "db_password",
+    "mysql_password",
+    "postgres_password",
+})
+
+
+def public_env_summary(summary: dict | None) -> dict | None:
+    """Strip plaintext secrets before any HTTP/JSON response."""
+    if not summary:
+        return summary
+    return {k: v for k, v in summary.items() if k not in _ENV_SUMMARY_SECRET_KEYS}
+
+
+def public_password_candidates(candidates: list[dict] | None) -> list[dict]:
+    """Return password candidate metadata without plaintext ``value``.
+
+    Adds ``server_held=True`` when a plaintext value exists server-side so the UI
+    can hydrate autofill via the scoped credentials endpoint / autopass.
+    """
+    out: list[dict] = []
+    for c in candidates or []:
+        item = {k: v for k, v in c.items() if k != "value"}
+        item["server_held"] = bool(c.get("value"))
+        out.append(item)
+    return out
+
+
 def migration_primary_key(candidates: list[dict], db_type: str | None) -> str | None:
     if not candidates:
         return None

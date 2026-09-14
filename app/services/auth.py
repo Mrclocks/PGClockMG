@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import os
 import secrets
 from pathlib import Path
@@ -102,3 +104,33 @@ def token_matches(candidate: str | None) -> bool:
 
 def token_path() -> Path:
     return TOKEN_FILE
+
+
+# In-memory login throttle (per-process; enough for single uvicorn worker).
+_LOGIN_HITS: dict[str, list[float]] = {}
+_LOGIN_LOCK_UNTIL: dict[str, float] = {}
+
+
+def login_is_throttled(key: str, *, max_hits: int = 8, window_sec: int = 300, lock_sec: int = 600) -> bool:
+    now = time.time()
+    until = _LOGIN_LOCK_UNTIL.get(key) or 0.0
+    if until > now:
+        return True
+    hits = [t for t in _LOGIN_HITS.get(key, []) if now - t < window_sec]
+    _LOGIN_HITS[key] = hits
+    return len(hits) >= max_hits
+
+
+def record_login_failure(key: str, *, max_hits: int = 8, window_sec: int = 300, lock_sec: int = 600) -> None:
+    now = time.time()
+    hits = [t for t in _LOGIN_HITS.get(key, []) if now - t < window_sec]
+    hits.append(now)
+    _LOGIN_HITS[key] = hits
+    if len(hits) >= max_hits:
+        _LOGIN_LOCK_UNTIL[key] = now + lock_sec
+
+
+def clear_login_failures(key: str) -> None:
+    _LOGIN_HITS.pop(key, None)
+    _LOGIN_LOCK_UNTIL.pop(key, None)
+

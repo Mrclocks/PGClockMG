@@ -40,6 +40,7 @@ const state = {
   targetPwdConfirmed: {},
   sourcePwdValues: {},
   targetPwdValues: {},
+  pwdHydrateGen: { source: 0, target: 0 },
   uploadLimits: null,
   allowLargeUploadOverride: false,
 };
@@ -161,14 +162,26 @@ function getMigrationPassword(role) {
   for (const key of order) {
     if (confirmed[key] && (values[key] ?? '').trim()) return values[key].trim();
   }
+  // Null is OK when server_held — migrate/validate inject from the vault (autopass).
   return null;
+}
+
+function rowHasSecret(role, row) {
+  const values = pwdValuesMap(role);
+  const confirmed = pwdConfirmedMap(role);
+  if (confirmed[row.key] && (values[row.key] ?? row.value ?? '').trim()) return true;
+  // Phase-1 scrubbed APIs mark secrets the server still holds for autofill/autopass.
+  return !!row.server_held;
 }
 
 function hasDbCredentials(role) {
   const db = role === 'source' ? state.sourceDb : state.targetDb;
   if (!dbNeedsPassword(db)) return true;
   if (!passwordCandidatesConfirmed(role)) return false;
-  return !!getMigrationPassword(role);
+  if (getMigrationPassword(role)) return true;
+  const rows = getPasswordRows(role);
+  return rows.some(r => r.used_for_migration && r.server_held)
+    || rows.some(r => r.server_held);
 }
 
 function getSourcePasswordCandidates() {
@@ -190,22 +203,97 @@ function getTargetPasswordCandidates() {
 function passwordCandidatesConfirmed(role) {
   const rows = getPasswordRows(role);
   if (!rows.length) return true;
-  const confirmed = pwdConfirmedMap(role);
-  const values = pwdValuesMap(role);
-  return rows.every(r => confirmed[r.key] && (values[r.key] ?? r.value ?? '').trim());
+  return rows.every(r => rowHasSecret(role, r));
 }
 
 function pwdFieldId(role, key) {
   return `pwd-${role}-${key}`;
 }
 
-function renderPasswordCandidates(role) {
+function resolveVaultScope(role) {
+  if (role === 'target') return 'live:pasarguard';
+  if (state.uploadId) return `upload:${state.uploadId}`;
+  if (state.uploadBundleId) return `bundle:${state.uploadBundleId}`;
+  const panel = state.selectedPanel?.id;
+  if (panel === 'marzban' || panel === 'marzneshin') return 'live:marzban';
+  if (state.systemCheck?.marzban_password_candidates?.length) return 'live:marzban';
+  return null;
+}
+
+async function hydratePasswordsFromVault(role) {
+  const scope = resolveVaultScope(role);
+  if (!scope) return;
+  const gen = (state.pwdHydrateGen[role] = (state.pwdHydrateGen[role] || 0) + 1);
+  try {
+    const data = await fetchJson(
+      `/api/credentials/candidates?scope=${encodeURIComponent(scope)}`,
+      {},
+      { retries: 1, timeoutMs: 12000 },
+    );
+    if (gen !== state.pwdHydrateGen[role]) return;
+    const cands = data?.candidates || [];
+    if (!cands.length) return;
+
+    const values = pwdValuesMap(role);
+    const confirmed = pwdConfirmedMap(role);
+    let changed = false;
+
+    // Seed candidate rows when scrubbed analysis had none (e.g. separate env slot).
+    const existing = role === 'source' ? getSourcePasswordCandidates() : getTargetPasswordCandidates();
+    if (!existing.length) {
+      const scrubbed = cands.map(c => {
+        const { value, ...rest } = c;
+        return { ...rest, server_held: !!value || !!rest.server_held };
+      });
+      if (role === 'source') state.sourcePasswordCandidates = scrubbed;
+      else state.targetPasswordCandidates = scrubbed;
+      changed = true;
+    } else {
+      // Mark matching keys as server-held so step gates unlock before/without typing.
+      for (const c of cands) {
+        if (!c.value) continue;
+        const row = (role === 'source' ? state.sourcePasswordCandidates : state.targetPasswordCandidates)
+          ?.find(r => r.key === c.key);
+        if (row && !row.server_held) {
+          row.server_held = true;
+          changed = true;
+        }
+      }
+    }
+
+    for (const c of cands) {
+      const val = (c.value || '').trim();
+      if (!val) continue;
+      if (!(values[c.key] || '').trim()) {
+        values[c.key] = val;
+        confirmed[c.key] = true;
+        changed = true;
+      } else if (!confirmed[c.key]) {
+        confirmed[c.key] = true;
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      renderPasswordCandidates(role, { skipHydrate: true });
+      updateStepButtons();
+    }
+  } catch (_) {
+    // Autofill is best-effort; migrate still uses server autopass when vault is warm.
+  }
+}
+
+function renderPasswordCandidates(role, { skipHydrate = false } = {}) {
   const isSource = role === 'source';
   const container = document.getElementById(isSource ? 'sourcePasswordCandidates' : 'targetPasswordCandidates');
   if (!container) return;
 
   const db = isSource ? state.sourceDb : getDetectedTargetDb();
   let candidates = isSource ? getSourcePasswordCandidates() : getTargetPasswordCandidates();
+  // Prefer hydrated state rows when analysis is empty but vault seeded candidates.
+  if (!candidates.length) {
+    candidates = isSource ? state.sourcePasswordCandidates : state.targetPasswordCandidates;
+  }
   if (!candidates.length && dbNeedsPassword(db)) {
     const key = db === 'mysql' || db === 'mariadb'
       ? 'MYSQL_ROOT_PASSWORD'
@@ -231,7 +319,7 @@ function renderPasswordCandidates(role) {
     <div class="pwd-candidates-title">${t('dbCred.confirmTitle')}</div>
     ${candidates.map(c => {
       const fid = pwdFieldId(role, c.key);
-      const isConfirmed = !!confirmed[c.key];
+      const isConfirmed = !!confirmed[c.key] || (!!(values[c.key] || '').trim() && !!c.server_held);
       return `
       <div class="pwd-field-row ${isConfirmed ? 'confirmed' : ''}" data-role="${role}" data-key="${c.key}">
         <div class="pwd-field-head">
@@ -253,14 +341,15 @@ function renderPasswordCandidates(role) {
   candidates.forEach(c => {
     const input = document.getElementById(pwdFieldId(role, c.key));
     if (!input) return;
-    const val = values[c.key] ?? c.value ?? '';
+    // Broad APIs stay scrubbed; scoped vault hydrate fills values locally.
+    const val = values[c.key] ?? '';
     input.value = val;
-    if (!values[c.key] && c.value) values[c.key] = c.value;
+    if (c.masked && !input.placeholder) input.placeholder = c.masked;
     input.addEventListener('input', () => {
       values[c.key] = input.value;
       if (confirmed[c.key]) {
         confirmed[c.key] = false;
-        renderPasswordCandidates(role);
+        renderPasswordCandidates(role, { skipHydrate: true });
       } else {
         updateStepButtons();
       }
@@ -268,6 +357,7 @@ function renderPasswordCandidates(role) {
   });
 
   container.classList.remove('hidden');
+  if (!skipHydrate) void hydratePasswordsFromVault(role);
 }
 
 function confirmPasswordField(role, key) {
@@ -281,7 +371,7 @@ function confirmPasswordField(role, key) {
   }
   values[key] = val;
   confirmed[key] = true;
-  renderPasswordCandidates(role);
+  renderPasswordCandidates(role, { skipHydrate: true });
   updateStepButtons();
 }
 
@@ -569,6 +659,16 @@ function detectMarzbanSourceDb() {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+  // Avoid leaking the one-time bootstrap token via history/Referer.
+  try {
+    const u = new URL(window.location.href);
+    if (u.searchParams.has('token')) {
+      u.searchParams.delete('token');
+      const qs = u.searchParams.toString();
+      history.replaceState({}, '', u.pathname + (qs ? '?' + qs : '') + u.hash);
+    }
+  } catch (_) {}
+
   // Paint UI text immediately — never wait on /api/* before i18n (mobile often
   // looks "empty" until a refresh when the first system-check is slow).
   setLang(state.lang);

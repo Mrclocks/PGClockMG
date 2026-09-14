@@ -23,6 +23,7 @@ from app.services.env_migration import (
     extract_env_summary,
     finalize_pasarguard_env_after_restore,
     read_env_var,
+    public_env_summary,
 )
 from app.services.migrators.base import MigrationJob
 from app.services.pg_access import get_panel_access_info
@@ -1409,6 +1410,15 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
 
         # table_counts kept for server-side verify only — not shown in the wizard UI
 
+        if upload_id and env_text:
+            from app.services import secret_vault
+            from app.services.env_migration import extract_env_password_candidates
+
+            cands = extract_env_password_candidates(env_text, db_type)
+            secret_vault.put_candidates(
+                secret_vault.upload_scope(upload_id), cands, db_type=db_type,
+            )
+
         return {
             "ok": ok,
             "filename": zip_path.name,
@@ -1429,7 +1439,7 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
             "timescaledb_chunk_catalog": chunk_catalog_era,
             "timescaledb_min_version": ts_min_version,
             "table_counts": table_counts,
-            "env_summary": {k: v for k, v in (summary or {}).items() if k != "db_password"},
+            "env_summary": public_env_summary(summary),
             "has_env": bool(env_path),
             "warnings": warnings,
             "zip_path": str(zip_path),

@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.5.5`** — ریستور Timescale بدون برخورد metadata/install_timestamp
+> 🚀 **`v4.5.6`** — hardening فاز ۱/۲ + اتوفیل امن پسورد (vault)
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-import re
 import sqlite3
 from pathlib import Path
 
 from app.services.archive_guard import resolve_within
 from app.services.env_migration import (
-    read_env_var,
     transform_marzban_env,
-    transform_xray_config,
     detect_db_type_from_env,
     extract_env_summary,
     extract_env_password_candidates,
+    public_env_summary,
+    public_password_candidates,
 )
 
 CATEGORY_RULES: list[tuple[str, tuple[str, ...]]] = [
@@ -123,7 +122,7 @@ def detect_db_from_env(text: str) -> str | None:
     return detect_db_type_from_env(text)
 
 
-def analyze_upload_directory(upload_dir: Path) -> dict:
+def analyze_upload_directory(upload_dir: Path, vault_scope: str | None = None) -> dict:
     root = resolve_extract_root(upload_dir)
     inventory: list[dict] = []
     categories: dict[str, int] = {}
@@ -271,6 +270,10 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
     if panel_hint == "3x-ui" and sqlite_path:
         xui_schema = _detect_xui_schema(Path(sqlite_path))
 
+    if vault_scope and password_candidates:
+        from app.services import secret_vault
+        secret_vault.put_candidates(vault_scope, password_candidates, db_type=detected_source_db)
+
     return {
         "extract_root": str(root.relative_to(upload_dir)).replace("\\", "/") if root != upload_dir else ".",
         "total_files": len(inventory),
@@ -281,8 +284,8 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
         "panel_hint": panel_hint,
         "detected_source_db": detected_source_db,
         "mysql_password_found": bool(password_candidates),
-        "env_summary": env_summary,
-        "password_candidates": password_candidates,
+        "env_summary": public_env_summary(env_summary),
+        "password_candidates": public_password_candidates(password_candidates),
         "env_mapping": env_mapping[:30],
         "backup_ok": backup_ok,
         "missing": missing,

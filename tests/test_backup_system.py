@@ -497,6 +497,7 @@ def test_backup_api_setup_login(tmp_path, monkeypatch):
 
     monkeypatch.setattr(auth, "BACKUP_PASSWORD_FILE", tmp_path / ".password")
     monkeypatch.setattr(auth, "BACKUP_SECRET_FILE", tmp_path / ".session_secret")
+    monkeypatch.setattr(auth, "BACKUP_SETUP_TOKEN_FILE", tmp_path / ".setup_token")
     monkeypatch.setattr(settings, "BACKUP_SETTINGS_FILE", tmp_path / "settings.json")
 
     # Avoid scheduler/docker side effects
@@ -508,23 +509,34 @@ def test_backup_api_setup_login(tmp_path, monkeypatch):
     })
     monkeypatch.setattr(bm, "list_backup_files", lambda: [])
 
+    setup_tok = auth.issue_setup_token()
     client = TestClient(bm.app)
     st = client.get("/api/setup/status")
     assert st.status_code == 200
     assert st.json()["password_set"] is False
+    assert st.json()["setup_token_required"] is True
+
+    # Missing setup token must fail closed
+    no_tok = client.post("/api/setup/password", json={
+        "password": "StrongPass123!", "password_confirm": "StrongPass123!",
+    })
+    assert no_tok.status_code == 403
 
     bad = client.post("/api/setup/password", json={
         "password": "alllowercase1!", "password_confirm": "alllowercase1!",
+        "setup_token": setup_tok,
     })
     assert bad.status_code == 400
 
     mismatch = client.post("/api/setup/password", json={
         "password": "StrongPass123!", "password_confirm": "StrongPass123?",
+        "setup_token": setup_tok,
     })
     assert mismatch.status_code == 400
 
     ok = client.post("/api/setup/password", json={
         "password": "StrongPass123!", "password_confirm": "StrongPass123!",
+        "setup_token": setup_tok,
     })
     assert ok.status_code == 200
     assert "pgclockmg_backup_session" in ok.cookies
