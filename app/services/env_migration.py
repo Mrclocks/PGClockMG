@@ -64,10 +64,15 @@ def public_env_summary(summary: dict | None) -> dict | None:
 
 
 def public_password_candidates(candidates: list[dict] | None) -> list[dict]:
-    """Return password candidate metadata without plaintext ``value``."""
+    """Return password candidate metadata without plaintext ``value``.
+
+    Adds ``server_held=True`` when a plaintext value exists server-side so the UI
+    can hydrate autofill via the scoped credentials endpoint / autopass.
+    """
     out: list[dict] = []
     for c in candidates or []:
         item = {k: v for k, v in c.items() if k != "value"}
+        item["server_held"] = bool(c.get("value"))
         out.append(item)
     return out
 

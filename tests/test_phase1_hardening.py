@@ -65,6 +65,7 @@ def test_public_password_candidates_strip_values():
     assert public and "value" not in public[0]
     assert public[0]["masked"]
     assert public[0]["key"]
+    assert public[0]["server_held"] is True
 
 
 def test_openapi_docs_disabled(client):
