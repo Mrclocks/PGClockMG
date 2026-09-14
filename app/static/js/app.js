@@ -253,9 +253,10 @@ function renderPasswordCandidates(role) {
   candidates.forEach(c => {
     const input = document.getElementById(pwdFieldId(role, c.key));
     if (!input) return;
-    const val = values[c.key] ?? c.value ?? '';
+    // API no longer returns plaintext passwords — only masked hints.
+    const val = values[c.key] ?? '';
     input.value = val;
-    if (!values[c.key] && c.value) values[c.key] = c.value;
+    if (c.masked && !input.placeholder) input.placeholder = c.masked;
     input.addEventListener('input', () => {
       values[c.key] = input.value;
       if (confirmed[c.key]) {
@@ -569,6 +570,16 @@ function detectMarzbanSourceDb() {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+  // Avoid leaking the one-time bootstrap token via history/Referer.
+  try {
+    const u = new URL(window.location.href);
+    if (u.searchParams.has('token')) {
+      u.searchParams.delete('token');
+      const qs = u.searchParams.toString();
+      history.replaceState({}, '', u.pathname + (qs ? '?' + qs : '') + u.hash);
+    }
+  } catch (_) {}
+
   // Paint UI text immediately — never wait on /api/* before i18n (mobile often
   // looks "empty" until a refresh when the first system-check is slow).
   setLang(state.lang);

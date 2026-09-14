@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-import re
 import sqlite3
 from pathlib import Path
 
 from app.services.archive_guard import resolve_within
 from app.services.env_migration import (
-    read_env_var,
     transform_marzban_env,
-    transform_xray_config,
     detect_db_type_from_env,
     extract_env_summary,
     extract_env_password_candidates,
+    public_env_summary,
+    public_password_candidates,
 )
 
 CATEGORY_RULES: list[tuple[str, tuple[str, ...]]] = [
@@ -281,8 +280,8 @@ def analyze_upload_directory(upload_dir: Path) -> dict:
         "panel_hint": panel_hint,
         "detected_source_db": detected_source_db,
         "mysql_password_found": bool(password_candidates),
-        "env_summary": env_summary,
-        "password_candidates": password_candidates,
+        "env_summary": public_env_summary(env_summary),
+        "password_candidates": public_password_candidates(password_candidates),
         "env_mapping": env_mapping[:30],
         "backup_ok": backup_ok,
         "missing": missing,
