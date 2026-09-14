@@ -4,6 +4,7 @@ import json
 import urllib.request
 import urllib.error
 from app.config import PASARGUARD_DIR
+from app.services.backup_net import UnsafeDestinationError, normalize_public_http_url
 from app.services.migrators.base import BaseMigrator
 from app.services.pasarguard_ops import safe_start_pasarguard
 
@@ -15,6 +16,14 @@ class RemnawaveMigrator(BaseMigrator):
 
         if not api_url or not api_token:
             raise RuntimeError("Remnawave API URL and token are required")
+
+        try:
+            api_url = normalize_public_http_url(api_url)
+        except UnsafeDestinationError as exc:
+            raise RuntimeError(
+                "Remnawave URL is not allowed (must be a public http/https host). "
+                f"Reason: {exc}"
+            ) from exc
 
         self.job.set_progress(10, "Checking PasarGuard...")
         if not PASARGUARD_DIR.exists():
@@ -76,10 +85,19 @@ class RemnawaveMigrator(BaseMigrator):
             "Content-Type": "application/json",
         }
 
+        # No redirects: a 3xx to a private IP would bypass the initial host check.
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        opener = urllib.request.build_opener(_NoRedirect)
+
         for url in endpoints:
             try:
+                # Re-validate every candidate URL (path-only changes stay on same host).
+                normalize_public_http_url(url)
                 req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with opener.open(req, timeout=30) as resp:
                     data = json.loads(resp.read().decode())
                     if isinstance(data, list):
                         return data
@@ -88,7 +106,10 @@ class RemnawaveMigrator(BaseMigrator):
                             if key in data and isinstance(data[key], list):
                                 return data[key]
                         return [data]
+            except UnsafeDestinationError as e:
+                self.job.log(f"API {url}: blocked ({e})")
             except urllib.error.HTTPError as e:
+                # 3xx from NoRedirect still surfaces as HTTPError
                 self.job.log(f"API {url}: HTTP {e.code}")
             except Exception as e:
                 self.job.log(f"API {url}: {e}")

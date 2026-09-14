@@ -1098,7 +1098,7 @@ print_backup_success() {
   local ip app_ver token="" url
   ip="$(server_ip)"
   app_ver="$(read_app_version "$BACKUP_INSTALL_DIR" backup_main.py)"
-  ensure_backup_setup_token || true
+  ensure_backup_setup_token || fail "Backup setup token could not be created — refuse to leave panel open for setup"
   token="$(read_backup_setup_token 2>/dev/null || true)"
   url="http://${ip}:${BACKUP_PORT}/"
   log ""
@@ -1119,7 +1119,7 @@ print_backup_success() {
     log "   ${C_YELLOW}Required:${C_RESET} paste the setup token above on first password setup."
     log "   ${C_DIM}Recovery:${C_RESET} cat ${BACKUP_INSTALL_DIR}/backup_panel/.setup_token"
   else
-    fail_soft "Setup token was not created — check ${BACKUP_INSTALL_DIR}/backup_panel/.setup_token"
+    fail "Setup token was not created — check ${BACKUP_INSTALL_DIR}/backup_panel/.setup_token"
   fi
   log ""
 }
