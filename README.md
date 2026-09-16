@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.5.7`** — حفظ hosts با retarget کردن inbound_tag یتیم (بدون DELETE)
+> 🚀 **`v4.5.8`** — پاک‌سازی junk اول address/host هنگام تبدیل
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
