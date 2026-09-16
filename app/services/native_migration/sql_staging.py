@@ -312,32 +312,34 @@ async def _import_via_compose_service(
 
     head = ""
     try:
-        head = dump_path.read_text(encoding="utf-8", errors="ignore")[:80_000]
+        with open(dump_path, "r", encoding="utf-8", errors="ignore") as fh:
+            head = fh.read(80_000)
     except Exception:
         pass
     use_ts = source_db == "timescaledb" or "timescaledb" in head.lower()
     filtered: Path | None = None
     import_path = dump_path
     if use_ts:
-        from app.services.pg_restore import TIMESCALEDB_CATALOG_SEED_CLEAR_SQL
+        from app.services.pg_restore import (
+            TIMESCALEDB_CATALOG_SEED_CLEAR_SQL,
+            filter_timescaledb_extension_sql_file,
+        )
 
         for sql in (
             "CREATE EXTENSION IF NOT EXISTS timescaledb;",
             "SELECT timescaledb_pre_restore();",
             TIMESCALEDB_CATALOG_SEED_CLEAR_SQL,
         ):
-            p = await asyncio.create_subprocess_shell(
-                f'cd "{cwd}" && docker compose exec -T {service} '
-                f'env PGPASSWORD="{pwd}" psql -U {user} -d {staging_db} -c {repr(sql)}'
+            p = await asyncio.create_subprocess_exec(
+                "docker", "compose", "exec", "-T",
+                "-e", f"PGPASSWORD={pwd}",
+                service, "psql", "-U", user, "-d", staging_db, "-c", sql,
+                cwd=cwd,
             )
             await p.wait()
         filtered = dump_path.with_suffix(dump_path.suffix + ".staging-filtered")
-        filtered.write_text(
-            _filter_timescaledb_extension_sql(
-                dump_path.read_text(encoding="utf-8", errors="ignore")
-            ),
-            encoding="utf-8",
-        )
+        # Stream filter — never load multi-GB dumps into RAM.
+        filter_timescaledb_extension_sql_file(dump_path, filtered, strip_all=False)
         import_path = filtered
 
     # Prefer stdin so host paths outside compose mounts still work
@@ -359,11 +361,37 @@ async def _import_via_compose_service(
     if proc.returncode != 0:
         raise RuntimeError(f"SQL staging failed (db={staging_db})")
 
+    # ON_ERROR_STOP=0 can exit 0 with an empty/broken import — verify tables landed.
+    verify = await asyncio.create_subprocess_exec(
+        "docker", "compose", "exec", "-T",
+        "-e", f"PGPASSWORD={pwd}",
+        service, "psql", "-U", user, "-d", staging_db, "-tAc",
+        "SELECT COUNT(*) FROM information_schema.tables "
+        "WHERE table_schema = 'public' AND table_type = 'BASE TABLE';",
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    vout_b, _ = await verify.communicate()
+    vout = (vout_b or b"").decode("utf-8", errors="ignore")
+    table_count = 0
+    for line in vout.splitlines():
+        if line.strip().isdigit():
+            table_count = int(line.strip())
+            break
+    if table_count < 1:
+        raise RuntimeError(
+            f"Compose staging DB {staging_db} has no tables after dump import — "
+            "backup dump may be empty or incompatible."
+        )
+
     if use_ts:
-        p = await asyncio.create_subprocess_shell(
-            f'cd "{cwd}" && docker compose exec -T {service} '
-            f'env PGPASSWORD="{pwd}" psql -U {user} -d {staging_db} -c '
-            f'"SELECT timescaledb_post_restore();"'
+        p = await asyncio.create_subprocess_exec(
+            "docker", "compose", "exec", "-T",
+            "-e", f"PGPASSWORD={pwd}",
+            service, "psql", "-U", user, "-d", staging_db, "-c",
+            "SELECT timescaledb_post_restore();",
+            cwd=cwd,
         )
         await p.wait()
 
@@ -873,12 +901,10 @@ async def _import_via_ephemeral_postgres(
                 on_error_stop=False,
             )
             filtered = dump_path.with_suffix(dump_path.suffix + ".ephemeral-filtered")
-            filtered.write_text(
-                _filter_timescaledb_extension_sql(
-                    dump_path.read_text(encoding="utf-8", errors="ignore")
-                ),
-                encoding="utf-8",
-            )
+            # Stream filter — never load multi-GB dumps into RAM.
+            from app.services.pg_restore import filter_timescaledb_extension_sql_file
+
+            filter_timescaledb_extension_sql_file(dump_path, filtered, strip_all=False)
             import_path = filtered
 
         # Dump restore: tolerate non-fatal object errors (roles/tablespaces)

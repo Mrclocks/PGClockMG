@@ -1025,7 +1025,14 @@ def _sniff_sql_dump(path: Path) -> tuple[int, str | None]:
     elif "-- postgresql database dump" in low or "copy public." in low or "set statement_timeout" in low:
         engine = "postgresql"
         score += 6
-    elif "-- mariadb dump" in low or "engine=aria" in low:
+    elif (
+        "-- mariadb dump" in low
+        or "mariadb dump" in low
+        or "mariadb-dump" in low
+        or "engine=aria" in low
+        or "uca1400" in low
+        or "sandbox mode" in low
+    ):
         engine = "mariadb"
         score += 6
     elif "-- mysql dump" in low or "engine=innodb" in low or "lock tables" in low or "/*!40101" in low:
