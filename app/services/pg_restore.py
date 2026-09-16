@@ -3297,6 +3297,130 @@ async def _count_pg_users(
     return await _count_pg_table(job, svc, password, user, db_name, "users")
 
 
+async def _recover_hosts_if_missing(
+    job: MigrationJob,
+    db_type: str,
+    password: str,
+    user: str,
+    db_name: str,
+    dump: Path | None,
+    *,
+    expected_hosts: int = 0,
+) -> int:
+    """Reload sanitized hosts from the dump when post-import count is empty/short.
+
+    Same-engine restore skips ``convert_value``; a bad ``COPY hosts`` row or a
+    later alembic wipe can leave ``hosts: 0/N`` while users/inbounds look fine.
+    """
+    if not dump or not dump.exists():
+        return -1
+    if db_type not in ("postgresql", "timescaledb"):
+        return -1
+
+    from app.services.hosts_dump_sanitize import (
+        count_hosts_rows_in_pg_dump,
+        extract_sanitized_hosts_copy_sql,
+    )
+
+    dump_rows = count_hosts_rows_in_pg_dump(dump)
+    if dump_rows <= 0:
+        return -1
+
+    want = max(int(expected_hosts or 0), dump_rows)
+    svc = await _detect_db_container(job, db_type)
+    if not svc:
+        for cand in ("timescaledb", "postgresql"):
+            probed = await _detect_db_container(job, cand)
+            if probed:
+                svc = probed
+                break
+    if not svc:
+        svc = "timescaledb" if db_type == "timescaledb" else "postgresql"
+
+    actual = await _count_pg_table(job, svc, password, user, db_name, "hosts")
+    if actual < 0:
+        job.log("Hosts recover skipped — could not COUNT hosts")
+        return -1
+    if actual >= want:
+        return actual
+    # Only force-reload when hosts are empty or severely short vs dump.
+    if actual > 0 and actual * 2 >= want:
+        return actual
+
+    copy_sql = extract_sanitized_hosts_copy_sql(dump)
+    if not copy_sql:
+        job.log("Hosts recover skipped — dump has no sanitizable COPY hosts block")
+        return actual
+
+    job.log(
+        f"Hosts recover: live={actual}, dump={dump_rows}, expected≥{want} — "
+        "reloading sanitized COPY hosts from backup…"
+    )
+    script = (
+        "BEGIN;\n"
+        "DELETE FROM public.hosts;\n"
+        f"{copy_sql}"
+        "COMMIT;\n"
+    )
+    # Retarget orphan inbound_tag after reload (never DELETE hosts).
+    from app.services.marzban_preboot_heal import (
+        orphan_casefold_match_sql,
+        orphan_repoint_sql,
+        ORPHAN_REPOINT_SPECS,
+    )
+
+    heal_bits: list[str] = []
+    for child, child_col, parent, parent_col in ORPHAN_REPOINT_SPECS:
+        if child != "hosts":
+            continue
+        heal_bits.append(orphan_casefold_match_sql(child, child_col, parent, parent_col) + ";")
+        heal_bits.append(orphan_repoint_sql(child, child_col, parent, parent_col) + ";")
+    if heal_bits:
+        script += "\n".join(heal_bits) + "\n"
+
+    tmp = Path(f"/tmp/pgclockmg-hosts-recover-{db_name}.sql")
+    try:
+        tmp.write_text(script, encoding="utf-8")
+        cmd = [
+            "docker", "compose", "exec", "-T",
+            "-e", f"PGPASSWORD={password}",
+            svc, "psql", "-v", "ON_ERROR_STOP=1", "-U", user, "-d", db_name,
+        ]
+        with open(tmp, "rb") as sql_fh:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=str(PASARGUARD_DIR),
+                stdin=sql_fh,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out_b, _ = await proc.communicate()
+        out = (out_b or b"").decode("utf-8", errors="replace")
+        if proc.returncode != 0:
+            job.log(
+                "Hosts recover failed:\n"
+                f"{(extract_psql_errors(out) or out)[:800]}"
+            )
+            return actual
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except TypeError:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+        except OSError:
+            pass
+
+    reloaded = await _count_pg_table(job, svc, password, user, db_name, "hosts")
+    if reloaded >= 0:
+        job.log(f"Hosts recover complete: {reloaded} row(s) loaded")
+        return reloaded
+    return actual
+
+
 async def _verify_restored_data(
     job: MigrationJob,
     final_db: str,
@@ -4050,6 +4174,32 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         verify_user = read_env_var(env_now, "DB_USER") or verify_user
         verify_db = read_env_var(env_now, "DB_NAME") or verify_db
 
+        # Same-engine PG path skips convert_value; alembic/panel may also wipe
+        # hosts after a successful import. Reload sanitized hosts before verify
+        # when the live count is empty/short vs the backup dump.
+        if final_engine in ("postgresql", "timescaledb"):
+            hosts_dump = dump_path
+            if (not hosts_dump or not hosts_dump.exists()) and convert_source:
+                cand = Path(convert_source)
+                if cand.exists() and (
+                    cand.suffix.lower() == ".sql"
+                    or cand.name.lower().endswith(".sql.gz")
+                ):
+                    hosts_dump = cand
+            if not hosts_dump or not hosts_dump.exists():
+                hosts_dump = resolve_backup_sql_dump(root, env_db=backup_db)
+            if hosts_dump and hosts_dump.exists():
+                hosts_dump = _ensure_plain_sql(hosts_dump)
+            await _recover_hosts_if_missing(
+                job,
+                final_engine,
+                verify_pass,
+                verify_user,
+                verify_db,
+                hosts_dump,
+                expected_hosts=int(expected_counts.get("hosts") or 0),
+            )
+
         verified = await _verify_restored_data(
             job,
             final_engine,
@@ -4607,8 +4757,33 @@ async def _restore_postgres(
             logs_indicate_orphan_fk,
             write_orphan_tolerant_pg_dump,
         )
+        from app.services.hosts_dump_sanitize import sanitize_hosts_copy_in_pg_dump
 
-        wrapped = path.parent / f".{path.name}.orphan-tolerant.sql"
+        # Same-engine restore never runs convert_value — coerce hosts COPY
+        # fields (address junk, enums, bools) before orphan-tolerant wrap.
+        import_path = path
+        hosts_sanitized = path.parent / f".{path.name}.hosts-sanitized.sql"
+        try:
+            host_stats = sanitize_hosts_copy_in_pg_dump(path, hosts_sanitized)
+            if host_stats.get("rows", 0) > 0:
+                job.log(
+                    f"Sanitized {host_stats['rows']} hosts COPY row(s) "
+                    "before PostgreSQL dump import"
+                )
+                import_path = hosts_sanitized
+            else:
+                try:
+                    hosts_sanitized.unlink(missing_ok=True)
+                except TypeError:
+                    if hosts_sanitized.exists():
+                        hosts_sanitized.unlink()
+                except OSError:
+                    pass
+        except OSError as exc:
+            job.log(f"Hosts dump sanitize skipped ({exc}) — importing original dump")
+            import_path = path
+
+        wrapped = import_path.parent / f".{import_path.name}.orphan-tolerant.sql"
         ok, out = False, ""
 
         async def _import_wrapped(*, pg_user: str, pg_password: str) -> tuple[bool, str]:
@@ -4693,7 +4868,7 @@ async def _restore_postgres(
 
         try:
             write_orphan_tolerant_pg_dump(
-                path,
+                import_path,
                 wrapped,
                 strict=is_super,
                 set_role=(user if is_super and import_user != user else None),
@@ -4735,7 +4910,7 @@ async def _restore_postgres(
                         "with strict FK deferral…"
                     )
                     write_orphan_tolerant_pg_dump(
-                        path,
+                        import_path,
                         wrapped,
                         strict=True,
                         set_role=(user if su != user else None),
@@ -4756,9 +4931,9 @@ async def _restore_postgres(
                         strip_soft_orphan_copy_data_from_pg_dump,
                     )
 
-                    stripped = path.parent / f".{path.name}.orphan-data-stripped.sql"
+                    stripped = import_path.parent / f".{import_path.name}.orphan-data-stripped.sql"
                     try:
-                        stats = strip_soft_orphan_copy_data_from_pg_dump(path, stripped)
+                        stats = strip_soft_orphan_copy_data_from_pg_dump(import_path, stripped)
                         if stats:
                             job.log(
                                 "No usable superuser for FK deferral — stripping "
@@ -4802,6 +4977,17 @@ async def _restore_postgres(
                     pass
             except OSError:
                 pass
+            if import_path != path:
+                try:
+                    hosts_sanitized.unlink(missing_ok=True)
+                except TypeError:
+                    try:
+                        if hosts_sanitized.exists():
+                            hosts_sanitized.unlink()
+                    except OSError:
+                        pass
+                except OSError:
+                    pass
 
         if tolerant:
             verified, detail = await verify_app_tables(dbn)

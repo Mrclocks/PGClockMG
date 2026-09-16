@@ -1,4 +1,4 @@
-> 🚀 **`v4.5.8`** — очистка мусора в начале address/host при convert
+> 🚀 **`v4.5.9`** — sanitize+recover hosts при same-engine PG restore
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
