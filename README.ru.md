@@ -1,4 +1,4 @@
-> 🚀 **`v4.5.6`** — hardening фазы 1/2 + безопасный autofill паролей (vault)
+> 🚀 **`v4.5.7`** — hosts сохраняются: orphan inbound_tag retarget вместо DELETE
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
