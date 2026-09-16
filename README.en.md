@@ -1,4 +1,4 @@
-> 🚀 **`v4.5.6`** — Phase 1/2 hardening + scoped password autofill vault
+> 🚀 **`v4.5.7`** — keep hosts by retargeting orphan inbound_tag (no DELETE)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

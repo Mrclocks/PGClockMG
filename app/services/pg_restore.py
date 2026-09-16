@@ -4852,7 +4852,8 @@ async def _restore_postgres(
         if deleted_hint:
             job.log(
                 f"Orphan FK heal after dump import on `{dbn}`: removed {deleted_hint} "
-                "dangling child row(s) (reminders / usages / associations)"
+                "dangling soft child row(s); hosts inbound_tag mismatches are retargeted "
+                "(not deleted)"
             )
         elif ok:
             job.log(f"Orphan FK heal after dump import on `{dbn}`: no dangling rows")

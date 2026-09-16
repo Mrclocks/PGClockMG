@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.5.6`** — hardening فاز ۱/۲ + اتوفیل امن پسورد (vault)
+> 🚀 **`v4.5.7`** — حفظ hosts با retarget کردن inbound_tag یتیم (بدون DELETE)
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
