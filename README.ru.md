@@ -1,4 +1,4 @@
-> 🚀 **`v4.5.9`** — sanitize+recover hosts при same-engine PG restore
+> 🚀 **`v4.5.10`** — permanent hosts restore (strip + reload after alembic)
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
