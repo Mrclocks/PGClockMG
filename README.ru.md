@@ -1,4 +1,4 @@
-> 🚀 **`v4.5.7`** — hosts сохраняются: orphan inbound_tag retarget вместо DELETE
+> 🚀 **`v4.5.8`** — очистка мусора в начале address/host при convert
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
