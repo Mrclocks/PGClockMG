@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.5.9`** — sanitize و بازیابی hosts در restore هم‌موتور PG
+> 🚀 **`v4.5.10`** — بازیابی دائمی hosts (جدا از dump، لود بعد از alembic)
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
