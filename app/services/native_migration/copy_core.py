@@ -275,16 +275,127 @@ def normalize_host_fingerprint(value):
     return s
 
 
+# Invisible / format junk that .strip() does not remove (BOM, ZWSP, bidi marks, NUL, U+FFFD).
+_HOST_INVISIBLE_RE = re.compile(
+    "[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f"
+    "\ufeff\u200b-\u200f\u202a-\u202e\u2060\ufffd]+"
+)
+# Whole-value Postgres text[] / JSON-array literals dumped into a TEXT column.
+_HOST_PG_ARRAY_RE = re.compile(r"^\{(.*)\}$", re.DOTALL)
+_HOST_JSON_ARRAY_RE = re.compile(r"^\[(.*)\]$", re.DOTALL)
+
+
+def _decode_host_text(value) -> str:
+    """Decode host field bytes without ever producing a ``b'...'`` prefix."""
+    if isinstance(value, memoryview):
+        value = bytes(value)
+    if isinstance(value, bytes):
+        for enc in ("utf-8-sig", "utf-8", "cp1256", "latin-1"):
+            try:
+                return value.decode(enc)
+            except Exception:
+                continue
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _scrub_host_text(value: str) -> str:
+    """Strip whitespace and invisible junk from host text fields."""
+    if not value:
+        return ""
+    return _HOST_INVISIBLE_RE.sub("", value).strip()
+
+
+def _unwrap_host_array_literal(value: str) -> str:
+    """Unwrap a single-layer ``{a,b}`` / ``[a,b]`` / quoted literal into CSV text.
+
+    Leaves normal hostnames and IPv6 alone. Only unwraps when the *entire* value
+    is wrapped — so a bare ``example.com`` is unchanged.
+    """
+    s = value.strip()
+    if len(s) < 2:
+        return s
+    inner = None
+    m = _HOST_PG_ARRAY_RE.match(s)
+    if m and not s.startswith("{{"):
+        inner = m.group(1)
+    else:
+        m = _HOST_JSON_ARRAY_RE.match(s)
+        if m:
+            inner = m.group(1)
+    if inner is None:
+        # Whole-value quotes: "example.com" or 'example.com'
+        if (
+            len(s) >= 2
+            and s[0] == s[-1]
+            and s[0] in ("'", '"')
+            and s.count(s[0]) == 2
+        ):
+            return s[1:-1].strip()
+        return s
+
+    parts: list[str] = []
+    buf: list[str] = []
+    in_quote: str | None = None
+    i = 0
+    while i < len(inner):
+        ch = inner[i]
+        if in_quote:
+            if ch == "\\" and i + 1 < len(inner):
+                buf.append(inner[i + 1])
+                i += 2
+                continue
+            if ch == in_quote:
+                in_quote = None
+                i += 1
+                continue
+            buf.append(ch)
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            in_quote = ch
+            i += 1
+            continue
+        if ch == ",":
+            part = _scrub_host_text("".join(buf))
+            if part:
+                parts.append(part)
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    part = _scrub_host_text("".join(buf))
+    if part:
+        parts.append(part)
+    return ",".join(parts)
+
+
 def normalize_host_string_array(column: str, value):
-    """StringArray columns; address is NOT NULL in PasarGuard."""
+    """StringArray columns (comma-separated TEXT); address is NOT NULL in PasarGuard.
+
+    Hardens migrate/convert against dump/driver artifacts that otherwise land as
+    leading junk on address/host/sni: ``{example.com}``, BOM/ZWSP, quoted lists,
+    and undecoded ``bytes`` (which used to become a literal ``b'...'`` prefix).
+    Clean hostnames and multi-address CSV values pass through unchanged.
+    """
+    empty = "" if column == "address" else None
     if value is None:
-        return "" if column == "address" else None
+        return empty
     if isinstance(value, (list, set, tuple)):
-        parts = [str(v).strip() for v in value if str(v).strip()]
-        return ",".join(parts) if parts else ("" if column == "address" else None)
-    s = str(value).strip()
+        parts = []
+        for item in value:
+            part = _scrub_host_text(_unwrap_host_array_literal(_decode_host_text(item)))
+            if part:
+                parts.append(part)
+        return ",".join(parts) if parts else empty
+    s = _scrub_host_text(_unwrap_host_array_literal(_decode_host_text(value)))
     if not s:
-        return "" if column == "address" else None
+        return empty
+    if "," in s:
+        parts = [_scrub_host_text(p) for p in s.split(",")]
+        parts = [p for p in parts if p]
+        return ",".join(parts) if parts else empty
     return s
 
 
@@ -348,9 +459,13 @@ def normalize_raw_value(value):
         return value.isoformat()
     if isinstance(value, bytes):
         try:
-            return value.decode("utf-8")
+            return value.decode("utf-8-sig")
         except Exception:
-            return value
+            try:
+                return value.decode("utf-8")
+            except Exception:
+                # Never return raw bytes — str(bytes) becomes a literal b'...' prefix.
+                return value.decode("latin-1")
     if isinstance(value, str):
         s = value.strip()
         # asyncpg/psycopg sometimes yield timestamptz as text with +00:00
@@ -557,9 +672,10 @@ def convert_value(table: str, column: str, value):
         return normalize_host_string_array(column, value)
 
     if table == "hosts" and column == "remark":
-        if value is None or (isinstance(value, str) and not value.strip()):
+        if value is None:
             return "host"
-        return str(value).strip()
+        remark = _scrub_host_text(_decode_host_text(value))
+        return remark or "host"
 
     if table == "hosts" and column == "alpn":
         return normalize_host_alpn(value)
