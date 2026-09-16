@@ -4302,9 +4302,33 @@ async def _restore_mysql(
             if proc.returncode == 0:
                 # mysql CLI does not always print rowcounts; treat success as soft progress
                 deleted += 1
-        # NULL-style specs: attempt UPDATE; if it fails (NOT NULL), DELETE instead.
-        from app.services.marzban_preboot_heal import orphan_null_sql
+        # Subscription hosts: retarget inbound_tag — never DELETE (hosts:0/N verify).
+        from app.services.marzban_preboot_heal import (
+            ORPHAN_REPOINT_SPECS,
+            orphan_casefold_match_sql,
+            orphan_null_sql,
+            orphan_repoint_sql,
+        )
 
+        for child, child_col, parent, parent_col in ORPHAN_REPOINT_SPECS:
+            for sql in (
+                orphan_casefold_match_sql(child, child_col, parent, parent_col) + ";",
+                orphan_repoint_sql(child, child_col, parent, parent_col) + ";",
+            ):
+                cmd = [
+                    "docker", "compose", "exec", "-T",
+                    "-e", f"MYSQL_PWD={pwd}", svc, mysql_cmd, "-u", user, target_db,
+                    "-e", sql,
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(PASARGUARD_DIR),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                await proc.communicate()
+
+        # NULL-style specs: attempt UPDATE; if it fails (NOT NULL), DELETE instead.
         for child, child_col, parent, parent_col in ORPHAN_NULL_SPECS:
             sql = orphan_null_sql(child, child_col, parent, parent_col) + ";"
             cmd = [
