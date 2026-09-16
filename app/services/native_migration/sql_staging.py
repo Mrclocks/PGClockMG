@@ -206,12 +206,8 @@ async def _import_via_compose_service(
     cwd = str(PASARGUARD_DIR)
 
     if source_db in ("mysql", "mariadb"):
-        # Single-quote -e payload — backticks inside double quotes are eaten by the shell
-        e_sql = mysql_shell_e_arg(mysql_create_db_sql(staging_db, drop_first=True))
-        create_cmd = (
-            f'cd "{cwd}" && docker compose exec -T {service} '
-            f'mysql -u {user} -p"{pwd}" -e {e_sql}'
-        )
+        from app.services.pasarguard_ops import mysql_client_bins
+
         safe_db = _safe_mysql_ident(staging_db)
         size_mb = dump_path.stat().st_size / (1024 * 1024) if dump_path.exists() else 0.0
         migrator.job.log(
@@ -223,43 +219,58 @@ async def _import_via_compose_service(
                 f"Rewrote MySQL dump for staging DB {safe_db} "
                 f"(stripped {stripped} USE/CREATE/DROP DATABASE redirect lines)"
             )
-        import_cmd = (
-            f'cd "{cwd}" && docker compose exec -T {service} '
-            f'mysql -u {user} -p"{pwd}" {safe_db} < "{import_path}"'
-        )
+        create_sql = mysql_create_db_sql(staging_db, drop_first=True)
+        created = False
+        last_out = ""
         try:
-            # CREATE DATABASE is fast — communicate is fine.
-            proc = await asyncio.create_subprocess_shell(
-                create_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            out_b, _ = await proc.communicate()
-            if proc.returncode != 0:
-                out = (out_b or b"").decode("utf-8", errors="replace")
+            for bin_name in mysql_client_bins(source_db, service):
+                proc = await asyncio.create_subprocess_exec(
+                    "docker", "compose", "exec", "-T",
+                    "-e", f"MYSQL_PWD={pwd}",
+                    service, bin_name, "-u", user, "-e", create_sql,
+                    cwd=cwd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                out_b, _ = await proc.communicate()
+                last_out = (out_b or b"").decode("utf-8", errors="replace")
+                if proc.returncode == 0:
+                    created = True
+                    break
+            if not created:
                 raise RuntimeError(
-                    f"SQL staging failed (db={staging_db}): {out[-400:]}"
+                    f"SQL staging failed (db={staging_db}): {last_out[-400:]}"
                 )
 
             migrator.job.log(
                 f"Importing dump into staging `{safe_db}` "
                 f"({size_mb:.1f} MB — large dumps can take a long time)..."
             )
-            proc = await asyncio.create_subprocess_shell(
-                import_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            out_b = await _await_proc_with_heartbeat(
-                migrator,
-                proc,
-                label=f"importing Marzban dump into staging `{safe_db}`",
-                size_mb=size_mb,
-            )
-            if proc.returncode != 0:
-                out = (out_b or b"").decode("utf-8", errors="replace")
+            imported = False
+            for bin_name in mysql_client_bins(source_db, service):
+                with open(import_path, "rb") as fh:
+                    proc = await asyncio.create_subprocess_exec(
+                        "docker", "compose", "exec", "-T",
+                        "-e", f"MYSQL_PWD={pwd}",
+                        service, bin_name, "-u", user, safe_db,
+                        cwd=cwd,
+                        stdin=fh,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT,
+                    )
+                    out_b = await _await_proc_with_heartbeat(
+                        migrator,
+                        proc,
+                        label=f"importing Marzban dump into staging `{safe_db}`",
+                        size_mb=size_mb,
+                    )
+                last_out = (out_b or b"").decode("utf-8", errors="replace")
+                if proc.returncode == 0:
+                    imported = True
+                    break
+            if not imported:
                 raise RuntimeError(
-                    f"SQL staging failed (db={staging_db}): {out[-400:]}"
+                    f"SQL staging failed (db={staging_db}): {last_out[-400:]}"
                 )
         finally:
             if import_path != dump_path and import_path.exists():
@@ -283,13 +294,12 @@ async def _import_via_compose_service(
             f'DROP DATABASE IF EXISTS "{staging_db}";',
             f'CREATE DATABASE "{staging_db}";',
         ):
-            create_cmd = (
-                f'cd "{cwd}" && docker compose exec -T {service} '
-                f'env PGPASSWORD="{pwd}" psql -U {u} -d postgres -v ON_ERROR_STOP=1 -c '
-                f"\"{sql}\""
-            )
-            proc = await asyncio.create_subprocess_shell(
-                create_cmd,
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "compose", "exec", "-T",
+                "-e", f"PGPASSWORD={pwd}",
+                service, "psql", "-U", u, "-d", "postgres",
+                "-v", "ON_ERROR_STOP=1", "-c", sql,
+                cwd=cwd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )

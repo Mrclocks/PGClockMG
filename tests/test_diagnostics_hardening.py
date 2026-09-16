@@ -111,3 +111,71 @@ def test_filter_timescaledb_keeps_catalog_preamble_but_drops_extension_ddl():
     assert "DROP EXTENSION" not in out.upper()
     assert "CREATE TABLE users" in out
     assert "pgclockmg_ts_catalog" in out.lower() or "_timescaledb" in out.lower()
+
+
+@pytest.mark.asyncio
+async def test_alembic_pin_failure_aborts_two_phase(monkeypatch):
+    """After a successful copy, a failed alembic pin must abort — not warn-and-continue."""
+    from app.services.native_migration import cross_db as mod
+
+    class Job:
+        progress = 80
+
+        def log(self, *_a, **_k):
+            pass
+
+        def set_progress(self, *_a, **_k):
+            pass
+
+    class Mini:
+        def __init__(self):
+            self.job = Job()
+            self.params = {"target_db": "postgresql"}
+            self.copy_stats = None
+            self.copy_report = {}
+
+        async def _run_cmd(self, *_a, **_k):
+            return True, ""
+
+    class FakeReader:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(mod, "normalize_target_db", lambda x: x)
+    monkeypatch.setattr(mod, "migration_strategy", lambda s, t: "two_phase")
+    monkeypatch.setattr(mod, "_stop_panel", AsyncMock())
+    monkeypatch.setattr(
+        mod, "_phase1_land_intermediate",
+        AsyncMock(return_value=("/tmp/x.sql", "mysql", {"host": "1"})),
+    )
+    monkeypatch.setattr(mod, "_prepare_target_for_migration", AsyncMock())
+    monkeypatch.setattr(mod, "_reset_target_schema", AsyncMock())
+    monkeypatch.setattr(mod, "run_alembic_upgrade_head", AsyncMock())
+    monkeypatch.setattr(mod, "build_local_alembic_url", lambda _p: "postgresql://x")
+    monkeypatch.setattr(mod, "get_target_connection", lambda _p: {"user": "postgres"})
+    monkeypatch.setattr(mod, "get_source_connection", lambda _p: {"user": "root"})
+    monkeypatch.setattr(
+        mod, "copy_database_universal",
+        AsyncMock(return_value={"users": 1, "admins": 1, "hosts": 1, "groups": 0, "nodes": 0}),
+    )
+    monkeypatch.setattr(mod, "_flush_pg_type_caches", AsyncMock())
+
+    monkeypatch.setattr(
+        "app.services.native_migration.adapters.create_reader",
+        lambda *_a, **_k: FakeReader(),
+    )
+    monkeypatch.setattr(
+        "app.services.native_migration.adapters._count_source_rows",
+        lambda *_a, **_k: 5,
+    )
+    monkeypatch.setattr(
+        "app.services.pasarguard_ops.get_alembic_head_revision",
+        AsyncMock(return_value="deadbeef"),
+    )
+    monkeypatch.setattr(
+        "app.services.pasarguard_ops.set_target_alembic_version",
+        AsyncMock(return_value=False),
+    )
+
+    with pytest.raises(RuntimeError, match="Alembic pin|pin alembic"):
+        await mod.run_two_phase_migration(Mini(), "/tmp/x.sql", "mysql", "postgresql")
