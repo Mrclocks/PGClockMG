@@ -1,4 +1,4 @@
-> 🚀 **`v4.5.8`** — sanitize leading junk on hosts address/host during convert
+> 🚀 **`v4.5.9`** — sanitize+recover hosts on same-engine PG restore
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
