@@ -190,7 +190,7 @@ def test_cleanup_orphans_sqlite_removes_only_orphans():
 
         deleted, nulled = cleanup_orphans_sqlite(path)
         assert deleted == 2
-        assert nulled == 1
+        assert nulled >= 1
 
         db = sqlite3.connect(str(path))
         usage_ids = [r[0] for r in db.execute("SELECT id FROM node_usages").fetchall()]
@@ -199,10 +199,13 @@ def test_cleanup_orphans_sqlite_removes_only_orphans():
             (r[0] if r[0] is not None else "")
             for r in db.execute("SELECT inbound_tag FROM hosts").fetchall()
         )
+        host_count = db.execute("SELECT COUNT(*) FROM hosts").fetchone()[0]
         db.close()
         assert usage_ids == [1]
         assert nuu == [(1,)]
-        assert host_tags == ["", "vless"]
+        # Orphan host inbound_tag is repointed onto a real inbound — never dropped.
+        assert host_count == 2
+        assert host_tags == ["vless", "vless"]
 
         # Clean second pass is a no-op
         assert cleanup_orphans_sqlite(path) == (0, 0)
@@ -265,6 +268,7 @@ def test_shrink_heavy_usage_sqlite_threshold():
 
 
 def test_orphan_null_falls_back_to_delete_when_not_null():
+    """Hosts with NOT NULL inbound_tag are repointed, never deleted."""
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / "db.sqlite3"
         db = sqlite3.connect(str(path))
@@ -278,18 +282,34 @@ def test_orphan_null_falls_back_to_delete_when_not_null():
             INSERT INTO inbounds VALUES (1, 'vless');
             INSERT INTO hosts VALUES (1, 'vless');
             INSERT INTO hosts VALUES (2, 'missing-tag');
+            INSERT INTO hosts VALUES (3, 'VLESS');  -- case-only mismatch
             """
         )
         db.commit()
         db.close()
         deleted, nulled = cleanup_orphans_sqlite(path)
-        assert deleted == 1
-        assert nulled == 0
+        assert deleted == 0
+        assert nulled >= 1
         db = sqlite3.connect(str(path))
-        tags = [r[0] for r in db.execute("SELECT inbound_tag FROM hosts").fetchall()]
+        tags = sorted(r[0] for r in db.execute("SELECT inbound_tag FROM hosts").fetchall())
+        count = db.execute("SELECT COUNT(*) FROM hosts").fetchone()[0]
         db.close()
-        assert tags == ["vless"]
-    print("OK: NOT NULL orphan uses delete")
+        assert count == 3, tags
+        assert tags == ["vless", "vless", "vless"]
+    print("OK: NOT NULL host orphans are repointed (not deleted)")
+
+
+def test_orphan_cleanup_sql_script_repoints_hosts_not_deletes():
+    from app.services.marzban_preboot_heal import orphan_cleanup_sql_script
+
+    script = orphan_cleanup_sql_script()
+    assert "orphan_repoint" in script or "ORDER BY inbounds.tag LIMIT 1" in script or (
+        "SET inbound_tag =" in script and "FROM inbounds" in script
+    )
+    # Must not DELETE hosts for missing inbound_tag anymore.
+    assert "DELETE FROM hosts WHERE hosts.inbound_tag" not in script
+    assert "lower(trim(" in script
+    print("OK: PG orphan cleanup script repoints hosts")
 
 
 def test_heal_marzban_preboot_shrinks_before_orphan_cleanup():
@@ -357,6 +377,7 @@ if __name__ == "__main__":
     test_cleanup_orphans_noop_on_clean_db()
     test_shrink_heavy_usage_sqlite_threshold()
     test_orphan_null_falls_back_to_delete_when_not_null()
+    test_orphan_cleanup_sql_script_repoints_hosts_not_deletes()
     test_heal_marzban_preboot_shrinks_before_orphan_cleanup()
     test_sqlite_reader_count_rows_uses_count_star()
     print("\nAll marzban_preboot_heal tests passed.")

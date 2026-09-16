@@ -50,11 +50,18 @@ ORPHAN_DELETE_SPECS: tuple[tuple[str, str, str, str], ...] = (
 )
 
 # SET NULL style refs (parent missing → null child column).
-# If the column is NOT NULL (common for hosts.inbound_tag on MySQL), we DELETE
-# the orphan row instead — SET NULL raises 1048 and used to abort the whole heal.
+# If the column is NOT NULL we DELETE the orphan row instead — SET NULL raises
+# 1048 and used to abort the whole heal. Do NOT put hosts here: wiping hosts
+# makes verify fail with hosts:0/N while users/inbounds look fine.
 ORPHAN_NULL_SPECS: tuple[tuple[str, str, str, str], ...] = (
-    ("hosts", "inbound_tag", "inbounds", "tag"),
     ("next_plans", "user_template_id", "user_templates", "id"),
+)
+
+# Subscription-critical rows: never DELETE when the parent key is missing.
+# 1) retarget case/whitespace-only mismatches onto the real parent value
+# 2) otherwise repoint onto an existing parent key so the row survives restore.
+ORPHAN_REPOINT_SPECS: tuple[tuple[str, str, str, str], ...] = (
+    ("hosts", "inbound_tag", "inbounds", "tag"),
 )
 
 # High-churn usage/history tables. PasarGuard's "use bigint for id" alembic rebuilds
@@ -87,6 +94,43 @@ def orphan_null_sql(child: str, child_col: str, parent: str, parent_col: str = "
         f"WHERE {child}.{child_col} IS NOT NULL "
         f"AND NOT EXISTS (SELECT 1 FROM {parent} "
         f"WHERE {parent}.{parent_col} = {child}.{child_col})"
+    )
+
+
+def orphan_casefold_match_sql(
+    child: str, child_col: str, parent: str, parent_col: str = "id",
+) -> str:
+    """Retarget child keys that only differ by case/whitespace from a parent row."""
+    child, child_col, parent, parent_col = map(_ident, (child, child_col, parent, parent_col))
+    return (
+        f"UPDATE {child} SET {child_col} = ("
+        f"SELECT p.{parent_col} FROM {parent} p "
+        f"WHERE p.{parent_col} IS NOT NULL "
+        f"AND lower(trim(p.{parent_col})) = lower(trim({child}.{child_col})) "
+        f"LIMIT 1) "
+        f"WHERE {child}.{child_col} IS NOT NULL "
+        f"AND NOT EXISTS (SELECT 1 FROM {parent} "
+        f"WHERE {parent}.{parent_col} = {child}.{child_col}) "
+        f"AND EXISTS ("
+        f"SELECT 1 FROM {parent} p2 WHERE p2.{parent_col} IS NOT NULL "
+        f"AND lower(trim(p2.{parent_col})) = lower(trim({child}.{child_col})))"
+    )
+
+
+def orphan_repoint_sql(
+    child: str, child_col: str, parent: str, parent_col: str = "id",
+) -> str:
+    """Point remaining orphan child keys at any existing parent value (keep the row)."""
+    child, child_col, parent, parent_col = map(_ident, (child, child_col, parent, parent_col))
+    return (
+        f"UPDATE {child} SET {child_col} = ("
+        f"SELECT {parent}.{parent_col} FROM {parent} "
+        f"WHERE {parent}.{parent_col} IS NOT NULL "
+        f"ORDER BY {parent}.{parent_col} LIMIT 1) "
+        f"WHERE {child}.{child_col} IS NOT NULL "
+        f"AND NOT EXISTS (SELECT 1 FROM {parent} "
+        f"WHERE {parent}.{parent_col} = {child}.{child_col}) "
+        f"AND EXISTS (SELECT 1 FROM {parent} WHERE {parent}.{parent_col} IS NOT NULL)"
     )
 
 
@@ -307,6 +351,29 @@ def orphan_cleanup_sql_script() -> str:
             f"  RAISE NOTICE 'orphan delete skipped on {c}.{cc}: %', SQLERRM;\n"
             f"END $pgclockmg_orphan$;\n"
         )
+    for child, child_col, parent, parent_col in ORPHAN_REPOINT_SPECS:
+        c, cc, p, pc = map(_ident, (child, child_col, parent, parent_col))
+        parts.append(
+            f"DO $pgclockmg_orphan$ BEGIN\n"
+            f"  IF to_regclass('public.{c}') IS NOT NULL\n"
+            f"     AND to_regclass('public.{p}') IS NOT NULL\n"
+            f"     AND EXISTS (\n"
+            f"       SELECT 1 FROM information_schema.columns\n"
+            f"       WHERE table_schema='public' AND table_name='{c}'\n"
+            f"         AND column_name='{cc}'\n"
+            f"     )\n"
+            f"     AND EXISTS (\n"
+            f"       SELECT 1 FROM information_schema.columns\n"
+            f"       WHERE table_schema='public' AND table_name='{p}'\n"
+            f"         AND column_name='{pc}'\n"
+            f"     ) THEN\n"
+            f"    {orphan_casefold_match_sql(c, cc, p, pc)};\n"
+            f"    {orphan_repoint_sql(c, cc, p, pc)};\n"
+            f"  END IF;\n"
+            f"EXCEPTION WHEN OTHERS THEN\n"
+            f"  RAISE NOTICE 'orphan repoint skipped on {c}.{cc}: %', SQLERRM;\n"
+            f"END $pgclockmg_orphan$;\n"
+        )
     for child, child_col, parent, parent_col in ORPHAN_NULL_SPECS:
         c, cc, p, pc = map(_ident, (child, child_col, parent, parent_col))
         parts.append(
@@ -375,6 +442,18 @@ def cleanup_orphans_sqlite(sqlite_path: str | Path) -> tuple[int, int]:
                 continue
             cur = db.execute(orphan_delete_sql(child, child_col, parent, parent_col))
             deleted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        for child, child_col, parent, parent_col in ORPHAN_REPOINT_SPECS:
+            if not (_sqlite_table_exists(db, child) and _sqlite_table_exists(db, parent)):
+                continue
+            if not (
+                _sqlite_column_exists(db, child, child_col)
+                and _sqlite_column_exists(db, parent, parent_col)
+            ):
+                continue
+            cur = db.execute(orphan_casefold_match_sql(child, child_col, parent, parent_col))
+            nulled += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            cur = db.execute(orphan_repoint_sql(child, child_col, parent, parent_col))
+            nulled += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
         for child, child_col, parent, parent_col in ORPHAN_NULL_SPECS:
             if not (_sqlite_table_exists(db, child) and _sqlite_table_exists(db, parent)):
                 continue
@@ -457,6 +536,18 @@ def cleanup_orphans_mysql_conn(
                     continue
                 cur.execute(orphan_delete_sql(child, child_col, parent, parent_col))
                 deleted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            for child, child_col, parent, parent_col in ORPHAN_REPOINT_SPECS:
+                if not (
+                    _mysql_table_exists(cur, database, child)
+                    and _mysql_table_exists(cur, database, parent)
+                    and _mysql_column_exists(cur, database, child, child_col)
+                    and _mysql_column_exists(cur, database, parent, parent_col)
+                ):
+                    continue
+                cur.execute(orphan_casefold_match_sql(child, child_col, parent, parent_col))
+                nulled += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+                cur.execute(orphan_repoint_sql(child, child_col, parent, parent_col))
+                nulled += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
             for child, child_col, parent, parent_col in ORPHAN_NULL_SPECS:
                 if not (
                     _mysql_table_exists(cur, database, child)
@@ -469,7 +560,6 @@ def cleanup_orphans_mysql_conn(
                     cur.execute(orphan_null_sql(child, child_col, parent, parent_col))
                     nulled += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
                 else:
-                    # NOT NULL (e.g. hosts.inbound_tag) — delete orphan rows instead.
                     cur.execute(orphan_delete_sql(child, child_col, parent, parent_col))
                     deleted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
     return deleted, nulled
@@ -631,6 +721,25 @@ def cleanup_orphans_postgres_conn(
                     continue
                 cur.execute(orphan_delete_sql(child, child_col, parent, parent_col))
                 deleted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            for child, child_col, parent, parent_col in ORPHAN_REPOINT_SPECS:
+                cur.execute(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema='public' AND table_name=%s AND column_name=%s LIMIT 1",
+                    (child, child_col),
+                )
+                if not cur.fetchone():
+                    continue
+                cur.execute(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema='public' AND table_name=%s AND column_name=%s LIMIT 1",
+                    (parent, parent_col),
+                )
+                if not cur.fetchone():
+                    continue
+                cur.execute(orphan_casefold_match_sql(child, child_col, parent, parent_col))
+                nulled += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+                cur.execute(orphan_repoint_sql(child, child_col, parent, parent_col))
+                nulled += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
             for child, child_col, parent, parent_col in ORPHAN_NULL_SPECS:
                 cur.execute(
                     "SELECT 1 FROM information_schema.columns "
@@ -743,6 +852,29 @@ async def _cleanup_orphans_mysql_via_compose(migrator, conn: dict) -> tuple[int,
         )
         if rc == 0:
             deleted += n
+
+    for child, child_col, parent, parent_col in ORPHAN_REPOINT_SPECS:
+        child_i, child_col_i = _ident(child), _ident(child_col)
+        parent_i, parent_col_i = _ident(parent), _ident(parent_col)
+        if not (await _table_ok(child_i) and await _table_ok(parent_i)):
+            continue
+        n = await _count_orphans(child_i, child_col_i, parent_i, parent_col_i)
+        if n == 0:
+            continue
+        rc, _ = await _mysql_compose_query(
+            svc=svc, user=user, pwd=pwd, host=host, db=db, cwd=cwd,
+            sql=orphan_casefold_match_sql(child_i, child_col_i, parent_i, parent_col_i),
+        )
+        if rc == 0:
+            nulled += n
+        n2 = await _count_orphans(child_i, child_col_i, parent_i, parent_col_i)
+        if n2:
+            rc, _ = await _mysql_compose_query(
+                svc=svc, user=user, pwd=pwd, host=host, db=db, cwd=cwd,
+                sql=orphan_repoint_sql(child_i, child_col_i, parent_i, parent_col_i),
+            )
+            if rc == 0:
+                nulled += n2
 
     for child, child_col, parent, parent_col in ORPHAN_NULL_SPECS:
         child_i, child_col_i = _ident(child), _ident(child_col)
