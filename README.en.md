@@ -64,7 +64,7 @@ URL: `http://SERVER_IP:7000/?token=...`
 
 ### Features
 - ✅ Restore PasarGuard backups (including DB engine changes)
-- ✅ Migrate Marzban / 3x-ui / Hiddify / Remnawave
+- ✅ Migrate Marzban / 3x-ui / Hiddify
 - ✅ Receive streamed backup → **manual confirm** → restore
 - ✅ TimescaleDB auto-heal
 

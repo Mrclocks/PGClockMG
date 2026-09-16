@@ -425,7 +425,6 @@ function updateSourceCredentialsVisibility() {
   if (!box) return;
   // Hiddify JSON migrate does not read source MySQL — no password UI
   const needs = dbNeedsPassword(state.sourceDb)
-    && state.selectedPanel?.id !== 'remnawave'
     && state.selectedPanel?.id !== 'hiddify';
   box.classList.toggle('hidden', !needs);
   if (needs) {
@@ -678,14 +677,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   const sel = document.getElementById('uploadSelectText');
   if (drag) drag.textContent = t('step2.uploadDrag');
   if (sel) sel.textContent = t('step2.uploadSelect');
-  const rw1 = document.querySelector('#remnawaveFields .form-group:nth-child(1) label');
-  const rw2 = document.querySelector('#remnawaveFields .form-group:nth-child(2) label');
-  if (rw1) rw1.textContent = t('step2.remnawaveUrl');
-  if (rw2) rw2.textContent = t('step2.remnawaveToken');
-  const rwUrl = document.getElementById('remnawaveUrl');
-  const rwTok = document.getElementById('remnawaveToken');
-  if (rwUrl) rwUrl.placeholder = t('step2.remnawaveUrlPh');
-  if (rwTok) rwTok.placeholder = t('step2.remnawaveTokenPh');
   const footerGithub = document.getElementById('footerGithubLabel');
   if (footerGithub) footerGithub.textContent = t('footer.star');
   if (typeof applySocialI18n === 'function') applySocialI18n();
@@ -832,16 +823,10 @@ function canProceedStep2() {
   } else if (!state.sourceDb) {
     return t('block.noSourceDb');
   }
-  if (panel?.id === 'remnawave') {
-    const url = document.getElementById('remnawaveUrl')?.value?.trim();
-    const token = document.getElementById('remnawaveToken')?.value?.trim();
-    if (!url || !token) return t('block.remnawaveCreds');
-  }
   const needsPwd = dbNeedsPassword(state.sourceDb);
   const analysis = state.bundleStatus?.analysis || state.uploadInfo?.analysis;
   if (
     needsPwd
-    && panel?.id !== 'remnawave'
     && panel?.id !== 'hiddify'
     && !hasDbCredentials('source')
   ) {
@@ -1036,8 +1021,6 @@ function buildMigrationBody() {
     install_redirect: document.getElementById('installRedirect')?.checked ?? true,
     relocate_inbound_certs: document.getElementById('chkRelocateInboundCerts')?.checked ?? false,
     skip_bad_user_rows: document.getElementById('chkSkipBadUserRows')?.checked ?? true,
-    remnawave_url: document.getElementById('remnawaveUrl')?.value || null,
-    remnawave_token: document.getElementById('remnawaveToken')?.value || null,
     marzban_mode: 'fresh',
   };
 }
@@ -1164,8 +1147,6 @@ function renderMarzbanDetectedSource() {
 function renderSourceDbs() {
   const panel = state.selectedPanel;
   if (!panel) return goStep(1);
-
-  document.getElementById('remnawaveFields').classList.toggle('hidden', panel.id !== 'remnawave');
 
   if (panel.id === 'marzban') {
     const h2 = document.querySelector('#step2 h2');

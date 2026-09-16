@@ -73,7 +73,7 @@ sudo PG_MIGRATOR_ACTION=install-backup PG_BACKUP_PORT=7001 bash -c "$(curl -fsSL
 
 ### قابلیت‌ها
 - ✅ ریستور بکاپ PasarGuard (حتی با تغییر DB)
-- ✅ مهاجرت Marzban / 3x-ui / Hiddify / Remnawave
+- ✅ مهاجرت Marzban / 3x-ui / Hiddify
 - ✅ دریافت استریم بکاپ و ریستور با تأیید دستی
 - ✅ TimescaleDB heal خودکار
 
