@@ -100,6 +100,38 @@ def test_convert_bool_values():
     print("OK: convert_bool_values")
 
 
+def test_hosts_address_sanitizes_array_and_invisible_junk():
+    """Leading junk on address/host must not survive convert (reported after migrate)."""
+    from app.services.native_migration.copy_core import convert_value
+
+    assert convert_value("hosts", "address", "example.com") == "example.com"
+    assert convert_value("hosts", "address", "{example.com}") == "example.com"
+    assert convert_value("hosts", "address", "{ example.com }") == "example.com"
+    assert convert_value("hosts", "address", '{"cdn.example.com"}') == "cdn.example.com"
+    assert convert_value("hosts", "address", '["a.example.com","b.example.com"]') == (
+        "a.example.com,b.example.com"
+    )
+    assert convert_value("hosts", "address", "{a.example.com,b.example.com}") == (
+        "a.example.com,b.example.com"
+    )
+    # Invisible prefix junk (BOM / ZWSP / replacement) + spaces
+    assert convert_value("hosts", "address", "\ufeff example.com") == "example.com"
+    assert convert_value("hosts", "address", "\u200b\u200b example.com") == "example.com"
+    assert convert_value("hosts", "address", "\ufffd example.com") == "example.com"
+    assert convert_value("hosts", "address", b"example.com") == "example.com"
+    # Must never become a literal b'...' string
+    bad = convert_value("hosts", "address", b"\xff\xfe example.com")
+    assert not str(bad).startswith("b'")
+    assert "example.com" in str(bad) or bad == "" or isinstance(bad, str)
+    assert convert_value("hosts", "host", "{www.example.com}") == "www.example.com"
+    assert convert_value("hosts", "sni", None) is None
+    assert convert_value("hosts", "remark", "\ufeff My Host") == "My Host"
+    assert convert_value("hosts", "remark", "\u200b") == "host"
+    # Clean multi-address CSV unchanged
+    assert convert_value("hosts", "address", "a.com, b.com") == "a.com,b.com"
+    print("OK: hosts_address_sanitizes_array_and_invisible_junk")
+
+
 def test_users_status_not_bool():
     from app.services.native_migration.copy_core import (
         convert_value, normalize_user_status, BOOL_COLUMNS,
@@ -1063,6 +1095,7 @@ if __name__ == "__main__":
     test_migration_strategy_matrix()
     test_read_alembic_from_sql_dump()
     test_convert_bool_values()
+    test_hosts_address_sanitizes_array_and_invisible_junk()
     test_users_status_not_bool()
     test_hosts_json_and_column_plan()
     test_hosts_marzban_none_enums_copy()
