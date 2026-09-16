@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.5.9`** — sanitize و بازیابی hosts در restore هم200cموتور PG
+> 🚀 **`v4.5.9`** — sanitize و بازیابی hosts در restore هم‌موتور PG
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
