@@ -68,10 +68,6 @@ def get_primary(scope: str) -> str | None:
         return str(primary) if primary else None
 
 
-def has_primary(scope: str) -> bool:
-    return bool(get_primary(scope))
-
-
 def clear_scope(scope: str) -> None:
     with _LOCK:
         _STORE.pop(scope, None)

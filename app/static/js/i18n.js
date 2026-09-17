@@ -188,28 +188,6 @@ const I18N = {
         applied: 'Backup slimmed: {rows} rows removed, {size} saved.',
       },
     },
-    step0: {
-      h2: 'Welcome',
-      desc: 'Migration wizard for PasarGuard — check your server is ready.',
-      info: 'Runs on your Ubuntu server with root access. Panel-specific requirements appear after you choose a source.',
-      checks: [
-        ['server', 'Ubuntu server', 'Wizard on port 7000'],
-        ['key', 'Root access', 'Required for .env & Docker'],
-        ['disk', 'Backup', 'Always backup before migrating'],
-      ],
-      start: 'Get Started',
-      pasarguardCheck: 'PasarGuard on server',
-      pasarguardYes: 'Installed',
-      pasarguardNo: 'Not installed — install manually before migration (if required)',
-      marzbanCheck: 'Marzban on server',
-      marzbanYes: 'Installed',
-      marzbanNo: 'Not installed',
-      dockerCheck: 'Docker',
-      dockerYes: 'Running',
-      dockerNo: 'Not running',
-      checking: 'Checking server...',
-      checkingDetail: 'Detecting PasarGuard, Marzban, Docker',
-    },
     step1: {
       h2: 'Select Source Panel',
       desc: 'Which panel are you migrating from?',
@@ -217,14 +195,6 @@ const I18N = {
       next: 'Continue →',
       prereqTitle: 'What must be installed:',
       uploadHint: 'Missing something? You can upload a backup in the next step.',
-      marzbanModeTitle: 'Marzban migration method',
-      marzbanModeDesc: 'Choose how to migrate based on your server setup (per official PasarGuard docs).',
-      marzbanInplace: 'In-place (Marzban on this server)',
-      marzbanInplaceDesc: 'Marzban is installed here and PasarGuard is NOT. Directories are renamed in-place.',
-      marzbanFresh: 'Fresh PasarGuard install',
-      marzbanFreshDesc: 'PasarGuard already installed, or you will upload a Marzban backup / use another server.',
-      suggested: 'Suggested',
-      alternative: 'Alternative',
     },
     step2: {
       h2: 'Source Database',
@@ -293,7 +263,6 @@ const I18N = {
         port: 'Port',
       },
       copyCmd: 'Copy',
-      crossDbWarning: 'Cross-DB: {source} → {target}. Two-phase engine (head→head copy).',
       password: 'Target database password',
       passwordPh: 'New or existing password',
       pgMissing: 'PasarGuard is NOT installed',
@@ -421,39 +390,14 @@ const I18N = {
       password: 'DB password',
     },
     upload: {
-      inventoryTitle: 'Backup contents',
       modeZip: 'Full ZIP (recommended)',
       modeSeparate: 'Separate files',
       required: 'Required',
       optional: 'Optional',
       browse: 'Choose file',
       allReady: 'All required files received — you can continue',
-      waitingFiles: 'Waiting for required files',
-      missing: 'Not uploaded yet',
-      viaZip: 'from ZIP',
       fullZip: 'Full ZIP backup',
       separateFiles: 'Separate uploaded files',
-      fileCount: 'Files',
-      extractRoot: 'Data folder in zip',
-      envMapping: 'Marzban → PasarGuard mapping',
-      backupOk: 'Backup complete',
-      backupIncomplete: 'Backup incomplete',
-      pwdFromEnv: 'Will use password from backup .env',
-      truncated: '…and more files (list truncated)',
-      colType: 'Type',
-      colPath: 'Path in zip',
-      colSize: 'Size',
-      colPgPath: 'PasarGuard path',
-      cat: {
-        database_sqlite: 'SQLite DB',
-        database_sql: 'SQL dump',
-        config_env: '.env',
-        config_compose: 'docker-compose',
-        config_xray: 'xray config',
-        ssl_certs: 'SSL certs',
-        templates: 'templates',
-        other: 'other',
-      },
     },
     block: {
       noRoot: 'Root access is required — run wizard as root',
@@ -472,7 +416,6 @@ const I18N = {
       passwordNotConfirmed: 'Confirm all passwords read from .env',
       pasarguardMissing: 'Install PasarGuard yourself, then tap check again',
       marzbanBackup: 'Upload Marzban backup or use server with Marzban data',
-      backupIncomplete: 'Backup zip is missing required files — see list below',
       dbMismatch: 'Selected DB type does not match backup contents',
       uploadsIncomplete: 'Upload all required files listed below',
       xuiDb: 'Upload your SQLite backup file (x-ui.db)',
@@ -666,28 +609,6 @@ const I18N = {
       },
       nodesDisabledNote: 'نودها طبق درخواست غیرفعال ماندند. از پنل فعالشان کنید.',
     },
-    step0: {
-      h2: 'خوش آمدید',
-      desc: 'ویزارد مهاجرت به PasarGuard — آمادگی سرور را بررسی کنید.',
-      info: 'روی سرور Ubuntu با دسترسی root اجرا می‌شود. نیازمندی‌های هر پنل پس از انتخاب مبدأ نمایش داده می‌شود.',
-      checks: [
-        ['server', 'سرور Ubuntu', 'ویزارد روی پورت ۷۰۰۰'],
-        ['key', 'دسترسی root', 'برای .env و Docker'],
-        ['disk', 'بکاپ', 'قبل از مهاجرت حتماً بکاپ بگیرید'],
-      ],
-      start: 'شروع',
-      pasarguardCheck: 'PasarGuard روی سرور',
-      pasarguardYes: 'نصب شده',
-      pasarguardNo: 'نصب نیست — در صورت نیاز قبل از مهاجرت دستی نصب کنید',
-      marzbanCheck: 'Marzban روی سرور',
-      marzbanYes: 'نصب شده',
-      marzbanNo: 'نصب نیست',
-      dockerCheck: 'Docker',
-      dockerYes: 'در حال اجرا',
-      dockerNo: 'اجرا نمی‌شود',
-      checking: 'در حال بررسی سرور...',
-      checkingDetail: 'شناسایی PasarGuard، Marzban و Docker',
-    },
     step1: {
       h2: 'انتخاب پنل مبدأ',
       desc: 'از کدام پنل می‌خواهید مهاجرت کنید؟',
@@ -695,14 +616,6 @@ const I18N = {
       next: 'ادامه ←',
       prereqTitle: 'چه چیزهایی باید نصب باشد:',
       uploadHint: 'چیزی کم است؟ در مرحله بعد بکاپ آپلود کنید.',
-      marzbanModeTitle: 'روش مهاجرت مرزبان',
-      marzbanModeDesc: 'بر اساس وضعیت سرور یکی از دو روش رسمی PasarGuard را انتخاب کنید.',
-      marzbanInplace: 'درجا (مرزبان روی همین سرور)',
-      marzbanInplaceDesc: 'مرزبان نصب است و PasarGuard نصب نیست. پوشه‌ها درجا تغییر نام می‌یابند.',
-      marzbanFresh: 'نصب تازه PasarGuard',
-      marzbanFreshDesc: 'PasarGuard از قبل نصب است، یا بکاپ مرزبان آپلود می‌کنید / سرور دیگر.',
-      suggested: 'پیشنهادی',
-      alternative: 'جایگزین',
     },
     step2: {
       h2: 'دیتابیس مبدأ',
@@ -771,7 +684,6 @@ const I18N = {
         port: 'پورت',
       },
       copyCmd: 'کپی',
-      crossDbWarning: 'مهاجرت DB: {source} → {target}. موتور دو‌فازی (کپی head→head).',
       password: 'رمز دیتابیس مقصد',
       passwordPh: 'رمز جدید یا موجود',
       pgMissing: 'PasarGuard نصب نیست',
@@ -899,39 +811,14 @@ const I18N = {
       password: 'رمز DB',
     },
     upload: {
-      inventoryTitle: 'محتوای بکاپ',
       modeZip: 'ZIP کامل (پیشنهادی)',
       modeSeparate: 'فایل‌های جدا',
       required: 'اجباری',
       optional: 'اختیاری',
       browse: 'انتخاب فایل',
       allReady: 'همه فایل‌های لازم دریافت شد — می‌توانید ادامه دهید',
-      waitingFiles: 'در انتظار فایل‌های اجباری',
-      missing: 'هنوز آپلود نشده',
-      viaZip: 'از ZIP',
       fullZip: 'بکاپ ZIP کامل',
       separateFiles: 'فایل‌های جداگانه',
-      fileCount: 'فایل',
-      extractRoot: 'پوشه داده در zip',
-      envMapping: 'نگاشت Marzban → PasarGuard',
-      backupOk: 'بکاپ کامل است',
-      backupIncomplete: 'بکاپ ناقص است',
-      pwdFromEnv: 'رمز از .env بکاپ خوانده می‌شود',
-      truncated: '…فایل‌های بیشتر (لیست کوتاه شده)',
-      colType: 'نوع',
-      colPath: 'مسیر در zip',
-      colSize: 'حجم',
-      colPgPath: 'مسیر PasarGuard',
-      cat: {
-        database_sqlite: 'دیتابیس SQLite',
-        database_sql: 'فایل SQL',
-        config_env: '.env',
-        config_compose: 'docker-compose',
-        config_xray: 'تنظیم xray',
-        ssl_certs: 'گواهی SSL',
-        templates: 'قالب‌ها',
-        other: 'سایر',
-      },
     },
     block: {
       noRoot: 'دسترسی root لازم است',
@@ -950,7 +837,6 @@ const I18N = {
       passwordNotConfirmed: 'همه رمزهای خوانده‌شده از .env را تأیید کنید',
       pasarguardMissing: 'PasarGuard را خودتان نصب کنید، بعد «دوباره چک کن» را بزنید',
       marzbanBackup: 'بکاپ Marzban آپلود کنید یا Marzban روی سرور باشد',
-      backupIncomplete: 'فایل zip فاقد فایل‌های لازم است — لیست زیر را ببینید',
       dbMismatch: 'نوع دیتابیس انتخابی با محتوای بکاپ مطابقت ندارد',
       uploadsIncomplete: 'همه فایل‌های اجباری زیر را آپلود کنید',
       xuiDb: 'فایل بکاپ SQLite خود را آپلود کنید (x-ui.db)',
@@ -1144,28 +1030,6 @@ const I18N = {
       },
       nodesDisabledNote: 'Узлы оставлены отключёнными по запросу. Включите их из панели.',
     },
-    step0: {
-      h2: 'Добро пожаловать',
-      desc: 'Мастер миграции в PasarGuard — проверьте готовность сервера.',
-      info: 'Работает на Ubuntu с root. Требования панели появятся после выбора источника.',
-      checks: [
-        ['server', 'Сервер Ubuntu', 'Порт 7000'],
-        ['key', 'Root доступ', 'Для .env и Docker'],
-        ['disk', 'Резервная копия', 'Сделайте бэкап'],
-      ],
-      start: 'Начать',
-      pasarguardCheck: 'PasarGuard на сервере',
-      pasarguardYes: 'Установлен',
-      pasarguardNo: 'Не установлен — установите вручную перед миграцией (если требуется)',
-      marzbanCheck: 'Marzban на сервере',
-      marzbanYes: 'Установлен',
-      marzbanNo: 'Не установлен',
-      dockerCheck: 'Docker',
-      dockerYes: 'Работает',
-      dockerNo: 'Не запущен',
-      checking: 'Проверка сервера...',
-      checkingDetail: 'Определение PasarGuard, Marzban, Docker',
-    },
     step1: {
       h2: 'Исходная панель',
       desc: 'С какой панели мигрируете?',
@@ -1173,14 +1037,6 @@ const I18N = {
       next: 'Далее →',
       prereqTitle: 'Что должно быть установлено:',
       uploadHint: 'Нет данных? Загрузите копию на следующем шаге.',
-      marzbanModeTitle: 'Метод миграции Marzban',
-      marzbanModeDesc: 'Выберите метод по состоянию сервера (официальная документация PasarGuard).',
-      marzbanInplace: 'На месте (Marzban на этом сервере)',
-      marzbanInplaceDesc: 'Marzban установлен, PasarGuard НЕТ. Каталоги переименовываются на месте.',
-      marzbanFresh: 'Чистая установка PasarGuard',
-      marzbanFreshDesc: 'PasarGuard уже установлен, или загрузите копию Marzban / другой сервер.',
-      suggested: 'Рекомендуется',
-      alternative: 'Альтернатива',
     },
     step2: {
       h2: 'База данных источника',
@@ -1249,7 +1105,6 @@ const I18N = {
         port: 'Порт',
       },
       copyCmd: 'Копировать',
-      crossDbWarning: 'Миграция БД: {source} → {target}. Двухфазный движок (head→head).',
       password: 'Пароль целевой БД',
       passwordPh: 'Новый или существующий пароль',
       pgMissing: 'PasarGuard НЕ установлен',
@@ -1377,39 +1232,14 @@ const I18N = {
       password: 'Пароль БД',
     },
     upload: {
-      inventoryTitle: 'Содержимое копии',
       modeZip: 'Полный ZIP (рекомендуется)',
       modeSeparate: 'Отдельные файлы',
       required: 'Обязательно',
       optional: 'Опционально',
       browse: 'Выбрать файл',
       allReady: 'Все обязательные файлы получены — можно продолжить',
-      waitingFiles: 'Ожидание обязательных файлов',
-      missing: 'Ещё не загружен',
-      viaZip: 'из ZIP',
       fullZip: 'Полный ZIP',
       separateFiles: 'Отдельные файлы',
-      fileCount: 'Файлов',
-      extractRoot: 'Папка данных в zip',
-      envMapping: 'Соответствие Marzban → PasarGuard',
-      backupOk: 'Копия полная',
-      backupIncomplete: 'Копия неполная',
-      pwdFromEnv: 'Пароль будет взят из .env копии',
-      truncated: '…и другие файлы (список сокращён)',
-      colType: 'Тип',
-      colPath: 'Путь в zip',
-      colSize: 'Размер',
-      colPgPath: 'Путь PasarGuard',
-      cat: {
-        database_sqlite: 'SQLite БД',
-        database_sql: 'SQL дамп',
-        config_env: '.env',
-        config_compose: 'docker-compose',
-        config_xray: 'xray config',
-        ssl_certs: 'SSL сертификаты',
-        templates: 'шаблоны',
-        other: 'прочее',
-      },
     },
     block: {
       noRoot: 'Требуется root доступ',
@@ -1428,7 +1258,6 @@ const I18N = {
       passwordNotConfirmed: 'Подтвердите все пароли из .env',
       pasarguardMissing: 'Установите PasarGuard вручную и нажмите Проверить',
       marzbanBackup: 'Загрузите копию Marzban или используйте сервер с Marzban',
-      backupIncomplete: 'В zip нет нужных файлов — см. список ниже',
       dbMismatch: 'Выбранный тип БД не совпадает с содержимым копии',
       uploadsIncomplete: 'Загрузите все обязательные файлы ниже',
       xuiDb: 'Загрузите вашу SQLite-копию (x-ui.db)',
@@ -1529,9 +1358,7 @@ function setLang(lang) {
   syncLangSwitch(lang);
   applyI18n();
   applySocialI18n();
-  renderGlobalChecks();
   if (state.selectedPanel) renderPanelPrereqs(state.selectedPanel.id);
-  if (state.selectedPanel?.id === 'marzban' && typeof renderMarzbanModes === 'function') renderMarzbanModes();
   if (state.currentStep === 1 && state.panels.length) renderPanels();
   if (typeof renderUploadResourceCard === 'function') renderUploadResourceCard();
 }
@@ -1616,35 +1443,3 @@ function renderSteps() {
   });
 }
 
-function renderGlobalChecks() {
-  // Legacy helper — welcome phase no longer uses globalChecks list.
-  const el = document.getElementById('globalChecks');
-  if (!el) return;
-  const checks = t('step0.checks');
-  if (!Array.isArray(checks)) return;
-  let html = checks.map(([ic, title, detail]) => `
-    <div class="check-item"><span class="check-icon">${typeof icon==='function'?icon(ic):ic}</span><div><div>${title}</div><div class="check-detail">${detail}</div></div></div>`).join('');
-
-  const sys = state.systemCheck;
-  if (sys) {
-    const pgIcon = statusIcon(sys.pasarguard ? 'ok' : false);
-    const pgDetail = sys.pasarguard
-      ? `${t('step0.pasarguardYes')}${sys.pasarguard_path ? ` — ${sys.pasarguard_path}` : ''}${sys.pasarguard_db ? ` (${sys.pasarguard_db})` : ''}`
-      : t('step0.pasarguardNo');
-    html += `<div class="check-item check-live"><span class="check-icon">${pgIcon}</span><div><div><strong>${t('step0.pasarguardCheck')}</strong></div><div class="check-detail">${pgDetail}</div></div></div>`;
-
-    const mzIcon = statusIcon(sys.marzban ? 'ok' : 'warn');
-    const mzDetail = sys.marzban
-      ? `${t('step0.marzbanYes')}${sys.marzban_path ? ` — ${sys.marzban_path}` : ''}${sys.marzban_db ? ` (${sys.marzban_db})` : ''}`
-      : t('step0.marzbanNo');
-    html += `<div class="check-item check-live"><span class="check-icon">${mzIcon}</span><div><div><strong>${t('step0.marzbanCheck')}</strong></div><div class="check-detail">${mzDetail}</div></div></div>`;
-
-    const dkIcon = statusIcon(sys.docker ? 'ok' : false);
-    const dkDetail = sys.docker ? t('step0.dockerYes') : t('step0.dockerNo');
-    html += `<div class="check-item check-live"><span class="check-icon">${dkIcon}</span><div><div><strong>${t('step0.dockerCheck')}</strong></div><div class="check-detail">${dkDetail}</div></div></div>`;
-  } else {
-    html += `<div class="check-item"><span class="check-icon">${statusIcon('wait')}</span><div><div>${t('step0.checking')}</div><div class="check-detail">${t('step0.checkingDetail')}</div></div></div>`;
-  }
-
-  document.getElementById('globalChecks').innerHTML = html;
-}

@@ -47,15 +47,6 @@ class MigrationRequest(BaseModel):
     marzban_mode: Optional[Literal["fresh"]] = "fresh"
 
 
-class MigrationStatus(BaseModel):
-    job_id: str
-    status: Literal["pending", "running", "success", "error"]
-    progress: int = 0
-    message: str = ""
-    logs: List[str] = []
-    result: Optional[dict] = None
-
-
 class BackupCleanupRequest(BaseModel):
     upload_id: str
     rule_ids: List[str] = []

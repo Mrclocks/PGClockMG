@@ -165,16 +165,6 @@ def _normalize_dest_url(dest_base_url: str) -> str:
     return normalize_stream_dest_url(dest_base_url)
 
 
-def _touch_listener_ttl(token: str) -> None:
-    """Extend listener expiry while actively receiving large backups."""
-    with _LOCK:
-        info = _LISTENERS.get(token)
-        if not info:
-            return
-        if info.get("status") in ("listening", "receiving"):
-            info["expires_at"] = time.time() + LISTENER_TTL_SEC
-
-
 async def receive_stream(
     token: str,
     request_stream,

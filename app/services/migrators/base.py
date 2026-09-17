@@ -83,17 +83,8 @@ class MigrationJob:
     def on_log(self, callback: Callable):
         self._callbacks.append(callback)
 
-    def off_log(self, callback: Callable) -> None:
-        try:
-            self._callbacks.remove(callback)
-        except ValueError:
-            pass
-
     def clear_log_callbacks(self) -> None:
         self._callbacks.clear()
-
-    def log_offset(self) -> int:
-        return len(self.logs)
 
 
 class BaseMigrator(ABC):

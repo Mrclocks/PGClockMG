@@ -773,15 +773,10 @@ async function loadSystemCheck() {
   try {
     const data = await fetchJson('/api/system-check', {}, { retries: 2, timeoutMs: 45000 });
     applySystemCheck(data);
-    renderGlobalChecks();
     if (state.currentStep === 3) renderDetectedTargetDb();
     updateStepButtons();
   } catch (e) {
     console.error(e);
-    const el = document.getElementById('globalChecks');
-    if (el) {
-      el.innerHTML += `<div class="check-item"><span class="check-icon">${statusIcon(false)}</span><div><div>Server check</div><div class="check-detail">${e.message}</div></div></div>`;
-    }
   }
 }
 
@@ -797,10 +792,6 @@ function showStepBlock(step, msg) {
   }
 }
 
-function canProceedStep0() {
-  // Pre-flight is handled in welcome/pg phases now.
-  return null;
-}
 
 function canProceedStep1() {
   if (!state.selectedPanel) return t('block.noPanel');
@@ -1211,7 +1202,6 @@ async function renderTargetDbs() {
 
   const h2 = document.querySelector('#step3 h2');
   const desc = document.querySelector('#step3 .desc');
-  const crossEl = document.getElementById('crossDbWarning');
 
   if (panel.id === 'marzban') {
     if (h2) h2.textContent = t('step3.marzbanH2');
@@ -2053,7 +2043,6 @@ async function renderUploadSection() {
 
 async function uploadSlotFile(slot, file) {
   const status = document.getElementById('uploadStatus');
-  const inventory = document.getElementById('uploadInventory');
   // Primary dropzone (zip OR single 3X-UI db) uses the same progress UI
   const isPrimaryZone = slot === 'bundle_zip' || slot === primaryUploadSlot();
   const progressIds = {
@@ -2105,12 +2094,6 @@ async function uploadSlotFile(slot, file) {
 
     const bs = data.bundle_status || {};
     const ok = !!bs.complete;
-
-    if (bs.analysis) {
-      renderUploadInventory({ analysis: bs.analysis });
-    } else {
-      inventory?.classList.add('hidden');
-    }
 
     applyBundleAnalysis(bs);
     renderUploadSection();
@@ -2174,10 +2157,3 @@ async function uploadFile(file) {
   return uploadSlotFile('bundle_zip', file);
 }
 
-function renderUploadInventory(_data) {
-  // Backup contents / inventory table intentionally hidden.
-  const el = document.getElementById('uploadInventory');
-  if (!el) return;
-  el.innerHTML = '';
-  el.classList.add('hidden');
-}
