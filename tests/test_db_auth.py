@@ -494,6 +494,119 @@ def test_mysql_probe_uses_argv_without_password_in_args():
     print("OK: mysql probe uses argv and hides the password")
 
 
+def test_pg_resolve_rejects_wrong_password_under_trust():
+    """In-container trust must not accept a stale .env password without TCP proof."""
+    import asyncio
+    from unittest.mock import patch
+
+    from app.services.db_auth import resolve_live_admin_connection
+    from app.services.migrators.base import BaseMigrator, MigrationJob
+
+    class Dummy(BaseMigrator):
+        async def run(self, params):
+            return {}
+
+    async def _run():
+        job = MigrationJob(job_id="pg-trust1")
+        migrator = Dummy(job, {})
+        env = "POSTGRES_PASSWORD=stale-secret\nPOSTGRES_DB=pasarguard\n"
+
+        async def fake_run(cmd, cwd=None, timeout=600, *, quiet=False):
+            argv = list(cmd) if isinstance(cmd, list) else [cmd]
+            joined = " ".join(argv)
+            if "compose ps" in joined:
+                return True, "dbcid\n"
+            if "{{.Config.Image}}" in joined:
+                return True, "postgres:16\n"
+            if "NetworkSettings.Ports" in joined:
+                return True, '{"5432/tcp":[{"HostIp":"127.0.0.1","HostPort":"5432"}]}'
+            if "run" in argv and "--network" in argv:
+                # Host TCP rejects the stale password
+                return False, "password authentication failed"
+            if "exec" in argv and "psql" in argv:
+                # Local socket trust: any password works
+                return True, "1\n"
+            return True, ""
+
+        with patch("app.services.db_auth.PASARGUARD_DIR", Path("/opt/pasarguard")), \
+             patch("app.services.db_auth.resolve_db_service", return_value="postgresql"), \
+             patch.object(migrator, "_run_cmd", fake_run):
+            with __import__("pytest").raises(RuntimeError, match="TCP|trust"):
+                await resolve_live_admin_connection(migrator, "postgresql", env_text=env)
+
+    asyncio.run(_run())
+    print("OK: PG resolve rejects wrong password under trust")
+
+
+def test_pg_resolve_accepts_password_verified_over_tcp():
+    import asyncio
+    from unittest.mock import patch
+
+    from app.services.db_auth import resolve_live_admin_connection
+    from app.services.migrators.base import BaseMigrator, MigrationJob
+
+    class Dummy(BaseMigrator):
+        async def run(self, params):
+            return {}
+
+    async def _run():
+        job = MigrationJob(job_id="pg-trust2")
+        migrator = Dummy(job, {})
+        env = "POSTGRES_PASSWORD=real-secret\nPOSTGRES_DB=pasarguard\n"
+
+        async def fake_run(cmd, cwd=None, timeout=600, *, quiet=False):
+            argv = list(cmd) if isinstance(cmd, list) else [cmd]
+            joined = " ".join(argv)
+            pwd = ""
+            for a in argv:
+                if a.startswith("PGPASSWORD="):
+                    pwd = a.split("=", 1)[1]
+            if "compose ps" in joined:
+                return True, "dbcid\n"
+            if "{{.Config.Image}}" in joined:
+                return True, "timescale/timescaledb:latest-pg16\n"
+            if "NetworkSettings.Ports" in joined:
+                return True, '{"5432/tcp":[{"HostIp":"0.0.0.0","HostPort":"5432"}]}'
+            if "run" in argv and "--network" in argv:
+                if pwd == "real-secret":
+                    return True, "1\n"
+                return False, "password authentication failed"
+            if "exec" in argv and "psql" in argv:
+                return True, "1\n"  # trust
+            return True, ""
+
+        with patch("app.services.db_auth.PASARGUARD_DIR", Path("/opt/pasarguard")), \
+             patch("app.services.db_auth.resolve_db_service", return_value="timescaledb"), \
+             patch.object(migrator, "_run_cmd", fake_run):
+            conn = await resolve_live_admin_connection(
+                migrator, "timescaledb", env_text=env,
+            )
+        assert conn["password"] == "real-secret"
+        assert conn["port"] == "5432"
+        assert conn["host"] == "127.0.0.1"
+
+    asyncio.run(_run())
+    print("OK: PG resolve accepts TCP-verified password under trust")
+
+
+def test_parse_published_port_prefers_loopback():
+    from app.services.db_auth import _parse_published_port
+
+    # 0.0.0.0 is normalized to loopback and returned immediately
+    host, port = _parse_published_port(
+        '{"5432/tcp":[{"HostIp":"0.0.0.0","HostPort":"5432"}]}'
+    )
+    assert (host, port) == ("127.0.0.1", "5432")
+
+    # Explicit 127.0.0.1 wins over a non-loopback fallback later in the list
+    host, port = _parse_published_port(
+        '{"5432/tcp":[{"HostIp":"10.0.0.5","HostPort":"15432"},'
+        '{"HostIp":"127.0.0.1","HostPort":"5432"}]}'
+    )
+    assert (host, port) == ("127.0.0.1", "5432")
+    print("OK: published port prefers loopback")
+
+
 if __name__ == "__main__":
     test_postgres_password_candidates_order()
     test_postgres_admin_users()
@@ -514,4 +627,7 @@ if __name__ == "__main__":
     test_sync_mysql_roles_skip_grant_recovery_when_locked_out()
     test_pg_restore_sync_mysql_uses_candidates_then_recovery()
     test_mysql_probe_uses_argv_without_password_in_args()
+    test_pg_resolve_rejects_wrong_password_under_trust()
+    test_pg_resolve_accepts_password_verified_over_tcp()
+    test_parse_published_port_prefers_loopback()
     print("\nAll db_auth tests passed")

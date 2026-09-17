@@ -1,4 +1,4 @@
-> 🚀 **`v4.5.10`** — permanent hosts restore (strip + reload after alembic)
+> 🚀 **`v4.6.0`** — harden migrate/restore + backup stream UX; remove Remnawave; dead-code cleanup
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
@@ -88,7 +88,8 @@ systemctl status pg-backup
 ```
 
 Точка отката до v4: `restore-point-pre-v4.0.0`  
-Точка отката до v4.5.0: `restore-point-pre-v4.5.0`
+Точка отката до v4.5.0: `restore-point-pre-v4.5.0`  
+Точка отката до v4.6.0: `restore-point-pre-v4.6.0`
 
 ---
 

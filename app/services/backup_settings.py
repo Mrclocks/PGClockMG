@@ -343,13 +343,6 @@ def load_settings() -> dict:
         return _merge(DEFAULT_SETTINGS, raw if isinstance(raw, dict) else {})
 
 
-def save_settings(data: dict) -> dict:
-    with _LOCK:
-        merged = _merge(DEFAULT_SETTINGS, data)
-        _atomic_write(BACKUP_SETTINGS_FILE, merged)
-        return merged
-
-
 def update_settings(patch: dict) -> dict:
     with _LOCK:
         current = load_settings()

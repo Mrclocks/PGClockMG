@@ -24,12 +24,6 @@ _task: asyncio.Task | None = None
 _running = False
 
 
-def schedule_anchor(sched: dict | None) -> datetime | None:
-    """Prefer last_success_at; fall back to legacy last_run_at."""
-    sched = sched or {}
-    return parse_last_run_at(sched.get("last_success_at")) or parse_last_run_at(sched.get("last_run_at"))
-
-
 def due_for_scheduled_run(
     *,
     enabled: bool,

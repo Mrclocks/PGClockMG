@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from app.config import PASARGUARD_DIR, PASARGUARD_ENV
 from app.services.env_migration import read_env_var, read_compose_db_credentials
 from app.services.pasarguard_ops import resolve_db_service, migration_port
@@ -218,6 +220,7 @@ async def _probe_pg(
     password: str,
     database: str,
 ) -> bool:
+    """In-container psql probe. Under local ``trust``, any password succeeds."""
     if not password:
         return False
     cmd = [
@@ -226,6 +229,93 @@ async def _probe_pg(
         service, "psql", "-U", user, "-d", database, "-tAc", "SELECT 1",
     ]
     ok, out = await migrator._run_cmd(cmd, cwd=str(PASARGUARD_DIR), timeout=25)
+    return ok and "1" in (out or "")
+
+
+async def _pg_in_container_is_trust(
+    migrator,
+    service: str,
+    user: str,
+    database: str,
+) -> bool:
+    """True when the container local socket accepts a deliberately wrong password.
+
+    Official Postgres/Timescale images use ``host all all 127.0.0.1/32 trust`` for
+    the first loopback rule, so in-container probes cannot validate credentials.
+    """
+    bogus = f"pgmig-trust-check-{os.getpid()}-{id(migrator)}"
+    return await _probe_pg(migrator, service, user, bogus, database)
+
+
+def _parse_published_port(ports_json: str, container_port: str = "5432/tcp") -> tuple[str, str]:
+    """Host IP/port published for a container port. Prefers loopback bindings."""
+    import json
+
+    try:
+        ports = json.loads(ports_json or "{}") or {}
+    except (ValueError, TypeError):
+        return "", ""
+    fallback = ("", "")
+    for binding in ports.get(container_port) or []:
+        if not isinstance(binding, dict):
+            continue
+        host_ip = str(binding.get("HostIp") or "").strip()
+        host_port = str(binding.get("HostPort") or "").strip()
+        if not host_port:
+            continue
+        if host_ip in ("", "0.0.0.0", "::", "[::]"):
+            host_ip = "127.0.0.1"
+        if host_ip == "127.0.0.1":
+            return host_ip, host_port
+        if not fallback[1]:
+            fallback = (host_ip, host_port)
+    return fallback
+
+
+async def _resolve_pg_host_endpoint(migrator, service: str) -> tuple[str, str, str]:
+    """Return ``(image, host, port)`` for a TCP probe matching alembic/copy."""
+    ok, cid = await migrator._run_cmd(
+        ["docker", "compose", "ps", "-q", service],
+        cwd=str(PASARGUARD_DIR),
+        timeout=30,
+    )
+    container = (cid or "").strip().splitlines()[0].strip() if ok else ""
+    if not container:
+        return "", "", ""
+    ok_img, image_out = await migrator._run_cmd(
+        ["docker", "inspect", "--format", "{{.Config.Image}}", container],
+        timeout=30,
+    )
+    image = (image_out or "").strip().splitlines()[0].strip() if ok_img else ""
+    ok_ports, ports_out = await migrator._run_cmd(
+        ["docker", "inspect", "--format", "{{json .NetworkSettings.Ports}}", container],
+        timeout=30,
+    )
+    host, port = _parse_published_port(ports_out or "") if ok_ports else ("", "")
+    return image, host, port
+
+
+async def _probe_pg_via_host_tcp(
+    migrator,
+    *,
+    image: str,
+    host: str,
+    port: str,
+    user: str,
+    password: str,
+    database: str,
+) -> bool:
+    """Authenticate the way the panel/alembic does: host → published TCP port."""
+    if not image or not host or not port or not password:
+        return False
+    cmd = [
+        "docker", "run", "--rm", "--network", "host",
+        "--entrypoint", "psql",
+        "-e", f"PGPASSWORD={password}",
+        image,
+        "-h", host, "-p", port, "-U", user, "-d", database, "-tAc", "SELECT 1",
+    ]
+    ok, out = await migrator._run_cmd(cmd, timeout=90)
     return ok and "1" in (out or "")
 
 
@@ -275,9 +365,19 @@ async def resolve_live_admin_connection(
         users = postgres_admin_users(text)
         passwords = postgres_password_candidates(text)
         probe_db = "postgres"
+        trust_mode: bool | None = None
+        host_endpoint: tuple[str, str, str] | None = None
+        tcp_failures = 0
+
         for user in users:
             for pwd in passwords:
-                if await _probe_pg(migrator, service, user, pwd, probe_db):
+                if not await _probe_pg(migrator, service, user, pwd, probe_db):
+                    continue
+                if trust_mode is None:
+                    trust_mode = await _pg_in_container_is_trust(
+                        migrator, service, user, probe_db,
+                    )
+                if not trust_mode:
                     conn = {
                         "db_type": db_type,
                         "user": user,
@@ -288,6 +388,53 @@ async def resolve_live_admin_connection(
                     }
                     migrator.job.log(f"PostgreSQL auth OK as {user} (direct port 5432)")
                     return conn
+
+                # Local socket is trust — only a host/TCP login proves the password.
+                if host_endpoint is None:
+                    host_endpoint = await _resolve_pg_host_endpoint(migrator, service)
+                    image, host, port = host_endpoint
+                    if not (image and host and port):
+                        raise RuntimeError(
+                            "PostgreSQL container uses local trust auth, but the published "
+                            "host port/image could not be resolved — refusing to accept an "
+                            "unverified password. Check that the DB service publishes 5432 "
+                            "and POSTGRES_PASSWORD / DB_PASSWORD match the running cluster."
+                        )
+                    migrator.job.log(
+                        f"PostgreSQL local socket is trust — verifying passwords via "
+                        f"TCP {host}:{port}..."
+                    )
+                image, host, port = host_endpoint
+                if await _probe_pg_via_host_tcp(
+                    migrator,
+                    image=image,
+                    host=host,
+                    port=port,
+                    user=user,
+                    password=pwd,
+                    database=probe_db,
+                ):
+                    conn = {
+                        "db_type": db_type,
+                        "user": user,
+                        "password": pwd,
+                        "database": db_name,
+                        "host": host,
+                        "port": port,
+                    }
+                    migrator.job.log(
+                        f"PostgreSQL auth OK as {user} via TCP {host}:{port}"
+                    )
+                    return conn
+                tcp_failures += 1
+
+        if trust_mode and tcp_failures:
+            raise RuntimeError(
+                "PostgreSQL/TimescaleDB authentication failed over TCP — "
+                "in-container probes are trust-only and every .env password candidate "
+                "was rejected by the published host port. Fix POSTGRES_PASSWORD / "
+                "DB_PASSWORD to match the running container, then retry."
+            )
         raise RuntimeError(
             "PostgreSQL/TimescaleDB authentication failed — "
             "POSTGRES_PASSWORD and DB_PASSWORD in /opt/pasarguard/.env do not match the running container"

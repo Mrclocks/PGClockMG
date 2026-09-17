@@ -14,6 +14,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -30,6 +32,9 @@ def _expected_path(source_db: str, target_db: str) -> str:
             return "sqlite_same"
         return "sqlite_then_convert"
     if source_db in ("mysql", "mariadb"):
+        # Non-sqlite → sqlite is rejected early (same as migration_strategy / can_convert).
+        if target_db == "sqlite":
+            return "unsupported"
         if soft_db_family(source_db, target_db) or source_db == target_db:
             return "mysql_same_family"
         return "mysql_two_phase"
@@ -44,12 +49,12 @@ def test_routing_matrix_matches_soft_family():
         ("sqlite", "mariadb"): "sqlite_then_convert",
         ("sqlite", "postgresql"): "sqlite_then_convert",
         ("sqlite", "timescaledb"): "sqlite_then_convert",
-        ("mysql", "sqlite"): "mysql_two_phase",  # soft_family false; two_phase (may be unsupported downstream)
+        ("mysql", "sqlite"): "unsupported",
         ("mysql", "mysql"): "mysql_same_family",
         ("mysql", "mariadb"): "mysql_same_family",
         ("mysql", "postgresql"): "mysql_two_phase",
         ("mysql", "timescaledb"): "mysql_two_phase",
-        ("mariadb", "sqlite"): "mysql_two_phase",
+        ("mariadb", "sqlite"): "unsupported",
         ("mariadb", "mysql"): "mysql_same_family",
         ("mariadb", "mariadb"): "mysql_same_family",
         ("mariadb", "postgresql"): "mysql_two_phase",
@@ -261,8 +266,13 @@ def test_sqlite_paths_call_preboot_and_long_wait():
 def test_mysql_mariadb_paths_matrix():
     for src in ("mysql", "mariadb"):
         for tgt in PASARGUARD_TARGETS:
-            calls = _run(_exercise_mysql_same_or_two_phase(src, tgt))
             path = _expected_path(src, tgt)
+            if path == "unsupported":
+                with pytest.raises(RuntimeError, match="sqlite"):
+                    _run(_exercise_mysql_same_or_two_phase(src, tgt))
+                print(f"OK: {src}→{tgt} path=unsupported (early reject)")
+                continue
+            calls = _run(_exercise_mysql_same_or_two_phase(src, tgt))
             if path == "mysql_same_family":
                 assert calls["import"] == 1, f"{src}→{tgt}"
                 assert calls["cross"] == 0, f"{src}→{tgt}"

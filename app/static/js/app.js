@@ -425,7 +425,6 @@ function updateSourceCredentialsVisibility() {
   if (!box) return;
   // Hiddify JSON migrate does not read source MySQL — no password UI
   const needs = dbNeedsPassword(state.sourceDb)
-    && state.selectedPanel?.id !== 'remnawave'
     && state.selectedPanel?.id !== 'hiddify';
   box.classList.toggle('hidden', !needs);
   if (needs) {
@@ -678,14 +677,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   const sel = document.getElementById('uploadSelectText');
   if (drag) drag.textContent = t('step2.uploadDrag');
   if (sel) sel.textContent = t('step2.uploadSelect');
-  const rw1 = document.querySelector('#remnawaveFields .form-group:nth-child(1) label');
-  const rw2 = document.querySelector('#remnawaveFields .form-group:nth-child(2) label');
-  if (rw1) rw1.textContent = t('step2.remnawaveUrl');
-  if (rw2) rw2.textContent = t('step2.remnawaveToken');
-  const rwUrl = document.getElementById('remnawaveUrl');
-  const rwTok = document.getElementById('remnawaveToken');
-  if (rwUrl) rwUrl.placeholder = t('step2.remnawaveUrlPh');
-  if (rwTok) rwTok.placeholder = t('step2.remnawaveTokenPh');
   const footerGithub = document.getElementById('footerGithubLabel');
   if (footerGithub) footerGithub.textContent = t('footer.star');
   if (typeof applySocialI18n === 'function') applySocialI18n();
@@ -782,15 +773,10 @@ async function loadSystemCheck() {
   try {
     const data = await fetchJson('/api/system-check', {}, { retries: 2, timeoutMs: 45000 });
     applySystemCheck(data);
-    renderGlobalChecks();
     if (state.currentStep === 3) renderDetectedTargetDb();
     updateStepButtons();
   } catch (e) {
     console.error(e);
-    const el = document.getElementById('globalChecks');
-    if (el) {
-      el.innerHTML += `<div class="check-item"><span class="check-icon">${statusIcon(false)}</span><div><div>Server check</div><div class="check-detail">${e.message}</div></div></div>`;
-    }
   }
 }
 
@@ -806,10 +792,6 @@ function showStepBlock(step, msg) {
   }
 }
 
-function canProceedStep0() {
-  // Pre-flight is handled in welcome/pg phases now.
-  return null;
-}
 
 function canProceedStep1() {
   if (!state.selectedPanel) return t('block.noPanel');
@@ -832,16 +814,10 @@ function canProceedStep2() {
   } else if (!state.sourceDb) {
     return t('block.noSourceDb');
   }
-  if (panel?.id === 'remnawave') {
-    const url = document.getElementById('remnawaveUrl')?.value?.trim();
-    const token = document.getElementById('remnawaveToken')?.value?.trim();
-    if (!url || !token) return t('block.remnawaveCreds');
-  }
   const needsPwd = dbNeedsPassword(state.sourceDb);
   const analysis = state.bundleStatus?.analysis || state.uploadInfo?.analysis;
   if (
     needsPwd
-    && panel?.id !== 'remnawave'
     && panel?.id !== 'hiddify'
     && !hasDbCredentials('source')
   ) {
@@ -1036,8 +1012,6 @@ function buildMigrationBody() {
     install_redirect: document.getElementById('installRedirect')?.checked ?? true,
     relocate_inbound_certs: document.getElementById('chkRelocateInboundCerts')?.checked ?? false,
     skip_bad_user_rows: document.getElementById('chkSkipBadUserRows')?.checked ?? true,
-    remnawave_url: document.getElementById('remnawaveUrl')?.value || null,
-    remnawave_token: document.getElementById('remnawaveToken')?.value || null,
     marzban_mode: 'fresh',
   };
 }
@@ -1165,8 +1139,6 @@ function renderSourceDbs() {
   const panel = state.selectedPanel;
   if (!panel) return goStep(1);
 
-  document.getElementById('remnawaveFields').classList.toggle('hidden', panel.id !== 'remnawave');
-
   if (panel.id === 'marzban') {
     const h2 = document.querySelector('#step2 h2');
     const desc = document.querySelector('#step2 .desc');
@@ -1230,7 +1202,6 @@ async function renderTargetDbs() {
 
   const h2 = document.querySelector('#step3 h2');
   const desc = document.querySelector('#step3 .desc');
-  const crossEl = document.getElementById('crossDbWarning');
 
   if (panel.id === 'marzban') {
     if (h2) h2.textContent = t('step3.marzbanH2');
@@ -2072,7 +2043,6 @@ async function renderUploadSection() {
 
 async function uploadSlotFile(slot, file) {
   const status = document.getElementById('uploadStatus');
-  const inventory = document.getElementById('uploadInventory');
   // Primary dropzone (zip OR single 3X-UI db) uses the same progress UI
   const isPrimaryZone = slot === 'bundle_zip' || slot === primaryUploadSlot();
   const progressIds = {
@@ -2124,12 +2094,6 @@ async function uploadSlotFile(slot, file) {
 
     const bs = data.bundle_status || {};
     const ok = !!bs.complete;
-
-    if (bs.analysis) {
-      renderUploadInventory({ analysis: bs.analysis });
-    } else {
-      inventory?.classList.add('hidden');
-    }
 
     applyBundleAnalysis(bs);
     renderUploadSection();
@@ -2193,10 +2157,3 @@ async function uploadFile(file) {
   return uploadSlotFile('bundle_zip', file);
 }
 
-function renderUploadInventory(_data) {
-  // Backup contents / inventory table intentionally hidden.
-  const el = document.getElementById('uploadInventory');
-  if (!el) return;
-  el.innerHTML = '';
-  el.classList.add('hidden');
-}

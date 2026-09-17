@@ -1,4 +1,4 @@
-> 🚀 **`v4.5.10`** — permanent hosts restore (strip dump data, reload after alembic)
+> 🚀 **`v4.6.0`** — harden migrate/restore + backup stream UX; remove Remnawave; dead-code cleanup
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
@@ -64,7 +64,7 @@ URL: `http://SERVER_IP:7000/?token=...`
 
 ### Features
 - ✅ Restore PasarGuard backups (including DB engine changes)
-- ✅ Migrate Marzban / 3x-ui / Hiddify / Remnawave
+- ✅ Migrate Marzban / 3x-ui / Hiddify
 - ✅ Receive streamed backup → **manual confirm** → restore
 - ✅ TimescaleDB auto-heal
 
@@ -112,7 +112,8 @@ journalctl -u pg-backup -f
 ```
 
 Pre-v4 restore point: `restore-point-pre-v4.0.0`  
-Pre-v4.5.0 restore point: `restore-point-pre-v4.5.0`
+Pre-v4.5.0 restore point: `restore-point-pre-v4.5.0`  
+Pre-v4.6.0 restore point: `restore-point-pre-v4.6.0`
 
 ---
 

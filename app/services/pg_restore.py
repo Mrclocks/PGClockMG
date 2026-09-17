@@ -1025,7 +1025,14 @@ def _sniff_sql_dump(path: Path) -> tuple[int, str | None]:
     elif "-- postgresql database dump" in low or "copy public." in low or "set statement_timeout" in low:
         engine = "postgresql"
         score += 6
-    elif "-- mariadb dump" in low or "engine=aria" in low:
+    elif (
+        "-- mariadb dump" in low
+        or "mariadb dump" in low
+        or "mariadb-dump" in low
+        or "engine=aria" in low
+        or "uca1400" in low
+        or "sandbox mode" in low
+    ):
         engine = "mariadb"
         score += 6
     elif "-- mysql dump" in low or "engine=innodb" in low or "lock tables" in low or "/*!40101" in low:
@@ -2654,50 +2661,6 @@ async def _prepare_panel_boot_after_finalize(
     return verify_pass, verify_user, verify_db
 
 
-async def _heal_panel_auth_if_needed(job: MigrationJob, password: str, user: str, db_name: str, db_type: str) -> None:
-    """If panel crash-loops on SASL/password, re-sync roles and restart."""
-    from app.services.pasarguard_ops import panel_compose_service
-
-    if db_type not in ("postgresql", "timescaledb", "mysql", "mariadb"):
-        return
-    panel = panel_compose_service()
-    ok, logs = await _run(
-        job,
-        _compose_argv("logs", "--tail", "80", panel),
-        cwd=str(PASARGUARD_DIR),
-        timeout=40,
-    )
-    blob = logs or ""
-    if not is_auth_failure_text(blob):
-        return
-    job.log("Detected DB authentication failure in panel logs — auto-healing credentials...")
-    if db_type in ("postgresql", "timescaledb"):
-        svc = await _detect_db_container(job, db_type)
-        if svc:
-            await _sync_pg_role_passwords(job, svc, password, user or "pasarguard", db_name or "pasarguard")
-    elif db_type in ("mysql", "mariadb"):
-        svc = await _detect_db_container(job, db_type)
-        if svc and password:
-            await _sync_mysql_passwords(
-                job, svc, password,
-                user=user or "pasarguard",
-                db_type=db_type,
-                db_name=db_name or "pasarguard",
-            )
-    await _compose(job, "up", "-d", "--force-recreate", panel, timeout=120)
-    await asyncio.sleep(6)
-    ok2, logs2 = await _run(
-        job,
-        _compose_argv("logs", "--tail", "40", panel),
-        cwd=str(PASARGUARD_DIR),
-        timeout=40,
-    )
-    if is_auth_failure_text(logs2 or ""):
-        job.log("Auth still failing after heal — check DB_PASSWORD / POSTGRES_PASSWORD in /opt/pasarguard/.env")
-    else:
-        job.log("Auth heal applied — panel should start cleanly")
-
-
 async def _maybe_cross_db_after_restore(
     job: MigrationJob,
     params: dict,
@@ -3179,10 +3142,6 @@ def _count_sqlite_table(path: Path, table: str) -> int:
         return 0
 
 
-def _count_sqlite_users(path: Path) -> int:
-    return _count_sqlite_table(path, "users")
-
-
 def _snapshot_sqlite_counts(path: Path) -> dict[str, int]:
     from app.services.native_migration.copy_core import VERIFY_TABLES
 
@@ -3285,16 +3244,6 @@ async def _count_pg_table(
         if line.isdigit():
             return int(line)
     return -1
-
-
-async def _count_pg_users(
-    job: MigrationJob,
-    svc: str,
-    password: str,
-    user: str,
-    db_name: str,
-) -> int:
-    return await _count_pg_table(job, svc, password, user, db_name, "users")
 
 
 async def _recover_hosts_if_missing(

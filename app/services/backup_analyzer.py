@@ -212,8 +212,19 @@ def analyze_upload_directory(upload_dir: Path, vault_scope: str | None = None) -
         elif paths.get("hiddify_json") or panel_hint == "hiddify":
             detected_source_db = "mysql"
         elif paths["sql"]:
-            low = paths["sql"].lower()
-            detected_source_db = "mariadb" if "mariadb" in low else "mysql"
+            sql_path = Path(paths["sql"])
+            low_name = paths["sql"].lower()
+            detected_source_db = "mariadb" if "mariadb" in low_name else "mysql"
+            # Prefer content sniff over filename — real mariadb-dump often says "MySQL dump"
+            # but still carries MariaDB markers (sandbox mode / uca1400 / ARIA).
+            try:
+                from app.services.pg_restore import _sniff_sql_dump
+
+                _score, sniffed = _sniff_sql_dump(sql_path)
+                if sniffed in ("mysql", "mariadb"):
+                    detected_source_db = sniffed
+            except Exception:
+                pass
 
     env_summary = extract_env_summary(env_text) if env_text else None
     password_candidates = (

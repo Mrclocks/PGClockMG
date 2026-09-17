@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 
 from app.config import UPLOAD_DIR
-from app.services.backup_net import UnsafeDestinationError, normalize_public_http_url
+from app.services.backup_net import UnsafeDestinationError, normalize_stream_dest_url
 
 _LOCK = threading.RLock()
 _LISTENERS: dict[str, dict[str, Any]] = {}
@@ -146,7 +146,12 @@ def get_listener(token: str) -> dict | None:
     with _LOCK:
         _purge_expired()
         info = _LISTENERS.get(token)
-        return dict(info) if info else None
+        if not info:
+            return None
+        # Keep listening tokens alive while the UI polls (large transfers need headroom).
+        if info.get("status") == "listening":
+            info["expires_at"] = time.time() + LISTENER_TTL_SEC
+        return dict(info)
 
 
 def mark_listener_consumed(token: str) -> None:
@@ -157,7 +162,7 @@ def mark_listener_consumed(token: str) -> None:
 
 
 def _normalize_dest_url(dest_base_url: str) -> str:
-    return normalize_public_http_url(dest_base_url)
+    return normalize_stream_dest_url(dest_base_url)
 
 
 async def receive_stream(
@@ -214,6 +219,7 @@ async def receive_stream(
                     with _LOCK:
                         if token in _LISTENERS:
                             _LISTENERS[token]["bytes_received"] = received
+                            _LISTENERS[token]["expires_at"] = time.time() + LISTENER_TTL_SEC
                 if expected_size and received > expected_size + (1024 * 1024):
                     raise RuntimeError("stream_too_large")
 
@@ -221,6 +227,7 @@ async def receive_stream(
         with _LOCK:
             if token in _LISTENERS:
                 _LISTENERS[token]["bytes_received"] = received
+                _LISTENERS[token]["expires_at"] = time.time() + LISTENER_TTL_SEC
 
         digest = hasher.hexdigest()
         if expected_sha256 and digest.lower() != expected_sha256.lower():
@@ -231,6 +238,19 @@ async def receive_stream(
             raise RuntimeError("empty_stream")
 
         os.replace(partial, dest)
+
+        # Fail at transfer time if the zip is corrupt / missing required members —
+        # do not mark ready and wait for restore analyze.
+        from app.services.backup_engine import verify_backup_archive
+
+        verified = verify_backup_archive(dest, expected_sha256=digest)
+        if not verified.get("ok"):
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise RuntimeError(f"stream_zip_invalid:{verified.get('error') or 'verify_failed'}")
+
         meta = {
             "upload_id": upload_id,
             "filename": info.get("filename") or safe_name,
@@ -238,6 +258,11 @@ async def receive_stream(
             "sha256": digest,
             "source": "stream",
             "received_at": time.time(),
+            "integrity": {
+                "ok": True,
+                "crc_ok": bool(verified.get("crc_ok")),
+                "members": verified.get("members"),
+            },
         }
         (dest_dir / "stream_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
@@ -250,6 +275,7 @@ async def receive_stream(
                     "error": None,
                     "partial_path": None,
                     "sha256": digest,
+                    "expires_at": time.time() + LISTENER_TTL_SEC,
                 })
         return {"ok": True, "upload_id": upload_id, "size_bytes": received, "sha256": digest}
     except Exception as exc:
@@ -353,3 +379,150 @@ def push_backup_file(
         return {"ok": True, "response": body, "sha256": sha256, "size_bytes": size, "dest": url}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+def start_create_and_stream_async(
+    *,
+    dest_base_url: str,
+    token: str,
+) -> dict:
+    """Create a fresh backup then push it — one job the UI can poll end-to-end.
+
+    Existing create / stream-send endpoints remain unchanged; this only adds a
+    combined path. Failures during create never delete older backups.
+    """
+    # Validate destination before starting create (fail fast, no orphan work).
+    try:
+        dest = normalize_stream_dest_url(dest_base_url)
+    except UnsafeDestinationError:
+        raise
+    except ValueError as exc:
+        raise UnsafeDestinationError(str(exc)) from exc
+    tok = (token or "").strip()
+    if not tok:
+        raise ValueError("token_missing")
+
+    job_id = secrets.token_hex(6)
+    job = {
+        "job_id": job_id,
+        "status": "queued",  # queued | creating | connecting | sending | success | error
+        "phase": "queued",
+        "bytes_sent": 0,
+        "bytes_total": 0,
+        "error": None,
+        "result": None,
+        "backup_id": None,
+        "filename": None,
+        "started_at": time.time(),
+    }
+    with _PUSH_LOCK:
+        _PUSH_JOBS[job_id] = job
+
+    def _run() -> None:
+        from app.services.backup_engine import create_backup_bundle, resolve_backup_path
+
+        def on_progress(sent: int, total: int, *, phase: str = "sending") -> None:
+            with _PUSH_LOCK:
+                j = _PUSH_JOBS.get(job_id)
+                if not j:
+                    return
+                j["status"] = phase
+                j["phase"] = phase
+                j["bytes_sent"] = int(sent)
+                j["bytes_total"] = int(total)
+
+        try:
+            with _PUSH_LOCK:
+                j = _PUSH_JOBS.get(job_id) or job
+                j["status"] = "creating"
+                j["phase"] = "creating"
+                _PUSH_JOBS[job_id] = j
+
+            created = create_backup_bundle(trigger="manual+stream")
+            if (created or {}).get("status") != "success":
+                with _PUSH_LOCK:
+                    j = _PUSH_JOBS.get(job_id) or job
+                    j["status"] = "error"
+                    j["phase"] = "creating"
+                    j["error"] = (created or {}).get("error") or "backup_create_failed"
+                    j["result"] = {"create": created}
+                    _PUSH_JOBS[job_id] = j
+                return
+
+            backup_id = created.get("backup_id")
+            path = resolve_backup_path(str(backup_id or ""))
+            if not path:
+                with _PUSH_LOCK:
+                    j = _PUSH_JOBS.get(job_id) or job
+                    j["status"] = "error"
+                    j["error"] = "backup_file_missing_after_create"
+                    j["result"] = {"create": created}
+                    _PUSH_JOBS[job_id] = j
+                return
+
+            sha = None
+            sidecar = path.with_suffix(path.suffix + ".json")
+            if sidecar.is_file():
+                try:
+                    meta = json.loads(sidecar.read_text(encoding="utf-8"))
+                    sha = (meta or {}).get("sha256")
+                except Exception:
+                    sha = None
+
+            with _PUSH_LOCK:
+                j = _PUSH_JOBS.get(job_id) or job
+                j["backup_id"] = backup_id
+                j["filename"] = path.name
+                j["bytes_total"] = int(path.stat().st_size) if path.is_file() else 0
+                j["status"] = "connecting"
+                j["phase"] = "connecting"
+                j["result"] = {"create": {
+                    "backup_id": backup_id,
+                    "filename": path.name,
+                    "size_bytes": created.get("size_bytes"),
+                }}
+                _PUSH_JOBS[job_id] = j
+
+            result = push_backup_file(
+                path,
+                dest_base_url=dest,
+                token=tok,
+                sha256=sha,
+                progress_cb=on_progress,
+            )
+            with _PUSH_LOCK:
+                j = _PUSH_JOBS.get(job_id) or job
+                if result.get("ok"):
+                    j["status"] = "success"
+                    j["phase"] = "success"
+                    j["bytes_sent"] = int(result.get("size_bytes") or j.get("bytes_total") or 0)
+                    create_meta = (j.get("result") or {}).get("create") or {}
+                    j["result"] = {"create": create_meta, "stream": result}
+                    j["error"] = None
+                else:
+                    j["status"] = "error"
+                    j["phase"] = "sending"
+                    j["error"] = result.get("error") or "stream_failed"
+                    create_meta = (j.get("result") or {}).get("create") or {}
+                    j["result"] = {"create": create_meta, "stream": result}
+                _PUSH_JOBS[job_id] = j
+        except UnsafeDestinationError as exc:
+            with _PUSH_LOCK:
+                j = _PUSH_JOBS.get(job_id) or job
+                j["status"] = "error"
+                j["error"] = str(exc)
+                _PUSH_JOBS[job_id] = j
+        except Exception as exc:
+            with _PUSH_LOCK:
+                j = _PUSH_JOBS.get(job_id) or job
+                j["status"] = "error"
+                j["error"] = str(exc)
+                _PUSH_JOBS[job_id] = j
+
+    threading.Thread(target=_run, daemon=True, name=f"create-stream-{job_id}").start()
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "phase": "queued",
+        "bytes_total": 0,
+    }

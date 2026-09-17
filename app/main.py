@@ -40,7 +40,7 @@ from app.services.auth import (
 )
 from app.config import WEB_PORT
 
-APP_VERSION = "4.5.10"
+APP_VERSION = "4.6.0"
 
 
 @asynccontextmanager
@@ -623,13 +623,17 @@ async def api_stream_listen():
     """Destination: prepare a one-time token so a source can push a backup zip."""
     from app.services.backup_stream import create_listener
     info = create_listener(label="wizard")
+    suggested_base_url = f"http://{_server_ip()}:{WEB_PORT}"
+    token = info["token"]
     return {
-        "token": info["token"],
+        "token": token,
         "expires_in_sec": int(info["expires_at"] - info["created_at"]),
-        "receive_path": f"/api/stream/receive/{info['token']}",
+        "receive_path": f"/api/stream/receive/{token}",
+        "suggested_base_url": suggested_base_url,
+        "copy_pair": f"{suggested_base_url}\n{token}",
         "hint": {
-            "en": "On the source backup panel: Stream → paste this server URL and token.",
-            "fa": "روی پنل بکاپ مبدأ: استریم → آدرس این سرور و توکن را وارد کنید.",
+            "en": "On the source backup panel: Stream → paste this server URL and token (or copy both).",
+            "fa": "روی پنل بکاپ مبدأ: استریم → آدرس این سرور و توکن را وارد کنید (یا هر دو را یکجا کپی کنید).",
             "ru": "На панели бэкапа источника: Stream → URL этого сервера и токен.",
         },
     }

@@ -1,12 +1,10 @@
-"""Phase-2 hardening: safe zip extract, Remnawave SSRF, setup-token fail-closed."""
+"""Phase-2 hardening: safe zip extract, setup-token fail-closed."""
 
 from __future__ import annotations
 
-import asyncio
 import io
 import zipfile
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -16,9 +14,6 @@ from app.services.backup_auth import (
     setup_token_is_required,
     verify_setup_token,
 )
-from app.services.backup_net import UnsafeDestinationError
-from app.services.migrators.base import MigrationJob
-from app.services.migrators.remnawave import RemnawaveMigrator
 from app.services.upload_bundle import init_bundle, prepare_bundle_workspace, save_bundle_slot
 
 
@@ -69,7 +64,6 @@ def test_bundle_workspace_rejects_zip_slip(tmp_path, monkeypatch):
     assert "Unsafe zip entry" in (result.get("slot_meta") or {}).get("error", "")
 
 
-
 def test_prepare_bundle_uses_safe_extract_for_db_zip(tmp_path, monkeypatch):
     """prepare_bundle_workspace must use safe_extract (zip slip raises)."""
     monkeypatch.setenv("PG_MIGRATOR_HOME", str(tmp_path))
@@ -99,7 +93,6 @@ def test_prepare_bundle_uses_safe_extract_for_db_zip(tmp_path, monkeypatch):
     assert not (ub.bundle_dir(bid) / "pwned.txt").exists()
 
 
-
 def test_setup_token_fail_closed(tmp_path, monkeypatch):
     monkeypatch.setenv("PG_BACKUP_HOME", str(tmp_path))
     monkeypatch.setenv("PG_MIGRATOR_HOME", str(tmp_path))
@@ -117,22 +110,3 @@ def test_setup_token_fail_closed(tmp_path, monkeypatch):
     assert backup_auth.setup_token_is_required() is True
     assert backup_auth.verify_setup_token(tok) is True
     assert backup_auth.verify_setup_token("wrong-token-value-here!!!!!") is False
-
-
-def test_remnawave_blocks_private_url(monkeypatch):
-    job = MigrationJob()
-    mig = RemnawaveMigrator(job, {})
-
-    async def _run():
-        with pytest.raises(RuntimeError, match="not allowed|Remnawave URL"):
-            await mig.run({
-                "remnawave_url": "http://127.0.0.1:8000",
-                "remnawave_token": "tok",
-            })
-        with pytest.raises(RuntimeError, match="not allowed|Remnawave URL"):
-            await mig.run({
-                "remnawave_url": "http://169.254.169.254/latest/meta-data",
-                "remnawave_token": "tok",
-            })
-
-    asyncio.run(_run())

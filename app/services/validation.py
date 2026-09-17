@@ -80,14 +80,11 @@ def validate_migration(params: dict) -> dict:
         errors.extend(_validate_xui(upload_path, bundle_status))
     elif panel_id == "hiddify":
         errors.extend(_validate_hiddify(upload_path, bundle_status, upload_analysis))
-    elif panel_id == "remnawave":
-        if not params.get("remnawave_url") or not params.get("remnawave_token"):
-            errors.append(_msg("Remnawave URL and API token required", "URL و Token رمناوی لازم است", "Нужны URL и токен Remnawave"))
     elif panel_id == "pasarguard":
         if not (PASARGUARD_DATA / "db.sqlite3").exists() and not upload_path:
             errors.append(_msg("PasarGuard database or backup upload required", "دیتابیس یا بکاپ PasarGuard لازم است", "Нужна БД или копия PasarGuard"))
 
-    if source_db != target_db and panel_id not in ("hiddify", "3x-ui", "remnawave"):
+    if source_db != target_db and panel_id not in ("hiddify", "3x-ui"):
         errors.extend(validate_db_credentials(params, "source"))
 
     # Hiddify JSON import runs inside PasarGuard container — no wizard DB passwords

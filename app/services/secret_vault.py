@@ -68,10 +68,6 @@ def get_primary(scope: str) -> str | None:
         return str(primary) if primary else None
 
 
-def has_primary(scope: str) -> bool:
-    return bool(get_primary(scope))
-
-
 def clear_scope(scope: str) -> None:
     with _LOCK:
         _STORE.pop(scope, None)
@@ -103,8 +99,4 @@ def apply_vault_passwords(params: dict) -> dict:
         held = get_primary(LIVE_PASARGUARD)
         if held:
             out["target_db_password"] = held
-    # Remnawave token may also be stored as source password in some flows.
-    if (out.get("source_panel") or "").lower() == "remnawave":
-        if not (out.get("remnawave_token") or "").strip() and (out.get("source_db_password") or "").strip():
-            out["remnawave_token"] = out["source_db_password"]
     return out

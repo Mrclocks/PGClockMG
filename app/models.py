@@ -44,18 +44,7 @@ class MigrationRequest(BaseModel):
     install_redirect: bool = True
     relocate_inbound_certs: bool = False
     skip_bad_user_rows: bool = True
-    remnawave_url: Optional[str] = None
-    remnawave_token: Optional[str] = None
     marzban_mode: Optional[Literal["fresh"]] = "fresh"
-
-
-class MigrationStatus(BaseModel):
-    job_id: str
-    status: Literal["pending", "running", "success", "error"]
-    progress: int = 0
-    message: str = ""
-    logs: List[str] = []
-    result: Optional[dict] = None
 
 
 class BackupCleanupRequest(BaseModel):

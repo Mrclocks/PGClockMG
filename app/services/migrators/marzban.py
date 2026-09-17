@@ -197,6 +197,14 @@ class MarzbanMigrator(BaseMigrator):
         """Marzban MySQL/MariaDB → target with panel-boot upgrade + restore-grade convert."""
         same_family = soft_db_family(source_db, target_db) or source_db == target_db
 
+        # Defense in depth: validation already blocks this, but fail early with a clear
+        # message if called directly (migration_strategy would return unsupported late).
+        if target_db == "sqlite" and source_db != "sqlite":
+            raise RuntimeError(
+                f"Cannot convert Marzban {source_db} → sqlite. "
+                "Install PasarGuard with MySQL/MariaDB/PostgreSQL/TimescaleDB, then retry."
+            )
+
         if same_family:
             self.job.set_progress(40, f"Importing Marzban dump into PasarGuard {target_db}...")
             await self._update_env_paths(source_db, target_db)

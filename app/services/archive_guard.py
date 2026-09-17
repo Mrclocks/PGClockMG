@@ -79,14 +79,6 @@ def allowed_upload_bytes(allow_override: bool = False) -> int:
     return MAX_UPLOAD_BYTES
 
 
-def preflight_zip_file(path: str | Path) -> ZipPreflight:
-    try:
-        with zipfile.ZipFile(path, "r") as zf:
-            return preflight_zip(zf)
-    except zipfile.BadZipFile as e:
-        raise ValueError("Bad zip file") from e
-
-
 def preflight_zip(zf: zipfile.ZipFile) -> ZipPreflight:
     infos = zf.infolist()
     total_uncompressed = 0

@@ -19,7 +19,10 @@ def test_filter_timescaledb_extension_in_staging():
         "INSERT INTO users VALUES (1);",
     ])
     out = _filter_timescaledb_extension_sql(sql)
-    assert "timescaledb" not in out.lower()
+    # Extension DDL must be stripped; catalog seed-clear preamble may still
+    # mention _timescaledb% namespaces (intentional for TS→TS staging).
+    assert "CREATE EXTENSION" not in out.upper()
+    assert "DROP EXTENSION" not in out.upper()
     assert "CREATE TABLE users" in out
     assert "INSERT INTO users" in out
     print("OK: staging filter timescaledb extension")

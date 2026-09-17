@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.5.10`** — بازیابی دائمی hosts (جدا از dump، لود بعد از alembic)
+> 🚀 **`v4.6.0`** — harden migrate/restore + backup stream UX؛ حذف Remnawave؛ پاکسازی کد مرده
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
@@ -73,7 +73,7 @@ sudo PG_MIGRATOR_ACTION=install-backup PG_BACKUP_PORT=7001 bash -c "$(curl -fsSL
 
 ### قابلیت‌ها
 - ✅ ریستور بکاپ PasarGuard (حتی با تغییر DB)
-- ✅ مهاجرت Marzban / 3x-ui / Hiddify / Remnawave
+- ✅ مهاجرت Marzban / 3x-ui / Hiddify
 - ✅ دریافت استریم بکاپ و ریستور با تأیید دستی
 - ✅ TimescaleDB heal خودکار
 
@@ -131,7 +131,8 @@ sudo bash -c "$(curl -fsSL 'https://raw.githubusercontent.com/Mrclocks/PGClockMG
 ```
 
 نقطهٔ ریستور قبل از خانوادهٔ ۴: `restore-point-pre-v4.0.0`  
-نقطهٔ ریستور قبل از `v4.5.0`: `restore-point-pre-v4.5.0`
+نقطهٔ ریستور قبل از `v4.5.0`: `restore-point-pre-v4.5.0`  
+نقطهٔ ریستور قبل از `v4.6.0`: `restore-point-pre-v4.6.0`
 
 ---
 
