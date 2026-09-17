@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.0`** — harden migrate/restore + backup stream UX; remove Remnawave; dead-code cleanup
+> 🚀 **`v4.6.1`** — soft-fail relocate inbound TLS Marzban; nodes disabled by default after migrate
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
