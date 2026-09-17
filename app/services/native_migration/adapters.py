@@ -144,8 +144,12 @@ class SqliteReader(TableReader):
             return -1
 
     def fetch_rows(self, table: str, columns: list[str]) -> Iterable[tuple]:
-        cols = ", ".join(columns)
-        for row in self._conn.execute(f"SELECT {cols} FROM {table}"):
+        # Quote identifiers like MysqlReader/PostgresReader — reserved names break otherwise.
+        safe = "".join(c for c in table if c.isalnum() or c == "_")
+        if safe != table or not safe:
+            raise RuntimeError(f"Unsafe SQLite table name: {table!r}")
+        cols = ", ".join(f'"{c}"' for c in columns)
+        for row in self._conn.execute(f'SELECT {cols} FROM "{safe}"'):
             yield tuple(row[c] for c in columns)
 
     def close(self) -> None:

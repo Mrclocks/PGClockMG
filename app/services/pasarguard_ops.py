@@ -529,10 +529,6 @@ async def _mysql_ddl_status(migrator) -> str | None:
     return None
 
 
-async def _pasarguard_container_running(migrator) -> bool:
-    return (await _pasarguard_container_state(migrator)) == "running"
-
-
 async def _ensure_pasarguard_up(migrator) -> None:
     from app.services.multiworker_stack import start_panel_stack
 
@@ -1488,45 +1484,6 @@ def read_sqlite_alembic_version(sqlite_path: str | Path) -> str | None:
         return None
 
 
-async def read_mysql_alembic_version(migrator, target_db: str) -> str | None:
-    service = resolve_db_service(target_db)
-    if not service:
-        return None
-    conn = _target_conn(migrator)
-    user = conn.get("user") or "root"
-    pwd = conn.get("password") or "password"
-    host = conn.get("host") or "127.0.0.1"
-    db = conn.get("database") or "pasarguard"
-    cwd = str(PASARGUARD_DIR)
-    pwd_q = (pwd or "").replace('"', '\\"')
-    from app.services.native_migration.sql_staging import (
-        _safe_mysql_ident,
-        mysql_shell_e_arg,
-    )
-
-    safe_db = _safe_mysql_ident(db)
-    e_sql = mysql_shell_e_arg(
-        f"SELECT version_num FROM `{safe_db}`.alembic_version LIMIT 1"
-    )
-    for bin_name in mysql_client_bins(target_db, service):
-        cmd = [
-            "docker", "compose", "exec", "-T",
-            "-e", f"MYSQL_PWD={pwd}",
-            service, bin_name, "-u", user, "-h", host, "-N", "-e", e_sql,
-        ]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, cwd=cwd,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        )
-        stdout, _ = await proc.communicate()
-        if proc.returncode != 0:
-            continue
-        version = (stdout or b"").decode("utf-8", errors="ignore").strip()
-        if version:
-            return version
-    return None
-
-
 def read_source_alembic_version(
     source_db: str,
     source_path: str | Path | None,
@@ -1588,36 +1545,6 @@ async def wait_pasarguard_ready(migrator, max_wait: int = 90, strict: bool = Fal
         )
     migrator.job.log("PasarGuard readiness timeout — continuing")
     return False
-
-
-async def start_pasarguard(migrator, wait: bool = True, recreate: bool = False) -> None:
-    from app.services.multiworker_stack import start_panel_stack
-
-    ok, out = await start_panel_stack(migrator.job, force_recreate=recreate)
-    if not ok:
-        raise RuntimeError(f"PasarGuard start failed:\n{(out or '')[-1500:]}")
-    if wait:
-        await wait_pasarguard_ready(migrator)
-
-
-async def restart_pasarguard(migrator, wait: bool = True) -> None:
-    cwd = str(PASARGUARD_DIR)
-    panel = panel_compose_service()
-    prefix = compose_file_prefix()
-    migrator.job.log("Restarting PasarGuard (docker compose)...")
-    ok, _ = await migrator._run_cmd(
-        ["docker", "compose", *prefix, "restart", panel],
-        cwd=cwd,
-        timeout=120,
-    )
-    if not ok:
-        await migrator._run_cmd(
-            ["docker", "compose", *prefix, "up", "-d", "--force-recreate", panel],
-            cwd=cwd,
-            timeout=180,
-        )
-    if wait:
-        await wait_pasarguard_ready(migrator, max_wait=30, strict=False)
 
 
 async def _wait_db_service(migrator, target_db: str, service: str, attempts: int = 20) -> None:
@@ -1734,16 +1661,6 @@ async def read_target_alembic_version(migrator, target_db: str) -> str | None:
     return normalize_alembic_revision(version)
 
 
-async def run_alembic_upgrade(migrator) -> bool:
-    ok, out = await _run_pasarguard_alembic(migrator, "upgrade", "head")
-    if ok:
-        migrator.job.log("Alembic upgrade head completed")
-        return True
-    if out and "already at head" in out.lower():
-        return True
-    return False
-
-
 def resolve_pasarguard_service() -> str:
     """Resolve panel service; overlay wins when multi-worker is active."""
     paths = _active_compose_paths()
@@ -1787,28 +1704,6 @@ def resolve_pasarguard_service() -> str:
     return per_file[0]
 
 
-def _discover_compose_profiles() -> list[str]:
-    text = _compose_text()
-    found: list[str] = []
-    for block in re.finditer(r"profiles:\s*\n((?:[ \t]+-\s*[^\n]+\n?)+)", text):
-        for item in re.findall(r"-\s*['\"]?([^'\"\n]+)['\"]?", block.group(1)):
-            name = item.strip()
-            if name and name not in found:
-                found.append(name)
-    return found
-
-
-def _compose_cmd(*args: str, profiles: list[str] | None = None) -> list[str]:
-    cmd: list[str] = ["docker", "compose", *compose_file_prefix()]
-    for profile in profiles or []:
-        cmd.extend(["--profile", profile])
-    env_file = PASARGUARD_ENV if PASARGUARD_ENV.exists() else PASARGUARD_DIR / ".env"
-    if env_file.exists():
-        cmd.extend(["--env-file", str(env_file)])
-    cmd.extend(args)
-    return cmd
-
-
 def _alembic_output_indicates_success(output: str) -> bool:
     low = (output or "").lower()
     return any(
@@ -1820,13 +1715,6 @@ def _alembic_output_indicates_success(output: str) -> bool:
             "(head)",
         )
     )
-
-
-async def _ensure_pasarguard_image(migrator, service: str | None = None) -> None:
-    svc = service or resolve_pasarguard_service()
-    cwd = str(PASARGUARD_DIR)
-    migrator.job.log(f"Ensuring Docker image for {svc} is available...")
-    await migrator._run_cmd(_compose_cmd("pull", svc), cwd=cwd, timeout=600)
 
 
 def resolve_pasarguard_image() -> str:
@@ -2358,68 +2246,6 @@ async def stamp_alembic_head(migrator) -> bool:
     return False
 
 
-async def _pg_column_exists(migrator, table: str, column: str) -> bool:
-    target_db = migrator.params.get("target_db")
-    service = resolve_db_service(target_db or "")
-    if not service:
-        return False
-    conn = _target_conn(migrator)
-    user = conn.get("user") or "postgres"
-    pwd = conn.get("password") or ""
-    db = conn.get("database") or "pasarguard"
-    cwd = str(PASARGUARD_DIR)
-    sql = (
-        "SELECT 1 FROM information_schema.columns "
-        f"WHERE table_name='{table}' AND column_name='{column}' LIMIT 1"
-    )
-    cmd = [
-        "docker", "compose", "exec", "-T",
-        "-e", f"PGPASSWORD={pwd}",
-        service, "psql", "-U", user, "-d", db, "-tAc", sql,
-    ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, cwd=cwd,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-    )
-    stdout, _ = await proc.communicate()
-    if proc.returncode != 0:
-        return False
-    return (stdout or b"").decode("utf-8", errors="ignore").strip() == "1"
-
-
-async def _target_has_public_tables(migrator, target_db: str) -> bool:
-    service = resolve_db_service(target_db)
-    if not service:
-        return False
-    conn = _target_conn(migrator)
-    user = conn.get("user") or "postgres"
-    pwd = conn.get("password") or ""
-    db = conn.get("database") or "pasarguard"
-    cwd = str(PASARGUARD_DIR)
-    sql = (
-        "SELECT 1 FROM information_schema.tables "
-        "WHERE table_schema='public' AND table_type='BASE TABLE' LIMIT 1"
-    )
-    cmd = [
-        "docker", "compose", "exec", "-T",
-        "-e", f"PGPASSWORD={pwd}",
-        service, "psql", "-U", user, "-d", db, "-tAc", sql,
-    ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, cwd=cwd,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-    )
-    stdout, _ = await proc.communicate()
-    if proc.returncode != 0:
-        return False
-    return (stdout or b"").decode("utf-8", errors="ignore").strip() == "1"
-
-
-async def finalize_target_alembic_after_import(migrator, target_db: str) -> None:
-    """After db-migrations — sync alembic before PasarGuard starts."""
-    await sync_alembic_for_startup(migrator, target_db)
-
-
 async def set_target_alembic_version(
     migrator, target_db: str, version: str,
 ) -> bool:
@@ -2501,66 +2327,3 @@ async def set_target_alembic_version(
     return False
 
 
-async def ensure_schema_initialized(
-    migrator,
-    target_db: str,
-    source_db: str | None = None,
-    source_path: str | Path | None = None,
-) -> str | None:
-    """
-    Prepare target DB schema at source Alembic revision for db-migrations.
-    Uses one-shot `alembic upgrade` (not full PasarGuard all-in-one startup).
-    """
-    cwd = str(PASARGUARD_DIR)
-    conn = _target_conn(migrator)
-    migrator.job.log(
-        f"Target DB connection (user input): "
-        f"type={target_db}, user={conn.get('user')}, database={conn.get('database')}, "
-        f"host={conn.get('host')}, port={conn.get('port') or 'default'}"
-    )
-
-    source_version = read_source_alembic_version(source_db or "sqlite", source_path)
-    if source_version:
-        migrator.job.log(f"Source Alembic version: {source_version}")
-
-    service = resolve_db_service(target_db)
-    if service:
-        migrator.job.log(f"Ensuring DB service {service} is running...")
-        await docker_compose_up(migrator, [service])
-        await _wait_db_service(migrator, target_db, service)
-    elif target_db == "sqlite":
-        PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
-        sqlite_path = Path(conn.get("sqlite_path") or PASARGUARD_DATA / "db.sqlite3")
-        sqlite_path.parent.mkdir(parents=True, exist_ok=True)
-        migrator.job.log(f"Target SQLite path: {sqlite_path}")
-
-    migrator.job.log("Stopping PasarGuard before schema init...")
-    from app.services.multiworker_stack import stop_panel_stack
-
-    await stop_panel_stack(migrator.job)
-
-    revision = source_version or "head"
-    migrator.job.log(f"Running alembic upgrade {revision} (one-shot, no panel startup)...")
-    ok, out = await _run_pasarguard_alembic(migrator, "upgrade", revision)
-    if not ok:
-        if _is_duplicate_schema_error(out or ""):
-            migrator.job.log("Schema partially exists — healing alembic_version...")
-            if await _heal_alembic_duplicate_schema(migrator, target_db, out or ""):
-                target_version = await read_target_alembic_version(migrator, target_db)
-                migrator.job.log(f"Target Alembic version after heal: {target_version}")
-                return target_version
-        raise RuntimeError(
-            f"Failed to initialize target schema with alembic upgrade {revision}. "
-            "The wizard runs alembic in a one-shot container (panel does not need to be running).\n"
-            f"{(out or '')[-3000:]}"
-        )
-
-    target_version = await read_target_alembic_version(migrator, target_db)
-    if not target_version:
-        raise RuntimeError(
-            f"Target database ({target_db}) has no Alembic schema after upgrade. "
-            f"Check credentials: database '{conn.get('database')}', user '{conn.get('user')}'."
-        )
-
-    migrator.job.log(f"Target Alembic version after init: {target_version}")
-    return target_version

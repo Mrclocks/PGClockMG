@@ -96,7 +96,11 @@ async def _flush_pg_type_caches(migrator, target_db: str) -> None:
 
 
 async def _reset_target_schema(migrator, target_db: str) -> None:
-    """Wipe target so alembic upgrade head creates a clean head schema."""
+    """Wipe target so alembic upgrade head creates a clean head schema.
+
+    Fail hard on wipe failure — continuing into alembic/copy on a dirty target
+    is the main cause of partial merges and unique/FK collisions.
+    """
     import asyncio
 
     if target_db == "sqlite":
@@ -114,8 +118,9 @@ async def _reset_target_schema(migrator, target_db: str) -> None:
     conn = get_target_connection(migrator.params)
     service = resolve_db_service(target_db)
     if not service:
-        migrator.job.log("No compose DB service — skipping schema wipe")
-        return
+        raise RuntimeError(
+            f"Cannot reset target schema for {target_db}: no compose DB service found"
+        )
 
     user = conn.get("user") or (
         "postgres" if target_db in ("postgresql", "timescaledb") else "root"
@@ -125,50 +130,56 @@ async def _reset_target_schema(migrator, target_db: str) -> None:
     cwd = str(PASARGUARD_DIR)
     migrator.job.log(f"Resetting target schema on {service}/{db}...")
 
+    last_out = ""
+    ok = False
+
     if target_db in ("postgresql", "timescaledb"):
+        # Keep user identifier conservative for GRANT; passwords go via env, not shell.
+        safe_user = "".join(c for c in user if c.isalnum() or c in ("_", "-"))
+        if safe_user != user or not safe_user:
+            raise RuntimeError(f"Unsafe PostgreSQL user for schema reset: {user!r}")
         sql = (
             "DROP SCHEMA IF EXISTS public CASCADE; "
             "CREATE SCHEMA public; "
-            f"GRANT ALL ON SCHEMA public TO \"{user}\"; "
+            f'GRANT ALL ON SCHEMA public TO "{safe_user}"; '
             "GRANT ALL ON SCHEMA public TO public;"
         )
-        cmds = [
-            (
-                f'cd "{cwd}" && docker compose exec -T {service} '
-                f'env PGPASSWORD="{pwd}" psql -U {user} -d {db} -c "{sql}"'
-            )
-        ]
-    else:
-        from app.services.pasarguard_ops import mysql_client_bins
-        from app.services.native_migration.sql_staging import (
-            mysql_create_db_sql,
-            mysql_shell_e_arg,
-        )
-
-        pwd_q = (pwd or "").replace('"', '\\"')
-        # Single-quote -e SQL: double quotes expand backticks via command substitution
-        e_sql = mysql_shell_e_arg(mysql_create_db_sql(db, drop_first=True))
-        cmds = [
-            (
-                f'cd "{cwd}" && docker compose exec -T {service} '
-                f'{bin_name} -u {user} -p"{pwd_q}" -e {e_sql}'
-            )
-            for bin_name in mysql_client_bins(target_db, service)
-        ]
-
-    ok = False
-    for cmd in cmds:
-        proc = await asyncio.create_subprocess_shell(
-            cmd,
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "compose", "exec", "-T",
+            "-e", f"PGPASSWORD={pwd}",
+            service, "psql", "-U", user, "-d", db, "-v", "ON_ERROR_STOP=1", "-c", sql,
+            cwd=cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
-        await proc.wait()
-        if proc.returncode == 0:
-            ok = True
-            break
+        out_b, _ = await proc.communicate()
+        last_out = (out_b or b"").decode("utf-8", errors="ignore")
+        ok = proc.returncode == 0
+    else:
+        from app.services.pasarguard_ops import mysql_client_bins
+        from app.services.native_migration.sql_staging import mysql_create_db_sql
+
+        sql = mysql_create_db_sql(db, drop_first=True)
+        for bin_name in mysql_client_bins(target_db, service):
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "compose", "exec", "-T",
+                "-e", f"MYSQL_PWD={pwd}",
+                service, bin_name, "-u", user, "-e", sql,
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out_b, _ = await proc.communicate()
+            last_out = (out_b or b"").decode("utf-8", errors="ignore")
+            if proc.returncode == 0:
+                ok = True
+                break
+
     if not ok:
-        migrator.job.log("Warning: target schema reset returned non-zero — continuing")
+        raise RuntimeError(
+            f"Target schema reset failed on {service}/{db} — aborting before "
+            f"alembic/copy to avoid merging into leftover schema.\n{last_out[-800:]}"
+        )
 
 
 async def _heal_staging_alembic_if_unknown(
@@ -513,13 +524,18 @@ async def run_two_phase_migration(
             from app.services.pasarguard_ops import get_alembic_head_revision, set_target_alembic_version
 
             head = await get_alembic_head_revision(migrator)
-            if head:
-                if await set_target_alembic_version(migrator, target_db, head):
-                    migrator.job.log(f"Pinned alembic_version to head ({head}) after data copy")
-                else:
-                    migrator.job.log("Warning: could not pin alembic_version after copy")
+            if not head:
+                raise RuntimeError("Could not resolve alembic head revision after data copy")
+            if not await set_target_alembic_version(migrator, target_db, head):
+                raise RuntimeError(
+                    f"Failed to pin alembic_version to head ({head}) after data copy"
+                )
+            migrator.job.log(f"Pinned alembic_version to head ({head}) after data copy")
         except Exception as e:
-            migrator.job.log(f"Alembic pin note: {e}")
+            raise RuntimeError(
+                f"Alembic pin after convert failed — aborting to avoid panel re-migrating "
+                f"over copied data: {e}"
+            ) from e
         migrator.job.log(
             f"Two-phase done: users={stats.get('users', 0)} admins={stats.get('admins', 0)} "
             f"hosts={stats.get('hosts', 0)} groups={stats.get('groups', 0)} nodes={stats.get('nodes', 0)}"

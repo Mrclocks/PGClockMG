@@ -35,7 +35,7 @@ from app.services.backup_settings import (
     update_settings,
 )
 from app.services.backup_net import UnsafeDestinationError
-from app.services.backup_stream import get_push_job, start_push_async
+from app.services.backup_stream import get_push_job, start_create_and_stream_async, start_push_async
 from app.services.backup_telegram import (
     probe_telegram_connection,
     send_backup_to_telegram,
@@ -132,6 +132,11 @@ class TelegramTestBody(BaseModel):
 
 class StreamSendBody(BaseModel):
     backup_id: str
+    dest_url: str
+    token: str
+
+
+class CreateAndStreamBody(BaseModel):
     dest_url: str
     token: str
 
@@ -443,9 +448,9 @@ async def api_stream_send(body: StreamSendBody):
         except Exception:
             pass
     try:
-        # Validate destination early (same checks as push) before starting the job
-        from app.services.backup_net import normalize_public_http_url
-        normalize_public_http_url(body.dest_url.strip())
+        # Stream allows private LAN; webhooks still use public-only checks elsewhere.
+        from app.services.backup_net import normalize_stream_dest_url
+        normalize_stream_dest_url(body.dest_url.strip())
     except UnsafeDestinationError as exc:
         raise HTTPException(400, str(exc)) from exc
     except ValueError as exc:
@@ -459,6 +464,30 @@ async def api_stream_send(body: StreamSendBody):
         token=body.token.strip(),
         sha256=sha,
     )
+
+
+@app.post("/api/backups/create-and-stream")
+async def api_create_and_stream(body: CreateAndStreamBody):
+    """Create a fresh backup, then stream it to the destination wizard."""
+    try:
+        from app.services.backup_net import normalize_stream_dest_url
+        normalize_stream_dest_url(body.dest_url.strip())
+    except UnsafeDestinationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not (body.token or "").strip():
+        raise HTTPException(400, "token_missing")
+    update_settings({"stream": {"default_dest_url": body.dest_url.strip()}})
+    try:
+        return start_create_and_stream_async(
+            dest_base_url=body.dest_url.strip(),
+            token=body.token.strip(),
+        )
+    except UnsafeDestinationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.get("/api/backups/stream/jobs/{job_id}")

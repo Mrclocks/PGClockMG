@@ -10,8 +10,6 @@ from app.services.migrators.xui import XuiMigrator
 from app.services.migrators.hiddify import HiddifyMigrator
 from app.services.migrators.pasarguard_db import PasarguardDbMigrator
 
-from app.services.migrators.remnawave import RemnawaveMigrator
-
 from app.services.panel_job_lock import PanelJobAlreadyRunning, ensure_panel_idle
 
 MIGRATORS = {
@@ -19,7 +17,6 @@ MIGRATORS = {
     "3x-ui": XuiMigrator,
     "hiddify": HiddifyMigrator,
     "pasarguard": PasarguardDbMigrator,
-    "remnawave": RemnawaveMigrator,
 }
 
 _active_jobs: dict[str, MigrationJob] = {}

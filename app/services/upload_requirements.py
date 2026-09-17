@@ -210,14 +210,6 @@ def get_upload_requirements(
             _slot("database", False, accept=[".sqlite3", ".sql"], db_types=["sqlite", "mysql", "mariadb", "postgresql"]),
         ]
 
-    elif panel_id == "remnawave":
-        upload_mode = "none"
-        reason = {
-            "en": "Remnawave uses API — no file upload needed",
-            "fa": "رمناوی از API استفاده می‌کند — آپلود لازم نیست",
-            "ru": "Remnawave через API — загрузка не нужна",
-        }
-
     allow_zip = panel_id not in ("3x-ui", "hiddify")
     allow_separate = panel_id not in ("3x-ui", "hiddify")
     return {

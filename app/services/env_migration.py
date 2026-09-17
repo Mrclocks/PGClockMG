@@ -315,11 +315,6 @@ def detect_db_type_from_env(text: str, *, prefer_compose: bool = True) -> str | 
     return None
 
 
-def _parse_db_user_from_url(url: str) -> str | None:
-    m = re.search(r"://([^:@/]+)", url or "")
-    return m.group(1) if m else None
-
-
 def sqlite_fs_path_from_url(url: str) -> str | None:
     """Extract a normalized filesystem path from a SQLAlchemy SQLite URL.
 

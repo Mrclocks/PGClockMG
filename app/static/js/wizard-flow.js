@@ -601,6 +601,9 @@ function applyPhaseI18n() {
   set('restoreSelectText', 'restore.select');
   set('restoreStreamHint', 'restore.streamHint');
   set('btnStreamListen', 'restore.streamListen');
+  set('chkAutoRestoreOnStreamLabel', 'restore.autoRestoreOnStream');
+  set('chkAutoRestoreOnStreamHint', 'restore.autoRestoreOnStreamHint');
+  set('restoreStreamUrlHint', 'restore.streamPairHint');
   set('btnCopyStreamToken', 'copy');
   const streamSteps = document.getElementById('restoreStreamSteps');
   if (streamSteps) {
@@ -1554,6 +1557,17 @@ async function startStreamListen() {
     if (!res.ok) throw new Error(data.detail || 'listen failed');
     tokenEl.textContent = data.token;
     tokenBox.classList.remove('hidden');
+    const pairBox = document.getElementById('restoreStreamPairBox');
+    const pairEl = document.getElementById('restoreStreamPair');
+    const urlHint = document.getElementById('restoreStreamUrlHint');
+    if (pairEl && data.copy_pair) {
+      pairEl.textContent = data.copy_pair;
+      if (pairBox) pairBox.classList.remove('hidden');
+    }
+    if (urlHint && data.suggested_base_url) {
+      urlHint.textContent = `${t('restore.streamUrlHint')} ${data.suggested_base_url}`;
+      urlHint.classList.remove('hidden');
+    }
     setTag('listening');
     setProgress(0, t('restore.streamWaiting'));
     const poll = async () => {
@@ -1620,6 +1634,13 @@ async function applyStreamedBackup(uploadId, fileName) {
       if (btn) btn.disabled = true;
       document.getElementById('restoreUploadZone')?.classList.remove('hidden');
       document.getElementById('restoreStreamTokenBox')?.classList.add('hidden');
+      document.getElementById('restoreStreamPairBox')?.classList.add('hidden');
     },
   });
+  const auto = document.getElementById('chkAutoRestoreOnStream');
+  // Default: auto-restore when analysis is OK (checkbox defaults checked).
+  // Manual confirm remains available if the user unchecks it.
+  if (analysis.ok && (!auto || auto.checked)) {
+    await startRestore();
+  }
 }

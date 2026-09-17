@@ -263,6 +263,7 @@ def test_stream_listener_lifecycle():
 
 def test_stream_receive_writes_zip(tmp_path, monkeypatch):
     import asyncio
+    import zipfile
     from app.services import backup_stream as stream
 
     monkeypatch.setattr(stream, "UPLOAD_DIR", tmp_path / "uploads")
@@ -271,7 +272,11 @@ def test_stream_receive_writes_zip(tmp_path, monkeypatch):
     info = stream.create_listener()
     token = info["token"]
 
-    payload = b"PK\x03\x04" + b"0" * 200  # not a real zip; size check only needs >= 64
+    src = tmp_path / "demo.zip"
+    with zipfile.ZipFile(src, "w") as zf:
+        zf.writestr(".env", 'SQLALCHEMY_DATABASE_URL="sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3"\n')
+        zf.writestr("db.sqlite3", b"SQLite format 3\x00" + b"\x00" * 200)
+    payload = src.read_bytes()
 
     async def gen():
         yield payload[:50]
@@ -294,6 +299,34 @@ def test_stream_receive_writes_zip(tmp_path, monkeypatch):
     st = stream.get_listener(token)
     assert st["status"] == "ready"
     print("OK: stream receive writes zip")
+
+
+def test_stream_receive_rejects_invalid_zip(tmp_path, monkeypatch):
+    import asyncio
+    from app.services import backup_stream as stream
+
+    monkeypatch.setattr(stream, "UPLOAD_DIR", tmp_path / "uploads")
+    (tmp_path / "uploads").mkdir()
+    stream._LISTENERS.clear()
+    token = stream.create_listener()["token"]
+    payload = b"PK\x03\x04" + b"0" * 200
+
+    async def gen():
+        yield payload
+
+    async def _run():
+        return await stream.receive_stream(
+            token, gen(), filename="bad.zip", expected_size=len(payload),
+        )
+
+    try:
+        asyncio.run(_run())
+        raise AssertionError("expected invalid zip to fail")
+    except RuntimeError as exc:
+        assert "stream_zip_invalid" in str(exc) or "bad_zip" in str(exc)
+    st = stream.get_listener(token)
+    assert st["status"] == "error"
+    print("OK: stream receive rejects invalid zip")
 
 
 def test_backup_bundle_sqlite_layout(tmp_path, monkeypatch):

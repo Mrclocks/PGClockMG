@@ -240,10 +240,6 @@ def consume_setup_token(provided: str | None) -> bool:
     return True
 
 
-def password_file_path() -> Path:
-    return BACKUP_PASSWORD_FILE
-
-
 def clear_empty_password_file() -> None:
     """Remove a leftover empty .password so exclusive first-setup can proceed."""
     try:

@@ -62,27 +62,6 @@ def read_alembic_version_from_sql_dump(sql_text: str) -> str | None:
     return None
 
 
-async def resolve_source_alembic_version(
-    migrator, source_db: str, source_path: str,
-) -> str | None:
-    path = Path(source_path) if source_path else None
-
-    if source_db == "sqlite":
-        if not path or not path.exists():
-            return None
-        return read_sqlite_alembic_version(path)
-
-    if path and path.exists() and path.suffix.lower() == ".sql":
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        return read_alembic_version_from_sql_dump(text)
-
-    if source_db in ("postgresql", "timescaledb", "mysql", "mariadb"):
-        from app.services.db_credentials import get_source_connection
-        return _read_live_alembic_version(get_source_connection(migrator.params), source_db)
-
-    return None
-
-
 def _read_live_alembic_version(conn: dict, db_type: str) -> str | None:
     """Read alembic_version from a live source DB using wizard credentials."""
     from app.services.db_credentials import migration_port
