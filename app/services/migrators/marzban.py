@@ -36,6 +36,11 @@ from app.services.backup_analyzer import resolve_extract_root, find_file_in_uplo
 from app.services.pg_restore import soft_db_family
 from app.services.pg_access import get_panel_access_info
 from app.services.marzban_inbound_certs import relocate_inbound_certs_in_xray_config
+from app.services.marzban_migrate_heal import (
+    is_transient_infra_error,
+    normalize_templates_layout,
+    safe_replace_tree,
+)
 
 
 class MarzbanMigrator(BaseMigrator):
@@ -174,14 +179,14 @@ class MarzbanMigrator(BaseMigrator):
         self.job.set_progress(50, "Upgrading Marzban schema via PasarGuard panel boot...")
         # Long Marzban→PG alembic chains (bigint id, etc.) need a large health budget.
         self._maybe_relocate_inbound_certs()
-        await safe_start_pasarguard(self, health_max_wait=1800)
+        await self._safe_start_with_heal(health_max_wait=1800)
         self.params["target_db"] = orig_target or target_db
         await self._stop_panel()
         self._assert_sqlite_pasarguard_ready(dest)
 
         if target_db == "sqlite":
             self.job.set_progress(90, "Starting PasarGuard on SQLite...")
-            await safe_start_pasarguard(self)
+            await self._safe_start_with_heal()
             await self._assert_target_pasarguard_ready("sqlite")
             return
 
@@ -190,7 +195,7 @@ class MarzbanMigrator(BaseMigrator):
         if extra_data_dir:
             await self._copy_marzban_assets(extra_data_dir)
         self.job.set_progress(90, "Starting PasarGuard...")
-        await safe_start_pasarguard(self)
+        await self._safe_start_with_heal()
         await self._assert_target_pasarguard_ready(target_db)
 
     async def _migrate_mysql_like_restore(
@@ -232,7 +237,7 @@ class MarzbanMigrator(BaseMigrator):
             self.job.set_progress(70, "Upgrading Marzban MySQL schema via panel boot...")
             # Large dumps: alembic may spend a long time on "use bigint for id column".
             self._maybe_relocate_inbound_certs()
-            await safe_start_pasarguard(self, health_max_wait=1800)
+            await self._safe_start_with_heal(health_max_wait=1800)
             await self._assert_target_pasarguard_ready(target_db)
             return
 
@@ -251,7 +256,7 @@ class MarzbanMigrator(BaseMigrator):
         self._abort_if_inbounds_missing_from_stats(getattr(self, "copy_stats", None))
         await self._finalize_env_after_convert(target_db, install_env_snapshot)
         self.job.set_progress(90, "Starting PasarGuard...")
-        await safe_start_pasarguard(self)
+        await self._safe_start_with_heal()
         await self._assert_target_pasarguard_ready(target_db)
 
     async def _convert_pg_sqlite_to_target(
@@ -824,10 +829,24 @@ class MarzbanMigrator(BaseMigrator):
 
         self.job.log(f"Starting {svc} container...")
         await self._run_cmd(["docker", "compose", "up", "-d", svc], cwd=str(PASARGUARD_DIR))
-        await asyncio.sleep(10)
+        await asyncio.sleep(5)
+        # Soft readiness nudge — never skips data; only restarts a stuck DB once.
+        try:
+            await self._run_cmd(
+                ["docker", "compose", "ps", svc],
+                cwd=str(PASARGUARD_DIR),
+                timeout=30,
+            )
+        except Exception:
+            pass
 
     async def _copy_marzban_assets(self, source_data: Path):
-        """Copy certs, templates, xray_config from Marzban data dir."""
+        """Copy certs, templates, xray_config from Marzban data dir.
+
+        Asset layout glitches auto-heal (merge copy / template rename). Missing
+        optional assets warn; xray_config pin still runs so inbounds seeding can
+        proceed when the file is present.
+        """
         PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
         for item in ("certs", "templates"):
             src = source_data / item
@@ -837,28 +856,116 @@ class MarzbanMigrator(BaseMigrator):
                         src = p
                         break
             dst = PASARGUARD_DATA / item
-            if src.exists():
-                # Don't wipe a good certs tree with an empty directory.
-                if item == "certs" and src.is_dir() and not any(src.iterdir()):
-                    self.job.log(f"Skip empty {item}/ (keeping existing PasarGuard certs)")
-                    continue
-                if dst.exists():
-                    shutil.rmtree(dst, ignore_errors=True)
-                shutil.copytree(src, dst)
-                self.job.log(f"Copied {item}/ → /var/lib/pasarguard/{item}/")
-        v2ray = PASARGUARD_DATA / "templates" / "v2ray"
-        xray = PASARGUARD_DATA / "templates" / "xray"
-        if v2ray.exists() and not xray.exists():
-            v2ray.rename(xray)
-            self.job.log("Renamed templates/v2ray → templates/xray")
+            if not src.exists():
+                continue
+            try:
+                how = safe_replace_tree(src, dst, log=self.job.log)
+                if how in ("replaced", "merged"):
+                    self.job.log(f"Copied {item}/ → /var/lib/pasarguard/{item}/ ({how})")
+            except Exception as exc:
+                self.job.log(
+                    f"Warning: could not copy {item}/ ({exc}) — continuing with "
+                    "whatever assets are already on disk"
+                )
+        templates = PASARGUARD_DATA / "templates"
+        try:
+            normalize_templates_layout(templates, log=self.job.log)
+        except Exception as exc:
+            self.job.log(f"Warning: templates layout heal skipped — {exc}")
         for p in source_data.rglob("xray_config.json"):
-            text = transform_xray_config(p.read_text(encoding="utf-8", errors="ignore"))
-            dst = PASARGUARD_DATA / "xray_config.json"
-            dst.write_text(text, encoding="utf-8")
-            self.job.log("Copied xray_config.json → /var/lib/pasarguard/")
+            try:
+                text = transform_xray_config(p.read_text(encoding="utf-8", errors="ignore"))
+                dst = PASARGUARD_DATA / "xray_config.json"
+                dst.write_text(text, encoding="utf-8")
+                self.job.log("Copied xray_config.json → /var/lib/pasarguard/")
+            except Exception as exc:
+                self.job.log(f"Warning: xray_config copy failed — {exc}")
             break
         self._pin_xray_json_env()
         self._maybe_relocate_inbound_certs()
+
+    async def _safe_start_with_heal(self, *, health_max_wait: int | None = None) -> None:
+        """Start PasarGuard; on transient/auth failure heal once and retry.
+
+        Completeness asserts still run after a successful start. A second
+        failure propagates unchanged so operators see the real error.
+        """
+        try:
+            await safe_start_pasarguard(self, health_max_wait=health_max_wait)
+            return
+        except Exception as first:
+            if not is_transient_infra_error(first):
+                # Still allow one retry for generic start failures — many are infra.
+                self.job.log(
+                    f"Panel start failed — attempting one auto-heal retry "
+                    f"({type(first).__name__}: {first})"
+                )
+            else:
+                self.job.log(
+                    f"Panel start hit transient error — auto-heal retry once: {first}"
+                )
+
+        target_db = (self.params or {}).get("target_db") or "sqlite"
+        try:
+            await self._stop_panel()
+        except Exception as stop_exc:
+            self.job.log(f"Auto-heal: panel stop note — {stop_exc}")
+
+        if target_db in ("mysql", "mariadb", "postgresql", "timescaledb"):
+            try:
+                await self._ensure_target_database_stack(target_db)
+            except Exception as db_exc:
+                self.job.log(f"Auto-heal: DB stack note — {db_exc}")
+            await self._try_sync_db_auth(target_db)
+
+        await asyncio.sleep(3)
+        await safe_start_pasarguard(self, health_max_wait=health_max_wait)
+
+    async def _try_sync_db_auth(self, target_db: str) -> None:
+        """Best-effort role/password sync so a retry can complete the transfer."""
+        try:
+            from app.services.db_credentials import get_target_connection
+            from app.services.pasarguard_ops import fetch_pasarguard_logs
+            from app.services.pg_restore import (
+                _detect_db_container,
+                _sync_mysql_passwords,
+                _sync_pg_role_passwords,
+                is_auth_failure_text,
+            )
+
+            logs = ""
+            try:
+                logs = await fetch_pasarguard_logs(self, tail=120)
+            except Exception:
+                logs = ""
+            if logs and not is_auth_failure_text(logs):
+                # Still sync once when restarting — cheap and helps completeness.
+                self.job.log("Auto-heal: aligning DB credentials before panel retry")
+            else:
+                self.job.log("Auto-heal: DB auth failure detected — syncing roles")
+
+            conn = get_target_connection(self.params) or {}
+            password = conn.get("password") or ""
+            user = conn.get("user") or "pasarguard"
+            db_name = conn.get("database") or "pasarguard"
+            if not password:
+                return
+            svc = await _detect_db_container(self.job, target_db)
+            if not svc:
+                return
+            if target_db in ("postgresql", "timescaledb"):
+                await _sync_pg_role_passwords(
+                    self.job, svc, password, user or "pasarguard", db_name or "pasarguard",
+                )
+            elif target_db in ("mysql", "mariadb"):
+                await _sync_mysql_passwords(
+                    self.job, svc, password,
+                    user=user or "pasarguard",
+                    db_type=target_db,
+                    db_name=db_name or "pasarguard",
+                )
+        except Exception as exc:
+            self.job.log(f"Auto-heal: credential sync skipped — {exc}")
 
     def _maybe_relocate_inbound_certs(self) -> None:
         """Best-effort inbound TLS relocate — never abort migration.
@@ -919,14 +1026,28 @@ class MarzbanMigrator(BaseMigrator):
         conn = get_source_connection(self.params)
         pwd = conn.get("password") or ""
         dump_path = work_dir / "marzban.sql"
-        if MARZBAN_DIR.exists():
-            proc = await asyncio.create_subprocess_shell(
-                f'cd "{MARZBAN_DIR}" && docker compose exec -T mysql '
-                f'mysqldump -u root -p"{pwd}" -h 127.0.0.1 --databases marzban > "{dump_path}"',
+        last_err = ""
+        for attempt in (1, 2):
+            if MARZBAN_DIR.exists():
+                proc = await asyncio.create_subprocess_shell(
+                    f'cd "{MARZBAN_DIR}" && docker compose exec -T mysql '
+                    f'mysqldump -u root -p"{pwd}" -h 127.0.0.1 --databases marzban > "{dump_path}"',
+                )
+                await proc.wait()
+                if proc.returncode not in (0, None) and not dump_path.exists():
+                    last_err = f"mysqldump exit={proc.returncode}"
+            if dump_path.exists() and dump_path.stat().st_size > 0:
+                break
+            if attempt == 1:
+                self.job.log(
+                    "Auto-heal: Marzban MySQL dump missing/empty — retrying dump once..."
+                )
+                await asyncio.sleep(2)
+                continue
+            raise RuntimeError(
+                "Failed to dump Marzban MySQL — check password and docker"
+                + (f" ({last_err})" if last_err else "")
             )
-            await proc.wait()
-        if not dump_path.exists():
-            raise RuntimeError("Failed to dump Marzban MySQL — check password and docker")
         changed = rewrite_mysql_dump_file_for_pasarguard(dump_path, dump_path)
         size_mb = dump_path.stat().st_size / (1024 * 1024)
         self.job.log(
@@ -980,11 +1101,38 @@ class MarzbanMigrator(BaseMigrator):
             if attempt == 0 or (attempt + 1) % 5 == 0:
                 self.job.log(f"Still waiting for {svc}... ({attempt + 1}/{attempts})")
             await asyncio.sleep(2)
+
+        # Auto-heal once: recreate the DB container then wait again (short).
+        self.job.log(
+            f"Auto-heal: {svc} not ready — force-recreating and waiting again..."
+        )
+        await self._run_cmd(
+            ["docker", "compose", "up", "-d", "--force-recreate", svc],
+            cwd=str(PASARGUARD_DIR),
+            timeout=180,
+        )
+        await asyncio.sleep(5)
+        retry_attempts = max(15, attempts // 3)
+        for attempt in range(retry_attempts):
+            for client in clients:
+                proc = await asyncio.create_subprocess_exec(
+                    "docker", "compose", "exec", "-T", svc,
+                    client, "-u", user, f"-p{pwd}", "-h", host, "-e", "SELECT 1;",
+                    cwd=str(PASARGUARD_DIR),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                out_b, _ = await proc.communicate()
+                last = (out_b or b"").decode("utf-8", errors="replace")
+                if proc.returncode == 0:
+                    self.job.log(f"{svc} is ready after auto-heal recreate")
+                    return
+            await asyncio.sleep(2)
         raise RuntimeError(
             f"{svc} did not become ready in time. Last output:\n{(last or '')[-400:]}"
         )
 
-    async def _import_mysql_dump(self, dump_file: Path):
+    async def _import_mysql_dump(self, dump_file: Path, *, _heal_attempted: bool = False):
         conn = get_target_connection(self.params)
         user = conn.get("user") or "root"
         pwd = conn.get("password") or ""
@@ -1146,13 +1294,31 @@ class MarzbanMigrator(BaseMigrator):
                 oom_killed=oom,
             )
             diag = await compose_service_diagnostics(str(PASARGUARD_DIR), svc)
-            raise RuntimeError(
+            err = RuntimeError(
                 format_mysql_import_error(
                     failure,
                     output_tail="\n".join(output_lines[-40:]),
                     diag_tail=diag,
                 )
             )
+            # One auto-heal retry after DB death / transient import failure.
+            # Import always recreates the target DB first, so retry is safe.
+            if (
+                not _heal_attempted
+                and (container_died or oom or is_transient_infra_error(err))
+            ):
+                self.job.log(
+                    "Auto-heal: MySQL import failed — recreating DB service and "
+                    "retrying import once so the transfer can complete..."
+                )
+                await self._run_cmd(
+                    ["docker", "compose", "up", "-d", "--force-recreate", svc],
+                    cwd=str(PASARGUARD_DIR),
+                    timeout=180,
+                )
+                await self._wait_compose_mysql_ready(svc, user, pwd, host)
+                return await self._import_mysql_dump(dump_file, _heal_attempted=True)
+            raise err
         self.job.log(f"MySQL dump import finished ({elapsed}s)")
         for path in (fixed, session_file):
             try:
