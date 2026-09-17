@@ -57,6 +57,8 @@ class MarzbanMigrator(BaseMigrator):
             self.job.log("Optimization: skip broken user rows and continue with report")
         if params.get("relocate_inbound_certs"):
             self.job.log("Optimization: relocate inbound TLS certs into PasarGuard certs/")
+        if params.get("disable_nodes_after_migrate"):
+            self.job.log("Optimization: disable nodes after Marzban migration")
         self.job.set_progress(5, "Starting Marzban → PasarGuard migration...")
 
         return await self._migrate(
@@ -136,6 +138,7 @@ class MarzbanMigrator(BaseMigrator):
             raise RuntimeError("Source database file missing for Marzban migration")
 
         self.job.set_progress(100, "Marzban migration completed")
+        await self._maybe_disable_nodes(target_db)
         return self._result("fresh", target_db)
 
     async def _migrate_sqlite_like_restore(
@@ -854,7 +857,12 @@ class MarzbanMigrator(BaseMigrator):
         self._maybe_relocate_inbound_certs()
 
     def _maybe_relocate_inbound_certs(self) -> None:
-        """Optional optimization: move inbound TLS files under PasarGuard certs/."""
+        """Best-effort inbound TLS relocate — never abort migration.
+
+        Panel certs/xray_config are already copied by ``_copy_marzban_assets``.
+        Inbound relocate is an optional layout optimization; any failure is
+        logged and migration continues with the copied panel assets.
+        """
         if not self.params.get("relocate_inbound_certs"):
             return
         xray = PASARGUARD_DATA / "xray_config.json"
@@ -865,17 +873,43 @@ class MarzbanMigrator(BaseMigrator):
                 log=self.job.log,
             )
         except Exception as e:
-            raise RuntimeError(
-                f"Inbound TLS cert relocate failed: {e}. "
-                "Disable the optimization switch and retry, or fix cert paths manually."
-            ) from e
-        # Soft note when pairs were referenced but missing — do not abort migration;
-        # empty-inbound guards still catch broken seed outcomes.
+            self.job.log(
+                f"Warning: inbound TLS cert relocate skipped — {e}. "
+                "Panel certificates already copied; migration continues."
+            )
+            return
         missing = summary.get("missing") or []
+        errors = int(summary.get("errors") or 0)
         if missing and not summary.get("copied") and not summary.get("rewritten"):
             self.job.log(
                 f"Warning: relocate found {len(missing)} cert pair(s) but no files on disk"
             )
+        if errors:
+            self.job.log(
+                f"Warning: relocate skipped {errors} inbound cert pair(s); "
+                "panel certs kept, migration continues."
+            )
+
+    async def _maybe_disable_nodes(self, target_db: str) -> None:
+        """Optional: leave all nodes disabled after a successful Marzban migrate."""
+        if not self.params.get("disable_nodes_after_migrate"):
+            return
+        try:
+            from app.services.db_credentials import get_target_connection
+            from app.services.pg_restore import _disable_nodes_after_restore
+
+            conn = get_target_connection(self.params) or {}
+            await _disable_nodes_after_restore(
+                self.job,
+                target_db,
+                conn.get("password") or "",
+                conn.get("user") or "pasarguard",
+                conn.get("database") or "pasarguard",
+            )
+            self._nodes_disabled = True
+        except Exception as e:
+            self.job.log(f"Warning: could not disable nodes after migrate — {e}")
+            self._nodes_disabled = False
 
     async def _dump_marzban_mysql(self, work_dir: Path) -> Path:
         conn = get_source_connection(self.params)
@@ -1154,6 +1188,7 @@ class MarzbanMigrator(BaseMigrator):
             "subscription_mode": "native",
             "method": method,
             "target_db": target_db,
+            "nodes_disabled": bool(getattr(self, "_nodes_disabled", False)),
         }
         if self.copy_report:
             out["copy_report"] = self.copy_report

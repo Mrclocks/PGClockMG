@@ -280,7 +280,9 @@ const I18N = {
       skipBadUserRows: 'Skip broken users and continue',
       skipBadUserRowsHint: 'If some users cannot be copied (bad FK/data), skip them and finish the job (migrate / restore / Change-DB). A report is shown at the end. Still fails if no users transfer. Recommended on.',
       relocateInboundCerts: 'Move inbound TLS certificates into PasarGuard certs/',
-      relocateInboundCertsHint: 'Copies domain TLS cert/key files into /var/lib/pasarguard/certs/<domain>/, sets read permissions, and updates inbound paths in xray_config. Off = previous behavior.',
+      relocateInboundCertsHint: 'Best-effort: copies domain TLS cert/key into /var/lib/pasarguard/certs/<domain>/ and updates xray_config. Panel certs always stay. Failures are warnings only — migration continues.',
+      disableNodes: 'Keep nodes disabled after migration',
+      disableNodesHint: 'If your previous Marzban panel or nodes are still active, turn this on to avoid connection conflicts. Nodes stay in the database but disabled — enable them from PasarGuard when ready.',
       start: 'Start Migration',
       back: '← Back',
       summary: {
@@ -306,6 +308,7 @@ const I18N = {
       successRedirect: 'Data migrated. Old subscription links work via the redirect server.',
       successChanged: 'Data migrated. Inform users about new subscription links.',
       disableOldPanelTip: 'To sign in to the new panel safely, temporarily disable your previous panel. After you verify the new panel and all data has transferred, remove the old panel.',
+      nodesDisabledNote: 'Nodes were left disabled as requested. Enable them from the panel.',
       xuiOldSubPortWarn: 'You cannot use your previous subscription port in configs.',
       redirectInstalled: 'Redirect server (pg-redirect) installed',
       redirectVerifyTitle: 'Verify redirect server',
@@ -701,7 +704,9 @@ const I18N = {
       skipBadUserRows: 'رد کردن کاربران خراب و ادامه',
       skipBadUserRowsHint: 'اگر بعضی کاربران به‌خاطر داده/FK خراب منتقل نشوند، رد می‌شوند و کار تمام می‌شود (مهاجرت / ریستور / Change-DB). در انتها گزارش نشان داده می‌شود. اگر هیچ کاربری منتقل نشود باز هم متوقف می‌شود. روشن توصیه می‌شود.',
       relocateInboundCerts: 'انتقال سرتیفیکیت TLS اینباندها به پوشه certs پاسارگارد',
-      relocateInboundCertsHint: 'فایل‌های cert/key دامنه را به /var/lib/pasarguard/certs/<دامنه>/ کپی می‌کند، دسترسی خواندن می‌دهد و مسیر داخل اینباندها را در xray_config به‌روز می‌کند. خاموش = رفتار قبلی.',
+      relocateInboundCertsHint: 'بهترین‌تلاش: cert/key دامنه را به /var/lib/pasarguard/certs/<دامنه>/ کپی و xray_config را به‌روز می‌کند. سرتیفیکیت پنل همیشه می‌ماند. خطا فقط هشدار است — مهاجرت ادامه می‌یابد.',
+      disableNodes: 'نودها بعد از مهاجرت غیرفعال بمانند',
+      disableNodesHint: 'اگر پنل یا نودهای قبلی مرزبان هنوز فعال‌اند، این گزینه را روشن کنید تا تداخل اتصال پیش نیاید. نودها در دیتابیس می‌مانند ولی غیرفعال‌اند — از پاسارگارد فعالشان کنید.',
       start: 'شروع مهاجرت',
       back: '→ بازگشت',
       summary: {
@@ -727,6 +732,7 @@ const I18N = {
       successRedirect: 'داده‌ها منتقل شد. لینک‌های قدیمی اشتراک با سرور ریدایرکت کار می‌کنند.',
       successChanged: 'داده‌ها منتقل شد. لینک‌های جدید را به کاربران اطلاع دهید.',
       disableOldPanelTip: 'برای ورود به پنل جدید بهتر است پنل قبلی خود را موقتاً غیرفعال کنید و بعد از تست پنل جدید و انتقال کامل اطلاعات، آن را حذف کنید.',
+      nodesDisabledNote: 'نودها طبق درخواست غیرفعال ماندند. از پنل فعالشان کنید.',
       xuiOldSubPortWarn: 'از پورت ساب قبلی خود نمی‌توانید در کانفیگ‌ها استفاده کنید.',
       redirectInstalled: 'سرور ریدایرکت (pg-redirect) نصب شد',
       redirectVerifyTitle: 'بررسی سرور ریدایرکت',
@@ -1122,7 +1128,9 @@ const I18N = {
       skipBadUserRows: 'Пропускать битых пользователей и продолжать',
       skipBadUserRowsHint: 'Если часть пользователей не копируется (битые FK/данные), они пропускаются и задание завершается (миграция / restore / Change-DB). В конце показывается отчёт. Если не перенесён ни один пользователь — всё равно ошибка. Рекомендуется включить.',
       relocateInboundCerts: 'Перенести TLS-сертификаты inbound в certs PasarGuard',
-      relocateInboundCertsHint: 'Копирует cert/key доменов в /var/lib/pasarguard/certs/<domain>/, выставляет права чтения и обновляет пути inbound в xray_config. Выкл. = прежнее поведение.',
+      relocateInboundCertsHint: 'Best-effort: копирует cert/key доменов в /var/lib/pasarguard/certs/<domain>/ и обновляет xray_config. Сертификаты панели всегда сохраняются. Ошибки — только предупреждения, миграция продолжается.',
+      disableNodes: 'Оставить узлы отключёнными после миграции',
+      disableNodesHint: 'Если прежняя панель Marzban или узлы ещё активны, включите это, чтобы избежать конфликтов. Узлы останутся в БД, но отключёнными — включите их из PasarGuard.',
       start: 'Начать миграцию',
       back: '← Назад',
       summary: {
@@ -1148,6 +1156,7 @@ const I18N = {
       successRedirect: 'Данные перенесены. Старые ссылки подписки работают через redirect.',
       successChanged: 'Данные перенесены. Сообщите пользователям о новых ссылках.',
       disableOldPanelTip: 'Для входа в новую панель лучше временно отключить предыдущую. После проверки новой панели и полного переноса данных удалите старую.',
+      nodesDisabledNote: 'Узлы оставлены отключёнными по запросу. Включите их из панели.',
       xuiOldSubPortWarn: 'Порт старой подписки нельзя использовать в конфигах.',
       redirectInstalled: 'Redirect-сервер (pg-redirect) установлен',
       redirectVerifyTitle: 'Проверка redirect-сервера',
@@ -1396,6 +1405,10 @@ function applyI18n() {
   const skipHint = document.getElementById('chkSkipBadUserRowsHint');
   if (skipLbl) skipLbl.textContent = t('step4.skipBadUserRows');
   if (skipHint) skipHint.textContent = t('step4.skipBadUserRowsHint');
+  const disLbl = document.getElementById('chkMigrateDisableNodesLabel');
+  const disHint = document.getElementById('chkMigrateDisableNodesHint');
+  if (disLbl) disLbl.textContent = t('step4.disableNodes');
+  if (disHint) disHint.textContent = t('step4.disableNodesHint');
   const successH2 = document.querySelector('#resultSuccess h2');
   if (successH2) successH2.textContent = t('step6.success');
   document.querySelector('#resultError h2') && (document.querySelector('#resultError h2').textContent = t('step6.error'));

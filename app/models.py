@@ -44,6 +44,7 @@ class MigrationRequest(BaseModel):
     install_redirect: bool = True
     relocate_inbound_certs: bool = False
     skip_bad_user_rows: bool = True
+    disable_nodes_after_migrate: bool = False
     marzban_mode: Optional[Literal["fresh"]] = "fresh"
 
 
