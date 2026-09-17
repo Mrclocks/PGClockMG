@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.0`** — harden migrate/restore + backup stream UX; remove Remnawave; dead-code cleanup
+> 🚀 **`v4.6.1`** — Marzban inbound cert relocate soft-fail; nodes disabled by default after migrate
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

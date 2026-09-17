@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.6.0`** — harden migrate/restore + backup stream UX؛ حذف Remnawave؛ پاکسازی کد مرده
+> 🚀 **`v4.6.1`** — soft-fail relocate سرتیفیکیت اینباند Marzban؛ نودها بعد مهاجرت پیش‌فرض خاموش
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
