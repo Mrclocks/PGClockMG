@@ -243,8 +243,8 @@ def test_restore_request_has_no_relocate_field():
         source_panel="marzban", source_db="sqlite", target_db="sqlite",
     )
     assert req.relocate_inbound_certs is False
-    assert req.disable_nodes_after_migrate is False
-    print("OK: restore model untouched; migrate defaults off")
+    assert req.disable_nodes_after_migrate is True
+    print("OK: restore model untouched; migrate disable-nodes default on")
 
 
 def test_strip_json_comments_and_load():

@@ -1012,7 +1012,7 @@ function buildMigrationBody() {
     install_redirect: document.getElementById('installRedirect')?.checked ?? true,
     relocate_inbound_certs: document.getElementById('chkRelocateInboundCerts')?.checked ?? false,
     skip_bad_user_rows: document.getElementById('chkSkipBadUserRows')?.checked ?? true,
-    disable_nodes_after_migrate: document.getElementById('chkMigrateDisableNodes')?.checked ?? false,
+    disable_nodes_after_migrate: document.getElementById('chkMigrateDisableNodes')?.checked ?? true,
     marzban_mode: 'fresh',
   };
 }

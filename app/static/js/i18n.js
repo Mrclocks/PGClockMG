@@ -282,7 +282,7 @@ const I18N = {
       relocateInboundCerts: 'Move inbound TLS certificates into PasarGuard certs/',
       relocateInboundCertsHint: 'Best-effort: copies domain TLS cert/key into /var/lib/pasarguard/certs/<domain>/ and updates xray_config. Panel certs always stay. Failures are warnings only — migration continues.',
       disableNodes: 'Keep nodes disabled after migration',
-      disableNodesHint: 'If your previous Marzban panel or nodes are still active, turn this on to avoid connection conflicts. Nodes stay in the database but disabled — enable them from PasarGuard when ready.',
+      disableNodesHint: 'On by default. Nodes are migrated but left disabled so old Marzban/nodes do not conflict — enable them from PasarGuard when ready. Turn off only if you want nodes active immediately.',
       start: 'Start Migration',
       back: '← Back',
       summary: {
@@ -706,7 +706,7 @@ const I18N = {
       relocateInboundCerts: 'انتقال سرتیفیکیت TLS اینباندها به پوشه certs پاسارگارد',
       relocateInboundCertsHint: 'بهترین‌تلاش: cert/key دامنه را به /var/lib/pasarguard/certs/<دامنه>/ کپی و xray_config را به‌روز می‌کند. سرتیفیکیت پنل همیشه می‌ماند. خطا فقط هشدار است — مهاجرت ادامه می‌یابد.',
       disableNodes: 'نودها بعد از مهاجرت غیرفعال بمانند',
-      disableNodesHint: 'اگر پنل یا نودهای قبلی مرزبان هنوز فعال‌اند، این گزینه را روشن کنید تا تداخل اتصال پیش نیاید. نودها در دیتابیس می‌مانند ولی غیرفعال‌اند — از پاسارگارد فعالشان کنید.',
+      disableNodesHint: 'به‌صورت پیش‌فرض روشن است. نودها منتقل می‌شوند ولی غیرفعال می‌مانند تا با مرزبان/نودهای قبلی تداخل نکنند — وقتی آماده بودید از پاسارگارد فعالشان کنید. فقط اگر می‌خواهید فوراً فعال باشند خاموش کنید.',
       start: 'شروع مهاجرت',
       back: '→ بازگشت',
       summary: {
@@ -1130,7 +1130,7 @@ const I18N = {
       relocateInboundCerts: 'Перенести TLS-сертификаты inbound в certs PasarGuard',
       relocateInboundCertsHint: 'Best-effort: копирует cert/key доменов в /var/lib/pasarguard/certs/<domain>/ и обновляет xray_config. Сертификаты панели всегда сохраняются. Ошибки — только предупреждения, миграция продолжается.',
       disableNodes: 'Оставить узлы отключёнными после миграции',
-      disableNodesHint: 'Если прежняя панель Marzban или узлы ещё активны, включите это, чтобы избежать конфликтов. Узлы останутся в БД, но отключёнными — включите их из PasarGuard.',
+      disableNodesHint: 'Включено по умолчанию. Узлы переносятся, но остаются отключёнными, чтобы не конфликтовать со старым Marzban — включите их из PasarGuard когда будете готовы. Выключайте только если нужны сразу активные узлы.',
       start: 'Начать миграцию',
       back: '← Назад',
       summary: {

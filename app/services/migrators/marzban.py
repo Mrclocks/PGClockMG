@@ -57,8 +57,12 @@ class MarzbanMigrator(BaseMigrator):
             self.job.log("Optimization: skip broken user rows and continue with report")
         if params.get("relocate_inbound_certs"):
             self.job.log("Optimization: relocate inbound TLS certs into PasarGuard certs/")
+        # Default ON: leave nodes disabled so old Marzban/nodes cannot conflict.
+        if "disable_nodes_after_migrate" not in params:
+            params["disable_nodes_after_migrate"] = True
+            self.params["disable_nodes_after_migrate"] = True
         if params.get("disable_nodes_after_migrate"):
-            self.job.log("Optimization: disable nodes after Marzban migration")
+            self.job.log("Optimization: disable nodes after Marzban migration (default on)")
         self.job.set_progress(5, "Starting Marzban → PasarGuard migration...")
 
         return await self._migrate(
