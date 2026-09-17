@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.6.1`** — soft-fail relocate سرتیفیکیت اینباند Marzban؛ نودها بعد مهاجرت پیش‌فرض خاموش
+> 🚀 **`v4.6.2`** — auto-heal امن مهاجرت Marzban؛ soft-fail سرتیفیکیت؛ نودها پیش‌فرض خاموش
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

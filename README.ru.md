@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.1`** — soft-fail relocate inbound TLS Marzban; nodes disabled by default after migrate
+> 🚀 **`v4.6.2`** — безопасный auto-heal миграции Marzban; soft-fail cert relocate; nodes disabled by default
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

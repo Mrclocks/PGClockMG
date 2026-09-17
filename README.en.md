@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.1`** — Marzban inbound cert relocate soft-fail; nodes disabled by default after migrate
+> 🚀 **`v4.6.2`** — safe Marzban migrate auto-heal; cert relocate soft-fail; nodes disabled by default
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
