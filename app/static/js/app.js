@@ -1012,6 +1012,7 @@ function buildMigrationBody() {
     install_redirect: document.getElementById('installRedirect')?.checked ?? true,
     relocate_inbound_certs: document.getElementById('chkRelocateInboundCerts')?.checked ?? false,
     skip_bad_user_rows: document.getElementById('chkSkipBadUserRows')?.checked ?? true,
+    disable_nodes_after_migrate: document.getElementById('chkMigrateDisableNodes')?.checked ?? true,
     marzban_mode: 'fresh',
   };
 }
@@ -1276,10 +1277,12 @@ function renderSummary() {
 
   const optBox = document.getElementById('migrateOptimizeOptions');
   const isMarzban = panel.id === 'marzban';
-  // Soft-skip is global for every migrate panel; cert relocate stays Marzban-only.
+  // Soft-skip is global for every migrate panel; cert relocate + disable nodes stay Marzban-only.
   if (optBox) optBox.classList.remove('hidden');
   const relocateRow = document.getElementById('migrateRelocateCertsRow');
   if (relocateRow) relocateRow.classList.toggle('hidden', !isMarzban);
+  const disableNodesRow = document.getElementById('migrateDisableNodesRow');
+  if (disableNodesRow) disableNodesRow.classList.toggle('hidden', !isMarzban);
   {
     const lang = state.lang;
     const s4 = (I18N[lang] || I18N.fa).step4 || {};
@@ -1288,11 +1291,15 @@ function renderSummary() {
     const hint = document.getElementById('chkRelocateInboundCertsHint');
     const skipLbl = document.getElementById('chkSkipBadUserRowsLabel');
     const skipHint = document.getElementById('chkSkipBadUserRowsHint');
+    const disLbl = document.getElementById('chkMigrateDisableNodesLabel');
+    const disHint = document.getElementById('chkMigrateDisableNodesHint');
     if (title) title.textContent = s4.optimizeTitle || '';
     if (lbl) lbl.textContent = s4.relocateInboundCerts || '';
     if (hint) hint.textContent = s4.relocateInboundCertsHint || '';
     if (skipLbl) skipLbl.textContent = s4.skipBadUserRows || '';
     if (skipHint) skipHint.textContent = s4.skipBadUserRowsHint || '';
+    if (disLbl) disLbl.textContent = s4.disableNodes || '';
+    if (disHint) disHint.textContent = s4.disableNodesHint || '';
   }
 
   const warnEl = document.getElementById('finalWarnings');
@@ -1609,6 +1616,9 @@ async function showSuccess(result) {
   const tipsEl = document.getElementById('resultPostSuccessTips');
   if (tipsEl) {
     const tips = [`<p class="warn-line">${statusIcon('warn')}<span>${t('step6.disableOldPanelTip')}</span></p>`];
+    if (result?.nodes_disabled) {
+      tips.push(`<p class="info-note">${t('step6.nodesDisabledNote')}</p>`);
+    }
     tipsEl.innerHTML = tips.join('');
     tipsEl.classList.remove('hidden');
   }

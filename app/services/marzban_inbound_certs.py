@@ -31,6 +31,15 @@ _DOMAIN_RE = re.compile(
 _ACME_DOMAIN_RE = re.compile(
     r"(?:^|/)([A-Za-z0-9.-]+\.[A-Za-z]{2,})(?:_ecc|_rsa)?(?:/|$)"
 )
+# Filenames / path segments that must never become a certs/<slug>/ folder name.
+# Marzban often stores panel TLS flat as certs/fullchain.pem — treating that
+# basename as a domain caused mkdir(FileExistsError) and aborted migration.
+_CERT_FILENAME_RE = re.compile(
+    r"^(fullchain|privkey|private|cert|certificate|key|chain|ca)"
+    r"(\.[A-Za-z0-9]+)?$",
+    re.IGNORECASE,
+)
+_CERT_SUFFIXES = frozenset({".pem", ".crt", ".cer", ".key"})
 
 
 def strip_json_comments(text: str) -> str:
@@ -84,11 +93,23 @@ def load_xray_config(text: str) -> dict[str, Any]:
     return data
 
 
+def _looks_like_cert_filename(value: str) -> bool:
+    name = Path(str(value).strip()).name
+    if not name:
+        return False
+    if _CERT_FILENAME_RE.match(name):
+        return True
+    return Path(name).suffix.lower() in _CERT_SUFFIXES
+
+
 def _safe_domain_slug(value: str | None) -> str | None:
     if not value:
         return None
     v = str(value).strip().lower().strip(".")
     if not v or len(v) > 200:
+        return None
+    # Never treat cert/key filenames as domains (fullchain.pem, privkey.pem, …).
+    if _looks_like_cert_filename(v):
         return None
     if _DOMAIN_RE.match(v):
         return v
@@ -104,6 +125,10 @@ def _domain_from_path(path: str) -> str | None:
         return _safe_domain_slug(m.group(1))
     parts = Path(path.replace("\\", "/")).parts
     for part in reversed(parts):
+        if part in {".", "..", "/", "certs", "cert", "ssl", "tls", "acme"}:
+            continue
+        if _looks_like_cert_filename(part):
+            continue
         slug = _safe_domain_slug(part)
         if slug:
             return slug
@@ -125,6 +150,17 @@ def _pair_domain(cert_path: str, key_path: str, server_name: str | None) -> str:
             return candidate
     digest = hashlib.sha1(f"{cert_path}|{key_path}".encode()).hexdigest()[:10]
     return f"inbound-{digest}"
+
+
+def _resolve_dest_dir(certs_root: Path, domain: str, cert_path: str, key_path: str) -> tuple[str, Path]:
+    """Pick a writable certs/<slug>/ directory; never collide with a flat file."""
+    slug = domain or "inbound"
+    dest_dir = certs_root / slug
+    if dest_dir.exists() and not dest_dir.is_dir():
+        digest = hashlib.sha1(f"{cert_path}|{key_path}|{slug}".encode()).hexdigest()[:10]
+        slug = f"inbound-{digest}"
+        dest_dir = certs_root / slug
+    return slug, dest_dir
 
 
 def _candidate_host_paths(raw: str) -> list[Path]:
@@ -214,6 +250,8 @@ def apply_cert_permissions(path: Path, *, is_key: bool) -> None:
 
 
 def _copy_file(src: Path, dst: Path, *, is_key: bool) -> None:
+    if dst.exists() and dst.is_dir():
+        raise IsADirectoryError(f"Cannot overwrite directory with cert file: {dst}")
     dst.parent.mkdir(parents=True, exist_ok=True)
     apply_cert_permissions(dst.parent, is_key=False)
     shutil.copy2(src, dst)
@@ -228,6 +266,9 @@ def relocate_inbound_certs_in_xray_config(
 ) -> dict[str, Any]:
     """Copy inbound TLS files into certs/<domain>/ and rewrite xray_config paths.
 
+    Best-effort: one bad pair must not abort the whole pass. Callers should treat
+    failures as warnings — panel certs copied earlier stay intact.
+
     Returns a summary dict. No-op summary when nothing to do.
     """
     def _log(msg: str) -> None:
@@ -239,6 +280,7 @@ def relocate_inbound_certs_in_xray_config(
         "rewritten": 0,
         "copied": 0,
         "skipped": 0,
+        "errors": 0,
         "missing": [],
         "domains": [],
     }
@@ -256,84 +298,91 @@ def relocate_inbound_certs_in_xray_config(
     pair_map: dict[tuple[str, str], tuple[str, str]] = {}
 
     for cert_obj, parent in _iter_certificate_dicts(data):
-        cert_raw = cert_obj.get("certificateFile") or cert_obj.get("certificate_file")
-        key_raw = cert_obj.get("keyFile") or cert_obj.get("key_file")
-        if not isinstance(cert_raw, str) or not isinstance(key_raw, str):
-            continue
-        if not cert_raw.strip() or not key_raw.strip():
-            continue
+        try:
+            cert_raw = cert_obj.get("certificateFile") or cert_obj.get("certificate_file")
+            key_raw = cert_obj.get("keyFile") or cert_obj.get("key_file")
+            if not isinstance(cert_raw, str) or not isinstance(key_raw, str):
+                continue
+            if not cert_raw.strip() or not key_raw.strip():
+                continue
 
-        src_key = (cert_raw.strip(), key_raw.strip())
-        if src_key in pair_map:
-            new_cert, new_key = pair_map[src_key]
-            if cert_obj.get("certificateFile") != new_cert or cert_obj.get("keyFile") != new_key:
-                cert_obj["certificateFile"] = new_cert
-                cert_obj["keyFile"] = new_key
-                if "certificate_file" in cert_obj:
-                    cert_obj["certificate_file"] = new_cert
-                if "key_file" in cert_obj:
-                    cert_obj["key_file"] = new_key
-                summary["rewritten"] += 1
-            else:
-                summary["skipped"] += 1
-            continue
+            src_key = (cert_raw.strip(), key_raw.strip())
+            if src_key in pair_map:
+                new_cert, new_key = pair_map[src_key]
+                if cert_obj.get("certificateFile") != new_cert or cert_obj.get("keyFile") != new_key:
+                    cert_obj["certificateFile"] = new_cert
+                    cert_obj["keyFile"] = new_key
+                    if "certificate_file" in cert_obj:
+                        cert_obj["certificate_file"] = new_cert
+                    if "key_file" in cert_obj:
+                        cert_obj["key_file"] = new_key
+                    summary["rewritten"] += 1
+                else:
+                    summary["skipped"] += 1
+                continue
 
-        cert_src = resolve_existing_file(cert_raw)
-        key_src = resolve_existing_file(key_raw)
-        if not cert_src or not key_src:
-            summary["missing"].append({"certificateFile": cert_raw, "keyFile": key_raw})
-            _log(
-                "Inbound cert relocate: source file(s) not found for "
-                f"cert={cert_raw!r} key={key_raw!r}"
+            cert_src = resolve_existing_file(cert_raw)
+            key_src = resolve_existing_file(key_raw)
+            if not cert_src or not key_src:
+                summary["missing"].append({"certificateFile": cert_raw, "keyFile": key_raw})
+                _log(
+                    "Inbound cert relocate: source file(s) not found for "
+                    f"cert={cert_raw!r} key={key_raw!r}"
+                )
+                continue
+
+            domain = _pair_domain(str(cert_src), str(key_src), _server_name_near(parent))
+            domain, dest_dir = _resolve_dest_dir(
+                certs_root, domain, str(cert_src), str(key_src),
             )
-            continue
-
-        domain = _pair_domain(str(cert_src), str(key_src), _server_name_near(parent))
-        dest_dir = certs_root / domain
-        # Prefer stable names; keep original suffix when not pem
-        cert_name = "fullchain.pem" if cert_src.suffix.lower() in {".pem", ".crt", ".cer", ""} else cert_src.name
-        key_name = "privkey.pem" if key_src.suffix.lower() in {".pem", ".key", ""} else key_src.name
-        # Avoid clobbering different content under same domain names
-        dest_cert = dest_dir / cert_name
-        dest_key = dest_dir / key_name
-        if dest_cert.exists() and dest_cert.resolve() != cert_src.resolve():
-            try:
-                if dest_cert.read_bytes() != cert_src.read_bytes():
+            # Prefer stable names; keep original suffix when not pem
+            cert_name = "fullchain.pem" if cert_src.suffix.lower() in {".pem", ".crt", ".cer", ""} else cert_src.name
+            key_name = "privkey.pem" if key_src.suffix.lower() in {".pem", ".key", ""} else key_src.name
+            # Avoid clobbering different content under same domain names
+            dest_cert = dest_dir / cert_name
+            dest_key = dest_dir / key_name
+            if dest_cert.exists() and dest_cert.is_file() and dest_cert.resolve() != cert_src.resolve():
+                try:
+                    if dest_cert.read_bytes() != cert_src.read_bytes():
+                        digest = hashlib.sha1(str(cert_src).encode()).hexdigest()[:8]
+                        dest_cert = dest_dir / f"{digest}-{cert_name}"
+                        dest_key = dest_dir / f"{digest}-{key_name}"
+                except OSError:
                     digest = hashlib.sha1(str(cert_src).encode()).hexdigest()[:8]
                     dest_cert = dest_dir / f"{digest}-{cert_name}"
                     dest_key = dest_dir / f"{digest}-{key_name}"
-            except OSError:
-                digest = hashlib.sha1(str(cert_src).encode()).hexdigest()[:8]
-                dest_cert = dest_dir / f"{digest}-{cert_name}"
-                dest_key = dest_dir / f"{digest}-{key_name}"
 
-        already_in_place = (
-            cert_src.resolve() == dest_cert.resolve()
-            and key_src.resolve() == dest_key.resolve()
-        )
-        if not already_in_place:
-            _copy_file(cert_src, dest_cert, is_key=False)
-            _copy_file(key_src, dest_key, is_key=True)
-            summary["copied"] += 1
-            _log(f"Inbound certs → {dest_dir}/ ({domain})")
-        else:
-            apply_cert_permissions(dest_dir, is_key=False)
-            apply_cert_permissions(dest_cert, is_key=False)
-            apply_cert_permissions(dest_key, is_key=True)
-            summary["skipped"] += 1
+            already_in_place = (
+                cert_src.resolve() == dest_cert.resolve()
+                and key_src.resolve() == dest_key.resolve()
+            )
+            if not already_in_place:
+                _copy_file(cert_src, dest_cert, is_key=False)
+                _copy_file(key_src, dest_key, is_key=True)
+                summary["copied"] += 1
+                _log(f"Inbound certs → {dest_dir}/ ({domain})")
+            else:
+                apply_cert_permissions(dest_dir, is_key=False)
+                apply_cert_permissions(dest_cert, is_key=False)
+                apply_cert_permissions(dest_key, is_key=True)
+                summary["skipped"] += 1
 
-        new_cert = f"/var/lib/pasarguard/certs/{domain}/{dest_cert.name}"
-        new_key = f"/var/lib/pasarguard/certs/{domain}/{dest_key.name}"
-        pair_map[src_key] = (new_cert, new_key)
-        cert_obj["certificateFile"] = new_cert
-        cert_obj["keyFile"] = new_key
-        if "certificate_file" in cert_obj:
-            cert_obj["certificate_file"] = new_cert
-        if "key_file" in cert_obj:
-            cert_obj["key_file"] = new_key
-        summary["rewritten"] += 1
-        if domain not in summary["domains"]:
-            summary["domains"].append(domain)
+            new_cert = f"/var/lib/pasarguard/certs/{domain}/{dest_cert.name}"
+            new_key = f"/var/lib/pasarguard/certs/{domain}/{dest_key.name}"
+            pair_map[src_key] = (new_cert, new_key)
+            cert_obj["certificateFile"] = new_cert
+            cert_obj["keyFile"] = new_key
+            if "certificate_file" in cert_obj:
+                cert_obj["certificate_file"] = new_cert
+            if "key_file" in cert_obj:
+                cert_obj["key_file"] = new_key
+            summary["rewritten"] += 1
+            if domain not in summary["domains"]:
+                summary["domains"].append(domain)
+        except Exception as exc:
+            summary["errors"] = int(summary.get("errors") or 0) + 1
+            _log(f"Inbound cert relocate: skipped one pair — {exc}")
+            continue
 
     if summary["rewritten"] or summary["copied"]:
         xray_path.write_text(
@@ -343,12 +392,13 @@ def relocate_inbound_certs_in_xray_config(
         _log(
             "Inbound cert relocate done: "
             f"copied={summary['copied']} rewritten={summary['rewritten']} "
-            f"domains={len(summary['domains'])} missing={len(summary['missing'])}"
+            f"domains={len(summary['domains'])} missing={len(summary['missing'])} "
+            f"errors={summary.get('errors') or 0}"
         )
-    elif summary["missing"]:
+    elif summary["missing"] or summary.get("errors"):
         _log(
             f"Inbound cert relocate: no files copied; "
-            f"{len(summary['missing'])} path pair(s) missing on disk"
+            f"missing={len(summary['missing'])} errors={summary.get('errors') or 0}"
         )
     else:
         _log("Inbound cert relocate: nothing to change")

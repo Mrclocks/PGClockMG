@@ -118,6 +118,85 @@ def test_relocate_is_idempotent():
     print("OK: relocate idempotent")
 
 
+def test_relocate_flat_fullchain_does_not_collide_with_filename_slug():
+    """Regression: flat certs/fullchain.pem must not become certs/fullchain.pem/ dir."""
+    from app.services.marzban_inbound_certs import (
+        _safe_domain_slug,
+        relocate_inbound_certs_in_xray_config,
+    )
+
+    assert _safe_domain_slug("fullchain.pem") is None
+    assert _safe_domain_slug("privkey.pem") is None
+    assert _safe_domain_slug("vpn.example.com") == "vpn.example.com"
+
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        pgdata = td_path / "pgdata"
+        certs_root = pgdata / "certs"
+        certs_root.mkdir(parents=True)
+        # Panel-style flat certs already copied by _copy_marzban_assets
+        flat_cert = certs_root / "fullchain.pem"
+        flat_key = certs_root / "key.pem"
+        flat_cert.write_text("PANEL-CERT", encoding="utf-8")
+        flat_key.write_text("PANEL-KEY", encoding="utf-8")
+
+        xray = pgdata / "xray_config.json"
+        xray.write_text(
+            json.dumps(
+                {
+                    "inbounds": [
+                        {
+                            "streamSettings": {
+                                "tlsSettings": {
+                                    "certificates": [
+                                        {
+                                            "certificateFile": str(flat_cert),
+                                            "keyFile": str(flat_key),
+                                        }
+                                    ],
+                                }
+                            }
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        logs: list[str] = []
+        with patch("app.services.marzban_inbound_certs.PASARGUARD_DATA", pgdata):
+            summary = relocate_inbound_certs_in_xray_config(
+                xray, certs_root=certs_root, log=logs.append,
+            )
+        # Must not raise; flat panel files must remain files
+        assert flat_cert.is_file()
+        assert flat_cert.read_text(encoding="utf-8") == "PANEL-CERT"
+        assert summary.get("errors", 0) == 0
+        assert summary["copied"] >= 1
+        # Destination under inbound-<digest>/ not certs/fullchain.pem/
+        assert any(
+            d.startswith("inbound-") for d in (summary.get("domains") or [])
+        ), summary
+        assert not (certs_root / "fullchain.pem").is_dir()
+    print("OK: flat fullchain.pem no FileExistsError / panel cert preserved")
+
+
+def test_migrator_relocate_failure_does_not_abort():
+    from app.services.migrators.base import MigrationJob
+    from app.services.migrators.marzban import MarzbanMigrator
+
+    m = MarzbanMigrator(MigrationJob(job_id="soft"), {"relocate_inbound_certs": True})
+    with (
+        patch("app.services.migrators.marzban.PASARGUARD_DATA", Path("/tmp/no-such-pg")),
+        patch(
+            "app.services.migrators.marzban.relocate_inbound_certs_in_xray_config",
+            side_effect=OSError(17, "File exists"),
+        ),
+    ):
+        m._maybe_relocate_inbound_certs()  # must not raise
+    assert any("Warning" in line or "skipped" in line for line in m.job.logs)
+    print("OK: relocate failure is soft warning")
+
+
 def test_migrator_skips_relocate_when_switch_off():
     from app.services.migrators.base import MigrationJob
     from app.services.migrators.marzban import MarzbanMigrator
@@ -145,7 +224,7 @@ def test_migrator_runs_relocate_when_switch_on():
             patch("app.services.migrators.marzban.PASARGUARD_DATA", pgdata),
             patch(
                 "app.services.migrators.marzban.relocate_inbound_certs_in_xray_config",
-                return_value={"copied": 0, "rewritten": 0, "missing": []},
+                return_value={"copied": 0, "rewritten": 0, "missing": [], "errors": 0},
             ) as fn,
         ):
             m._maybe_relocate_inbound_certs()
@@ -158,11 +237,14 @@ def test_restore_request_has_no_relocate_field():
 
     assert "relocate_inbound_certs" not in PasarguardRestoreRequest.model_fields
     assert "relocate_inbound_certs" in MigrationRequest.model_fields
+    assert "disable_nodes_after_migrate" in MigrationRequest.model_fields
+    assert "disable_nodes_after_migrate" not in PasarguardRestoreRequest.model_fields
     req = MigrationRequest(
         source_panel="marzban", source_db="sqlite", target_db="sqlite",
     )
     assert req.relocate_inbound_certs is False
-    print("OK: restore model untouched; migrate default off")
+    assert req.disable_nodes_after_migrate is True
+    print("OK: restore model untouched; migrate disable-nodes default on")
 
 
 def test_strip_json_comments_and_load():
@@ -182,6 +264,8 @@ def test_strip_json_comments_and_load():
 if __name__ == "__main__":
     test_relocate_copies_acme_paths_into_domain_folder_and_rewrites()
     test_relocate_is_idempotent()
+    test_relocate_flat_fullchain_does_not_collide_with_filename_slug()
+    test_migrator_relocate_failure_does_not_abort()
     test_migrator_skips_relocate_when_switch_off()
     test_migrator_runs_relocate_when_switch_on()
     test_restore_request_has_no_relocate_field()
