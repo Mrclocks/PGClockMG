@@ -86,6 +86,9 @@ const I18N = {
     download: "دانلود",
     sendTg: "تلگرام",
     sendStream: "استریم",
+    createAndStream: "بکاپ بساز و بفرست",
+    createAndStreamCreating: "در حال ساخت بکاپ…",
+    createAndStreamDone: "بکاپ ساخته و ارسال شد",
     remove: "حذف",
     latestBackupTag: "آخرین بکاپ",
     backupsPath: "مسیر ذخیره",
@@ -183,6 +186,7 @@ const I18N = {
     lblStreamUrl: "آدرس ویزارد مقصد",
     lblStreamToken: "توکن دریافت از ویزارد مقصد",
     btnStreamSend: "شروع ارسال",
+    btnCreateAndStream: "بکاپ بساز و بفرست",
     btnStreamBack: "بازگشت",
     users: "کاربر",
     nodes: "نود",
@@ -291,6 +295,9 @@ const I18N = {
     download: "Download",
     sendTg: "Telegram",
     sendStream: "Stream",
+    createAndStream: "Create & stream",
+    createAndStreamCreating: "Creating backup…",
+    createAndStreamDone: "Backup created and streamed",
     remove: "Delete",
     latestBackupTag: "Latest",
     backupsPath: "Storage path",
@@ -388,6 +395,7 @@ const I18N = {
     lblStreamUrl: "Destination wizard URL",
     lblStreamToken: "Receive token from destination wizard",
     btnStreamSend: "Start send",
+    btnCreateAndStream: "Create & stream",
     btnStreamBack: "Back",
     users: "Users",
     nodes: "Nodes",
@@ -496,6 +504,9 @@ const I18N = {
     download: "Скачать",
     sendTg: "Telegram",
     sendStream: "Стрим",
+    createAndStream: "Создать и отправить",
+    createAndStreamCreating: "Создание бэкапа…",
+    createAndStreamDone: "Бэкап создан и отправлен",
     remove: "Удалить",
     latestBackupTag: "Последний",
     backupsPath: "Путь хранения",
@@ -593,6 +604,7 @@ const I18N = {
     lblStreamUrl: "URL мастера назначения",
     lblStreamToken: "Токен приёма с мастера назначения",
     btnStreamSend: "Начать отправку",
+    btnCreateAndStream: "Создать и отправить",
     btnStreamBack: "Назад",
     users: "Пользователи",
     nodes: "Ноды",
@@ -875,7 +887,7 @@ function applyI18n() {
     ["lblSchedEnabled", "lblSchedEnabled"], ["lblTgEnabled", "lblTgEnabled"],
     ["lblWebhookEnabled", "lblWebhookEnabled"], ["lblProxyEnabled", "lblProxyEnabled"],
     ["streamH2", "streamH2"], ["streamDesc", "streamDesc"], ["lblStreamUrl", "lblStreamUrl"],
-    ["lblStreamToken", "lblStreamToken"], ["btnStreamSend", "btnStreamSend"], ["btnStreamBack", "btnStreamBack"],
+    ["lblStreamToken", "lblStreamToken"], ["btnStreamSend", "btnStreamSend"], ["btnCreateAndStream", "btnCreateAndStream"], ["btnStreamBack", "btnStreamBack"],
     ["streamConnTitle", "streamConnTitle"], ["streamUrlHint", "streamUrlHint"], ["streamTokenHint", "streamTokenHint"],
   ];
   for (const [id, key] of map) {
@@ -907,6 +919,8 @@ function applyI18n() {
   initSchedTimezoneSelect();
   initLangMenu();
   initBackupModal();
+  document.getElementById("streamUrl")?.addEventListener("paste", maybeFillStreamFromPaste);
+  document.getElementById("streamToken")?.addEventListener("paste", maybeFillStreamFromPaste);
   const tgEnableEl = document.getElementById("tgEnabled");
   if (tgEnableEl && !tgEnableEl.dataset.syncReady) {
     tgEnableEl.dataset.syncReady = "1";
@@ -1628,6 +1642,119 @@ function setStreamProgressUI({ title, pct, meta, running }) {
   const width = Math.max(0, Math.min(100, Number(pct) || 0));
   bar.style.width = width + "%";
   bar.style.animation = running && width < 100 ? "" : "none";
+}
+
+function parseStreamPaste(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return null;
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length >= 2) {
+    const url = lines[0];
+    const token = lines.slice(1).join("").trim();
+    if (/^https?:\/\//i.test(url) && token.length >= 8) return { url, token };
+  }
+  const m = text.match(/^(https?:\/\/\S+)\s+(\S{8,})$/i);
+  if (m) return { url: m[1], token: m[2] };
+  return null;
+}
+
+function maybeFillStreamFromPaste(ev) {
+  const pasted = (ev.clipboardData || window.clipboardData)?.getData("text");
+  const parsed = parseStreamPaste(pasted);
+  if (!parsed) return;
+  const urlEl = document.getElementById("streamUrl");
+  const tokEl = document.getElementById("streamToken");
+  if (!urlEl || !tokEl) return;
+  const targetId = ev.target && ev.target.id;
+  if (targetId === "streamUrl" || (!urlEl.value.trim() && !tokEl.value.trim())) {
+    urlEl.value = parsed.url;
+    tokEl.value = parsed.token;
+    ev.preventDefault();
+  }
+}
+
+async function createAndStream() {
+  const msg = document.getElementById("streamMsg");
+  const btn = document.getElementById("btnCreateAndStream");
+  const sendBtn = document.getElementById("btnStreamSend");
+  if (msg) {
+    msg.classList.add("hidden");
+    msg.textContent = "";
+  }
+  setStreamStatusTag("connecting");
+  setStreamProgressUI({ title: t("createAndStreamCreating"), pct: 2, meta: "", running: true });
+  if (btn) btn.disabled = true;
+  if (sendBtn) sendBtn.disabled = true;
+  try {
+    const started = await api("/api/backups/create-and-stream", {
+      method: "POST",
+      body: JSON.stringify({
+        dest_url: document.getElementById("streamUrl").value,
+        token: document.getElementById("streamToken").value,
+      }),
+    });
+    await pollCreateAndStreamJob(started.job_id);
+  } catch (e) {
+    setStreamStatusTag("error");
+    setStreamProgressUI({ title: t("streamFail") + ": " + e.message, pct: 100, meta: "", running: false });
+    const box = document.getElementById("streamProgress");
+    if (box) box.classList.add("is-error");
+    if (msg) {
+      msg.classList.remove("hidden");
+      msg.textContent = e.message;
+    }
+    showToast(t("streamFail") + ": " + e.message, "error");
+  } finally {
+    if (btn) btn.disabled = false;
+    if (sendBtn) sendBtn.disabled = false;
+  }
+}
+
+async function pollCreateAndStreamJob(jobId) {
+  return await new Promise((resolve, reject) => {
+    const tick = async () => {
+      try {
+        const job = await api("/api/backups/stream/jobs/" + encodeURIComponent(jobId));
+        const sent = Number(job.bytes_sent) || 0;
+        const total = Number(job.bytes_total) || 0;
+        const pct = total > 0
+          ? Math.min(99, Math.round((sent / total) * 100))
+          : (job.status === "creating" ? 15 : 5);
+        const meta = total > 0 ? `${humanSize(sent)} / ${humanSize(total)}` : (job.filename || "");
+        if (job.status === "creating" || job.phase === "creating") {
+          setStreamStatusTag("connecting");
+          setStreamProgressUI({ title: t("createAndStreamCreating"), pct: Math.max(pct, 8), meta, running: true });
+        } else if (job.status === "connecting" || job.status === "queued") {
+          setStreamStatusTag("connecting");
+          setStreamProgressUI({ title: t("streamConnecting"), pct: Math.max(pct, 20), meta, running: true });
+        } else if (job.status === "sending") {
+          setStreamStatusTag("sending");
+          setStreamProgressUI({ title: t("streamSending"), pct, meta, running: true });
+        } else if (job.status === "success") {
+          setStreamStatusTag("success");
+          setStreamProgressUI({ title: t("createAndStreamDone"), pct: 100, meta, running: false });
+          document.getElementById("streamProgress").classList.add("is-success");
+          const msg = document.getElementById("streamMsg");
+          if (msg) {
+            msg.classList.remove("hidden");
+            msg.textContent = t("createAndStreamDone") + (job.filename ? ": " + job.filename : "");
+          }
+          showToast(t("createAndStreamDone"), "success");
+          await refreshDashboard();
+          await refreshList();
+          resolve(job);
+          return;
+        } else if (job.status === "error") {
+          reject(new Error(job.error || "stream_failed"));
+          return;
+        }
+        setTimeout(tick, 900);
+      } catch (e) {
+        reject(e);
+      }
+    };
+    tick();
+  });
 }
 
 async function sendStream() {

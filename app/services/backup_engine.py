@@ -471,6 +471,76 @@ def verify_backup_archive(
     }
 
 
+def estimate_backup_source_bytes() -> int:
+    """Best-effort size of data that will be dumped/copied into the backup zip."""
+    floor = 64 * 1024 * 1024  # 64 MiB
+    try:
+        if not is_pasarguard_installed() or not PASARGUARD_ENV.is_file():
+            return floor
+        env_text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+        db_type = get_pasarguard_db_type() or detect_db_type_from_env(env_text, prefer_compose=True) or "sqlite"
+        total = 0
+        if db_type == "sqlite":
+            path = _resolve_sqlite_path(env_text)
+            if path.is_file():
+                total += int(path.stat().st_size)
+        else:
+            # Server DB dump size is unknown cheaply — use a conservative floor.
+            total += 512 * 1024 * 1024
+        # Certs / templates / data extras
+        for root in (PASARGUARD_DATA / "certs", PASARGUARD_DATA / "templates", PASARGUARD_DIR):
+            if not root.exists():
+                continue
+            if root.is_file():
+                try:
+                    total += int(root.stat().st_size)
+                except OSError:
+                    pass
+                continue
+            for dirpath, _dirnames, filenames in os.walk(root):
+                for name in filenames:
+                    try:
+                        total += int((Path(dirpath) / name).stat().st_size)
+                    except OSError:
+                        continue
+                    if total > 20 * 1024 * 1024 * 1024:
+                        return total
+        return max(total, floor)
+    except Exception:
+        return floor
+
+
+def required_free_bytes_for_backup(estimate_bytes: int) -> int:
+    """Need room for staging copy + final zip (+ margin)."""
+    estimate = max(int(estimate_bytes or 0), 64 * 1024 * 1024)
+    return max(estimate * 2, estimate + 512 * 1024 * 1024, 1024 * 1024 * 1024)
+
+
+def assert_enough_disk_for_backup() -> dict:
+    """Fail fast before dump/zip when free space is clearly insufficient."""
+    estimate = estimate_backup_source_bytes()
+    need = required_free_bytes_for_backup(estimate)
+    checked: list[dict] = []
+    for label, path in (("work", WORK_DIR), ("backup", BACKUP_DIR)):
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            free = int(shutil.disk_usage(str(path)).free)
+        except OSError as exc:
+            raise RuntimeError(f"Cannot check free disk on {path}: {exc}") from exc
+        checked.append({"path": str(path), "role": label, "free_bytes": free})
+        if free < need:
+            raise RuntimeError(
+                f"Not enough free disk for backup on {path} "
+                f"(need about {need // (1024 * 1024)} MiB free, "
+                f"have {free // (1024 * 1024)} MiB). Free space and retry."
+            )
+    return {
+        "estimate_bytes": estimate,
+        "required_bytes": need,
+        "paths": checked,
+    }
+
+
 def _read_sidecar_meta(path: Path) -> dict | None:
     meta = path.with_suffix(path.suffix + ".json")
     if not meta.is_file():
@@ -1138,6 +1208,15 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
             raise RuntimeError("PasarGuard is not installed on this server")
         if not PASARGUARD_ENV.is_file():
             raise RuntimeError("PasarGuard .env not found")
+
+        _set_progress(job, 5, "Checking free disk space…")
+        disk_info = assert_enough_disk_for_backup()
+        _log(
+            job,
+            "Disk preflight OK — "
+            f"estimate≈{int(disk_info['estimate_bytes']) // (1024 * 1024)} MiB, "
+            f"required≈{int(disk_info['required_bytes']) // (1024 * 1024)} MiB",
+        )
 
         _set_progress(job, 8, "Reading PasarGuard environment…")
         env_text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")

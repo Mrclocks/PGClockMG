@@ -228,6 +228,19 @@
               <div class="install-cmd-box"><code id="restoreStreamToken"></code></div>
               <button type="button" class="btn btn-copy" id="btnCopyStreamToken" onclick="copyText('restoreStreamToken')"></button>
             </div>
+            <div id="restoreStreamPairBox" class="install-cmd-row hidden" style="margin-top:8px">
+              <div class="install-cmd-box"><code id="restoreStreamPair" style="white-space:pre-wrap"></code></div>
+              <button type="button" class="btn btn-copy" id="btnCopyStreamPair" onclick="copyText('restoreStreamPair')"></button>
+            </div>
+            <p class="desc-sm" id="restoreStreamUrlHint" style="margin-top:8px"></p>
+            <label class="ios-toggle" for="chkAutoRestoreOnStream" style="margin-top:12px">
+              <input type="checkbox" id="chkAutoRestoreOnStream" role="switch" checked>
+              <span class="toggle-ui" aria-hidden="true"></span>
+              <span class="toggle-copy">
+                <span class="toggle-label" id="chkAutoRestoreOnStreamLabel"></span>
+                <span class="toggle-hint" id="chkAutoRestoreOnStreamHint"></span>
+              </span>
+            </label>
             <div id="restoreStreamProgress" class="progress-panel upload-progress hidden" style="margin-top:12px">
               <div class="progress-meta">
                 <p class="status-msg progress-status" id="restoreStreamStatus"></p>
