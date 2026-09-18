@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.2`** — безопасный auto-heal миграции Marzban; soft-fail cert relocate; nodes disabled by default
+> 🚀 **`v4.6.3`** — backup MySQL/PG dump: полная матрица паролей .env после drift restore
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

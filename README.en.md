@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.2`** — safe Marzban migrate auto-heal; cert relocate soft-fail; nodes disabled by default
+> 🚀 **`v4.6.3`** — backup MySQL/PG dump tries full .env credential matrix after restore drift
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
