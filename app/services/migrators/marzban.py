@@ -36,6 +36,15 @@ from app.services.backup_analyzer import resolve_extract_root, find_file_in_uplo
 from app.services.pg_restore import soft_db_family
 from app.services.pg_access import get_panel_access_info
 from app.services.marzban_inbound_certs import relocate_inbound_certs_in_xray_config
+from app.services.marzban_core_sync import (
+    assert_server_core_matches_xray,
+    assert_sqlite_core_matches_xray,
+    pin_xray_json_env,
+    require_marzban_xray_on_disk,
+    sync_core_from_xray_server_db,
+    sync_core_from_xray_sqlite,
+    xray_config_path,
+)
 from app.services.marzban_migrate_heal import (
     is_transient_infra_error,
     normalize_templates_layout,
@@ -179,6 +188,7 @@ class MarzbanMigrator(BaseMigrator):
         self.job.set_progress(50, "Upgrading Marzban schema via PasarGuard panel boot...")
         # Long Marzban→PG alembic chains (bigint id, etc.) need a large health budget.
         self._maybe_relocate_inbound_certs()
+        self._prepare_xray_for_panel_boot()
         await self._safe_start_with_heal(health_max_wait=1800)
         self.params["target_db"] = orig_target or target_db
         await self._stop_panel()
@@ -186,6 +196,7 @@ class MarzbanMigrator(BaseMigrator):
 
         if target_db == "sqlite":
             self.job.set_progress(90, "Starting PasarGuard on SQLite...")
+            self._prepare_xray_for_panel_boot()
             await self._safe_start_with_heal()
             await self._assert_target_pasarguard_ready("sqlite")
             return
@@ -195,6 +206,7 @@ class MarzbanMigrator(BaseMigrator):
         if extra_data_dir:
             await self._copy_marzban_assets(extra_data_dir)
         self.job.set_progress(90, "Starting PasarGuard...")
+        self._prepare_xray_for_panel_boot()
         await self._safe_start_with_heal()
         await self._assert_target_pasarguard_ready(target_db)
 
@@ -237,6 +249,7 @@ class MarzbanMigrator(BaseMigrator):
             self.job.set_progress(70, "Upgrading Marzban MySQL schema via panel boot...")
             # Large dumps: alembic may spend a long time on "use bigint for id column".
             self._maybe_relocate_inbound_certs()
+            self._prepare_xray_for_panel_boot()
             await self._safe_start_with_heal(health_max_wait=1800)
             await self._assert_target_pasarguard_ready(target_db)
             return
@@ -248,6 +261,7 @@ class MarzbanMigrator(BaseMigrator):
             await self._copy_marzban_assets(extra_data_dir)
         self.job.set_progress(50, f"Two-phase: {source_db} → {target_db} (panel-upgrade intermediate)...")
         self._maybe_relocate_inbound_certs()
+        self._prepare_xray_for_panel_boot()
         await run_cross_db_migration(
             self, str(source_sql), source_db, target_db,
             upgrade_via_panel=True,
@@ -256,6 +270,7 @@ class MarzbanMigrator(BaseMigrator):
         self._abort_if_inbounds_missing_from_stats(getattr(self, "copy_stats", None))
         await self._finalize_env_after_convert(target_db, install_env_snapshot)
         self.job.set_progress(90, "Starting PasarGuard...")
+        self._prepare_xray_for_panel_boot()
         await self._safe_start_with_heal()
         await self._assert_target_pasarguard_ready(target_db)
 
@@ -405,6 +420,8 @@ class MarzbanMigrator(BaseMigrator):
                 f".env SQLALCHEMY_DATABASE_URL does not match target engine {target_db}"
             )
         PASARGUARD_ENV.write_text(finalized, encoding="utf-8")
+        # finalize rewrites from install snapshot — never lose the absolute XRAY_JSON pin.
+        pin_xray_json_env(log=self.job.log)
         self.job.log(f".env finalized for {target_db}")
 
     def _relocate_sqlite_after_convert(self) -> None:
@@ -439,6 +456,10 @@ class MarzbanMigrator(BaseMigrator):
         text = _set_sqlalchemy_url(base, url)
         text = _set_env_var_simple(text, "PASARGUARD_DB_ENGINE", "sqlite")
         PASARGUARD_ENV.write_text(text, encoding="utf-8")
+        # Snapshot rewrite must not drop a previously pinned absolute XRAY_JSON path.
+        # Otherwise panel alembic seeds the install-default core while Marzban's
+        # xray_config.json already sits under /var/lib/pasarguard/.
+        pin_xray_json_env(log=self.job.log)
         self.job.log(".env temporarily pointed at SQLite for schema upgrade")
 
     async def _stop_panel(self) -> None:
@@ -478,6 +499,9 @@ class MarzbanMigrator(BaseMigrator):
             raise RuntimeError(f"Could not verify upgraded SQLite: {e}") from e
 
         self._assert_pasarguard_shape_ready(found, tables_present=tables, engine="sqlite")
+        # File on disk is source of truth — force DB core/inbounds to match even if
+        # panel boot seeded the install-default XRAY_JSON.
+        self._sync_and_assert_core_from_xray("sqlite", sqlite_path=path)
 
     async def _assert_target_pasarguard_ready(self, target_db: str) -> None:
         """Post-boot readiness for live target engines (sqlite/mysql/pg/ts)."""
@@ -487,11 +511,40 @@ class MarzbanMigrator(BaseMigrator):
         if target_db in ("mysql", "mariadb"):
             found, tables = self._count_mysql_pasarguard_tables(target_db)
             self._assert_pasarguard_shape_ready(found, tables_present=tables, engine=target_db)
+            self._sync_and_assert_core_from_xray(target_db)
             return
         if target_db in ("postgresql", "timescaledb"):
             found, tables = self._count_postgres_pasarguard_tables(target_db)
             self._assert_pasarguard_shape_ready(found, tables_present=tables, engine=target_db)
+            self._sync_and_assert_core_from_xray(target_db)
             return
+
+    def _prepare_xray_for_panel_boot(self) -> None:
+        """Pin XRAY_JSON and refuse boot without a real Marzban xray_config.json."""
+        pin_xray_json_env(log=self.job.log)
+        require_marzban_xray_on_disk(log=self.job.log)
+
+    def _sync_and_assert_core_from_xray(
+        self,
+        target_db: str,
+        *,
+        sqlite_path: Path | None = None,
+    ) -> None:
+        """Replace default core/inbounds with on-disk xray and hard-fail on mismatch."""
+        pin_xray_json_env(log=self.job.log)
+        require_marzban_xray_on_disk(log=self.job.log)
+        if target_db == "sqlite":
+            path = sqlite_path or (PASARGUARD_DATA / "db.sqlite3")
+            sync_core_from_xray_sqlite(path, log=self.job.log)
+            assert_sqlite_core_matches_xray(path)
+            return
+        from app.services.db_credentials import migration_port
+
+        conn = dict(get_target_connection(self.params) or {})
+        conn["host"] = conn.get("host") or "127.0.0.1"
+        conn["port"] = migration_port(conn, target_db)
+        sync_core_from_xray_server_db(target_db, conn, log=self.job.log)
+        assert_server_core_matches_xray(target_db, conn)
 
     def _count_postgres_pasarguard_tables(
         self, target_db: str,
@@ -654,15 +707,7 @@ class MarzbanMigrator(BaseMigrator):
 
     def _pin_xray_json_env(self) -> None:
         """Point panel alembic at the copied xray_config (not relative ./xray_config.json)."""
-        xray = PASARGUARD_DATA / "xray_config.json"
-        if not xray.exists() or not PASARGUARD_ENV.exists():
-            return
-        text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
-        pinned = "/var/lib/pasarguard/xray_config.json"
-        new_text = _set_env_var_simple(text, "XRAY_JSON", pinned)
-        if new_text != text:
-            PASARGUARD_ENV.write_text(new_text, encoding="utf-8")
-            self.job.log(f"Pinned XRAY_JSON → {pinned}")
+        pin_xray_json_env(log=self.job.log)
 
     # ─── Helpers ─────────────────────────────────────────────────────
 
@@ -879,8 +924,16 @@ class MarzbanMigrator(BaseMigrator):
                 dst.write_text(text, encoding="utf-8")
                 self.job.log("Copied xray_config.json → /var/lib/pasarguard/")
             except Exception as exc:
-                self.job.log(f"Warning: xray_config copy failed — {exc}")
+                raise RuntimeError(
+                    f"Failed to copy Marzban xray_config.json — cannot seed core/inbounds: {exc}"
+                ) from exc
             break
+        else:
+            if not xray_config_path().is_file():
+                self.job.log(
+                    "Warning: no xray_config.json found in Marzban assets "
+                    "(will hard-fail before panel boot if still missing)"
+                )
         self._pin_xray_json_env()
         self._maybe_relocate_inbound_certs()
 

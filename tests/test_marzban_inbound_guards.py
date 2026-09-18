@@ -7,6 +7,7 @@ do not (soft readiness OR-gate, live MySQL without assets, convert sum-check).
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import sys
 import tempfile
@@ -35,23 +36,30 @@ def _sqlite_with(*, users=0, inbounds=0, hosts=0, core_configs=0, proxies=0) -> 
     conn.executescript(
         """
         CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT);
-        CREATE TABLE inbounds (id INTEGER PRIMARY KEY, tag TEXT);
+        CREATE TABLE inbounds (id INTEGER PRIMARY KEY, tag TEXT, protocol TEXT);
         CREATE TABLE hosts (id INTEGER PRIMARY KEY, remark TEXT);
         CREATE TABLE groups (id INTEGER PRIMARY KEY, name TEXT);
         CREATE TABLE admins (id INTEGER PRIMARY KEY);
         CREATE TABLE nodes (id INTEGER PRIMARY KEY);
-        CREATE TABLE core_configs (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE core_configs (id INTEGER PRIMARY KEY, name TEXT, config TEXT);
         CREATE TABLE proxies (id INTEGER PRIMARY KEY, type TEXT);
         """
     )
     for i in range(users):
         conn.execute("INSERT INTO users VALUES (?, ?)", (i + 1, f"u{i}"))
     for i in range(inbounds):
-        conn.execute("INSERT INTO inbounds VALUES (?, ?)", (i + 1, f"in{i}"))
+        conn.execute(
+            "INSERT INTO inbounds VALUES (?, ?, ?)",
+            (i + 1, f"in{i}", "vless"),
+        )
     for i in range(hosts):
         conn.execute("INSERT INTO hosts VALUES (?, ?)", (i + 1, f"h{i}"))
     for i in range(core_configs):
-        conn.execute("INSERT INTO core_configs VALUES (?, ?)", (i + 1, f"core{i}"))
+        cfg = json.dumps({"inbounds": [{"tag": f"in{j}", "protocol": "vless"} for j in range(max(inbounds, 1))]})
+        conn.execute(
+            "INSERT INTO core_configs VALUES (?, ?, ?)",
+            (i + 1, f"core{i}", cfg),
+        )
     for i in range(proxies):
         conn.execute("INSERT INTO proxies VALUES (?, ?)", (i + 1, "vless"))
     conn.commit()
@@ -82,7 +90,25 @@ def test_assert_sqlite_rejects_users_without_core_configs():
 def test_assert_sqlite_accepts_users_with_inbounds_and_core():
     m = _migrator()
     path = _sqlite_with(users=1, inbounds=2, core_configs=1)
-    m._assert_sqlite_pasarguard_ready(path)
+    with tempfile.TemporaryDirectory() as td:
+        pgdata = Path(td) / "data"
+        pgdata.mkdir()
+        xray = {
+            "inbounds": [
+                {"tag": "in0", "protocol": "vless"},
+                {"tag": "in1", "protocol": "vmess"},
+            ]
+        }
+        (pgdata / "xray_config.json").write_text(json.dumps(xray), encoding="utf-8")
+        env = Path(td) / ".env"
+        env.write_text("XRAY_JSON=/var/lib/pasarguard/xray_config.json\n", encoding="utf-8")
+        with (
+            patch("app.services.migrators.marzban.PASARGUARD_DATA", pgdata),
+            patch("app.services.migrators.marzban.PASARGUARD_ENV", env),
+            patch("app.services.marzban_core_sync.PASARGUARD_DATA", pgdata),
+            patch("app.services.marzban_core_sync.PASARGUARD_ENV", env),
+        ):
+            m._assert_sqlite_pasarguard_ready(path)
 
 
 def test_assert_sqlite_still_rejects_totally_empty():
@@ -211,6 +237,7 @@ def test_mysql_same_family_calls_post_boot_assert():
                 patch.object(m, "_ensure_target_database_stack", AsyncMock()),
                 patch.object(m, "_import_mysql_dump", AsyncMock()),
                 patch.object(m, "_assert_target_pasarguard_ready", fake_assert),
+                patch.object(m, "_prepare_xray_for_panel_boot", MagicMock()),
                 patch(
                     "app.services.native_migration.cross_db._heal_staging_alembic_if_unknown",
                     AsyncMock(),
@@ -240,7 +267,11 @@ def test_copy_assets_pins_xray_json_and_skips_empty_certs():
             pgdata.mkdir()
             pg.mkdir()
             (src / "xray_config.json").write_text(
-                '{"path":"/var/lib/marzban/certs/a.pem"}', encoding="utf-8"
+                json.dumps({
+                    "inbounds": [{"tag": "VLESS-Reality", "protocol": "vless", "port": 443}],
+                    "path": "/var/lib/marzban/certs/a.pem",
+                }),
+                encoding="utf-8",
             )
             (src / "certs").mkdir()  # empty — must not wipe good dst certs
             good = pgdata / "certs"
@@ -251,6 +282,8 @@ def test_copy_assets_pins_xray_json_and_skips_empty_certs():
             with (
                 patch("app.services.migrators.marzban.PASARGUARD_DATA", pgdata),
                 patch("app.services.migrators.marzban.PASARGUARD_ENV", pg / ".env"),
+                patch("app.services.marzban_core_sync.PASARGUARD_DATA", pgdata),
+                patch("app.services.marzban_core_sync.PASARGUARD_ENV", pg / ".env"),
             ):
                 await m._copy_marzban_assets(src)
 
