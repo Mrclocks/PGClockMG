@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.5`** — миграция Marzban: принудительная замена default core/inbounds из xray_config.json
+> 🚀 **`v4.6.6`** — автовыравнивание паролей PostgreSQL/Timescale при trust, когда TCP отклоняет .env
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
