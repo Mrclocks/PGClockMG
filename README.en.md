@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.4`** — fuller backups for all DB engines (disk preflight + dump credentials)
+> 🚀 **`v4.6.5`** — Marzban migrate: force-replace default core/inbounds from xray_config.json
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

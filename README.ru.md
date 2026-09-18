@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.4`** — более полные бэкапы для всех СУБД (disk preflight + dump credentials)
+> 🚀 **`v4.6.5`** — миграция Marzban: принудительная замена default core/inbounds из xray_config.json
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
