@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.3`** — backup MySQL/PG dump: полная матрица паролей .env после drift restore
+> 🚀 **`v4.6.4`** — более полные бэкапы для всех СУБД (disk preflight + dump credentials)
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

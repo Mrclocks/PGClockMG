@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.3`** — backup MySQL/PG dump tries full .env credential matrix after restore drift
+> 🚀 **`v4.6.4`** — fuller backups for all DB engines (disk preflight + dump credentials)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

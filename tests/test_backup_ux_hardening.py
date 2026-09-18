@@ -41,9 +41,13 @@ def test_webhook_public_url_still_blocks_private():
         normalize_public_http_url("http://127.0.0.1:7000")
 
 
-def test_required_free_bytes_has_floor():
-    need = required_free_bytes_for_backup(10 * 1024 * 1024)
-    assert need >= 1024 * 1024 * 1024
+def test_required_free_bytes_scales_with_estimate():
+    small = required_free_bytes_for_backup(10 * 1024 * 1024)
+    # Modest panels must not demand a hard 1 GiB floor.
+    assert small >= 256 * 1024 * 1024
+    assert small < 1024 * 1024 * 1024
+    large = required_free_bytes_for_backup(2 * 1024 * 1024 * 1024)
+    assert large >= 2 * 1024 * 1024 * 1024 * 2
 
 
 def test_disk_preflight_fails_when_free_is_tiny(tmp_path, monkeypatch):
