@@ -494,10 +494,10 @@ def test_mysql_probe_uses_argv_without_password_in_args():
     print("OK: mysql probe uses argv and hides the password")
 
 
-def test_pg_resolve_rejects_wrong_password_under_trust():
-    """In-container trust must not accept a stale .env password without TCP proof."""
+def test_pg_resolve_trust_recovers_stale_password():
+    """Local trust + TCP reject → ALTER ROLE via trust → TCP accepts .env password."""
     import asyncio
-    from unittest.mock import patch
+    from unittest.mock import AsyncMock, patch
 
     from app.services.db_auth import resolve_live_admin_connection
     from app.services.migrators.base import BaseMigrator, MigrationJob
@@ -508,6 +508,72 @@ def test_pg_resolve_rejects_wrong_password_under_trust():
 
     async def _run():
         job = MigrationJob(job_id="pg-trust1")
+        migrator = Dummy(job, {})
+        env = (
+            "POSTGRES_PASSWORD=stale-secret\n"
+            "POSTGRES_USER=pasarguard\n"
+            "POSTGRES_DB=pasarguard\n"
+        )
+        state = {"aligned": False, "alters": 0, "tcp_before": 0, "tcp_after": 0}
+
+        async def fake_run(cmd, cwd=None, timeout=600, *, quiet=False):
+            argv = list(cmd) if isinstance(cmd, list) else [cmd]
+            joined = " ".join(argv)
+            pwd = ""
+            for a in argv:
+                if a.startswith("PGPASSWORD="):
+                    pwd = a.split("=", 1)[1]
+            if "compose ps" in joined:
+                return True, "dbcid\n"
+            if "{{.Config.Image}}" in joined:
+                return True, "postgres:16\n"
+            if "NetworkSettings.Ports" in joined:
+                return True, '{"5432/tcp":[{"HostIp":"127.0.0.1","HostPort":"5432"}]}'
+            if "run" in argv and "--network" in argv:
+                if state["aligned"] and pwd == "stale-secret":
+                    state["tcp_after"] += 1
+                    return True, "1\n"
+                state["tcp_before"] += 1
+                return False, "password authentication failed"
+            if "exec" in argv and "psql" in argv:
+                if "ALTER ROLE" in joined:
+                    state["alters"] += 1
+                    state["aligned"] = True
+                    return True, "ALTER ROLE\n"
+                return True, "1\n"
+            return True, ""
+
+        with patch("app.services.db_auth.PASARGUARD_DIR", Path("/opt/pasarguard")), \
+             patch("app.services.db_auth.resolve_db_service", return_value="postgresql"), \
+             patch.object(migrator, "_run_cmd", fake_run), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            conn = await resolve_live_admin_connection(
+                migrator, "postgresql", env_text=env,
+            )
+        assert conn["password"] == "stale-secret"
+        assert conn["user"] == "pasarguard"
+        assert state["alters"] >= 1
+        assert state["tcp_before"] >= 1
+        assert state["tcp_after"] >= 1
+        assert any("trust recovery" in line.lower() for line in job.logs)
+
+    asyncio.run(_run())
+    print("OK: PG resolve recovers stale password via trust ALTER")
+
+
+def test_pg_resolve_trust_recovery_raises_when_alter_fails():
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.db_auth import resolve_live_admin_connection
+    from app.services.migrators.base import BaseMigrator, MigrationJob
+
+    class Dummy(BaseMigrator):
+        async def run(self, params):
+            return {}
+
+    async def _run():
+        job = MigrationJob(job_id="pg-trust-fail")
         migrator = Dummy(job, {})
         env = "POSTGRES_PASSWORD=stale-secret\nPOSTGRES_DB=pasarguard\n"
 
@@ -521,21 +587,22 @@ def test_pg_resolve_rejects_wrong_password_under_trust():
             if "NetworkSettings.Ports" in joined:
                 return True, '{"5432/tcp":[{"HostIp":"127.0.0.1","HostPort":"5432"}]}'
             if "run" in argv and "--network" in argv:
-                # Host TCP rejects the stale password
                 return False, "password authentication failed"
             if "exec" in argv and "psql" in argv:
-                # Local socket trust: any password works
+                if "ALTER ROLE" in joined:
+                    return False, "ERROR: permission denied to alter role"
                 return True, "1\n"
             return True, ""
 
         with patch("app.services.db_auth.PASARGUARD_DIR", Path("/opt/pasarguard")), \
              patch("app.services.db_auth.resolve_db_service", return_value="postgresql"), \
-             patch.object(migrator, "_run_cmd", fake_run):
-            with __import__("pytest").raises(RuntimeError, match="TCP|trust"):
+             patch.object(migrator, "_run_cmd", fake_run), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            with __import__("pytest").raises(RuntimeError, match="trust recovery could not"):
                 await resolve_live_admin_connection(migrator, "postgresql", env_text=env)
 
     asyncio.run(_run())
-    print("OK: PG resolve rejects wrong password under trust")
+    print("OK: PG resolve still raises when trust ALTER fails")
 
 
 def test_pg_resolve_accepts_password_verified_over_tcp():
@@ -627,7 +694,8 @@ if __name__ == "__main__":
     test_sync_mysql_roles_skip_grant_recovery_when_locked_out()
     test_pg_restore_sync_mysql_uses_candidates_then_recovery()
     test_mysql_probe_uses_argv_without_password_in_args()
-    test_pg_resolve_rejects_wrong_password_under_trust()
+    test_pg_resolve_trust_recovers_stale_password()
+    test_pg_resolve_trust_recovery_raises_when_alter_fails()
     test_pg_resolve_accepts_password_verified_over_tcp()
     test_parse_published_port_prefers_loopback()
     print("\nAll db_auth tests passed")
