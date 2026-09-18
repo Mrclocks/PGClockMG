@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.5`** — Marzban migrate: force-replace default core/inbounds from xray_config.json
+> 🚀 **`v4.6.6`** — auto-align PostgreSQL/Timescale passwords when local trust rejects TCP auth
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
