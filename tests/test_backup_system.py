@@ -521,7 +521,7 @@ def test_dump_mysql_retries_app_password_when_root_denied(tmp_path, monkeypatch)
 
         def communicate(self, timeout=None):
             if self.returncode == 0:
-                return b"-- dump\n" + (b"x" * 80), b""
+                return b"-- dump\nCREATE TABLE users (id INT);\n" + (b"x" * 80), b""
             msg = (
                 f"mysqldump: Got error: 1045: Access denied for user "
                 f"'{self.user}'@'localhost' (using password: YES)"
@@ -543,7 +543,7 @@ def test_dump_mysql_retries_app_password_when_root_denied(tmp_path, monkeypatch)
         calls.append((user, pwd))
         proc = _Proc(user, pwd)
         if proc.returncode == 0 and stdout is not None:
-            stdout.write(b"-- dump\n" + (b"x" * 80))
+            stdout.write(b"-- dump\nCREATE TABLE users (id INT);\n" + (b"x" * 80))
         return proc
 
     monkeypatch.setattr(eng.subprocess, "Popen", fake_popen)
@@ -551,10 +551,109 @@ def test_dump_mysql_retries_app_password_when_root_denied(tmp_path, monkeypatch)
     eng._dump_mysql("mysql", dest, job)
     assert dest.is_file() and dest.stat().st_size >= 64
     assert ("pasarguard", "good-app") in calls
-    # Must have tried more than the single wrong-root password path
-    assert any(p == "wrong-root" for _, p in calls)
-    assert any(p == "good-app" for _, p in calls)
-    print("OK: mysqldump retries app password after root 1045")
+    # Prefer SQLAlchemy/app credentials first so a healthy panel dumps without
+    # burning attempts on a drifted MYSQL_ROOT_PASSWORD.
+    assert calls[0] == ("pasarguard", "good-app")
+    print("OK: mysqldump prefers app password after restore drift")
+
+
+def test_dump_postgres_retries_app_password_when_superuser_denied(tmp_path, monkeypatch):
+    """Same restore-drift matrix for pg_dump / Timescale stacks."""
+    from app.services import backup_engine as eng
+
+    env = tmp_path / ".env"
+    env.write_text(
+        "POSTGRES_PASSWORD=wrong-super\n"
+        "DB_PASSWORD=good-app\n"
+        "DB_USER=pasarguard\n"
+        "POSTGRES_DB=pasarguard\n"
+        'SQLALCHEMY_DATABASE_URL="postgresql+asyncpg://pasarguard:good-app@127.0.0.1:5432/pasarguard"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(eng, "PASARGUARD_ENV", env)
+    monkeypatch.setattr(eng, "PASARGUARD_DIR", tmp_path)
+    monkeypatch.setattr(eng, "resolve_db_service", lambda _t: "postgresql")
+
+    dest = tmp_path / "db.sql"
+    calls: list[tuple[str, str]] = []
+
+    class _Proc:
+        def __init__(self, user: str, password: str):
+            self.user = user
+            self.password = password
+            self.returncode = 0 if (user == "pasarguard" and password == "good-app") else 1
+
+        def communicate(self, timeout=None):
+            if self.returncode == 0:
+                return b"--\nCREATE TABLE users (id INT);\n" + (b"x" * 80), b""
+            return b"", b'pg_dump: error: connection failed: FATAL: password authentication failed for user "postgres"'
+
+        def kill(self):
+            pass
+
+    def fake_popen(cmd, cwd=None, stdout=None, stderr=None):
+        pwd = ""
+        user = ""
+        for i, part in enumerate(cmd):
+            if isinstance(part, str) and part.startswith("PGPASSWORD="):
+                pwd = part.split("=", 1)[1]
+            if part == "-U" and i + 1 < len(cmd):
+                user = cmd[i + 1]
+        # Ignore globals pg_dumpall follow-up for this unit test
+        if "pg_dumpall" in cmd:
+            return _Proc("skip", "skip")
+        calls.append((user, pwd))
+        proc = _Proc(user, pwd)
+        if proc.returncode == 0 and stdout is not None:
+            stdout.write(b"--\nCREATE TABLE users (id INT);\n" + (b"x" * 80))
+        return proc
+
+    monkeypatch.setattr(eng.subprocess, "Popen", fake_popen)
+    job = {"logs": []}
+    eng._dump_postgres("postgresql", dest, job)
+    assert dest.is_file() and eng._sql_dump_looks_complete(dest)
+    assert calls[0] == ("pasarguard", "good-app")
+    print("OK: pg_dump prefers app password after restore drift")
+
+
+def test_sql_dump_looks_complete_rejects_banner_only(tmp_path):
+    from app.services.backup_engine import _sql_dump_looks_complete
+
+    banner = tmp_path / "banner.sql"
+    banner.write_bytes(b"-- MySQL dump 10.0\n-- Host: localhost\n" + (b"#" * 80))
+    assert not _sql_dump_looks_complete(banner)
+    real = tmp_path / "real.sql"
+    real.write_bytes(b"-- dump\nCREATE TABLE users (id INT);\nINSERT INTO users VALUES (1);\n")
+    assert _sql_dump_looks_complete(real)
+    print("OK: sql dump completeness markers")
+
+
+def test_estimate_backup_source_ignores_opt_junk(tmp_path, monkeypatch):
+    """Disk preflight must not sum unrelated files under /opt/pasarguard."""
+    from app.services import backup_engine as eng
+
+    opt = tmp_path / "opt"
+    data = tmp_path / "data"
+    opt.mkdir()
+    data.mkdir()
+    (opt / ".env").write_text('SQLALCHEMY_DATABASE_URL="sqlite:////x"\n', encoding="utf-8")
+    (opt / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    # Huge junk that is NOT packaged into the backup zip
+    (opt / "huge-cache.bin").write_bytes(b"0" * (600 * 1024 * 1024))
+    (data / "certs").mkdir()
+    (data / "certs" / "a.pem").write_bytes(b"cert")
+
+    monkeypatch.setattr(eng, "PASARGUARD_DIR", opt)
+    monkeypatch.setattr(eng, "PASARGUARD_ENV", opt / ".env")
+    monkeypatch.setattr(eng, "PASARGUARD_DATA", data)
+    monkeypatch.setattr(eng, "is_pasarguard_installed", lambda: True)
+    monkeypatch.setattr(eng, "get_pasarguard_db_type", lambda: "sqlite")
+    monkeypatch.setattr(eng, "_resolve_sqlite_path", lambda _e: tmp_path / "missing.sqlite3")
+
+    estimate = eng.estimate_backup_source_bytes()
+    # Must stay near the 64 MiB floor — not 600 MiB+ from opt junk
+    assert estimate < 100 * 1024 * 1024
+    print("OK: estimate ignores /opt junk")
 
 
 def test_mysql_count_credentials_cross_tries_passwords(tmp_path, monkeypatch):
@@ -576,6 +675,8 @@ def test_mysql_count_credentials_cross_tries_passwords(tmp_path, monkeypatch):
     # Cross-try: app password with root and root password with app user
     assert ("root", "apppw", "pasarguard") in pairs
     assert ("pasarguard", "rootpw", "pasarguard") in pairs
+    # App/SQLAlchemy pair is preferred first
+    assert pairs[0] == ("pasarguard", "apppw", "pasarguard")
     print("OK: mysql credential matrix cross-tries passwords")
 
 

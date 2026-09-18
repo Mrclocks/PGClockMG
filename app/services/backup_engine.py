@@ -33,7 +33,7 @@ from app.services.env_migration import (
     read_env_var,
     sqlite_fs_path_from_url,
 )
-from app.services.pasarguard_ops import mysql_client_bins, resolve_db_service
+from app.services.pasarguard_ops import compose_file_prefix, mysql_client_bins, resolve_db_service
 from app.services.prerequisites import get_pasarguard_db_type, is_pasarguard_installed
 from app.services.sql_dump_counts import (
     STAT_TABLES,
@@ -47,6 +47,52 @@ LogFn = Callable[[str], None]
 _CREATE_LOCK = threading.Lock()
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
+
+# Minimal markers that a real mysqldump / pg_dump payload must contain.
+# Rejects header-only / auth-failure stubs that can still exceed a tiny size floor.
+_SQL_DUMP_MARKERS = re.compile(
+    rb"(?is)(?:CREATE\s+TABLE|INSERT\s+INTO|\bCOPY\s+(?:public\.)?[\"']?\w+|PRAGMA\s+)"
+)
+
+
+def _compose_exec_base() -> list[str]:
+    """``docker compose [-f …] exec -T`` including multi-worker overlay files."""
+    return ["docker", "compose", *compose_file_prefix(), "exec", "-T"]
+
+
+def _sql_dump_looks_complete(path: Path) -> bool:
+    """True when dump file contains schema/data markers, not just a banner."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False
+    if size < 64:
+        return False
+    try:
+        with path.open("rb") as f:
+            head = f.read(min(size, 256 * 1024))
+            if _SQL_DUMP_MARKERS.search(head):
+                return True
+            if size > 512 * 1024:
+                f.seek(max(0, size // 2))
+                if _SQL_DUMP_MARKERS.search(f.read(128 * 1024)):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _dump_artifact_ok(dest: Path, *, sql: bool) -> bool:
+    if not dest.is_file():
+        return False
+    try:
+        if dest.stat().st_size < 64:
+            return False
+    except OSError:
+        return False
+    if sql:
+        return _sql_dump_looks_complete(dest)
+    return True
 
 
 def _utc_now() -> str:
@@ -118,9 +164,11 @@ def _pg_count_credentials(db_type: str) -> list[tuple[str, str, str]]:
         if key not in pairs:
             pairs.append(key)
 
-    _add(admin.get("user"), admin.get("password"))
+    # Prefer SQLAlchemy / app user first — healthy panel already uses these.
+    # POSTGRES_PASSWORD often drifts from DB_PASSWORD after restore.
     _add(parsed.get("user"), parsed.get("password"))
     _add(read_env_var(text, "DB_USER"), read_env_var(text, "DB_PASSWORD"))
+    _add(admin.get("user"), admin.get("password"))
     _add(read_env_var(text, "POSTGRES_USER"), read_env_var(text, "POSTGRES_PASSWORD"))
     _add("postgres", read_env_var(text, "POSTGRES_PASSWORD") or read_env_var(text, "DB_PASSWORD"))
     _add("pasarguard", read_env_var(text, "DB_PASSWORD") or read_env_var(text, "POSTGRES_PASSWORD"))
@@ -163,11 +211,15 @@ def _mysql_count_credentials(db_type: str) -> list[tuple[str, str, str]]:
         if key not in pairs:
             pairs.append(key)
 
+    # Prefer SQLAlchemy / app user first — healthy panel already uses these.
+    # MYSQL_ROOT_PASSWORD often drifts from DB_PASSWORD after restore.
+    _add(parsed.get("user"), parsed.get("password"))
+    _add(
+        read_env_var(text, "MYSQL_USER") or read_env_var(text, "DB_USER"),
+        read_env_var(text, "MYSQL_PASSWORD") or read_env_var(text, "DB_PASSWORD"),
+    )
     _add(admin.get("user"), admin.get("password"))
     _add("root", read_env_var(text, "MYSQL_ROOT_PASSWORD") or admin.get("password"))
-    _add(parsed.get("user"), parsed.get("password"))
-    _add(read_env_var(text, "MYSQL_USER") or read_env_var(text, "DB_USER"),
-         read_env_var(text, "MYSQL_PASSWORD") or read_env_var(text, "DB_PASSWORD"))
     users = list(dict.fromkeys(u for u, _ in pairs))
     pwds = list(dict.fromkeys(p for _, p in pairs if p))
     for u in users:
@@ -199,7 +251,7 @@ def _docker_sql_counts(db_type: str) -> dict[str, int | None]:
             for binary in bins:
                 ok, text = _run(
                     [
-                        "docker", "compose", "exec", "-T",
+                        *_compose_exec_base(),
                         "-e", f"MYSQL_PWD={password}",
                         svc, binary, "-u", user, "-N", "-e",
                         "SELECT COUNT(*) FROM `users`;", database,
@@ -218,7 +270,7 @@ def _docker_sql_counts(db_type: str) -> dict[str, int | None]:
         for table in STAT_TABLES:
             ok, text = _run(
                 [
-                    "docker", "compose", "exec", "-T",
+                    *_compose_exec_base(),
                     "-e", f"MYSQL_PWD={password}",
                     svc, binary, "-u", user, "-N", "-e",
                     f"SELECT COUNT(*) FROM `{table}`;", database,
@@ -236,7 +288,7 @@ def _docker_sql_counts(db_type: str) -> dict[str, int | None]:
     for user, password, database in creds:
         ok, text = _run(
             [
-                "docker", "compose", "exec", "-T",
+                *_compose_exec_base(),
                 "-e", f"PGPASSWORD={password}",
                 svc, "psql", "-U", user, "-d", database, "-At", "-v", "ON_ERROR_STOP=1",
                 "-c", 'SELECT COUNT(*) FROM "users";',
@@ -253,7 +305,7 @@ def _docker_sql_counts(db_type: str) -> dict[str, int | None]:
     for table in STAT_TABLES:
         ok, text = _run(
             [
-                "docker", "compose", "exec", "-T",
+                *_compose_exec_base(),
                 "-e", f"PGPASSWORD={password}",
                 svc, "psql", "-U", user, "-d", database, "-At", "-v", "ON_ERROR_STOP=1",
                 "-c", f'SELECT COUNT(*) FROM "{table}";',
@@ -472,7 +524,12 @@ def verify_backup_archive(
 
 
 def estimate_backup_source_bytes() -> int:
-    """Best-effort size of data that will be dumped/copied into the backup zip."""
+    """Best-effort size of data that will be dumped/copied into the backup zip.
+
+    Must mirror ``_collect_extra_files`` — never walk all of ``/opt/pasarguard``
+    (compose caches / project trees are not packaged and inflated disk preflight
+    falsely blocked backups after the v4.6.0 UX harden).
+    """
     floor = 64 * 1024 * 1024  # 64 MiB
     try:
         if not is_pasarguard_installed() or not PASARGUARD_ENV.is_file():
@@ -486,25 +543,59 @@ def estimate_backup_source_bytes() -> int:
                 total += int(path.stat().st_size)
         else:
             # Server DB dump size is unknown cheaply — use a conservative floor.
-            total += 512 * 1024 * 1024
-        # Certs / templates / data extras
-        for root in (PASARGUARD_DATA / "certs", PASARGUARD_DATA / "templates", PASARGUARD_DIR):
+            total += 256 * 1024 * 1024
+
+        def _add_file(p: Path) -> None:
+            nonlocal total
+            try:
+                if p.is_file():
+                    total += int(p.stat().st_size)
+            except OSError:
+                pass
+
+        def _add_tree(root: Path) -> None:
+            nonlocal total
             if not root.exists():
-                continue
+                return
             if root.is_file():
-                try:
-                    total += int(root.stat().st_size)
-                except OSError:
-                    pass
-                continue
+                _add_file(root)
+                return
             for dirpath, _dirnames, filenames in os.walk(root):
                 for name in filenames:
-                    try:
-                        total += int((Path(dirpath) / name).stat().st_size)
-                    except OSError:
-                        continue
+                    _add_file(Path(dirpath) / name)
+                    if total > 20 * 1024 * 1024 * 1024:
+                        return
+
+        # Same payload as _collect_extra_files (data tree + light opt extras).
+        skip_files = {
+            "db.sqlite3", "db.sqlite3-wal", "db.sqlite3-shm",
+        }
+        skip_dirs = {
+            "mysql", "mariadb", "postgresql", "postgres", "timescaledb",
+            "pgdata", "pgbouncer",
+        }
+        if PASARGUARD_DATA.is_dir():
+            for child in PASARGUARD_DATA.iterdir():
+                if child.name in skip_files or child.name in skip_dirs:
+                    continue
+                if child.is_file():
+                    _add_file(child)
+                elif child.is_dir():
+                    _add_tree(child)
                     if total > 20 * 1024 * 1024 * 1024:
                         return total
+
+        _add_file(PASARGUARD_ENV)
+        for name in (
+            "docker-compose.yml",
+            "docker-compose.yaml",
+            "compose.yml",
+            "compose.yaml",
+            "xray_config.json",
+            "config.json",
+        ):
+            _add_file(PASARGUARD_DIR / name)
+
         return max(total, floor)
     except Exception:
         return floor
@@ -512,8 +603,10 @@ def estimate_backup_source_bytes() -> int:
 
 def required_free_bytes_for_backup(estimate_bytes: int) -> int:
     """Need room for staging copy + final zip (+ margin)."""
-    estimate = max(int(estimate_bytes or 0), 64 * 1024 * 1024)
-    return max(estimate * 2, estimate + 512 * 1024 * 1024, 1024 * 1024 * 1024)
+    estimate = max(int(estimate_bytes or 0), 32 * 1024 * 1024)
+    # staging + zip ≈ 2× payload, plus margin. A hard 1 GiB floor blocked small
+    # sqlite panels on modest VPS disks after the v4.6.0 disk preflight.
+    return max(estimate * 2 + 128 * 1024 * 1024, 256 * 1024 * 1024)
 
 
 def assert_enough_disk_for_backup() -> dict:
@@ -800,7 +893,7 @@ def _dump_postgres(db_type: str, dest: Path, job: dict) -> None:
         tried.add(key)
         _log(job, f"Running pg_dump via {svc} as {user} (db={database})…")
         cmd = [
-            "docker", "compose", "exec", "-T",
+            *_compose_exec_base(),
             "-e", f"PGPASSWORD={password}",
             svc, "pg_dump",
             "-U", user,
@@ -824,12 +917,12 @@ def _dump_postgres(db_type: str, dest: Path, job: dict) -> None:
         except subprocess.TimeoutExpired:
             proc.kill()
             raise RuntimeError("pg_dump timed out")
-        if proc.returncode == 0 and dest.is_file() and dest.stat().st_size >= 64:
+        if proc.returncode == 0 and _dump_artifact_ok(dest, sql=True):
             # Best-effort globals (roles) — used by some restore paths; safe to ignore failure
             globals_path = dest.parent / "globals.sql"
             try:
                 gcmd = [
-                    "docker", "compose", "exec", "-T",
+                    *_compose_exec_base(),
                     "-e", f"PGPASSWORD={password}",
                     svc, "pg_dumpall",
                     "-U", user,
@@ -892,7 +985,7 @@ def _dump_mysql(db_type: str, dest: Path, job: dict) -> None:
                 continue
             tried.add(key)
             cmd = [
-                "docker", "compose", "exec", "-T",
+                *_compose_exec_base(),
                 "-e", f"MYSQL_PWD={password}",
                 svc, binary,
                 "-u", user,
@@ -921,14 +1014,14 @@ def _dump_mysql(db_type: str, dest: Path, job: dict) -> None:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 raise RuntimeError("mysqldump timed out")
-            if proc.returncode == 0 and dest.is_file() and dest.stat().st_size >= 64:
+            if proc.returncode == 0 and _dump_artifact_ok(dest, sql=True):
                 _log(job, f"mysqldump ok ({binary} as {user})")
                 return
             last_err = (err or b"").decode("utf-8", errors="replace")[-1500:]
             # Retry without flags some servers reject
             if "unknown variable" in last_err.lower() or "unknown option" in last_err.lower():
                 cmd2 = [
-                    "docker", "compose", "exec", "-T",
+                    *_compose_exec_base(),
                     "-e", f"MYSQL_PWD={password}",
                     svc, binary,
                     "-u", user,
@@ -948,7 +1041,7 @@ def _dump_mysql(db_type: str, dest: Path, job: dict) -> None:
                         stderr=subprocess.PIPE,
                     )
                     _, err = proc.communicate(timeout=1800)
-                if proc.returncode == 0 and dest.is_file() and dest.stat().st_size >= 64:
+                if proc.returncode == 0 and _dump_artifact_ok(dest, sql=True):
                     _log(job, f"mysqldump ok ({binary} as {user}, reduced flags)")
                     return
                 last_err = (err or b"").decode("utf-8", errors="replace")[-1500:]
@@ -1235,10 +1328,14 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
         # Verify dump artifact before zipping
         if db_type == "sqlite":
             dump_path = staging / "db.sqlite3"
+            if not _dump_artifact_ok(dump_path, sql=False):
+                raise RuntimeError(f"Database dump missing or empty: {dump_path.name}")
         else:
             dump_path = staging / "db_backup.sql"
-        if not dump_path.is_file() or dump_path.stat().st_size < 64:
-            raise RuntimeError(f"Database dump missing or empty: {dump_path.name}")
+            if not _dump_artifact_ok(dump_path, sql=True):
+                raise RuntimeError(
+                    f"Database dump missing, empty, or incomplete: {dump_path.name}"
+                )
         _set_progress(job, 55, f"Dump ready: {dump_path.name} ({dump_path.stat().st_size} bytes)")
 
         stats = live_panel_stats()
