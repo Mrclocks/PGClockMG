@@ -781,28 +781,23 @@ def _dump_postgres(db_type: str, dest: Path, job: dict) -> None:
     svc = resolve_db_service(db_type)
     if not svc:
         raise RuntimeError(f"No Docker DB service found for {db_type}")
-    conn = get_pasarguard_admin_connection(db_type)
-    users: list[str] = []
-    for cand in (
-        conn.get("user"),
-        "postgres",
-        read_env_var(PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.is_file() else "", "DB_USER"),
-        "pasarguard",
-    ):
-        if not cand:
-            continue
+    # Same credential matrix as live COUNT probes — one password for every user
+    # fails when restore left MYSQL/POSTGRES_ROOT out of sync with the app URL.
+    creds = _pg_count_credentials(db_type)
+    if not creds:
+        raise RuntimeError("No PostgreSQL credentials found in PasarGuard .env")
+    last_err = ""
+    tried: set[tuple[str, str]] = set()
+    for user_raw, password, database_raw in creds:
         try:
-            safe = _safe_db_ident(str(cand), kind="user")
+            user = _safe_db_ident(str(user_raw), kind="user")
+            database = _safe_db_ident(database_raw, fallback="pasarguard", kind="database")
         except RuntimeError:
             continue
-        if safe not in users:
-            users.append(safe)
-    if not users:
-        users = ["postgres"]
-    password = conn.get("password") or ""
-    database = _safe_db_ident(conn.get("database"), fallback="pasarguard", kind="database")
-    last_err = ""
-    for user in users:
+        key = (user, password)
+        if key in tried:
+            continue
+        tried.add(key)
         _log(job, f"Running pg_dump via {svc} as {user} (db={database})…")
         cmd = [
             "docker", "compose", "exec", "-T",
@@ -858,6 +853,7 @@ def _dump_postgres(db_type: str, dest: Path, job: dict) -> None:
                     globals_path.unlink(missing_ok=True)
                 except OSError:
                     pass
+            _log(job, f"pg_dump ok (as {user})")
             return
         last_err = (err or b"").decode("utf-8", errors="replace")[-1500:]
         if "password authentication failed" in last_err.lower() or "role" in last_err.lower():
@@ -869,35 +865,32 @@ def _dump_mysql(db_type: str, dest: Path, job: dict) -> None:
     svc = resolve_db_service(db_type)
     if not svc:
         raise RuntimeError(f"No Docker DB service found for {db_type}")
-    conn = get_pasarguard_admin_connection(db_type)
-    env_text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore") if PASARGUARD_ENV.is_file() else ""
-    users: list[str] = []
-    for cand in (
-        conn.get("user"),
-        "root",
-        read_env_var(env_text, "MYSQL_USER"),
-        read_env_var(env_text, "DB_USER"),
-        "pasarguard",
-    ):
-        if not cand:
-            continue
-        try:
-            safe = _safe_db_ident(str(cand), kind="user")
-        except RuntimeError:
-            continue
-        if safe not in users:
-            users.append(safe)
-    if not users:
-        users = ["root"]
-    password = conn.get("password") or ""
-    database = _safe_db_ident(conn.get("database"), fallback="pasarguard", kind="database")
-    _log(job, f"Running mysqldump via {svc} (db={database})…")
+    # Cross-try every user×password from .env / SQLAlchemy URL — same matrix the
+    # healthy panel already authenticates with. After restore, MYSQL_ROOT_PASSWORD
+    # may drift from DB_PASSWORD; a single-password dump then falsely fails.
+    creds = _mysql_count_credentials(db_type)
+    if not creds:
+        raise RuntimeError("No MySQL credentials found in PasarGuard .env")
     dump_bins = ["mysqldump", "mariadb-dump"]
     if "maria" in (svc or "").lower() or db_type == "mariadb":
         dump_bins = ["mariadb-dump", "mysqldump"]
     last_err = ""
-    for user in users:
+    tried: set[tuple[str, str, str]] = set()
+    logged_db = False
+    for user_raw, password, database_raw in creds:
+        try:
+            user = _safe_db_ident(str(user_raw), kind="user")
+            database = _safe_db_ident(database_raw, fallback="pasarguard", kind="database")
+        except RuntimeError:
+            continue
+        if not logged_db:
+            _log(job, f"Running mysqldump via {svc} (db={database})…")
+            logged_db = True
         for binary in dump_bins:
+            key = (user, password, binary)
+            if key in tried:
+                continue
+            tried.add(key)
             cmd = [
                 "docker", "compose", "exec", "-T",
                 "-e", f"MYSQL_PWD={password}",
@@ -956,12 +949,14 @@ def _dump_mysql(db_type: str, dest: Path, job: dict) -> None:
                     )
                     _, err = proc.communicate(timeout=1800)
                 if proc.returncode == 0 and dest.is_file() and dest.stat().st_size >= 64:
+                    _log(job, f"mysqldump ok ({binary} as {user}, reduced flags)")
                     return
                 last_err = (err or b"").decode("utf-8", errors="replace")[-1500:]
             if "executable file not found" in last_err.lower() or "no such file" in last_err.lower():
                 continue
             if "access denied" in last_err.lower():
-                break  # try next user
+                # Next password/user pair — do not stick to one password.
+                continue
     raise RuntimeError(last_err or "mysqldump failed")
 
 

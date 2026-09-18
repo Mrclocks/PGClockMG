@@ -487,6 +487,98 @@ def test_safe_db_ident_rejects_path_like_values():
     print("OK: safe db ident rejects path-like values")
 
 
+def test_dump_mysql_retries_app_password_when_root_denied(tmp_path, monkeypatch):
+    """Regression: after restore, MYSQL_ROOT_PASSWORD may drift from DB_PASSWORD.
+
+    Panel still works via SQLAlchemy (pasarguard + DB_PASSWORD). Dump must not
+    stick to a single admin password — it should cross-try like COUNT probes.
+    """
+    from app.services import backup_engine as eng
+
+    env = tmp_path / ".env"
+    env.write_text(
+        "MYSQL_ROOT_PASSWORD=wrong-root\n"
+        "DB_PASSWORD=good-app\n"
+        "MYSQL_PASSWORD=good-app\n"
+        "DB_USER=pasarguard\n"
+        "MYSQL_USER=pasarguard\n"
+        "MYSQL_DATABASE=pasarguard\n"
+        'SQLALCHEMY_DATABASE_URL="mysql+pymysql://pasarguard:good-app@127.0.0.1:3306/pasarguard"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(eng, "PASARGUARD_ENV", env)
+    monkeypatch.setattr(eng, "PASARGUARD_DIR", tmp_path)
+    monkeypatch.setattr(eng, "resolve_db_service", lambda _t: "mysql")
+
+    dest = tmp_path / "db.sql"
+    calls: list[tuple[str, str]] = []  # (user, password)
+
+    class _Proc:
+        def __init__(self, user: str, password: str):
+            self.user = user
+            self.password = password
+            self.returncode = 0 if (user == "pasarguard" and password == "good-app") else 1
+
+        def communicate(self, timeout=None):
+            if self.returncode == 0:
+                return b"-- dump\n" + (b"x" * 80), b""
+            msg = (
+                f"mysqldump: Got error: 1045: Access denied for user "
+                f"'{self.user}'@'localhost' (using password: YES)"
+            ).encode()
+            return b"", msg
+
+        def kill(self):
+            pass
+
+    def fake_popen(cmd, cwd=None, stdout=None, stderr=None):
+        # cmd: docker compose exec -T -e MYSQL_PWD=... svc binary -u user ...
+        pwd = ""
+        user = ""
+        for i, part in enumerate(cmd):
+            if isinstance(part, str) and part.startswith("MYSQL_PWD="):
+                pwd = part.split("=", 1)[1]
+            if part == "-u" and i + 1 < len(cmd):
+                user = cmd[i + 1]
+        calls.append((user, pwd))
+        proc = _Proc(user, pwd)
+        if proc.returncode == 0 and stdout is not None:
+            stdout.write(b"-- dump\n" + (b"x" * 80))
+        return proc
+
+    monkeypatch.setattr(eng.subprocess, "Popen", fake_popen)
+    job = {"logs": []}
+    eng._dump_mysql("mysql", dest, job)
+    assert dest.is_file() and dest.stat().st_size >= 64
+    assert ("pasarguard", "good-app") in calls
+    # Must have tried more than the single wrong-root password path
+    assert any(p == "wrong-root" for _, p in calls)
+    assert any(p == "good-app" for _, p in calls)
+    print("OK: mysqldump retries app password after root 1045")
+
+
+def test_mysql_count_credentials_cross_tries_passwords(tmp_path, monkeypatch):
+    from app.services import backup_engine as eng
+
+    env = tmp_path / ".env"
+    env.write_text(
+        "MYSQL_ROOT_PASSWORD=rootpw\n"
+        "DB_PASSWORD=apppw\n"
+        "DB_USER=pasarguard\n"
+        "MYSQL_DATABASE=pasarguard\n"
+        'SQLALCHEMY_DATABASE_URL="mysql+pymysql://pasarguard:apppw@127.0.0.1:3306/pasarguard"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(eng, "PASARGUARD_ENV", env)
+    pairs = eng._mysql_count_credentials("mysql")
+    assert ("pasarguard", "apppw", "pasarguard") in pairs
+    assert ("root", "rootpw", "pasarguard") in pairs
+    # Cross-try: app password with root and root password with app user
+    assert ("root", "apppw", "pasarguard") in pairs
+    assert ("pasarguard", "rootpw", "pasarguard") in pairs
+    print("OK: mysql credential matrix cross-tries passwords")
+
+
 def test_stream_push_receive_roundtrip(tmp_path, monkeypatch):
     """Chunked receive reconstructs the exact zip bytes."""
     import asyncio
