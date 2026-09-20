@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.6`** — auto-align PostgreSQL/Timescale passwords when local trust rejects TCP auth
+> 🚀 **`v4.6.7`** — clear trilingual backup panel API errors (fa/en/ru)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
