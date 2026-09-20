@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -100,16 +101,29 @@ PUBLIC_PATHS = frozenset({
 })
 
 
+@app.exception_handler(RequestValidationError)
+async def _backup_validation_error(_request: Request, exc: RequestValidationError):
+    """Map body validation to stable codes the UI can localize (never raw English)."""
+    password_locs = {"password", "password_confirm", "current_password"}
+    for err in exc.errors() or []:
+        loc = err.get("loc") or ()
+        if any(part in password_locs for part in loc):
+            return JSONResponse(status_code=400, content={"detail": "weak_password:validation"})
+    return JSONResponse(status_code=400, content={"detail": "validation_failed"})
+
+
 class PasswordSetup(BaseModel):
-    password: str = Field(min_length=12, max_length=200)
-    password_confirm: str = Field(min_length=12, max_length=200)
+    # Keep min_length=1 so short passwords reach password_policy (clear weak_password
+    # codes) instead of raw FastAPI English "String should have at least 12…".
+    password: str = Field(min_length=1, max_length=200)
+    password_confirm: str = Field(min_length=1, max_length=200)
     setup_token: str | None = None
 
 
 class PasswordChange(BaseModel):
     current_password: str = Field(min_length=1, max_length=200)
-    password: str = Field(min_length=12, max_length=200)
-    password_confirm: str = Field(min_length=12, max_length=200)
+    password: str = Field(min_length=1, max_length=200)
+    password_confirm: str = Field(min_length=1, max_length=200)
 
 
 class LoginBody(BaseModel):

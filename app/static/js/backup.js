@@ -41,6 +41,18 @@ const I18N = {
     errThrottle: "تلاش‌های زیاد — چند دقیقه صبر کنید و دوباره امتحان کنید.",
     errServer: "خطای سرور. لاگ را ببینید: journalctl -u pg-backup -n 50",
     errNetwork: "قطع لحظه‌ای ارتباط — در حال تلاش مجدد…",
+    errUnauthorized: "نشست منقضی شده — دوباره وارد شوید.",
+    errSetupRequired: "اول باید رمز پنل بکاپ را تنظیم کنید.",
+    errPassWrite: "ذخیره رمز انجام نشد. دسترسی فایل یا دیسک را بررسی کنید.",
+    errJobNotFound: "عملیات پیدا نشد یا منقضی شده است.",
+    errBackupNotFound: "فایل بکاپ پیدا نشد.",
+    errTokenMissing: "توکن استریم خالی است.",
+    errTelegramFailed: "ارسال به تلگرام انجام نشد.",
+    errTelegramTestFailed: "تست تلگرام ناموفق بود. توکن و چت را بررسی کنید.",
+    errWebhookUnsafe: "آدرس وب‌هوک مجاز نیست.",
+    errNoUpdateJob: "عملیات به‌روزرسانی فعالی نیست.",
+    errValidation: "ورودی نامعتبر است. فیلدها را بررسی کنید.",
+    errUnknown: "خطایی رخ داد. دوباره تلاش کنید.",
     authLoginTitle: "ورود به پنل بکاپ",
     authLoginDesc: "با رمز همین پنل وارد شوید.",
     lblPassword: "رمز عبور",
@@ -250,6 +262,18 @@ const I18N = {
     errThrottle: "Too many attempts — wait a few minutes and try again.",
     errServer: "Server error. Check logs: journalctl -u pg-backup -n 50",
     errNetwork: "Brief connection drop — retrying…",
+    errUnauthorized: "Session expired — sign in again.",
+    errSetupRequired: "Set the backup panel password first.",
+    errPassWrite: "Could not save the password. Check file permissions or disk space.",
+    errJobNotFound: "Job not found or expired.",
+    errBackupNotFound: "Backup file not found.",
+    errTokenMissing: "Stream token is missing.",
+    errTelegramFailed: "Could not send to Telegram.",
+    errTelegramTestFailed: "Telegram test failed. Check bot token and chat.",
+    errWebhookUnsafe: "Webhook URL is not allowed.",
+    errNoUpdateJob: "No update job is running.",
+    errValidation: "Invalid input. Check the fields and try again.",
+    errUnknown: "Something went wrong. Please try again.",
     authLoginTitle: "Backup panel login",
     authLoginDesc: "Sign in with this panel’s password.",
     lblPassword: "Password",
@@ -459,6 +483,18 @@ const I18N = {
     errThrottle: "Слишком много попыток — подождите несколько минут.",
     errServer: "Ошибка сервера. Смотрите: journalctl -u pg-backup -n 50",
     errNetwork: "Краткий обрыв связи — повтор…",
+    errUnauthorized: "Сессия истекла — войдите снова.",
+    errSetupRequired: "Сначала задайте пароль панели бэкапа.",
+    errPassWrite: "Не удалось сохранить пароль. Проверьте права файла или диск.",
+    errJobNotFound: "Задача не найдена или устарела.",
+    errBackupNotFound: "Файл бэкапа не найден.",
+    errTokenMissing: "Токен стрима пуст.",
+    errTelegramFailed: "Не удалось отправить в Telegram.",
+    errTelegramTestFailed: "Тест Telegram не удался. Проверьте токен и чат.",
+    errWebhookUnsafe: "URL вебхука не разрешён.",
+    errNoUpdateJob: "Нет активного задания обновления.",
+    errValidation: "Некорректный ввод. Проверьте поля.",
+    errUnknown: "Произошла ошибка. Попробуйте ещё раз.",
     authLoginTitle: "Вход в панель бэкапа",
     authLoginDesc: "Войдите с паролем этой панели.",
     lblPassword: "Пароль",
@@ -941,6 +977,78 @@ function applyI18n() {
 
 const API_TIMEOUT_MS = 10000;
 
+
+/** Map backup API error codes / FastAPI validation to the active UI language. */
+function localizeApiError(detail, status) {
+  const codeOf = (raw) => {
+    const s = String(raw || "").trim();
+    if (!s) return "";
+    if (s.startsWith("weak_password")) return "weak_password";
+    if (s.startsWith("password_write_failed")) return "password_write_failed";
+    if (s.startsWith("webhook_url_unsafe")) return "webhook_url_unsafe";
+    return s;
+  };
+
+  let code = "";
+  if (typeof detail === "string") {
+    code = codeOf(detail);
+  } else if (Array.isArray(detail)) {
+    // FastAPI / Pydantic validation body
+    const blob = JSON.stringify(detail).toLowerCase();
+    if (
+      blob.includes("password")
+      || blob.includes("string_too_short")
+      || blob.includes("min_length")
+      || blob.includes("too_short")
+    ) {
+      code = "weak_password";
+    } else {
+      code = "validation_failed";
+    }
+  } else if (detail && typeof detail === "object") {
+    if (typeof detail.detail === "string") code = codeOf(detail.detail);
+    else if (detail.fa || detail.en || detail.ru) {
+      return detail[lang] || detail.fa || detail.en || detail.ru || t("errUnknown");
+    } else {
+      code = codeOf(detail.message || detail.error || "");
+    }
+  }
+
+  const map = {
+    setup_token_invalid: "errSetupToken",
+    password_mismatch: "errPassMismatch",
+    password_already_set: "errPassSet",
+    weak_password: "errWeakPass",
+    invalid_password: "errBadPass",
+    too_many_attempts: "errThrottle",
+    password_write_failed: "errPassWrite",
+    setup_required: "errSetupRequired",
+    Unauthorized: "errUnauthorized",
+    unauthorized: "errUnauthorized",
+    job_not_found: "errJobNotFound",
+    backup_not_found: "errBackupNotFound",
+    token_missing: "errTokenMissing",
+    telegram_failed: "errTelegramFailed",
+    telegram_test_failed: "errTelegramTestFailed",
+    webhook_url_unsafe: "errWebhookUnsafe",
+    no_update_job: "errNoUpdateJob",
+    validation_failed: "errValidation",
+    "Internal Server Error": "errServer",
+  };
+
+  if (status === 401 && (!code || code === "Unauthorized")) {
+    return t("errUnauthorized");
+  }
+  if (map[code]) return t(map[code]);
+  // Never dump raw JSON / English pydantic text to the user.
+  if (typeof detail === "string" && detail && !detail.startsWith("{") && !detail.startsWith("[")) {
+    // Unknown stable code → generic, not English server prose when it looks like a snake_case code
+    if (/^[a-z][a-z0-9_.:-]+$/i.test(detail) && detail.includes("_")) return t("errUnknown");
+  }
+  if (status >= 500) return t("errServer");
+  return t("errUnknown");
+}
+
 async function api(path, opts = {}) {
   const timeoutMs = Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : API_TIMEOUT_MS;
   const fetchOpts = { ...opts };
@@ -976,15 +1084,7 @@ async function api(path, opts = {}) {
   else data = await res.text();
   if (!res.ok) {
     const detail = (data && data.detail) || data || res.statusText;
-    let msg = typeof detail === "string" ? detail : JSON.stringify(detail);
-    if (msg === "setup_token_invalid") msg = t("errSetupToken");
-    else if (msg === "password_mismatch") msg = t("errPassMismatch");
-    else if (msg === "password_already_set") msg = t("errPassSet");
-    else if (String(msg).startsWith("weak_password")) msg = t("errWeakPass");
-    else if (msg === "invalid_password") msg = t("errBadPass");
-    else if (msg === "too_many_attempts") msg = t("errThrottle");
-    else if (msg === "Internal Server Error") msg = t("errServer");
-    throw new Error(msg);
+    throw new Error(localizeApiError(detail, res.status));
   }
   return data;
 }
