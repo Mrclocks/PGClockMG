@@ -753,12 +753,23 @@ def test_backup_api_setup_login(tmp_path, monkeypatch):
         "setup_token": setup_tok,
     })
     assert bad.status_code == 400
+    assert str(bad.json().get("detail", "")).startswith("weak_password")
+
+    # Short passwords must hit policy codes (localized in UI), not English Pydantic text.
+    short = client.post("/api/setup/password", json={
+        "password": "Ab1!", "password_confirm": "Ab1!",
+        "setup_token": setup_tok,
+    })
+    assert short.status_code == 400
+    assert str(short.json().get("detail", "")).startswith("weak_password")
+    assert "String should have" not in short.text
 
     mismatch = client.post("/api/setup/password", json={
         "password": "StrongPass123!", "password_confirm": "StrongPass123?",
         "setup_token": setup_tok,
     })
     assert mismatch.status_code == 400
+    assert mismatch.json().get("detail") == "password_mismatch"
 
     ok = client.post("/api/setup/password", json={
         "password": "StrongPass123!", "password_confirm": "StrongPass123!",
