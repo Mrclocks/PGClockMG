@@ -22,6 +22,7 @@ from app.services.env_migration import (
     env_points_to_db,
     extract_env_summary,
     finalize_pasarguard_env_after_restore,
+    heal_stale_sqlite_engine_env,
     read_env_var,
     public_env_summary,
 )
@@ -1303,6 +1304,20 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
                 if isinstance(v, int) and v > 0 and (k not in table_counts or table_counts.get(k, 0) < v):
                     table_counts[k] = v
         installed = is_pasarguard_installed()
+        # Auto-heal stale sqlite stamp left by a failed convert so analyze/UI
+        # report the real installed engine (compose) and the next restore converts.
+        if installed and PASARGUARD_ENV.exists():
+            try:
+                live = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+                healed, healed_to = heal_stale_sqlite_engine_env(live)
+                if healed_to and healed != live:
+                    shutil.copy2(
+                        PASARGUARD_ENV,
+                        PASARGUARD_ENV.with_suffix(".env.bak-before-heal"),
+                    )
+                    PASARGUARD_ENV.write_text(healed, encoding="utf-8")
+            except OSError:
+                pass
         installed_db = get_pasarguard_db_type() if installed else None
 
         warnings: list[dict] = []
@@ -2202,6 +2217,8 @@ async def _sync_pg_role_passwords(
 
     lit = _sql_literal(password)
     sync_errors: list[tuple[str, str]] = []
+    synced_any = False
+    failed_roles: list[str] = []
     for role in roles:
         sql = f'ALTER ROLE "{role}" WITH PASSWORD {lit};'
         synced = False
@@ -2218,6 +2235,7 @@ async def _sync_pg_role_passwords(
                 if _psql_exec_succeeded(ok, out):
                     job.log(f"Synced password for role {role} (as {auth_user})")
                     synced = True
+                    synced_any = True
                     break
                 err = extract_psql_errors(out or "")[:240] or (out or "")[-240:]
                 if err:
@@ -2225,10 +2243,37 @@ async def _sync_pg_role_passwords(
             if synced:
                 break
         if not synced:
+            failed_roles.append(role)
             job.log(
                 f"Could not sync password for role {role}: "
                 f"{summarize_pg_auth_errors(sync_errors[-6:]) or 'all auth attempts failed'}"
             )
+
+    if failed_roles or not synced_any:
+        from app.services.db_auth import recover_postgres_passwords_via_trust
+
+        class _TrustMini:
+            def __init__(self, j: MigrationJob):
+                self.job = j
+
+            async def _run_cmd(self, cmd, cwd=None, timeout=600, *, quiet: bool = False):
+                return await _run(self.job, cmd, cwd=cwd, timeout=timeout, quiet=quiet)
+
+        job.log(
+            "Falling back to PostgreSQL trust password recovery "
+            f"for {len(failed_roles) or len(roles)} role(s)..."
+        )
+        recovered = await recover_postgres_passwords_via_trust(
+            _TrustMini(job),
+            svc,
+            env_now,
+            password=password,
+            admin_users=[u for u, _ in auth_attempts] or roles,
+        )
+        if recovered:
+            job.log("Trust password recovery aligned roles to .env password")
+        else:
+            job.log("Trust password recovery could not align all roles")
     # PgBouncer recreate happens after finalize when credentials in .env are canonical.
 
 
@@ -2609,12 +2654,41 @@ async def _prepare_panel_boot_after_finalize(
         try:
             admin = await resolve_live_admin_connection(mini, final_engine, env_text=env_now)
         except RuntimeError as probe_err:
-            job.log(f"Live admin probe: {probe_err} — syncing with finalized password")
-            admin = {
-                "user": verify_user,
-                "password": verify_pass,
-                "database": verify_db,
-            }
+            from app.services.db_auth import (
+                recover_postgres_passwords_via_trust,
+            )
+            from app.services.pasarguard_ops import resolve_db_service
+
+            job.log(
+                f"Live admin probe: {probe_err} — "
+                "trying trust password recovery before panel boot"
+            )
+            svc = resolve_db_service(final_engine) or "timescaledb"
+            recovered = await recover_postgres_passwords_via_trust(
+                mini,
+                svc,
+                env_now,
+                password=verify_pass,
+                admin_users=[verify_user, "postgres"],
+            )
+            if recovered:
+                try:
+                    admin = await resolve_live_admin_connection(
+                        mini, final_engine, env_text=env_now,
+                    )
+                except RuntimeError:
+                    admin = {
+                        "user": verify_user,
+                        "password": verify_pass,
+                        "database": verify_db,
+                    }
+            else:
+                job.log("Trust recovery unavailable — syncing with finalized password")
+                admin = {
+                    "user": verify_user,
+                    "password": verify_pass,
+                    "database": verify_db,
+                }
         synced = await sync_postgres_roles_to_app_password(
             mini,
             final_engine,
@@ -2631,6 +2705,7 @@ async def _prepare_panel_boot_after_finalize(
             user=verify_user,
             password=verify_pass,
             database=verify_db,
+            force=True,
         )
         await _ensure_timescaledb_not_in_restore_mode(
             job, verify_pass, verify_user, verify_db,
@@ -2725,6 +2800,7 @@ async def _maybe_cross_db_after_restore(
         # Prefer install .env for target auth — merged backup .env often still has
         # Timescale/Postgres secrets and incomplete MYSQL_* until finalize.
         env_text = install_env_snapshot or _read_current_env()
+        svc: str | None = None
         if target_db != "sqlite":
             svc = "timescaledb" if target_db == "timescaledb" else await _detect_db_container(job, target_db)
             if svc:
@@ -2737,10 +2813,13 @@ async def _maybe_cross_db_after_restore(
                 admin = await resolve_live_admin_connection(
                     probe_mini, target_db, env_text=env_text,
                 )
-            except RuntimeError:
+            except RuntimeError as probe_err:
                 # Fallback: try live merged .env (same-engine soft path may have updated it)
                 if install_env_snapshot:
-                    job.log("Install-snapshot auth failed — retrying with live .env")
+                    job.log(
+                        f"Install-snapshot auth failed ({probe_err}) — "
+                        "retrying with live .env"
+                    )
                     admin = await resolve_live_admin_connection(
                         probe_mini, target_db, env_text=_read_current_env(),
                     )
@@ -2754,6 +2833,15 @@ async def _maybe_cross_db_after_restore(
                     admin.get("user") or "postgres",
                     db_name or "pasarguard",
                 )
+            elif target_db in ("mysql", "mariadb") and svc:
+                await _sync_mysql_passwords(
+                    job,
+                    svc,
+                    admin.get("password") or password or "",
+                    user=admin.get("user") or "root",
+                    db_type=target_db,
+                    db_name=db_name or "pasarguard",
+                )
             mig_params = migration_params_from_connection(backup_db, target_db, admin)
         else:
             mig_params: dict = {
@@ -2766,7 +2854,55 @@ async def _maybe_cross_db_after_restore(
 
         mig_params["_auto_db_credentials"] = True
         mini = _Mini(job, mig_params)
-        await run_cross_db_migration(mini, path, backup_db, target_db)
+        try:
+            await run_cross_db_migration(mini, path, backup_db, target_db)
+        except Exception as copy_err:
+            # One automatic auth heal + retry (SASL / Access denied mid-convert).
+            if (
+                target_db == "sqlite"
+                or mig_params.get("_auth_healed_once")
+                or not is_auth_failure_text(str(copy_err))
+            ):
+                raise
+            job.log(
+                "Convert hit DB auth/SASL failure — auto-healing credentials "
+                "and retrying convert once..."
+            )
+            mig_params["_auth_healed_once"] = True
+            heal_env = install_env_snapshot or _read_current_env()
+            heal_mini = _Mini(job, {"target_db": target_db, "_auto_db_credentials": True})
+            admin = await resolve_live_admin_connection(
+                heal_mini, target_db, env_text=heal_env,
+            )
+            if target_db in ("postgresql", "timescaledb"):
+                heal_svc = svc or (
+                    "timescaledb" if target_db == "timescaledb"
+                    else await _detect_db_container(job, target_db)
+                )
+                if heal_svc:
+                    await _sync_pg_role_passwords(
+                        job,
+                        heal_svc,
+                        admin.get("password") or password or "",
+                        admin.get("user") or "postgres",
+                        db_name or "pasarguard",
+                    )
+            elif target_db in ("mysql", "mariadb"):
+                heal_svc = svc or await _detect_db_container(job, target_db)
+                if heal_svc:
+                    await _sync_mysql_passwords(
+                        job,
+                        heal_svc,
+                        admin.get("password") or password or "",
+                        user=admin.get("user") or "root",
+                        db_type=target_db,
+                        db_name=db_name or "pasarguard",
+                    )
+            mig_params = migration_params_from_connection(backup_db, target_db, admin)
+            mig_params["_auto_db_credentials"] = True
+            mig_params["_auth_healed_once"] = True
+            mini = _Mini(job, mig_params)
+            await run_cross_db_migration(mini, path, backup_db, target_db)
         stats = getattr(mini, "copy_stats", None) or {}
         report = getattr(mini, "copy_report", None) or {}
         # Remember credentials that actually worked during convert
@@ -2782,10 +2918,65 @@ async def _maybe_cross_db_after_restore(
     except Exception as e:
         job.log(f"DB convert failed — target schema may have been reset; "
                 f"retry restore. Underlying: {e}")
+        _rollback_env_after_failed_convert(job, install_env_snapshot, target_db)
         explain = explain_restore_error(e, backup_db, target_db)
         err = RuntimeError(explain.get("en") or str(e))
         err.explain = explain  # type: ignore[attr-defined]
         raise err from e
+
+
+def _rollback_env_after_failed_convert(
+    job: MigrationJob,
+    install_env_snapshot: str | None,
+    target_db: str | None = None,
+) -> None:
+    """Restore install .env so a failed convert cannot leave the panel on sqlite."""
+    text = (install_env_snapshot or "").strip()
+    if not text:
+        bak = PASARGUARD_ENV.with_suffix(".env.bak-before-restore")
+        if bak.is_file():
+            try:
+                text = bak.read_text(encoding="utf-8", errors="ignore").strip()
+            except OSError:
+                text = ""
+    if not text:
+        job.log("Convert failed — no install .env snapshot available to roll back")
+        return
+
+    tgt = (target_db or "").strip().lower()
+    if tgt in ("mysql", "mariadb", "postgresql", "timescaledb"):
+        text = _set_env_var(text, "PASARGUARD_DB_ENGINE", tgt)
+        healed, _ = heal_stale_sqlite_engine_env(text)
+        text = healed
+
+    try:
+        if PASARGUARD_ENV.exists():
+            shutil.copy2(
+                PASARGUARD_ENV,
+                PASARGUARD_ENV.with_suffix(".env.bak-failed-convert"),
+            )
+        PASARGUARD_ENV.write_text(text, encoding="utf-8")
+        job.log(
+            "Rolled back .env to install engine"
+            + (f" ({tgt})" if tgt else "")
+            + " after failed convert"
+        )
+    except OSError as exc:
+        job.log(f"Failed to roll back .env after convert error: {exc}")
+        return
+
+    # Quarantine intermediate sqlite so the panel cannot silently fall back to it
+    if tgt and tgt != "sqlite":
+        sqlite_path = PASARGUARD_DATA / "db.sqlite3"
+        if sqlite_path.exists():
+            bak_sqlite = PASARGUARD_DATA / f"db.sqlite3.failed-convert-{job.job_id}.bak"
+            try:
+                if bak_sqlite.exists():
+                    bak_sqlite.unlink()
+                shutil.move(str(sqlite_path), str(bak_sqlite))
+                job.log(f"Quarantined intermediate SQLite → {bak_sqlite.name}")
+            except OSError as exc:
+                job.log(f"Could not quarantine sqlite after failed convert: {exc}")
 
 
 def explain_restore_error(exc: Exception, backup_db: str | None = None, target_db: str | None = None) -> dict:
@@ -3671,6 +3862,24 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             _safe_extract(zf, work)
         root = work
         current_env = _read_current_env()
+        # Failed sqlite→server converts can leave PASARGUARD_DB_ENGINE=sqlite while
+        # compose still runs Timescale/MySQL. Heal before we decide installed_db.
+        healed_env, healed_to = heal_stale_sqlite_engine_env(current_env)
+        if healed_to and healed_env != current_env:
+            try:
+                if PASARGUARD_ENV.exists():
+                    shutil.copy2(
+                        PASARGUARD_ENV,
+                        PASARGUARD_ENV.with_suffix(".env.bak-before-heal"),
+                    )
+                PASARGUARD_ENV.write_text(healed_env, encoding="utf-8")
+                job.log(
+                    f"Healed stale sqlite engine stamp/URL → {healed_to} "
+                    "(compose still has a server DB)"
+                )
+            except OSError as exc:
+                job.log(f"Could not write healed .env: {exc}")
+            current_env = healed_env
         install_env_snapshot = current_env
         backup_env_path = _find_env(work)
         if backup_env_path:
@@ -3888,16 +4097,25 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
 
         job.set_progress(75, "Merging configuration...")
         if needs_convert:
-            # Hard convert into already-installed target — keep install credentials only
+            # Hard convert into already-installed target — keep install credentials +
+            # install SQLALCHEMY URL / engine stamp so a failed convert cannot leave
+            # the panel on the backup's sqlite stamp forever.
             preserve = {
                 "DB_PASSWORD": cur_db_pass,
                 "DB_USER": cur_user,
                 "DB_NAME": cur_name,
+                "PASARGUARD_DB_ENGINE": target_db or installed_db or "",
             }
             if (target_db or "") in ("mysql", "mariadb"):
                 preserve["MYSQL_ROOT_PASSWORD"] = cur_mysql_root or cur_db_pass
             elif (target_db or "") in ("postgresql", "timescaledb"):
                 preserve["POSTGRES_PASSWORD"] = cur_pg_pass or cur_db_pass
+            if cur_url and "sqlite" not in cur_url.lower():
+                preserve["SQLALCHEMY_DATABASE_URL"] = cur_url
+            job.log(
+                f"Hard-convert merge: keeping install DB URL/stamp "
+                f"({preserve.get('PASARGUARD_DB_ENGINE') or target_db})"
+            )
         else:
             # Same / soft-family engine: put OLD (backup) DB password into the new .env
             # so panel auth matches roles restored from the dump.
@@ -4010,6 +4228,21 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                 )
         elif target_db and soft_db_family(restore_engine, target_db):
             final_db = target_db
+
+        # Convert path must never leave the panel on an intermediate/backup engine
+        if needs_convert:
+            landed = final_db or ""
+            want = installed_db or target_db or ""
+            if not landed or landed == "sqlite" or (
+                want
+                and landed != want
+                and not soft_db_family(landed, want)
+            ):
+                _rollback_env_after_failed_convert(job, install_env_snapshot, want or target_db)
+                raise RuntimeError(
+                    f"Cross-DB convert did not land on installed engine {want or '?'}; "
+                    f"got {landed or 'n/a'}. Install .env was restored."
+                )
 
         # After convert / same-engine: credentials must match what we wrote into .env
         final_engine_pre = final_db or target_db or restore_engine or backup_db
@@ -5481,6 +5714,13 @@ async def _merge_env_after_restore(
         # Hard convert path: strip backup engine URLs; finalize writes the target URL.
         text = _re.sub(_sqlalchemy_url_line_pattern(), "", text)
         text = _re.sub(r"\n{3,}", "\n\n", text)
+
+    # Stamp destination engine early so a mid-convert crash cannot leave
+    # PASARGUARD_DB_ENGINE=sqlite from the backup .env.
+    if tgt in ("sqlite", "mysql", "mariadb", "postgresql", "timescaledb"):
+        text = _set_env_var(text, "PASARGUARD_DB_ENGINE", tgt)
+    elif preserve.get("PASARGUARD_DB_ENGINE"):
+        text = _set_env_var(text, "PASARGUARD_DB_ENGINE", str(preserve["PASARGUARD_DB_ENGINE"]))
 
     if PASARGUARD_ENV.exists():
         shutil.copy2(PASARGUARD_ENV, PASARGUARD_ENV.with_suffix(".env.bak-before-restore"))
