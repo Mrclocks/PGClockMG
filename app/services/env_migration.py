@@ -251,39 +251,48 @@ def detect_db_type_from_env(text: str, *, prefer_compose: bool = True) -> str | 
     ``mysql+asyncmy://…`` without ``mariadb`` in the URL. For both cases we must
     prefer the compose service/image (``timescaledb`` / ``mariadb``), not the
     URL substring alone.
+
+    A failed sqlite→server restore can leave ``PASARGUARD_DB_ENGINE=sqlite`` (and
+    even a sqlite URL) while compose still runs Timescale/MySQL. Prefer the live
+    compose service in that case — otherwise the next restore treats the panel as
+    sqlite and skips convert forever.
     """
+    server_engines = ("mysql", "mariadb", "postgresql", "timescaledb")
+    svc = _compose_db_service() if prefer_compose else None
+
     # Explicit stamp (written by finalize / install tooling when present)
     stamped = (read_env_var(text, "PASARGUARD_DB_ENGINE") or "").strip().lower()
     if stamped in ("sqlite", "mysql", "mariadb", "postgresql", "timescaledb"):
+        if prefer_compose and stamped == "sqlite" and svc in server_engines:
+            return svc
         return stamped
 
     url = read_env_var(text, "SQLALCHEMY_DATABASE_URL") or ""
     if url:
         low = url.lower()
         if "sqlite" in low:
+            if prefer_compose and svc in server_engines:
+                return svc
             return "sqlite"
         if "mariadb" in low:
             return "mariadb"
         if "mysql" in low or "pymysql" in low or "asyncmy" in low:
             # URL alone cannot distinguish MariaDB vs MySQL on real installs
-            if prefer_compose:
-                svc = _compose_db_service()
-                if svc in ("mysql", "mariadb"):
-                    return svc
+            if prefer_compose and svc in ("mysql", "mariadb"):
+                return svc
             return "mysql"
         if "postgres" in low or "asyncpg" in low or "timescale" in low:
             # URL alone cannot distinguish Timescale vs PostgreSQL on real installs
             if "timescale" in low:
                 return "timescaledb"
-            if prefer_compose:
-                svc = _compose_db_service()
-                if svc in ("timescaledb", "postgresql"):
-                    return svc
+            if prefer_compose and svc in ("timescaledb", "postgresql"):
+                return svc
             return "postgresql"
 
     db_creds = read_compose_db_credentials(text)
     if db_creds.get("database") and db_creds.get("user"):
-        svc = _compose_db_service() if prefer_compose else None
+        if prefer_compose and svc in server_engines:
+            return svc
         if svc in ("timescaledb", "postgresql"):
             return svc
         if svc in ("mysql", "mariadb"):
@@ -296,10 +305,11 @@ def detect_db_type_from_env(text: str, *, prefer_compose: bool = True) -> str | 
             return "mysql"
 
     if read_env_var(text, "PGADMIN_EMAIL") or read_env_var(text, "PGADMIN_PASSWORD"):
-        svc = _compose_db_service() if prefer_compose else None
         return "timescaledb" if svc == "timescaledb" else "postgresql"
 
     low = text.lower()
+    if prefer_compose and svc in server_engines:
+        return svc
     if "sqlite" in low:
         return "sqlite"
     if "mariadb" in low:
@@ -307,12 +317,53 @@ def detect_db_type_from_env(text: str, *, prefer_compose: bool = True) -> str | 
     if "mysql" in low:
         return "mysql"
     if "postgres" in low or "timescale" in low:
-        if prefer_compose:
-            svc = _compose_db_service()
-            if svc in ("timescaledb", "postgresql"):
-                return svc
+        if prefer_compose and svc in ("timescaledb", "postgresql"):
+            return svc
         return "timescaledb" if "timescale" in low else "postgresql"
     return None
+
+
+def heal_stale_sqlite_engine_env(text: str) -> tuple[str, str | None]:
+    """Fix .env that still claims sqlite while compose has a server DB.
+
+    Returns ``(new_text, healed_to_engine_or_None)``.
+    """
+    server_engines = ("mysql", "mariadb", "postgresql", "timescaledb")
+    svc = _compose_db_service()
+    if svc not in server_engines:
+        return text, None
+    stamped = (read_env_var(text, "PASARGUARD_DB_ENGINE") or "").strip().lower()
+    url = read_env_var(text, "SQLALCHEMY_DATABASE_URL") or ""
+    if not (stamped == "sqlite" or "sqlite" in url.lower()):
+        return text, None
+
+    out = _set_env_var_simple(text or "", "PASARGUARD_DB_ENGINE", svc)
+    if (not url.strip()) or ("sqlite" in url.lower()):
+        bak_text = ""
+        try:
+            from app.config import PASARGUARD_ENV
+
+            cand = PASARGUARD_ENV.with_suffix(".env.bak-before-restore")
+            if cand.is_file():
+                bak_text = cand.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            bak_text = ""
+        bak_url = read_env_var(bak_text, "SQLALCHEMY_DATABASE_URL") if bak_text else ""
+        pwd = (
+            read_env_var(out, "POSTGRES_PASSWORD")
+            or read_env_var(out, "DB_PASSWORD")
+            or read_env_var(out, "MYSQL_ROOT_PASSWORD")
+            or read_env_var(out, "MYSQL_PASSWORD")
+            or read_env_var(bak_text, "POSTGRES_PASSWORD")
+            or read_env_var(bak_text, "DB_PASSWORD")
+            or ""
+        )
+        if bak_url and "sqlite" not in bak_url.lower() and env_points_to_db(bak_text, svc):
+            rebuilt = _replace_sqlalchemy_password(bak_url, pwd) if pwd else bak_url
+            out = _set_sqlalchemy_url(out, rebuilt)
+        else:
+            out = _set_sqlalchemy_url(out, build_sqlalchemy_url_for_target(svc, pwd, out))
+    return out, svc
 
 
 def sqlite_fs_path_from_url(url: str) -> str | None:

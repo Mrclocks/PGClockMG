@@ -65,6 +65,61 @@ def test_stamp_overrides_url():
     print("OK: PASARGUARD_DB_ENGINE stamp wins")
 
 
+def test_stale_sqlite_stamp_defers_to_compose():
+    """Failed convert left PASARGUARD_DB_ENGINE=sqlite but compose still has Timescale."""
+    env = "\n".join([
+        'PASARGUARD_DB_ENGINE="sqlite"',
+        'SQLALCHEMY_DATABASE_URL="sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3"',
+    ])
+    with tempfile.TemporaryDirectory() as td:
+        compose = Path(td) / "docker-compose.yml"
+        compose.write_text(
+            "services:\n  timescaledb:\n    image: timescale/timescaledb:latest-pg17\n",
+            encoding="utf-8",
+        )
+        with patch("app.config.PASARGUARD_DIR", Path(td)):
+            assert detect_db_type_from_env(env, prefer_compose=True) == "timescaledb"
+            assert detect_db_type_from_env(env, prefer_compose=False) == "sqlite"
+    print("OK: stale sqlite stamp defers to compose")
+
+
+def test_heal_stale_sqlite_engine_env(tmp_path, monkeypatch):
+    from app.services.env_migration import (
+        heal_stale_sqlite_engine_env,
+        read_env_var,
+        env_points_to_db,
+    )
+
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        "services:\n  timescaledb:\n    image: timescale/timescaledb:latest-pg17\n",
+        encoding="utf-8",
+    )
+    env_file = tmp_path / ".env"
+    bak = env_file.with_suffix(".env.bak-before-restore")
+    bak.write_text(
+        'SQLALCHEMY_DATABASE_URL="postgresql+asyncpg://pasarguard:secret@127.0.0.1:6432/pasarguard"\n'
+        'POSTGRES_PASSWORD="secret"\n'
+        'PASARGUARD_DB_ENGINE="timescaledb"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("app.config.PASARGUARD_DIR", tmp_path)
+    monkeypatch.setattr("app.config.PASARGUARD_ENV", env_file)
+
+    stale = "\n".join([
+        'PASARGUARD_DB_ENGINE="sqlite"',
+        'SQLALCHEMY_DATABASE_URL="sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3"',
+        'POSTGRES_PASSWORD="secret"',
+        'DB_PASSWORD="secret"',
+    ])
+    healed, to = heal_stale_sqlite_engine_env(stale)
+    assert to == "timescaledb"
+    assert read_env_var(healed, "PASARGUARD_DB_ENGINE") == "timescaledb"
+    assert env_points_to_db(healed, "timescaledb")
+    assert "sqlite" not in (read_env_var(healed, "SQLALCHEMY_DATABASE_URL") or "").lower()
+    print("OK: heal_stale_sqlite_engine_env")
+
+
 def test_estimate_copy_and_insert_counts():
     sql = """
 COPY public.users (id, username) FROM stdin;
@@ -177,6 +232,7 @@ if __name__ == "__main__":
     test_detect_postgresql_from_compose()
     test_backup_env_ignores_live_compose()
     test_stamp_overrides_url()
+    test_stale_sqlite_stamp_defers_to_compose()
     test_estimate_copy_and_insert_counts()
     test_soft_family_pg_timescale()
     test_detect_mariadb_from_compose_not_mysql_url()

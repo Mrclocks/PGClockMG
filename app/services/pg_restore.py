@@ -22,6 +22,7 @@ from app.services.env_migration import (
     env_points_to_db,
     extract_env_summary,
     finalize_pasarguard_env_after_restore,
+    heal_stale_sqlite_engine_env,
     read_env_var,
     public_env_summary,
 )
@@ -1303,6 +1304,20 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
                 if isinstance(v, int) and v > 0 and (k not in table_counts or table_counts.get(k, 0) < v):
                     table_counts[k] = v
         installed = is_pasarguard_installed()
+        # Auto-heal stale sqlite stamp left by a failed convert so analyze/UI
+        # report the real installed engine (compose) and the next restore converts.
+        if installed and PASARGUARD_ENV.exists():
+            try:
+                live = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+                healed, healed_to = heal_stale_sqlite_engine_env(live)
+                if healed_to and healed != live:
+                    shutil.copy2(
+                        PASARGUARD_ENV,
+                        PASARGUARD_ENV.with_suffix(".env.bak-before-heal"),
+                    )
+                    PASARGUARD_ENV.write_text(healed, encoding="utf-8")
+            except OSError:
+                pass
         installed_db = get_pasarguard_db_type() if installed else None
 
         warnings: list[dict] = []
@@ -2782,10 +2797,65 @@ async def _maybe_cross_db_after_restore(
     except Exception as e:
         job.log(f"DB convert failed — target schema may have been reset; "
                 f"retry restore. Underlying: {e}")
+        _rollback_env_after_failed_convert(job, install_env_snapshot, target_db)
         explain = explain_restore_error(e, backup_db, target_db)
         err = RuntimeError(explain.get("en") or str(e))
         err.explain = explain  # type: ignore[attr-defined]
         raise err from e
+
+
+def _rollback_env_after_failed_convert(
+    job: MigrationJob,
+    install_env_snapshot: str | None,
+    target_db: str | None = None,
+) -> None:
+    """Restore install .env so a failed convert cannot leave the panel on sqlite."""
+    text = (install_env_snapshot or "").strip()
+    if not text:
+        bak = PASARGUARD_ENV.with_suffix(".env.bak-before-restore")
+        if bak.is_file():
+            try:
+                text = bak.read_text(encoding="utf-8", errors="ignore").strip()
+            except OSError:
+                text = ""
+    if not text:
+        job.log("Convert failed — no install .env snapshot available to roll back")
+        return
+
+    tgt = (target_db or "").strip().lower()
+    if tgt in ("mysql", "mariadb", "postgresql", "timescaledb"):
+        text = _set_env_var(text, "PASARGUARD_DB_ENGINE", tgt)
+        healed, _ = heal_stale_sqlite_engine_env(text)
+        text = healed
+
+    try:
+        if PASARGUARD_ENV.exists():
+            shutil.copy2(
+                PASARGUARD_ENV,
+                PASARGUARD_ENV.with_suffix(".env.bak-failed-convert"),
+            )
+        PASARGUARD_ENV.write_text(text, encoding="utf-8")
+        job.log(
+            "Rolled back .env to install engine"
+            + (f" ({tgt})" if tgt else "")
+            + " after failed convert"
+        )
+    except OSError as exc:
+        job.log(f"Failed to roll back .env after convert error: {exc}")
+        return
+
+    # Quarantine intermediate sqlite so the panel cannot silently fall back to it
+    if tgt and tgt != "sqlite":
+        sqlite_path = PASARGUARD_DATA / "db.sqlite3"
+        if sqlite_path.exists():
+            bak_sqlite = PASARGUARD_DATA / f"db.sqlite3.failed-convert-{job.job_id}.bak"
+            try:
+                if bak_sqlite.exists():
+                    bak_sqlite.unlink()
+                shutil.move(str(sqlite_path), str(bak_sqlite))
+                job.log(f"Quarantined intermediate SQLite → {bak_sqlite.name}")
+            except OSError as exc:
+                job.log(f"Could not quarantine sqlite after failed convert: {exc}")
 
 
 def explain_restore_error(exc: Exception, backup_db: str | None = None, target_db: str | None = None) -> dict:
@@ -3671,6 +3741,24 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             _safe_extract(zf, work)
         root = work
         current_env = _read_current_env()
+        # Failed sqlite→server converts can leave PASARGUARD_DB_ENGINE=sqlite while
+        # compose still runs Timescale/MySQL. Heal before we decide installed_db.
+        healed_env, healed_to = heal_stale_sqlite_engine_env(current_env)
+        if healed_to and healed_env != current_env:
+            try:
+                if PASARGUARD_ENV.exists():
+                    shutil.copy2(
+                        PASARGUARD_ENV,
+                        PASARGUARD_ENV.with_suffix(".env.bak-before-heal"),
+                    )
+                PASARGUARD_ENV.write_text(healed_env, encoding="utf-8")
+                job.log(
+                    f"Healed stale sqlite engine stamp/URL → {healed_to} "
+                    "(compose still has a server DB)"
+                )
+            except OSError as exc:
+                job.log(f"Could not write healed .env: {exc}")
+            current_env = healed_env
         install_env_snapshot = current_env
         backup_env_path = _find_env(work)
         if backup_env_path:
@@ -3888,16 +3976,25 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
 
         job.set_progress(75, "Merging configuration...")
         if needs_convert:
-            # Hard convert into already-installed target — keep install credentials only
+            # Hard convert into already-installed target — keep install credentials +
+            # install SQLALCHEMY URL / engine stamp so a failed convert cannot leave
+            # the panel on the backup's sqlite stamp forever.
             preserve = {
                 "DB_PASSWORD": cur_db_pass,
                 "DB_USER": cur_user,
                 "DB_NAME": cur_name,
+                "PASARGUARD_DB_ENGINE": target_db or installed_db or "",
             }
             if (target_db or "") in ("mysql", "mariadb"):
                 preserve["MYSQL_ROOT_PASSWORD"] = cur_mysql_root or cur_db_pass
             elif (target_db or "") in ("postgresql", "timescaledb"):
                 preserve["POSTGRES_PASSWORD"] = cur_pg_pass or cur_db_pass
+            if cur_url and "sqlite" not in cur_url.lower():
+                preserve["SQLALCHEMY_DATABASE_URL"] = cur_url
+            job.log(
+                f"Hard-convert merge: keeping install DB URL/stamp "
+                f"({preserve.get('PASARGUARD_DB_ENGINE') or target_db})"
+            )
         else:
             # Same / soft-family engine: put OLD (backup) DB password into the new .env
             # so panel auth matches roles restored from the dump.
@@ -4010,6 +4107,21 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                 )
         elif target_db and soft_db_family(restore_engine, target_db):
             final_db = target_db
+
+        # Convert path must never leave the panel on an intermediate/backup engine
+        if needs_convert:
+            landed = final_db or ""
+            want = installed_db or target_db or ""
+            if not landed or landed == "sqlite" or (
+                want
+                and landed != want
+                and not soft_db_family(landed, want)
+            ):
+                _rollback_env_after_failed_convert(job, install_env_snapshot, want or target_db)
+                raise RuntimeError(
+                    f"Cross-DB convert did not land on installed engine {want or '?'}; "
+                    f"got {landed or 'n/a'}. Install .env was restored."
+                )
 
         # After convert / same-engine: credentials must match what we wrote into .env
         final_engine_pre = final_db or target_db or restore_engine or backup_db
@@ -5481,6 +5593,13 @@ async def _merge_env_after_restore(
         # Hard convert path: strip backup engine URLs; finalize writes the target URL.
         text = _re.sub(_sqlalchemy_url_line_pattern(), "", text)
         text = _re.sub(r"\n{3,}", "\n\n", text)
+
+    # Stamp destination engine early so a mid-convert crash cannot leave
+    # PASARGUARD_DB_ENGINE=sqlite from the backup .env.
+    if tgt in ("sqlite", "mysql", "mariadb", "postgresql", "timescaledb"):
+        text = _set_env_var(text, "PASARGUARD_DB_ENGINE", tgt)
+    elif preserve.get("PASARGUARD_DB_ENGINE"):
+        text = _set_env_var(text, "PASARGUARD_DB_ENGINE", str(preserve["PASARGUARD_DB_ENGINE"]))
 
     if PASARGUARD_ENV.exists():
         shutil.copy2(PASARGUARD_ENV, PASARGUARD_ENV.with_suffix(".env.bak-before-restore"))

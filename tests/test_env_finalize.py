@@ -19,12 +19,14 @@ from app.services.env_migration import (
 )
 
 
-def test_detect_db_type_sqlalchemy_beats_pgadmin():
+def test_detect_db_type_sqlalchemy_beats_pgadmin(tmp_path, monkeypatch):
     env = '\n'.join([
         'PGADMIN_EMAIL="admin@test.com"',
         'PGADMIN_PASSWORD="secret"',
         'SQLALCHEMY_DATABASE_URL="sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3"',
     ])
+    # Isolate from any live compose on the host
+    monkeypatch.setattr("app.config.PASARGUARD_DIR", tmp_path)
     assert detect_db_type_from_env(env) == "sqlite"
     print("OK: SQLALCHEMY beats pgAdmin for db type detection")
 
@@ -267,12 +269,5 @@ def test_strict_complete_hosts_fails_hard():
 
 
 if __name__ == "__main__":
-    test_detect_db_type_sqlalchemy_beats_pgadmin()
-    test_finalize_sqlite_to_timescaledb_url()
-    test_finalize_prefers_install_url_over_sqlite_merge()
-    test_finalize_keeps_backup_mysql_root_over_install()
-    test_finalize_strips_postgres_secrets_for_mysql_target()
-    test_sanitize_ssl_keeps_valid_files()
-    test_resolve_container_cert_path()
-    test_strict_complete_hosts_fails_hard()
-    print("\nAll env_finalize tests passed")
+    import pytest
+    raise SystemExit(pytest.main([__file__, "-q"]))
