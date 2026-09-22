@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.7`** — clear trilingual backup panel API errors (fa/en/ru)
+> 🚀 **`v4.6.8`** — sqlite→server restore no longer sticks on sqlite; SASL/password auto-heal
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
