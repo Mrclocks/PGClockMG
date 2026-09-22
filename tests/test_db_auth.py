@@ -656,6 +656,114 @@ def test_pg_resolve_accepts_password_verified_over_tcp():
     print("OK: PG resolve accepts TCP-verified password under trust")
 
 
+def test_mysql_resolve_skip_grant_recovers_stale_root():
+    """Every .env root candidate fails → skip-grant → probe succeeds."""
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.db_auth import resolve_live_admin_connection
+    from app.services.migrators.base import BaseMigrator, MigrationJob
+
+    class Dummy(BaseMigrator):
+        async def run(self, params):
+            return {}
+
+    async def _run():
+        job = MigrationJob(job_id="mysql-skip1")
+        migrator = Dummy(job, {})
+        env = "MYSQL_ROOT_PASSWORD=env-secret\nDB_USER=pasarguard\nDB_NAME=pasarguard\n"
+        state = {"recovered": False, "probes": 0}
+
+        async def fake_probe(migrator_, service, user, password, database):
+            state["probes"] += 1
+            return state["recovered"] and password == "env-secret"
+
+        async def fake_recover(*_a, **_k):
+            state["recovered"] = True
+            return True
+
+        with patch("app.services.db_auth.PASARGUARD_DIR", Path("/opt/pasarguard")), \
+             patch("app.services.db_auth.resolve_db_service", return_value="mysql"), \
+             patch("app.services.db_auth._probe_mysql", side_effect=fake_probe), \
+             patch(
+                 "app.services.db_auth.recover_mysql_passwords_via_skip_grants",
+                 side_effect=fake_recover,
+             ), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            conn = await resolve_live_admin_connection(
+                migrator, "mysql", env_text=env,
+            )
+        assert conn["password"] == "env-secret"
+        assert state["recovered"] is True
+        assert state["probes"] >= 2
+        assert any("skip-grant" in line.lower() for line in job.logs)
+
+    asyncio.run(_run())
+    print("OK: MySQL resolve recovers via skip-grant")
+
+
+def test_sync_postgres_falls_back_to_trust_alter():
+    """Password ALTER fails → trust ALTER succeeds → force PgBouncer refresh."""
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.db_auth import sync_postgres_roles_to_app_password
+    from app.services.migrators.base import BaseMigrator, MigrationJob
+
+    class Dummy(BaseMigrator):
+        async def run(self, params):
+            return {}
+
+    async def _run():
+        job = MigrationJob(job_id="pg-sync-trust")
+        migrator = Dummy(job, {})
+        env = (
+            "POSTGRES_PASSWORD=live\n"
+            "POSTGRES_USER=pasarguard\n"
+            "DB_USER=pasarguard\n"
+            "DB_NAME=pasarguard\n"
+            'SQLALCHEMY_DATABASE_URL="postgresql+asyncpg://pasarguard:live@127.0.0.1:6432/pasarguard"\n'
+        )
+        state = {"trust_alters": 0, "forced": False}
+
+        async def fake_run(cmd, cwd=None, timeout=600, *, quiet=False):
+            argv = list(cmd) if isinstance(cmd, list) else [cmd]
+            joined = " ".join(argv)
+            if "ALTER ROLE" in joined and "PGPASSWORD=" in joined:
+                return False, "password authentication failed"
+            if "ALTER ROLE" in joined:
+                state["trust_alters"] += 1
+                return True, "ALTER ROLE\n"
+            return True, ""
+
+        async def fake_refresh(*_a, **kwargs):
+            if kwargs.get("force"):
+                state["forced"] = True
+            return True
+
+        with patch("app.services.db_auth.PASARGUARD_DIR", Path("/opt/pasarguard")), \
+             patch("app.services.db_auth.resolve_db_service", return_value="timescaledb"), \
+             patch.object(migrator, "_run_cmd", fake_run), \
+             patch(
+                 "app.services.db_auth.refresh_pgbouncer_if_stale",
+                 side_effect=fake_refresh,
+             ), \
+             patch("app.services.pasarguard_ops.compose_file_prefix", return_value=()):
+            ok = await sync_postgres_roles_to_app_password(
+                migrator,
+                "timescaledb",
+                {"user": "pasarguard", "password": "wrong", "database": "pasarguard"},
+                env_text=env,
+                password="live",
+            )
+        assert ok is True
+        assert state["trust_alters"] >= 1
+        assert state["forced"] is True
+
+    asyncio.run(_run())
+    print("OK: sync_postgres falls back to trust ALTER")
+
+
 def test_parse_published_port_prefers_loopback():
     from app.services.db_auth import _parse_published_port
 
@@ -697,5 +805,7 @@ if __name__ == "__main__":
     test_pg_resolve_trust_recovers_stale_password()
     test_pg_resolve_trust_recovery_raises_when_alter_fails()
     test_pg_resolve_accepts_password_verified_over_tcp()
+    test_mysql_resolve_skip_grant_recovers_stale_root()
+    test_sync_postgres_falls_back_to_trust_alter()
     test_parse_published_port_prefers_loopback()
     print("\nAll db_auth tests passed")

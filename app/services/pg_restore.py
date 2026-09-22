@@ -2217,6 +2217,8 @@ async def _sync_pg_role_passwords(
 
     lit = _sql_literal(password)
     sync_errors: list[tuple[str, str]] = []
+    synced_any = False
+    failed_roles: list[str] = []
     for role in roles:
         sql = f'ALTER ROLE "{role}" WITH PASSWORD {lit};'
         synced = False
@@ -2233,6 +2235,7 @@ async def _sync_pg_role_passwords(
                 if _psql_exec_succeeded(ok, out):
                     job.log(f"Synced password for role {role} (as {auth_user})")
                     synced = True
+                    synced_any = True
                     break
                 err = extract_psql_errors(out or "")[:240] or (out or "")[-240:]
                 if err:
@@ -2240,10 +2243,37 @@ async def _sync_pg_role_passwords(
             if synced:
                 break
         if not synced:
+            failed_roles.append(role)
             job.log(
                 f"Could not sync password for role {role}: "
                 f"{summarize_pg_auth_errors(sync_errors[-6:]) or 'all auth attempts failed'}"
             )
+
+    if failed_roles or not synced_any:
+        from app.services.db_auth import recover_postgres_passwords_via_trust
+
+        class _TrustMini:
+            def __init__(self, j: MigrationJob):
+                self.job = j
+
+            async def _run_cmd(self, cmd, cwd=None, timeout=600, *, quiet: bool = False):
+                return await _run(self.job, cmd, cwd=cwd, timeout=timeout, quiet=quiet)
+
+        job.log(
+            "Falling back to PostgreSQL trust password recovery "
+            f"for {len(failed_roles) or len(roles)} role(s)..."
+        )
+        recovered = await recover_postgres_passwords_via_trust(
+            _TrustMini(job),
+            svc,
+            env_now,
+            password=password,
+            admin_users=[u for u, _ in auth_attempts] or roles,
+        )
+        if recovered:
+            job.log("Trust password recovery aligned roles to .env password")
+        else:
+            job.log("Trust password recovery could not align all roles")
     # PgBouncer recreate happens after finalize when credentials in .env are canonical.
 
 
@@ -2624,12 +2654,41 @@ async def _prepare_panel_boot_after_finalize(
         try:
             admin = await resolve_live_admin_connection(mini, final_engine, env_text=env_now)
         except RuntimeError as probe_err:
-            job.log(f"Live admin probe: {probe_err} — syncing with finalized password")
-            admin = {
-                "user": verify_user,
-                "password": verify_pass,
-                "database": verify_db,
-            }
+            from app.services.db_auth import (
+                recover_postgres_passwords_via_trust,
+            )
+            from app.services.pasarguard_ops import resolve_db_service
+
+            job.log(
+                f"Live admin probe: {probe_err} — "
+                "trying trust password recovery before panel boot"
+            )
+            svc = resolve_db_service(final_engine) or "timescaledb"
+            recovered = await recover_postgres_passwords_via_trust(
+                mini,
+                svc,
+                env_now,
+                password=verify_pass,
+                admin_users=[verify_user, "postgres"],
+            )
+            if recovered:
+                try:
+                    admin = await resolve_live_admin_connection(
+                        mini, final_engine, env_text=env_now,
+                    )
+                except RuntimeError:
+                    admin = {
+                        "user": verify_user,
+                        "password": verify_pass,
+                        "database": verify_db,
+                    }
+            else:
+                job.log("Trust recovery unavailable — syncing with finalized password")
+                admin = {
+                    "user": verify_user,
+                    "password": verify_pass,
+                    "database": verify_db,
+                }
         synced = await sync_postgres_roles_to_app_password(
             mini,
             final_engine,
@@ -2646,6 +2705,7 @@ async def _prepare_panel_boot_after_finalize(
             user=verify_user,
             password=verify_pass,
             database=verify_db,
+            force=True,
         )
         await _ensure_timescaledb_not_in_restore_mode(
             job, verify_pass, verify_user, verify_db,
@@ -2740,6 +2800,7 @@ async def _maybe_cross_db_after_restore(
         # Prefer install .env for target auth — merged backup .env often still has
         # Timescale/Postgres secrets and incomplete MYSQL_* until finalize.
         env_text = install_env_snapshot or _read_current_env()
+        svc: str | None = None
         if target_db != "sqlite":
             svc = "timescaledb" if target_db == "timescaledb" else await _detect_db_container(job, target_db)
             if svc:
@@ -2752,10 +2813,13 @@ async def _maybe_cross_db_after_restore(
                 admin = await resolve_live_admin_connection(
                     probe_mini, target_db, env_text=env_text,
                 )
-            except RuntimeError:
+            except RuntimeError as probe_err:
                 # Fallback: try live merged .env (same-engine soft path may have updated it)
                 if install_env_snapshot:
-                    job.log("Install-snapshot auth failed — retrying with live .env")
+                    job.log(
+                        f"Install-snapshot auth failed ({probe_err}) — "
+                        "retrying with live .env"
+                    )
                     admin = await resolve_live_admin_connection(
                         probe_mini, target_db, env_text=_read_current_env(),
                     )
@@ -2769,6 +2833,15 @@ async def _maybe_cross_db_after_restore(
                     admin.get("user") or "postgres",
                     db_name or "pasarguard",
                 )
+            elif target_db in ("mysql", "mariadb") and svc:
+                await _sync_mysql_passwords(
+                    job,
+                    svc,
+                    admin.get("password") or password or "",
+                    user=admin.get("user") or "root",
+                    db_type=target_db,
+                    db_name=db_name or "pasarguard",
+                )
             mig_params = migration_params_from_connection(backup_db, target_db, admin)
         else:
             mig_params: dict = {
@@ -2781,7 +2854,55 @@ async def _maybe_cross_db_after_restore(
 
         mig_params["_auto_db_credentials"] = True
         mini = _Mini(job, mig_params)
-        await run_cross_db_migration(mini, path, backup_db, target_db)
+        try:
+            await run_cross_db_migration(mini, path, backup_db, target_db)
+        except Exception as copy_err:
+            # One automatic auth heal + retry (SASL / Access denied mid-convert).
+            if (
+                target_db == "sqlite"
+                or mig_params.get("_auth_healed_once")
+                or not is_auth_failure_text(str(copy_err))
+            ):
+                raise
+            job.log(
+                "Convert hit DB auth/SASL failure — auto-healing credentials "
+                "and retrying convert once..."
+            )
+            mig_params["_auth_healed_once"] = True
+            heal_env = install_env_snapshot or _read_current_env()
+            heal_mini = _Mini(job, {"target_db": target_db, "_auto_db_credentials": True})
+            admin = await resolve_live_admin_connection(
+                heal_mini, target_db, env_text=heal_env,
+            )
+            if target_db in ("postgresql", "timescaledb"):
+                heal_svc = svc or (
+                    "timescaledb" if target_db == "timescaledb"
+                    else await _detect_db_container(job, target_db)
+                )
+                if heal_svc:
+                    await _sync_pg_role_passwords(
+                        job,
+                        heal_svc,
+                        admin.get("password") or password or "",
+                        admin.get("user") or "postgres",
+                        db_name or "pasarguard",
+                    )
+            elif target_db in ("mysql", "mariadb"):
+                heal_svc = svc or await _detect_db_container(job, target_db)
+                if heal_svc:
+                    await _sync_mysql_passwords(
+                        job,
+                        heal_svc,
+                        admin.get("password") or password or "",
+                        user=admin.get("user") or "root",
+                        db_type=target_db,
+                        db_name=db_name or "pasarguard",
+                    )
+            mig_params = migration_params_from_connection(backup_db, target_db, admin)
+            mig_params["_auto_db_credentials"] = True
+            mig_params["_auth_healed_once"] = True
+            mini = _Mini(job, mig_params)
+            await run_cross_db_migration(mini, path, backup_db, target_db)
         stats = getattr(mini, "copy_stats", None) or {}
         report = getattr(mini, "copy_report", None) or {}
         # Remember credentials that actually worked during convert

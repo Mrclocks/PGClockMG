@@ -405,6 +405,18 @@ async def recover_postgres_passwords_via_trust(
                 break
         if not synced:
             migrator.job.log(f"Trust recovery could not ALTER ROLE {role}")
+    if any_ok:
+        # Env strings often already match; force recreate so :6432 stops SASL-failing.
+        try:
+            await refresh_pgbouncer_if_stale(
+                migrator,
+                "postgresql",
+                env_text=text,
+                password=password,
+                force=True,
+            )
+        except Exception as exc:
+            migrator.job.log(f"PgBouncer refresh after trust recovery note: {exc}")
     return any_ok
 
 
@@ -595,8 +607,58 @@ async def resolve_live_admin_connection(
                     }
                     migrator.job.log(f"MySQL/MariaDB auth OK as {user}")
                     return conn
+
+        # Mirror PG trust recovery: when every .env candidate fails, force the
+        # preferred password via temporary skip-grant on the same volume.
+        preferred = passwords[0] if passwords else ""
+        app_user = (
+            read_env_var(text, "DB_USER")
+            or read_env_var(text, "MYSQL_USER")
+            or "pasarguard"
+        )
+        recovered = False
+        if preferred:
+            async def _run_list(cmd, cwd=None, timeout=600):
+                return await migrator._run_cmd(cmd, cwd=cwd, timeout=timeout)
+
+            recovered = await recover_mysql_passwords_via_skip_grants(
+                _run_list,
+                service=service,
+                password=preferred,
+                app_user=app_user,
+                db_type=db_type,
+                db_name=db_name,
+                compose_cwd=str(PASARGUARD_DIR),
+                log=migrator.job.log,
+            )
+        if recovered:
+            migrator.job.log(
+                "MySQL skip-grant recovery applied — re-checking root auth..."
+            )
+            await asyncio.sleep(2)
+            for user in users:
+                if await _probe_mysql(migrator, service, user, preferred, db_name):
+                    conn = {
+                        "db_type": db_type,
+                        "user": user,
+                        "password": preferred,
+                        "database": db_name,
+                        "host": "127.0.0.1",
+                        "port": "3306",
+                    }
+                    migrator.job.log(
+                        f"MySQL/MariaDB auth OK as {user} (after skip-grant recovery)"
+                    )
+                    return conn
         raise RuntimeError(
             "MySQL/MariaDB authentication failed — check MYSQL_ROOT_PASSWORD / DB_PASSWORD in .env"
+            + (
+                " (skip-grant recovery could not realign passwords)."
+                if preferred and not recovered
+                else " (skip-grant recovery ran but auth still failed)."
+                if preferred and recovered
+                else ""
+            )
         )
 
     raise RuntimeError(f"Unsupported database for credential probe: {db_type}")
@@ -971,8 +1033,13 @@ async def refresh_pgbouncer_if_stale(
     user: str | None = None,
     password: str | None = None,
     database: str | None = None,
+    force: bool = False,
 ) -> bool:
-    """Recreate PgBouncer when its baked-in env disagrees with finalized .env."""
+    """Recreate PgBouncer when its baked-in env disagrees with finalized .env.
+
+    Pass ``force=True`` after trust password recovery — env strings can already
+    match while SCRAM secrets / auth caches still reject the panel.
+    """
     import asyncio
 
     from app.services.env_migration import parse_sqlalchemy_url, read_env_var
@@ -1038,14 +1105,20 @@ async def refresh_pgbouncer_if_stale(
     stale = pgbouncer_env_mismatch(
         container_env, user=user, password=password, database=database,
     )
-    if not stale:
+    if not stale and not force:
         migrator.job.log("PgBouncer credentials already match finalized .env")
         return False
 
-    migrator.job.log(
-        f"PgBouncer holds stale credentials ({', '.join(stale)}) — "
-        "recreating so panel auth on :6432 succeeds..."
-    )
+    if force and not stale:
+        migrator.job.log(
+            "Forcing PgBouncer recreate after password recovery "
+            "(env matches but auth cache may be stale)..."
+        )
+    else:
+        migrator.job.log(
+            f"PgBouncer holds stale credentials ({', '.join(stale)}) — "
+            "recreating so panel auth on :6432 succeeds..."
+        )
     ok_cfg, cfg_out = await migrator._run_cmd(
         ["docker", "compose", *prefix, "config", "-q"],
         cwd=cwd,
@@ -1134,6 +1207,7 @@ async def sync_postgres_roles_to_app_password(
 
     prefix = compose_file_prefix()
     any_ok = False
+    failed_roles: list[str] = []
     for role in roles:
         sql = f'ALTER ROLE "{role}" WITH PASSWORD {lit};'
         cmd = [
@@ -1145,15 +1219,42 @@ async def sync_postgres_roles_to_app_password(
         ok, out = await migrator._run_cmd(cmd, cwd=cwd, timeout=30)
         if ok:
             any_ok = True
-        else:
-            migrator.job.log(
-                f"PostgreSQL ALTER ROLE {role} note: {(out or '')[-200:]}"
-            )
+            continue
+        # Password auth failed — try local socket trust (omit PGPASSWORD).
+        if await _pg_alter_role_via_trust(
+            migrator,
+            service,
+            as_user=admin_user,
+            role=role,
+            password=app_pwd,
+            database="postgres",
+        ):
+            migrator.job.log(f"Synced PostgreSQL role {role} via local trust")
+            any_ok = True
+            continue
+        migrator.job.log(
+            f"PostgreSQL ALTER ROLE {role} note: {(out or '')[-200:]}"
+        )
+        failed_roles.append(role)
+
+    if failed_roles or not any_ok:
+        recovered = await recover_postgres_passwords_via_trust(
+            migrator,
+            service,
+            text,
+            password=app_pwd,
+            admin_users=_unique_strings(admin_user, *postgres_admin_users(text)),
+        )
+        if recovered:
+            any_ok = True
+            # recover_postgres_passwords_via_trust already force-refreshes pgbouncer
+            return True
 
     await refresh_pgbouncer_if_stale(
         migrator,
         db_type,
         env_text=text,
         password=app_pwd,
+        force=bool(any_ok),
     )
     return any_ok
