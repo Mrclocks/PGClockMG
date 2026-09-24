@@ -52,6 +52,10 @@ _MARZBAN_BRIDGE_REVISIONS = (
     "6980e98bba01",
 )
 
+# How many successive alembic "schema already applied" stamps we allow while
+# waiting for the panel (one per stuck revision, e.g. expire_temp then next).
+_MAX_ALEMBIC_DUP_HEALS = 6
+
 # Harmless lines from DB restarts — must not fail the panel health check
 BENIGN_LOG_PATTERNS = (
     "terminating background worker",
@@ -701,29 +705,7 @@ async def _try_heal_alembic_duplicate_from_logs(migrator, logs: str) -> bool:
     text = logs or ""
     if not _is_duplicate_schema_error(text):
         return False
-
-    low = text.lower()
-    # Gate: only heal real panel migration failures, not incidental restore noise
-    # like "CREATE ROLE … already exists".
-    migration_fail = (
-        "database migrations failed" in low
-        or "duplicatecolumn" in low
-        or (
-            ("table" in low or "relation" in low or "column" in low)
-            and "already exists" in low
-            and any(
-                marker in low
-                for marker in (
-                    "sqlalchemy",
-                    "operationalerror",
-                    "asyncmy",
-                    "asyncpg",
-                    "programmingerror",
-                )
-            )
-        )
-    )
-    if not migration_fail:
+    if not _is_panel_migration_failure_context(text):
         return False
 
     target_db = (migrator.params or {}).get("target_db")
@@ -1043,6 +1025,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
     unknown_streak = 0
     restarting_streak = 0
     healed_once = False
+    alembic_dup_heals = 0
     silent_loop_healed = False
     soft_up_during_alembic = False
     prev_restart_count = 0
@@ -1263,6 +1246,22 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
             out_full = await fetch_extended_panel_logs(migrator, tail=500)
             if out_full.strip():
                 out = out_full
+            # Schema-ahead of alembic_version can fail on several revisions in a
+            # row (e.g. expire_temp then the next ADD COLUMN). Allow a small
+            # stamp budget independent of the one-shot recreate for other heals.
+            if (
+                alembic_dup_heals < _MAX_ALEMBIC_DUP_HEALS
+                and await _try_heal_alembic_duplicate_from_logs(migrator, out)
+            ):
+                alembic_dup_heals += 1
+                migrator.job.log(
+                    f"Panel error detected ({hit}) — alembic_version healed for "
+                    f"duplicate schema ({alembic_dup_heals}/{_MAX_ALEMBIC_DUP_HEALS}), "
+                    "recreating panel…"
+                )
+                await _ensure_pasarguard_up(migrator)
+                await asyncio.sleep(10)
+                continue
             # Give crash-loop a moment and one recreate before hard-fail
             if not healed_once:
                 healed_once = True
@@ -1279,13 +1278,6 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                     migrator.job.log(
                         f"Panel error detected ({hit}) — Marzban pre-boot heal applied, "
                         "recreating panel…"
-                    )
-                # Schema already applied but alembic_version lags (e.g. Table already exists)
-                elif await _try_heal_alembic_duplicate_from_logs(migrator, out):
-                    healed = True
-                    migrator.job.log(
-                        f"Panel error detected ({hit}) — alembic_version healed for "
-                        "duplicate schema, recreating panel…"
                     )
                 elif await _try_heal_nats_multiworker(migrator, out):
                     healed = True
@@ -1853,12 +1845,141 @@ def _parse_upgrade_target_revision(output: str) -> str | None:
     m = re.search(r"versions/([0-9a-f]+)_", output, re.I)
     if m:
         return m.group(1)
+    # asyncmy / alembic sometimes only logs the destination revision id nearby
+    m = re.search(
+        r"(?:upgrade(?:d)?\s+to|revision\s+)([0-9a-f]{12,})",
+        output or "",
+        re.I,
+    )
+    if m:
+        return m.group(1)
     return None
 
 
+# MySQL / MariaDB schema-object errno (from asyncmy / pymysql wrappers).
+# 1050 ER_TABLE_EXISTS_ERROR — CREATE TABLE when table exists
+# 1060 ER_DUP_FIELDNAME     — ADD COLUMN when column exists  (e.g. expire_temp)
+# 1061 ER_DUP_KEYNAME       — ADD INDEX when index exists
+_MYSQL_SCHEMA_DUP_ERRNO_RE = re.compile(r"\(\s*10(?:50|60|61)\s*,")
+_MYSQL_SCHEMA_DUP_ERRNO_WORD_RE = re.compile(r"\berror\s+10(?:50|60|61)\b", re.I)
+
+# Engine-native + SQLAlchemy phrasings for "schema object already present".
+# Intentionally does NOT match bare "duplicatecolumn" without separators only —
+# we normalize whitespace/underscores when matching CamelCase exception names.
+_SCHEMA_DUP_PHRASE_RES = (
+    re.compile(r"duplicate\s+column\s+name", re.I),
+    re.compile(r"duplicate\s+key\s+name", re.I),
+    re.compile(r"duplicate\s+table(?:\s+name)?\b", re.I),
+    re.compile(r"duplicatecolumn(?:error)?", re.I),
+    re.compile(r"duplicatetable(?:error)?", re.I),
+    re.compile(r"duplicateobject(?:error)?", re.I),
+    # PostgreSQL / SQLAlchemy: «column "x" of relation "y" already exists»
+    re.compile(
+        r"(?:column|table|relation|index|constraint|type|sequence)\b"
+        r"[^\n]{0,120}\balready\s+exists",
+        re.I,
+    ),
+    re.compile(
+        r"already\s+exists[^\n]{0,60}\b"
+        r"(?:column|table|relation|index|constraint|type|sequence)\b",
+        re.I,
+    ),
+)
+
+_ROLE_OR_DB_EXISTS_RE = re.compile(
+    r"\b(?:role|database|user)\b[^\n]{0,80}\balready\s+exists",
+    re.I,
+)
+
+
+def _is_role_or_database_already_exists_noise(output: str) -> bool:
+    """True for CREATE ROLE / DATABASE noise that must not stamp alembic.
+
+    Returns False when the same blob also carries a real schema-duplicate signal
+    (mixed restore + panel logs).
+    """
+    text = output or ""
+    if not _ROLE_OR_DB_EXISTS_RE.search(text):
+        return False
+    if _MYSQL_SCHEMA_DUP_ERRNO_RE.search(text) or _MYSQL_SCHEMA_DUP_ERRNO_WORD_RE.search(text):
+        return False
+    for pat in _SCHEMA_DUP_PHRASE_RES:
+        if pat.search(text):
+            return False
+    compact = re.sub(r"[\s_]+", "", text.lower())
+    if "duplicatecolumn" in compact or "duplicatetable" in compact:
+        return False
+    low = text.lower()
+    if any(w in low for w in ("column", "table", "relation", "index", "constraint")) and (
+        "already exists" in low or "duplicate" in low
+    ):
+        return False
+    return True
+
+
 def _is_duplicate_schema_error(output: str) -> bool:
+    """True when alembic failed because schema objects already exist.
+
+    Typical after cross-DB / Marzban migrate: physical schema is ahead of
+    ``alembic_version``, so the next ``ADD COLUMN`` / ``CREATE TABLE`` blows up.
+
+    Must recognize **engine-native** wording, not only SQLAlchemy's
+    ``DuplicateColumnError`` / ``already exists``:
+
+    - MySQL/MariaDB ``(1060, "Duplicate column name 'expire_temp'")``
+    - MySQL/MariaDB ``(1050, "Table 'api_keys' already exists")``
+    - MySQL/MariaDB ``(1061, "Duplicate key name '…'")``
+    - PostgreSQL ``column "x" of relation "y" already exists``
+    - SQLite ``duplicate column name: expire_temp``
+
+    Does **not** treat ``role "…" already exists`` as schema drift.
+    """
+    text = output or ""
+    if not text.strip():
+        return False
+    if _is_role_or_database_already_exists_noise(text):
+        return False
+
+    if _MYSQL_SCHEMA_DUP_ERRNO_RE.search(text) or _MYSQL_SCHEMA_DUP_ERRNO_WORD_RE.search(text):
+        return True
+
+    for pat in _SCHEMA_DUP_PHRASE_RES:
+        if pat.search(text):
+            return True
+
+    # CamelCase exception names after whitespace collapse
+    compact = re.sub(r"[\s_]+", "", text.lower())
+    if "duplicatecolumn" in compact or "duplicatetable" in compact or "duplicateobject" in compact:
+        return True
+
+    low = text.lower()
+    # Legacy soft match: object + already exists (PG / older SQLAlchemy wording)
+    if "already exists" in low and any(
+        w in low for w in ("column", "table", "relation", "index", "constraint", "key name")
+    ):
+        return True
+    return False
+
+
+def _is_panel_migration_failure_context(output: str) -> bool:
+    """Gate heal to real panel/alembic failures (not restore ROLE noise alone)."""
     low = (output or "").lower()
-    return "duplicatecolumn" in low or "already exists" in low
+    return any(
+        marker in low
+        for marker in (
+            "database migrations failed",
+            "sqlalchemy",
+            "asyncmy",
+            "asyncpg",
+            "pymysql",
+            "psycopg",
+            "alembic",
+            "operationalerror",
+            "programmingerror",
+            "duplicatecolumn",
+            "running upgrade",
+        )
+    )
 
 
 def _conn_table_exists(db_type: str, conn: dict, table: str) -> bool:
@@ -2154,17 +2275,18 @@ async def _heal_alembic_duplicate_schema(
 
 
 async def _run_alembic_upgrade_head_with_heal(
-    migrator, target_db: str, max_attempts: int = 6,
+    migrator, target_db: str, max_attempts: int | None = None,
 ) -> None:
     """Run upgrade head; on duplicate-column errors heal alembic_version and retry."""
+    attempts = _MAX_ALEMBIC_DUP_HEALS if max_attempts is None else int(max_attempts)
     last_out = ""
-    for attempt in range(1, max_attempts + 1):
+    for attempt in range(1, attempts + 1):
         ok, out = await _run_pasarguard_alembic(migrator, "upgrade", "head")
         last_out = out or last_out
         if ok or (out and "already at head" in (out or "").lower()):
             return
         if _is_duplicate_schema_error(out or ""):
-            migrator.job.log(f"Alembic duplicate schema (attempt {attempt}/{max_attempts}) — healing...")
+            migrator.job.log(f"Alembic duplicate schema (attempt {attempt}/{attempts}) — healing...")
             if await _heal_alembic_duplicate_schema(migrator, target_db, out or ""):
                 continue
         break

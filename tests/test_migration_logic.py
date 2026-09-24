@@ -206,6 +206,7 @@ def test_alembic_duplicate_heal_helpers():
         _is_duplicate_schema_error,
         _parse_missing_revision,
         _is_missing_revision_error,
+        _is_role_or_database_already_exists_noise,
     )
     log = (
         "Running upgrade 931ed40d6eec -> 68edca039166, "
@@ -222,6 +223,28 @@ def test_alembic_duplicate_heal_helpers():
         "ERROR: Database migrations failed"
     )
     assert _is_duplicate_schema_error(mysql_1050) is True
+
+    # Real user failure: MySQL says "Duplicate column name", NOT "already exists"
+    mysql_1060 = (
+        'pasarguard-1 | sqlalchemy.exc.OperationalError: '
+        '(asyncmy.errors.OperationalError) (1060, "Duplicate column name \'expire_temp\'")\n'
+        "pasarguard-1 | [2026-09-24 08:43:25] ERROR: Database migrations failed"
+    )
+    assert _is_duplicate_schema_error(mysql_1060) is True
+    assert _is_role_or_database_already_exists_noise(mysql_1060) is False
+
+    mysql_1061 = '(1061, "Duplicate key name \'ix_users_username\'")'
+    assert _is_duplicate_schema_error(mysql_1061) is True
+
+    sqlite_dup = "sqlite3.OperationalError: duplicate column name: expire_temp"
+    assert _is_duplicate_schema_error(sqlite_dup) is True
+
+    pg_dup = 'column "user_template_id" of relation "next_plans" already exists'
+    assert _is_duplicate_schema_error(pg_dup) is True
+
+    role_noise = 'ERROR: role "pasarguard" already exists'
+    assert _is_duplicate_schema_error(role_noise) is False
+    assert _is_role_or_database_already_exists_noise(role_noise) is True
 
     missing = (
         "ERROR [alembic.util.messaging] Can't locate revision identified by '5b41f7d2e9a1'"
@@ -277,6 +300,81 @@ def test_try_heal_alembic_duplicate_from_logs_mysql_1050():
     assert ok2 is False
     heal2.assert_not_awaited()
     print("OK: alembic duplicate heal from panel MySQL 1050 logs")
+
+
+def test_try_heal_alembic_duplicate_from_logs_mysql_1060_expire_temp():
+    """User-reported: Duplicate column name expire_temp must heal, not hard-fail."""
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.pasarguard_ops import _try_heal_alembic_duplicate_from_logs
+    from app.services.migrators.base import MigrationJob
+
+    logs = (
+        "pasarguard-1 | sqlalchemy.exc.OperationalError: "
+        "(asyncmy.errors.OperationalError) (1060, \"Duplicate column name 'expire_temp'\")\n"
+        "pasarguard-1 | [2026-09-24 08:43:25] ERROR: Database migrations failed\n"
+        "pasarguard-1 | sqlalchemy.exc.OperationalError: "
+        "(asyncmy.errors.OperationalError) (1060, \"Duplicate column name 'expire_temp'\")\n"
+        "pasarguard-1 | [2026-09-24 08:43:28] ERROR: Database migrations failed"
+    )
+
+    class _Mig:
+        def __init__(self):
+            self.job = MigrationJob(job_id="expire-temp")
+            self.params = {"target_db": "mysql"}
+
+    mig = _Mig()
+    with patch(
+        "app.services.pasarguard_ops._heal_alembic_duplicate_schema",
+        new_callable=AsyncMock,
+        return_value=True,
+    ) as heal:
+        ok = asyncio.run(_try_heal_alembic_duplicate_from_logs(mig, logs))
+    assert ok is True
+    heal.assert_awaited_once()
+    assert heal.await_args.args[1] == "mysql"
+    print("OK: MySQL 1060 expire_temp triggers alembic heal")
+
+
+def test_run_alembic_upgrade_heals_mysql_1060_then_succeeds():
+    """Pre-boot sync_alembic path must heal 1060 and retry upgrade."""
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.pasarguard_ops import _run_alembic_upgrade_head_with_heal
+    from app.services.migrators.base import MigrationJob
+
+    class _Mig:
+        def __init__(self):
+            self.job = MigrationJob(job_id="preboot-1060")
+            self.params = {"target_db": "mysql"}
+
+    mig = _Mig()
+    fail = (
+        '(asyncmy.errors.OperationalError) (1060, "Duplicate column name \'expire_temp\'")\n'
+        "ERROR: Database migrations failed"
+    )
+    calls = {"n": 0}
+
+    async def fake_alembic(*_a, **_k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return False, fail
+        return True, "INFO Running upgrade -> head\n"
+
+    with patch(
+        "app.services.pasarguard_ops._run_pasarguard_alembic",
+        side_effect=fake_alembic,
+    ), patch(
+        "app.services.pasarguard_ops._heal_alembic_duplicate_schema",
+        new_callable=AsyncMock,
+        return_value=True,
+    ) as heal:
+        asyncio.run(_run_alembic_upgrade_head_with_heal(mig, "mysql"))
+    assert calls["n"] == 2
+    heal.assert_awaited()
+    print("OK: pre-boot alembic heals MySQL 1060 then succeeds")
 
 
 def test_alembic_still_running_helpers():
@@ -653,6 +751,8 @@ if __name__ == "__main__":
     test_read_sqlite_alembic_version()
     test_alembic_duplicate_heal_helpers()
     test_try_heal_alembic_duplicate_from_logs_mysql_1050()
+    test_try_heal_alembic_duplicate_from_logs_mysql_1060_expire_temp()
+    test_run_alembic_upgrade_heals_mysql_1060_then_succeeds()
     test_alembic_still_running_helpers()
     test_write_alembic_version_on_sqlite_conn()
     test_heal_unknown_refuses_live_mysql()
