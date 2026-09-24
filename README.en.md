@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.8`** — sqlite→server restore no longer sticks on sqlite; SASL/password auto-heal
+> 🚀 **`v4.6.9`** — auto-heal MySQL/MariaDB Duplicate column (e.g. expire_temp) during migrate
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

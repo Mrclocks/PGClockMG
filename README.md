@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.6.8`** — ریستور sqlite→سرور دیگر روی sqlite گیر نمی‌کند؛ SASL/پسورد خودکار heal می‌شود
+> 🚀 **`v4.6.9`** — heal خودکار Duplicate column (مثل expire_temp) در مهاجرت MySQL/MariaDB
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

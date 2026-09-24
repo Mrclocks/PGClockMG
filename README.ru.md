@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.8`** — restore sqlite→server больше не зависает на sqlite; авто-heal SASL/пароля
+> 🚀 **`v4.6.9`** — авто-heal Duplicate column MySQL/MariaDB (например expire_temp) при миграции
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
