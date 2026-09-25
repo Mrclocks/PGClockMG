@@ -29,6 +29,9 @@ from app.services.env_migration import (
 )
 from app.services.db_credentials import build_app_sqlalchemy_url, get_source_connection, get_target_connection
 from app.services.pasarguard_ops import (
+    mysql_admin_bins,
+    mysql_client_bins,
+    normalize_target_db,
     safe_start_pasarguard,
     resolve_db_service,
 )
@@ -1108,6 +1111,69 @@ class MarzbanMigrator(BaseMigrator):
         )
         return dump_path
 
+    async def _resolve_pasarguard_mysql_service(self) -> tuple[str, str]:
+        """Return ``(compose_service, canonical_db_type)`` for the install target.
+
+        Prefer the engine the user selected (mariadb vs mysql) so we look up the
+        matching compose service and client binary order first.
+        """
+        target_db = normalize_target_db(self.params.get("target_db"))
+        if target_db not in ("mysql", "mariadb"):
+            # Import path is MySQL-family only; detect from live compose.
+            target_db = "mariadb" if resolve_db_service("mariadb") else "mysql"
+        if target_db == "mariadb":
+            svc = resolve_db_service("mariadb") or resolve_db_service("mysql") or "mariadb"
+        else:
+            svc = resolve_db_service("mysql") or resolve_db_service("mariadb") or "mysql"
+        return svc, target_db
+
+    async def _pick_mysql_client_bin(
+        self,
+        svc: str,
+        user: str,
+        pwd: str,
+        host: str,
+        db_type: str,
+    ) -> str:
+        """Pick a working ``mysql``/``mariadb`` client inside the DB container.
+
+        Official MariaDB images often ship only ``mariadb`` (no ``mysql`` symlink).
+        Hardcoding ``mysql`` yields exit 127 / executable file not found.
+        """
+        last = ""
+        for bin_name in mysql_client_bins(db_type, svc):
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "compose", "exec", "-T",
+                "-e", f"MYSQL_PWD={pwd}",
+                svc, bin_name, "-u", user, "-h", host, "-e", "SELECT 1",
+                cwd=str(PASARGUARD_DIR),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out_b, _ = await proc.communicate()
+            last = (out_b or b"").decode("utf-8", errors="replace")
+            if proc.returncode == 0:
+                self.job.log(f"Using SQL client `{bin_name}` inside `{svc}`")
+                return bin_name
+            low = last.lower()
+            if (
+                "executable file not found" in low
+                or "no such file" in low
+                or "not found in $path" in low
+            ):
+                self.job.log(
+                    f"`{bin_name}` not available in `{svc}` image — trying next client"
+                )
+                continue
+            # Auth/ready glitches: still try the alternate client before giving up
+            self.job.log(
+                f"`{bin_name}` probe failed on `{svc}` "
+                f"(exit {proc.returncode}) — trying next client"
+            )
+        raise RuntimeError(
+            f"No working mysql/mariadb client inside `{svc}`.\n{(last or '')[-400:]}"
+        )
+
     async def _wait_compose_mysql_ready(
         self,
         svc: str,
@@ -1115,19 +1181,22 @@ class MarzbanMigrator(BaseMigrator):
         pwd: str,
         host: str,
         *,
+        db_type: str = "",
         attempts: int = 90,
     ) -> None:
         """Wait until compose MySQL/MariaDB accepts queries (not just container start)."""
         self.job.log(f"Waiting for {svc} to accept connections...")
         last = ""
-        clients = ("mysql", "mariadb")
-        admins = ("mysqladmin", "mariadb-admin")
+        engine = db_type or normalize_target_db(self.params.get("target_db")) or "mysql"
+        clients = tuple(mysql_client_bins(engine, svc))
+        admins = tuple(mysql_admin_bins(engine, svc))
         for attempt in range(max(1, attempts)):
             ping_ok = False
             for admin in admins:
                 proc = await asyncio.create_subprocess_exec(
-                    "docker", "compose", "exec", "-T", svc,
-                    admin, "ping", "-h", host, f"-u{user}", f"-p{pwd}", "--silent",
+                    "docker", "compose", "exec", "-T",
+                    "-e", f"MYSQL_PWD={pwd}",
+                    svc, admin, "ping", "-h", host, f"-u{user}", "--silent",
                     cwd=str(PASARGUARD_DIR),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
@@ -1140,8 +1209,9 @@ class MarzbanMigrator(BaseMigrator):
             if ping_ok:
                 for client in clients:
                     proc = await asyncio.create_subprocess_exec(
-                        "docker", "compose", "exec", "-T", svc,
-                        client, "-u", user, f"-p{pwd}", "-h", host, "-e", "SELECT 1;",
+                        "docker", "compose", "exec", "-T",
+                        "-e", f"MYSQL_PWD={pwd}",
+                        svc, client, "-u", user, "-h", host, "-e", "SELECT 1;",
                         cwd=str(PASARGUARD_DIR),
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.STDOUT,
@@ -1149,7 +1219,7 @@ class MarzbanMigrator(BaseMigrator):
                     out_b, _ = await proc.communicate()
                     last = (out_b or b"").decode("utf-8", errors="replace")
                     if proc.returncode == 0:
-                        self.job.log(f"{svc} is ready")
+                        self.job.log(f"{svc} is ready (client={client})")
                         return
             if attempt == 0 or (attempt + 1) % 5 == 0:
                 self.job.log(f"Still waiting for {svc}... ({attempt + 1}/{attempts})")
@@ -1169,8 +1239,9 @@ class MarzbanMigrator(BaseMigrator):
         for attempt in range(retry_attempts):
             for client in clients:
                 proc = await asyncio.create_subprocess_exec(
-                    "docker", "compose", "exec", "-T", svc,
-                    client, "-u", user, f"-p{pwd}", "-h", host, "-e", "SELECT 1;",
+                    "docker", "compose", "exec", "-T",
+                    "-e", f"MYSQL_PWD={pwd}",
+                    svc, client, "-u", user, "-h", host, "-e", "SELECT 1;",
                     cwd=str(PASARGUARD_DIR),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
@@ -1178,7 +1249,9 @@ class MarzbanMigrator(BaseMigrator):
                 out_b, _ = await proc.communicate()
                 last = (out_b or b"").decode("utf-8", errors="replace")
                 if proc.returncode == 0:
-                    self.job.log(f"{svc} is ready after auto-heal recreate")
+                    self.job.log(
+                        f"{svc} is ready after auto-heal recreate (client={client})"
+                    )
                     return
             await asyncio.sleep(2)
         raise RuntimeError(
@@ -1218,21 +1291,20 @@ class MarzbanMigrator(BaseMigrator):
         else:
             self.job.log(ram_advice.message)
 
-        svc = resolve_db_service("mysql") or resolve_db_service("mariadb") or "mysql"
+        svc, engine = await self._resolve_pasarguard_mysql_service()
         await self._run_cmd(["docker", "compose", "up", "-d", svc], cwd=str(PASARGUARD_DIR))
-        await self._wait_compose_mysql_ready(svc, user, pwd, host)
+        await self._wait_compose_mysql_ready(svc, user, pwd, host, db_type=engine)
+        client = await self._pick_mysql_client_bin(svc, user, pwd, host, engine)
 
-        from app.services.native_migration.sql_staging import (
-            mysql_create_db_sql,
-            mysql_shell_e_arg,
-        )
+        from app.services.native_migration.sql_staging import mysql_create_db_sql
 
-        # Single-quote -e SQL: double quotes expand backticks via command substitution
-        e_sql = mysql_shell_e_arg(mysql_create_db_sql(db, drop_first=True))
-        self.job.log(f"Recreating target database `{db}`...")
-        wipe = await asyncio.create_subprocess_shell(
-            f'cd "{PASARGUARD_DIR}" && docker compose exec -T {svc} '
-            f'mysql -u {user} -p"{pwd}" -h {host} -e {e_sql}',
+        sql = mysql_create_db_sql(db, drop_first=True)
+        self.job.log(f"Recreating target database `{db}` via `{client}`...")
+        wipe = await asyncio.create_subprocess_exec(
+            "docker", "compose", "exec", "-T",
+            "-e", f"MYSQL_PWD={pwd}",
+            svc, client, "-u", user, "-h", host, "-e", sql,
+            cwd=str(PASARGUARD_DIR),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
@@ -1246,11 +1318,11 @@ class MarzbanMigrator(BaseMigrator):
 
         self.job.set_progress(
             45,
-            f"Importing Marzban dump into PasarGuard mysql ({size_mb:.0f} MB)...",
+            f"Importing Marzban dump into PasarGuard {engine} ({size_mb:.0f} MB)...",
         )
         self.job.log(
             f"Importing MySQL dump into `{db}` via docker compose exec stdin "
-            f"({size_mb:.1f} MB — large dumps can take a long time)..."
+            f"({size_mb:.1f} MB, client={client} — large dumps can take a long time)..."
         )
 
         # SESSION preamble on the same connection as the dump (FK/unique checks off).
@@ -1272,12 +1344,12 @@ class MarzbanMigrator(BaseMigrator):
 
         # Prefer exec+stdin over shell redirect so host paths outside mounts work
         # and passwords/special chars are not re-parsed by a shell.
-        # Same argv as before; only the stdin file may include a tiny SESSION preamble.
         container_died = False
         with import_path.open("rb") as fh:
             proc = await asyncio.create_subprocess_exec(
-                "docker", "compose", "exec", "-T", svc,
-                "mysql", "-u", user, f"-p{pwd}", "-h", host, db,
+                "docker", "compose", "exec", "-T",
+                "-e", f"MYSQL_PWD={pwd}",
+                svc, client, "-u", user, "-h", host, db,
                 cwd=str(PASARGUARD_DIR),
                 stdin=fh,
                 stdout=asyncio.subprocess.PIPE,
@@ -1309,7 +1381,7 @@ class MarzbanMigrator(BaseMigrator):
                     pct = min(65, 45 + (elapsed // 30))
                     self.job.set_progress(
                         pct,
-                        f"Importing Marzban dump into PasarGuard mysql "
+                        f"Importing Marzban dump into PasarGuard {engine} "
                         f"({size_mb:.0f} MB, {elapsed}s)...",
                     )
                     self.job.log(f"Still importing MySQL dump... ({elapsed}s elapsed)")
@@ -1369,10 +1441,12 @@ class MarzbanMigrator(BaseMigrator):
                     cwd=str(PASARGUARD_DIR),
                     timeout=180,
                 )
-                await self._wait_compose_mysql_ready(svc, user, pwd, host)
+                await self._wait_compose_mysql_ready(
+                    svc, user, pwd, host, db_type=engine,
+                )
                 return await self._import_mysql_dump(dump_file, _heal_attempted=True)
             raise err
-        self.job.log(f"MySQL dump import finished ({elapsed}s)")
+        self.job.log(f"MySQL dump import finished ({elapsed}s, client={client})")
         for path in (fixed, session_file):
             try:
                 if path.exists() and path.resolve() != dump_file.resolve():
