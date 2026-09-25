@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.9`** — авто-heal Duplicate column MySQL/MariaDB (например expire_temp) при миграции
+> 🚀 **`v4.6.10`** — миграция Marzban→PasarGuard на MariaDB (fallback клиента mariadb/mysql)
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

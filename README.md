@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.6.9`** — heal خودکار Duplicate column (مثل expire_temp) در مهاجرت MySQL/MariaDB
+> 🚀 **`v4.6.10`** — مهاجرت مرزبان→پاسارگارد روی MariaDB (کلاینت mariadb/mysql)
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

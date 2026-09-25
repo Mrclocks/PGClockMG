@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.9`** — auto-heal MySQL/MariaDB Duplicate column (e.g. expire_temp) during migrate
+> 🚀 **`v4.6.10`** — Marzban→PasarGuard migrate on MariaDB (mariadb/mysql client fallback)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
