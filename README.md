@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.6.12`** — هم‌ترازی خودکار رمز Timescale حتی وقتی trust کافی نیست (single-user heal)
+> 🚀 **`v4.6.13`** — heal قوی‌تر auth برای sqlite→Timescale (single-user + pg_hba + mint password)
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

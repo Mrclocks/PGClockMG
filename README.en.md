@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.12`** — auto-align Timescale password even when trust is not enough (single-user heal)
+> 🚀 **`v4.6.13`** — stronger sqlite→Timescale auth heal (single-user + pg_hba + mint password)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
