@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.12`** — автовыравнивание пароля Timescale даже без trust (single-user heal)
+> 🚀 **`v4.6.13`** — усиленный auth heal для sqlite→Timescale (single-user + pg_hba + mint password)
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
