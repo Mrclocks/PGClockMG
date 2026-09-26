@@ -303,13 +303,16 @@ class MarzbanMigrator(BaseMigrator):
         await self._ensure_target_database_stack(target_db)
 
         env = install_env_snapshot or ""
+        from app.services.db_auth import install_server_password
+
         user = (
             read_env_var(env, "DB_USER")
             or read_env_var(env, "POSTGRES_USER")
             or read_env_var(env, "MYSQL_USER")
             or "pasarguard"
         )
-        password = (
+        # SQLite source has no password — only install Timescale/MySQL secrets.
+        password = install_server_password(env, target_db) or (
             read_env_var(env, "DB_PASSWORD")
             or read_env_var(env, "POSTGRES_PASSWORD")
             or read_env_var(env, "MYSQL_ROOT_PASSWORD")
@@ -980,14 +983,10 @@ class MarzbanMigrator(BaseMigrator):
     async def _try_sync_db_auth(self, target_db: str) -> None:
         """Best-effort role/password sync so a retry can complete the transfer."""
         try:
+            from app.services.db_auth import ensure_target_auth_ready
             from app.services.db_credentials import get_target_connection
             from app.services.pasarguard_ops import fetch_pasarguard_logs
-            from app.services.pg_restore import (
-                _detect_db_container,
-                _sync_mysql_passwords,
-                _sync_pg_role_passwords,
-                is_auth_failure_text,
-            )
+            from app.services.pg_restore import is_auth_failure_text
 
             logs = ""
             try:
@@ -995,31 +994,21 @@ class MarzbanMigrator(BaseMigrator):
             except Exception:
                 logs = ""
             if logs and not is_auth_failure_text(logs):
-                # Still sync once when restarting — cheap and helps completeness.
                 self.job.log("Auto-heal: aligning DB credentials before panel retry")
             else:
                 self.job.log("Auto-heal: DB auth failure detected — syncing roles")
 
             conn = get_target_connection(self.params) or {}
             password = conn.get("password") or ""
-            user = conn.get("user") or "pasarguard"
-            db_name = conn.get("database") or "pasarguard"
             if not password:
                 return
-            svc = await _detect_db_container(self.job, target_db)
-            if not svc:
-                return
-            if target_db in ("postgresql", "timescaledb"):
-                await _sync_pg_role_passwords(
-                    self.job, svc, password, user or "pasarguard", db_name or "pasarguard",
-                )
-            elif target_db in ("mysql", "mariadb"):
-                await _sync_mysql_passwords(
-                    self.job, svc, password,
-                    user=user or "pasarguard",
-                    db_type=target_db,
-                    db_name=db_name or "pasarguard",
-                )
+            await ensure_target_auth_ready(
+                self,
+                target_db,
+                password=password,
+                sync_roles=True,
+                refresh_pgbouncer=True,
+            )
         except Exception as exc:
             self.job.log(f"Auto-heal: credential sync skipped — {exc}")
 

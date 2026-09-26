@@ -584,10 +584,8 @@ async def _try_heal_db_auth_mismatch(migrator, logs: str, *, force: bool = False
 
     try:
         from app.services.db_auth import (
+            ensure_target_auth_ready,
             read_env_text,
-            resolve_live_admin_connection,
-            sync_mysql_roles_to_password,
-            sync_postgres_roles_to_app_password,
         )
         from app.services.env_migration import parse_sqlalchemy_url, read_env_var
 
@@ -602,6 +600,7 @@ async def _try_heal_db_auth_mismatch(migrator, logs: str, *, force: bool = False
         )
         url_pwd = (
             parsed.get("password")
+            or read_env_var(env, "POSTGRES_PASSWORD")
             or read_env_var(env, "DB_PASSWORD")
             or read_env_var(env, "MYSQL_ROOT_PASSWORD")
             or ""
@@ -612,35 +611,14 @@ async def _try_heal_db_auth_mismatch(migrator, logs: str, *, force: bool = False
         migrator.job.log(
             f"Auth failure in panel logs — syncing {target_db} roles for user={app_user}…"
         )
-        try:
-            admin = await resolve_live_admin_connection(migrator, target_db, env_text=env)
-        except RuntimeError as probe_err:
-            if target_db not in ("mysql", "mariadb"):
-                raise
-            # Root password in the volume may differ from every .env candidate —
-            # sync_mysql_roles_to_password will try skip-grant recovery.
-            migrator.job.log(f"Live admin probe failed ({probe_err}) — sync with recovery")
-            admin = {
-                "user": "root",
-                "password": url_pwd,
-                "database": parsed.get("database")
-                or read_env_var(env, "DB_NAME")
-                or "pasarguard",
-            }
-        if target_db in ("mysql", "mariadb"):
-            await sync_mysql_roles_to_password(
-                migrator,
-                target_db,
-                admin,
-                app_user=app_user,
-                password=url_pwd,
-                env_text=env,
-                db_name=parsed.get("database") or read_env_var(env, "DB_NAME") or "pasarguard",
-            )
-        else:
-            await sync_postgres_roles_to_app_password(
-                migrator, target_db, admin, env_text=env, password=url_pwd,
-            )
+        await ensure_target_auth_ready(
+            migrator,
+            target_db,
+            env_text=env,
+            password=url_pwd,
+            sync_roles=True,
+            refresh_pgbouncer=True,
+        )
         return True
     except Exception as e:
         migrator.job.log(f"DB auth heal note: {e}")
