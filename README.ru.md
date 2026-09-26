@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.13`** — усиленный auth heal для sqlite→Timescale (single-user + pg_hba + mint password)
+> 🚀 **`v4.6.14`** — auth heal через volumes-from + live pg_hba (реальный fix SASL sqlite→Timescale)
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
