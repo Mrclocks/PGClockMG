@@ -214,6 +214,38 @@ def read_env_text() -> str:
     return ""
 
 
+def _pg_probe_databases(env_text: str | None, db_type: str = "postgresql") -> list[str]:
+    """Databases to try for auth probes (Timescale images may omit ``postgres``)."""
+    text = env_text or ""
+    primary = target_database_name(text, db_type)
+    return _unique_strings(primary, "postgres", "pasarguard", "template1")
+
+
+async def read_db_container_init_env(migrator, service: str) -> dict[str, str]:
+    """Read POSTGRES_*/MYSQL_* from the running DB container (init source of truth)."""
+    if not service:
+        return {}
+    keys = (
+        "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
+        "MYSQL_ROOT_PASSWORD", "MYSQL_PASSWORD", "MYSQL_USER", "MYSQL_DATABASE",
+        "MARIADB_ROOT_PASSWORD", "MARIADB_PASSWORD", "MARIADB_USER", "MARIADB_DATABASE",
+        "DB_USER", "DB_PASSWORD", "DB_NAME",
+    )
+    out: dict[str, str] = {}
+    for key in keys:
+        ok, raw = await migrator._run_cmd(
+            ["docker", "compose", "exec", "-T", service, "printenv", key],
+            cwd=str(PASARGUARD_DIR),
+            timeout=15,
+        )
+        if not ok:
+            continue
+        val = (raw or "").strip().splitlines()
+        if val and val[-1].strip():
+            out[key] = val[-1].strip()
+    return out
+
+
 async def _probe_pg(
     migrator,
     service: str,
@@ -231,6 +263,20 @@ async def _probe_pg(
     ]
     ok, out = await migrator._run_cmd(cmd, cwd=str(PASARGUARD_DIR), timeout=25)
     return ok and "1" in (out or "")
+
+
+async def _probe_pg_any_db(
+    migrator,
+    service: str,
+    user: str,
+    password: str,
+    databases: list[str],
+) -> str | None:
+    """Return the first database name that accepts the credentials, else None."""
+    for database in databases:
+        if await _probe_pg(migrator, service, user, password, database):
+            return database
+    return None
 
 
 async def _pg_in_container_is_trust(
@@ -341,18 +387,28 @@ async def _pg_alter_role_via_trust(
     if not service or not as_user or not role or not password:
         return False
     sql = f'ALTER ROLE "{role}" WITH PASSWORD {_pg_sql_literal(password)}'
-    cmd = [
-        "docker", "compose", "exec", "-T",
-        service, "psql", "-U", as_user, "-d", database,
-        "-v", "ON_ERROR_STOP=1", "-c", sql,
+    # Prefer the named role first; then retry as the image OS user ``postgres``
+    # (peer auth) when local trust was disabled for application roles.
+    attempts: list[list[str]] = [
+        [
+            "docker", "compose", "exec", "-T",
+            service, "psql", "-U", as_user, "-d", database,
+            "-v", "ON_ERROR_STOP=1", "-c", sql,
+        ],
+        [
+            "docker", "compose", "exec", "-T", "-u", "postgres",
+            service, "psql", "-d", database,
+            "-v", "ON_ERROR_STOP=1", "-c", sql,
+        ],
     ]
-    ok, out = await migrator._run_cmd(cmd, cwd=str(PASARGUARD_DIR), timeout=30)
-    if ok:
-        return True
-    low = (out or "").lower()
-    # Role missing is skippable (e.g. literal postgres on Timescale images).
-    if "does not exist" in low and "role" in low:
-        return False
+    for cmd in attempts:
+        ok, out = await migrator._run_cmd(cmd, cwd=str(PASARGUARD_DIR), timeout=30)
+        if ok:
+            return True
+        low = (out or "").lower()
+        # Role missing is skippable (e.g. literal postgres on Timescale images).
+        if "does not exist" in low and "role" in low:
+            return False
     return False
 
 
@@ -374,10 +430,33 @@ async def recover_postgres_passwords_via_trust(
     if not password or not service:
         return False
     text = env_text or ""
-    roles = postgres_role_candidates(text, include_postgres_fallback=True)
-    users = list(admin_users or postgres_admin_users(text)) or ["postgres"]
+    container_env: dict[str, str] = {}
+    try:
+        container_env = await read_db_container_init_env(migrator, service)
+    except Exception:
+        container_env = {}
+    roles = postgres_role_candidates(
+        text,
+        container_env.get("POSTGRES_USER"),
+        container_env.get("DB_USER"),
+        include_postgres_fallback=True,
+    )
+    users = list(
+        _unique_strings(
+            *(admin_users or []),
+            *postgres_admin_users(text),
+            container_env.get("POSTGRES_USER"),
+            container_env.get("DB_USER"),
+            "postgres",
+        )
+    ) or ["postgres"]
     db_name = target_database_name(text, "postgresql")
-    admin_dbs = _unique_strings(db_name, "postgres", "pasarguard")
+    admin_dbs = _unique_strings(
+        db_name,
+        container_env.get("POSTGRES_DB"),
+        "postgres",
+        "pasarguard",
+    )
     migrator.job.log(
         f"PostgreSQL trust recovery: aligning {len(roles)} role(s) to .env password "
         "(TCP rejected every candidate)..."
@@ -462,21 +541,44 @@ async def resolve_live_admin_connection(
     db_name = target_database_name(text, db_type)
     migrator.job.log(f"Resolving live admin credentials for {db_type} ({service}/{db_name})...")
 
+    # Container init env often holds the password the volume was created with —
+    # include it so restore/migrate can heal even when .env drifted.
+    container_env: dict[str, str] = {}
+    try:
+        container_env = await read_db_container_init_env(migrator, service)
+    except Exception as exc:
+        migrator.job.log(f"Container init-env probe note: {exc}")
+
     if db_type in ("postgresql", "timescaledb"):
-        users = postgres_admin_users(text)
-        passwords = postgres_password_candidates(text)
-        probe_db = "postgres"
+        users = _unique_strings(
+            *postgres_admin_users(text),
+            container_env.get("POSTGRES_USER"),
+            container_env.get("DB_USER"),
+        ) or ["postgres"]
+        passwords = _unique_strings(
+            *postgres_password_candidates(text),
+            container_env.get("POSTGRES_PASSWORD"),
+            container_env.get("DB_PASSWORD"),
+        )
+        probe_dbs = _pg_probe_databases(text, db_type)
+        if container_env.get("POSTGRES_DB"):
+            probe_dbs = _unique_strings(container_env.get("POSTGRES_DB"), *probe_dbs)
         trust_mode: bool | None = None
         host_endpoint: tuple[str, str, str] | None = None
         tcp_failures = 0
+        local_probe_ok = False
 
         for user in users:
             for pwd in passwords:
-                if not await _probe_pg(migrator, service, user, pwd, probe_db):
+                hit_db = await _probe_pg_any_db(
+                    migrator, service, user, pwd, probe_dbs,
+                )
+                if not hit_db:
                     continue
+                local_probe_ok = True
                 if trust_mode is None:
                     trust_mode = await _pg_in_container_is_trust(
-                        migrator, service, user, probe_db,
+                        migrator, service, user, hit_db,
                     )
                 if not trust_mode:
                     conn = {
@@ -487,7 +589,9 @@ async def resolve_live_admin_connection(
                         "host": "127.0.0.1",
                         "port": "5432",
                     }
-                    migrator.job.log(f"PostgreSQL auth OK as {user} (direct port 5432)")
+                    migrator.job.log(
+                        f"PostgreSQL auth OK as {user} on {hit_db} (direct port 5432)"
+                    )
                     return conn
 
                 # Local socket is trust — only a host/TCP login proves the password.
@@ -506,75 +610,95 @@ async def resolve_live_admin_connection(
                         f"TCP {host}:{port}..."
                     )
                 image, host, port = host_endpoint
-                if await _probe_pg_via_host_tcp(
-                    migrator,
-                    image=image,
-                    host=host,
-                    port=port,
-                    user=user,
-                    password=pwd,
-                    database=probe_db,
-                ):
-                    conn = {
-                        "db_type": db_type,
-                        "user": user,
-                        "password": pwd,
-                        "database": db_name,
-                        "host": host,
-                        "port": port,
-                    }
-                    migrator.job.log(
-                        f"PostgreSQL auth OK as {user} via TCP {host}:{port}"
-                    )
-                    return conn
-                tcp_failures += 1
-
-        if trust_mode and tcp_failures:
-            # Local socket is trust but every .env secret failed over TCP — force
-            # roles to the preferred .env password (same idea as MySQL skip-grant),
-            # then re-verify over the published port before giving up.
-            preferred = passwords[0] if passwords else ""
-            image = host = port = ""
-            if host_endpoint:
-                image, host, port = host_endpoint
-            recovered = False
-            if preferred and service:
-                recovered = await recover_postgres_passwords_via_trust(
-                    migrator,
-                    service,
-                    text,
-                    password=preferred,
-                    admin_users=users,
-                )
-            if recovered and image and host and port:
-                migrator.job.log(
-                    "PostgreSQL trust recovery applied — re-checking TCP auth..."
-                )
-                # SCRAM secrets can take a moment to settle after ALTER ROLE.
-                await asyncio.sleep(1)
-                for user in users:
+                for tcp_db in probe_dbs:
                     if await _probe_pg_via_host_tcp(
                         migrator,
                         image=image,
                         host=host,
                         port=port,
                         user=user,
-                        password=preferred,
-                        database=probe_db,
+                        password=pwd,
+                        database=tcp_db,
                     ):
                         conn = {
                             "db_type": db_type,
                             "user": user,
-                            "password": preferred,
+                            "password": pwd,
                             "database": db_name,
                             "host": host,
                             "port": port,
                         }
                         migrator.job.log(
                             f"PostgreSQL auth OK as {user} via TCP {host}:{port} "
-                            "(after trust password recovery)"
+                            f"(db={tcp_db})"
                         )
                         return conn
+                tcp_failures += 1
+
+        # Always attempt trust recovery when no verified TCP/local password worked.
+        # Covers: trust socket + stale SCRAM, AND local probes that never succeeded
+        # (wrong DB name, empty .env secrets, container-only password).
+        preferred = passwords[0] if passwords else ""
+        image = host = port = ""
+        if host_endpoint:
+            image, host, port = host_endpoint
+        elif service:
+            host_endpoint = await _resolve_pg_host_endpoint(migrator, service)
+            image, host, port = host_endpoint
+        recovered = False
+        if preferred and service:
+            migrator.job.log(
+                "PostgreSQL auth unresolved — attempting trust password recovery "
+                f"(local_probe_ok={local_probe_ok}, tcp_failures={tcp_failures})..."
+            )
+            recovered = await recover_postgres_passwords_via_trust(
+                migrator,
+                service,
+                text,
+                password=preferred,
+                admin_users=users,
+            )
+        if recovered and image and host and port:
+            migrator.job.log(
+                "PostgreSQL trust recovery applied — re-checking TCP auth..."
+            )
+            # SCRAM secrets can take a moment to settle after ALTER ROLE;
+            # retry a few times before declaring failure.
+            for attempt in range(1, 4):
+                await asyncio.sleep(1.5 * attempt)
+                for user in users:
+                    for tcp_db in probe_dbs:
+                        if await _probe_pg_via_host_tcp(
+                            migrator,
+                            image=image,
+                            host=host,
+                            port=port,
+                            user=user,
+                            password=preferred,
+                            database=tcp_db,
+                        ):
+                            conn = {
+                                "db_type": db_type,
+                                "user": user,
+                                "password": preferred,
+                                "database": db_name,
+                                "host": host,
+                                "port": port,
+                            }
+                            migrator.job.log(
+                                f"PostgreSQL auth OK as {user} via TCP {host}:{port} "
+                                f"(after trust password recovery, db={tcp_db}, "
+                                f"attempt={attempt})"
+                            )
+                            return conn
+            raise RuntimeError(
+                "PostgreSQL/TimescaleDB authentication failed over TCP — "
+                "trust recovery aligned role passwords but the published host port "
+                f"({host}:{port}) still rejected every candidate. "
+                "Check that 5432 is published to the live Timescale/Postgres container "
+                "and POSTGRES_PASSWORD / DB_PASSWORD match .env."
+            )
+        if trust_mode and tcp_failures:
             raise RuntimeError(
                 "PostgreSQL/TimescaleDB authentication failed over TCP — "
                 "in-container probes are trust-only and every .env password candidate "
@@ -589,11 +713,27 @@ async def resolve_live_admin_connection(
         raise RuntimeError(
             "PostgreSQL/TimescaleDB authentication failed — "
             "POSTGRES_PASSWORD and DB_PASSWORD in /opt/pasarguard/.env do not match the running container"
+            + (
+                " (trust recovery could not realign role passwords)."
+                if preferred and not recovered
+                else ""
+            )
         )
 
     if db_type in ("mysql", "mariadb"):
-        users = mysql_admin_users(text)
-        passwords = mysql_password_candidates(text)
+        users = _unique_strings(
+            *mysql_admin_users(text),
+            container_env.get("MYSQL_USER"),
+            container_env.get("MARIADB_USER"),
+        )
+        passwords = _unique_strings(
+            *mysql_password_candidates(text),
+            container_env.get("MYSQL_ROOT_PASSWORD"),
+            container_env.get("MARIADB_ROOT_PASSWORD"),
+            container_env.get("MYSQL_PASSWORD"),
+            container_env.get("MARIADB_PASSWORD"),
+            container_env.get("DB_PASSWORD"),
+        )
         for user in users:
             for pwd in passwords:
                 if await _probe_mysql(migrator, service, user, pwd, db_name):
@@ -614,6 +754,8 @@ async def resolve_live_admin_connection(
         app_user = (
             read_env_var(text, "DB_USER")
             or read_env_var(text, "MYSQL_USER")
+            or container_env.get("MYSQL_USER")
+            or container_env.get("MARIADB_USER")
             or "pasarguard"
         )
         recovered = False
@@ -662,6 +804,58 @@ async def resolve_live_admin_connection(
         )
 
     raise RuntimeError(f"Unsupported database for credential probe: {db_type}")
+
+
+async def ensure_target_auth_ready(
+    migrator,
+    db_type: str,
+    env_text: str | None = None,
+    *,
+    password: str | None = None,
+    sync_roles: bool = True,
+    refresh_pgbouncer: bool = True,
+) -> dict:
+    """Resolve admin auth, align roles, and refresh PgBouncer — shared by restore+migrate.
+
+    Does not change convert/engine selection rules; only makes credential heal
+    consistent across sqlite→server convert, same-engine restore, and Marzban/x-ui.
+    """
+    text = env_text if env_text is not None else read_env_text()
+    admin = await resolve_live_admin_connection(migrator, db_type, env_text=text)
+    canonical = (
+        password
+        or admin.get("password")
+        or ""
+    )
+    if not sync_roles or not canonical:
+        return admin
+
+    if db_type in ("postgresql", "timescaledb"):
+        await sync_postgres_roles_to_app_password(
+            migrator,
+            db_type,
+            admin,
+            env_text=text,
+            password=canonical,
+        )
+        if refresh_pgbouncer:
+            await refresh_pgbouncer_if_stale(
+                migrator,
+                db_type,
+                env_text=text,
+                password=canonical,
+                force=True,
+            )
+    elif db_type in ("mysql", "mariadb"):
+        await sync_mysql_roles_to_password(
+            migrator,
+            db_type,
+            admin,
+            password=canonical,
+            env_text=text,
+            db_name=admin.get("database") or target_database_name(text, db_type),
+        )
+    return admin
 
 
 def migration_params_from_connection(

@@ -282,35 +282,65 @@ async def _phase1_land_intermediate(
 async def _prepare_target_for_migration(migrator, target_db: str) -> None:
     """Ensure target DB is up, credentials verified, and role passwords aligned."""
     from app.services.db_auth import (
+        ensure_target_auth_ready,
         migration_params_from_connection,
-        resolve_live_admin_connection,
+        sync_mysql_roles_to_password,
         sync_postgres_roles_to_app_password,
+        refresh_pgbouncer_if_stale,
     )
 
     await _ensure_db_running(migrator, target_db)
     # Restore convert already probed with install-snapshot credentials — reuse them.
     # Re-reading the merged backup .env often loses MYSQL_ROOT / confuses POSTGRES_*.
     existing = migrator.params.get("_resolved_target_conn")
+    preferred_pwd = None
+    reused = None
     if (
         isinstance(existing, dict)
         and existing.get("password")
         and (existing.get("db_type") in (None, target_db) or not existing.get("db_type"))
     ):
-        admin = dict(existing)
-        admin["db_type"] = target_db
+        reused = dict(existing)
+        reused["db_type"] = target_db
+        preferred_pwd = reused.get("password")
         migrator.job.log(
-            f"Reusing verified target admin ({admin.get('user')}) for {target_db}"
+            f"Reusing verified target admin ({reused.get('user')}) for {target_db}"
         )
-    else:
-        admin = await resolve_live_admin_connection(migrator, target_db)
+
+    try:
+        admin = await ensure_target_auth_ready(
+            migrator,
+            target_db,
+            password=preferred_pwd,
+            sync_roles=True,
+            refresh_pgbouncer=True,
+        )
+    except Exception as heal_err:
+        if not reused:
+            raise
+        migrator.job.log(
+            f"Target auth re-probe note ({heal_err}) — "
+            "continuing with previously verified admin + role sync"
+        )
+        admin = reused
+        if target_db in ("postgresql", "timescaledb"):
+            await sync_postgres_roles_to_app_password(
+                migrator, target_db, admin, password=preferred_pwd,
+            )
+            await refresh_pgbouncer_if_stale(
+                migrator, target_db, password=preferred_pwd, force=True,
+            )
+        elif target_db in ("mysql", "mariadb"):
+            await sync_mysql_roles_to_password(
+                migrator, target_db, admin, password=preferred_pwd,
+            )
+
     migrator.params = migration_params_from_connection(
         migrator.params.get("source_db") or migrator.params.get("source_db_type") or "sqlite",
         target_db,
         admin,
     )
     migrator.params["_auto_db_credentials"] = True
-    if target_db in ("postgresql", "timescaledb"):
-        await sync_postgres_roles_to_app_password(migrator, target_db, admin)
 
 
 async def _panel_boot_upgrade_intermediate(
@@ -501,6 +531,14 @@ async def run_two_phase_migration(
 
             await sync_postgres_roles_to_app_password(
                 migrator, target_db, get_target_connection(migrator.params),
+            )
+        elif target_db in ("mysql", "mariadb"):
+            from app.services.db_auth import sync_mysql_roles_to_password
+
+            await sync_mysql_roles_to_password(
+                migrator,
+                target_db,
+                get_target_connection(migrator.params),
             )
         await run_alembic_upgrade_head(
             migrator,

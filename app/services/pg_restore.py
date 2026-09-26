@@ -2272,9 +2272,52 @@ async def _sync_pg_role_passwords(
         )
         if recovered:
             job.log("Trust password recovery aligned roles to .env password")
+            try:
+                from app.services.db_auth import refresh_pgbouncer_if_stale
+
+                class _PgbMini:
+                    def __init__(self, j: MigrationJob):
+                        self.job = j
+
+                    async def _run_cmd(self, cmd, cwd=None, timeout=600, *, quiet: bool = False):
+                        return await _run(self.job, cmd, cwd=cwd, timeout=timeout, quiet=quiet)
+
+                eng = "timescaledb" if "timescale" in (svc or "").lower() else "postgresql"
+                await refresh_pgbouncer_if_stale(
+                    _PgbMini(job),
+                    eng,
+                    env_text=env_now,
+                    password=password,
+                    force=True,
+                )
+            except Exception as pgb_exc:
+                job.log(f"PgBouncer refresh after role sync note: {pgb_exc}")
         else:
             job.log("Trust password recovery could not align all roles")
-    # PgBouncer recreate happens after finalize when credentials in .env are canonical.
+    else:
+        # Sync succeeded without trust fallback — still force-refresh PgBouncer so
+        # panel :6432 cannot keep a stale SCRAM cache after convert/restore.
+        try:
+            from app.services.db_auth import refresh_pgbouncer_if_stale
+
+            class _PgbMini2:
+                def __init__(self, j: MigrationJob):
+                    self.job = j
+
+                async def _run_cmd(self, cmd, cwd=None, timeout=600, *, quiet: bool = False):
+                    return await _run(self.job, cmd, cwd=cwd, timeout=timeout, quiet=quiet)
+
+            eng = "timescaledb" if "timescale" in (svc or "").lower() else "postgresql"
+            await refresh_pgbouncer_if_stale(
+                _PgbMini2(job),
+                eng,
+                env_text=env_now,
+                password=password,
+                force=True,
+            )
+        except Exception as pgb_exc:
+            job.log(f"PgBouncer refresh after role sync note: {pgb_exc}")
+    # PgBouncer recreate also happens after finalize when credentials in .env are canonical.
 
 
 async def _ensure_timescaledb_not_in_restore_mode(
@@ -2771,7 +2814,7 @@ async def _maybe_cross_db_after_restore(
 
     try:
         from app.services.native_migration.cross_db import run_cross_db_migration
-        from app.services.db_auth import migration_params_from_connection, resolve_live_admin_connection
+        from app.services.db_auth import migration_params_from_connection
 
         class _Mini:
             def __init__(self, j, p):
@@ -2809,22 +2852,32 @@ async def _maybe_cross_db_after_restore(
                 await _compose_up_services(job, svc, *extras, timeout=300)
                 await asyncio.sleep(5)
             probe_mini = _Mini(job, {"target_db": target_db, "_auto_db_credentials": True})
+            from app.services.db_auth import ensure_target_auth_ready
+
             try:
-                admin = await resolve_live_admin_connection(
-                    probe_mini, target_db, env_text=env_text,
+                admin = await ensure_target_auth_ready(
+                    probe_mini,
+                    target_db,
+                    env_text=env_text,
+                    password=password or None,
                 )
             except RuntimeError as probe_err:
                 # Fallback: try live merged .env (same-engine soft path may have updated it)
                 if install_env_snapshot:
                     job.log(
                         f"Install-snapshot auth failed ({probe_err}) — "
-                        "retrying with live .env"
+                        "retrying with live .env + full heal"
                     )
-                    admin = await resolve_live_admin_connection(
-                        probe_mini, target_db, env_text=_read_current_env(),
+                    admin = await ensure_target_auth_ready(
+                        probe_mini,
+                        target_db,
+                        env_text=_read_current_env(),
+                        password=password or None,
                     )
                 else:
                     raise
+            # Keep legacy sync helpers as a second pass for container-init secrets
+            # that ensure_target_auth_ready already covered — no-op when already aligned.
             if target_db in ("postgresql", "timescaledb"):
                 await _sync_pg_role_passwords(
                     job,
@@ -2871,8 +2924,13 @@ async def _maybe_cross_db_after_restore(
             mig_params["_auth_healed_once"] = True
             heal_env = install_env_snapshot or _read_current_env()
             heal_mini = _Mini(job, {"target_db": target_db, "_auto_db_credentials": True})
-            admin = await resolve_live_admin_connection(
-                heal_mini, target_db, env_text=heal_env,
+            from app.services.db_auth import ensure_target_auth_ready
+
+            admin = await ensure_target_auth_ready(
+                heal_mini,
+                target_db,
+                env_text=heal_env,
+                password=password or None,
             )
             if target_db in ("postgresql", "timescaledb"):
                 heal_svc = svc or (
@@ -4193,10 +4251,21 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         copy_stats: dict = {}
         copy_report: dict = {}
         if target_db and restore_engine != target_db and not soft_db_family(restore_engine, target_db):
+            # Engine-aware install password — never prefer leftover MYSQL_* on a
+            # Timescale install (or POSTGRES_* on MySQL) during convert auth heal.
+            if (target_db or "") in ("mysql", "mariadb"):
+                convert_pass = cur_mysql_root or cur_db_pass or ""
+            elif (target_db or "") in ("postgresql", "timescaledb"):
+                convert_pass = cur_pg_pass or cur_db_pass or ""
+            else:
+                convert_pass = cur_db_pass or cur_pg_pass or cur_mysql_root or ""
+            convert_user = cur_user or (
+                "root" if (target_db or "") in ("mysql", "mariadb") else "pasarguard"
+            )
             final_db, copy_stats, copy_report = await _maybe_cross_db_after_restore(
                 job, params, restore_engine, target_db,
-                cur_mysql_root or cur_db_pass or cur_pg_pass or "",
-                cur_user or ("root" if (target_db or "") in ("mysql", "mariadb") else "pasarguard"),
+                convert_pass,
+                convert_user,
                 cur_name or "pasarguard",
                 source_path=convert_source,
                 install_env_snapshot=install_env_snapshot,

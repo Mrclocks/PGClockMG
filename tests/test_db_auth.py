@@ -764,6 +764,271 @@ def test_sync_postgres_falls_back_to_trust_alter():
     print("OK: sync_postgres falls back to trust ALTER")
 
 
+def test_pg_resolve_recovers_when_local_probes_fail():
+    """Local probes never succeed → still attempt trust recovery (root gap fix)."""
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.db_auth import resolve_live_admin_connection
+    from app.services.migrators.base import BaseMigrator, MigrationJob
+
+    class Dummy(BaseMigrator):
+        async def run(self, params):
+            return {}
+
+    async def _run():
+        job = MigrationJob(job_id="pg-local-fail")
+        migrator = Dummy(job, {})
+        env = (
+            "POSTGRES_PASSWORD=live-secret\n"
+            "POSTGRES_USER=pasarguard\n"
+            "POSTGRES_DB=pasarguard\n"
+        )
+        state = {"aligned": False, "tcp_ok": 0}
+
+        async def fake_run(cmd, cwd=None, timeout=600, *, quiet=False):
+            argv = list(cmd) if isinstance(cmd, list) else [cmd]
+            joined = " ".join(argv)
+            pwd = ""
+            for a in argv:
+                if a.startswith("PGPASSWORD="):
+                    pwd = a.split("=", 1)[1]
+            if "printenv" in joined:
+                return True, ""
+            if "compose ps" in joined:
+                return True, "dbcid\n"
+            if "{{.Config.Image}}" in joined:
+                return True, "timescale/timescaledb:latest-pg16\n"
+            if "NetworkSettings.Ports" in joined:
+                return True, '{"5432/tcp":[{"HostIp":"127.0.0.1","HostPort":"5432"}]}'
+            if "run" in argv and "--network" in argv:
+                if state["aligned"] and pwd == "live-secret":
+                    state["tcp_ok"] += 1
+                    return True, "1\n"
+                return False, "password authentication failed"
+            if "exec" in argv and "psql" in argv:
+                if "ALTER ROLE" in joined:
+                    state["aligned"] = True
+                    return True, "ALTER ROLE\n"
+                # Local probes always fail (simulates scram-local + wrong secret)
+                return False, "password authentication failed"
+            return True, ""
+
+        with patch("app.services.db_auth.PASARGUARD_DIR", Path("/opt/pasarguard")), \
+             patch("app.services.db_auth.resolve_db_service", return_value="timescaledb"), \
+             patch.object(migrator, "_run_cmd", fake_run), \
+             patch("asyncio.sleep", new_callable=AsyncMock), \
+             patch(
+                 "app.services.db_auth.refresh_pgbouncer_if_stale",
+                 new_callable=AsyncMock,
+                 return_value=True,
+             ):
+            conn = await resolve_live_admin_connection(
+                migrator, "timescaledb", env_text=env,
+            )
+        assert conn["password"] == "live-secret"
+        assert state["aligned"] is True
+        assert state["tcp_ok"] >= 1
+        assert any("trust password recovery" in line.lower() for line in job.logs)
+
+    asyncio.run(_run())
+    print("OK: PG resolve recovers when local probes fail")
+
+
+def test_pg_resolve_tries_app_db_when_postgres_db_missing():
+    """Probe pasarguard DB when the default ``postgres`` database is absent."""
+    import asyncio
+    from unittest.mock import patch
+
+    from app.services.db_auth import resolve_live_admin_connection
+    from app.services.migrators.base import BaseMigrator, MigrationJob
+
+    class Dummy(BaseMigrator):
+        async def run(self, params):
+            return {}
+
+    async def _run():
+        job = MigrationJob(job_id="pg-app-db")
+        migrator = Dummy(job, {})
+        env = (
+            "POSTGRES_PASSWORD=ok\n"
+            "POSTGRES_USER=pasarguard\n"
+            "POSTGRES_DB=pasarguard\n"
+            "DB_NAME=pasarguard\n"
+        )
+
+        async def fake_run(cmd, cwd=None, timeout=600, *, quiet=False):
+            argv = list(cmd) if isinstance(cmd, list) else [cmd]
+            joined = " ".join(argv)
+            if "printenv" in joined:
+                return True, ""
+            if "exec" in argv and "psql" in argv and "-d" in argv:
+                # Find -d argument
+                try:
+                    di = argv.index("-d")
+                    db = argv[di + 1]
+                except (ValueError, IndexError):
+                    db = ""
+                if db == "postgres":
+                    return False, 'FATAL: database "postgres" does not exist'
+                if db == "pasarguard" and "PGPASSWORD=ok" in joined:
+                    return True, "1\n"
+                return False, "password authentication failed"
+            return True, ""
+
+        with patch("app.services.db_auth.PASARGUARD_DIR", Path("/opt/pasarguard")), \
+             patch("app.services.db_auth.resolve_db_service", return_value="timescaledb"), \
+             patch.object(migrator, "_run_cmd", fake_run), \
+             patch(
+                 "app.services.db_auth._pg_in_container_is_trust",
+                 return_value=False,
+             ):
+            conn = await resolve_live_admin_connection(
+                migrator, "timescaledb", env_text=env,
+            )
+        assert conn["password"] == "ok"
+        assert conn["user"] == "pasarguard"
+        assert any("pasarguard" in line for line in job.logs)
+
+    asyncio.run(_run())
+    print("OK: PG resolve tries app DB when postgres missing")
+
+
+def test_pg_resolve_uses_container_init_password():
+    """Empty .env password list → recover using container POSTGRES_PASSWORD."""
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.db_auth import resolve_live_admin_connection
+    from app.services.migrators.base import BaseMigrator, MigrationJob
+
+    class Dummy(BaseMigrator):
+        async def run(self, params):
+            return {}
+
+    async def _run():
+        job = MigrationJob(job_id="pg-ctr-pwd")
+        migrator = Dummy(job, {})
+        # No password keys in .env — only container init env has the secret
+        env = "POSTGRES_USER=pasarguard\nPOSTGRES_DB=pasarguard\nDB_NAME=pasarguard\n"
+        state = {"aligned": False}
+
+        async def fake_run(cmd, cwd=None, timeout=600, *, quiet=False):
+            argv = list(cmd) if isinstance(cmd, list) else [cmd]
+            joined = " ".join(argv)
+            pwd = ""
+            for a in argv:
+                if a.startswith("PGPASSWORD="):
+                    pwd = a.split("=", 1)[1]
+            if "printenv" in joined and "POSTGRES_PASSWORD" in joined:
+                return True, "container-secret\n"
+            if "printenv" in joined and "POSTGRES_USER" in joined:
+                return True, "pasarguard\n"
+            if "printenv" in joined:
+                return True, ""
+            if "compose ps" in joined:
+                return True, "dbcid\n"
+            if "{{.Config.Image}}" in joined:
+                return True, "postgres:16\n"
+            if "NetworkSettings.Ports" in joined:
+                return True, '{"5432/tcp":[{"HostIp":"0.0.0.0","HostPort":"5432"}]}'
+            if "run" in argv and "--network" in argv:
+                if state["aligned"] and pwd == "container-secret":
+                    return True, "1\n"
+                if pwd == "container-secret" and not state["aligned"]:
+                    # Before recovery TCP rejects (SCRAM drifted from init)
+                    return False, "password authentication failed"
+                return False, "password authentication failed"
+            if "exec" in argv and "psql" in argv:
+                if "ALTER ROLE" in joined:
+                    state["aligned"] = True
+                    return True, "ALTER ROLE\n"
+                if pwd == "container-secret":
+                    return True, "1\n"
+                return False, "password authentication failed"
+            return True, ""
+
+        with patch("app.services.db_auth.PASARGUARD_DIR", Path("/opt/pasarguard")), \
+             patch("app.services.db_auth.resolve_db_service", return_value="postgresql"), \
+             patch.object(migrator, "_run_cmd", fake_run), \
+             patch("asyncio.sleep", new_callable=AsyncMock), \
+             patch(
+                 "app.services.db_auth.refresh_pgbouncer_if_stale",
+                 new_callable=AsyncMock,
+                 return_value=True,
+             ):
+            conn = await resolve_live_admin_connection(
+                migrator, "postgresql", env_text=env,
+            )
+        assert conn["password"] == "container-secret"
+
+    asyncio.run(_run())
+    print("OK: PG resolve uses container init password")
+
+
+def test_ensure_target_auth_ready_syncs_mysql_and_pg():
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.db_auth import ensure_target_auth_ready
+    from app.services.migrators.base import BaseMigrator, MigrationJob
+
+    class Dummy(BaseMigrator):
+        async def run(self, params):
+            return {}
+
+    async def _run():
+        job = MigrationJob(job_id="ensure-1")
+        migrator = Dummy(job, {})
+        admin = {
+            "db_type": "mysql",
+            "user": "root",
+            "password": "secret",
+            "database": "pasarguard",
+            "host": "127.0.0.1",
+            "port": "3306",
+        }
+        sync_mysql = AsyncMock(return_value=True)
+        sync_pg = AsyncMock(return_value=True)
+        refresh = AsyncMock(return_value=True)
+        with patch(
+            "app.services.db_auth.resolve_live_admin_connection",
+            new_callable=AsyncMock,
+            return_value=admin,
+        ), patch(
+            "app.services.db_auth.sync_mysql_roles_to_password", sync_mysql,
+        ), patch(
+            "app.services.db_auth.sync_postgres_roles_to_app_password", sync_pg,
+        ), patch(
+            "app.services.db_auth.refresh_pgbouncer_if_stale", refresh,
+        ):
+            out = await ensure_target_auth_ready(
+                migrator, "mysql", env_text="MYSQL_ROOT_PASSWORD=secret\n",
+                password="secret",
+            )
+            assert out["password"] == "secret"
+            assert sync_mysql.await_count == 1
+            assert sync_pg.await_count == 0
+
+            pg_admin = dict(admin, db_type="timescaledb", port="5432")
+            with patch(
+                "app.services.db_auth.resolve_live_admin_connection",
+                new_callable=AsyncMock,
+                return_value=pg_admin,
+            ):
+                await ensure_target_auth_ready(
+                    migrator, "timescaledb",
+                    env_text="POSTGRES_PASSWORD=secret\n",
+                    password="secret",
+                )
+            assert sync_pg.await_count == 1
+            assert refresh.await_count == 1
+            assert refresh.await_args.kwargs.get("force") is True
+
+    asyncio.run(_run())
+    print("OK: ensure_target_auth_ready syncs mysql and pg")
+
+
 def test_parse_published_port_prefers_loopback():
     from app.services.db_auth import _parse_published_port
 
@@ -807,5 +1072,9 @@ if __name__ == "__main__":
     test_pg_resolve_accepts_password_verified_over_tcp()
     test_mysql_resolve_skip_grant_recovers_stale_root()
     test_sync_postgres_falls_back_to_trust_alter()
+    test_pg_resolve_recovers_when_local_probes_fail()
+    test_pg_resolve_tries_app_db_when_postgres_db_missing()
+    test_pg_resolve_uses_container_init_password()
+    test_ensure_target_auth_ready_syncs_mysql_and_pg()
     test_parse_published_port_prefers_loopback()
     print("\nAll db_auth tests passed")
