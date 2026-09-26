@@ -685,6 +685,274 @@ def _pg_hba_trust_restore_script() -> str:
     )
 
 
+async def _pg_service_container_id(migrator, service: str) -> str:
+    """Return compose container id for ``service`` (running or stopped)."""
+    cwd = str(PASARGUARD_DIR)
+    for args in (
+        ["docker", "compose", "ps", "-aq", service],
+        ["docker", "compose", "ps", "-q", service],
+    ):
+        ok, out = await migrator._run_cmd(args, cwd=cwd, timeout=30)
+        cid = (out or "").strip().splitlines()
+        if ok and cid and cid[-1].strip():
+            return cid[-1].strip()
+    return ""
+
+
+async def _pg_service_image(migrator, container_id: str) -> str:
+    if not container_id:
+        return ""
+    ok, out = await migrator._run_cmd(
+        ["docker", "inspect", "--format", "{{.Config.Image}}", container_id],
+        timeout=30,
+    )
+    return (out or "").strip().splitlines()[0].strip() if ok else ""
+
+
+async def _start_heal_sidecar_volumes_from(
+    migrator,
+    *,
+    service: str,
+    heal_name: str,
+) -> tuple[bool, str]:
+    """Start a one-shot container that mounts the *exact* live DB volume.
+
+    ``docker compose run`` can attach a fresh anonymous volume when the image
+    declares VOLUME and compose does not pin a named volume — then ALTER ROLE
+    would heal a throwaway datadir while the real Timescale cluster stays
+    locked. ``--volumes-from`` of the existing service container avoids that.
+    """
+    cwd = str(PASARGUARD_DIR)
+    await migrator._run_cmd(["docker", "rm", "-f", heal_name], cwd=cwd, timeout=60)
+
+    # Prefer stopping cleanly so single-user / hba edits are safe.
+    await migrator._run_cmd(
+        ["docker", "compose", "stop", service], cwd=cwd, timeout=120,
+    )
+    cid = await _pg_service_container_id(migrator, service)
+    image = await _pg_service_image(migrator, cid) if cid else ""
+    if cid and image:
+        migrator.job.log(
+            f"PostgreSQL heal sidecar: volumes-from={cid[:12]} image={image}"
+        )
+        ok, out = await migrator._run_cmd(
+            [
+                "docker", "run", "-d",
+                "--name", heal_name,
+                "--volumes-from", cid,
+                "--entrypoint", "bash",
+                image,
+                "-lc", "sleep 3600",
+            ],
+            cwd=cwd,
+            timeout=180,
+        )
+        if ok:
+            return True, "volumes-from"
+        migrator.job.log(
+            f"PostgreSQL heal: volumes-from run failed, falling back to compose run: "
+            f"{(out or '')[-200:]}"
+        )
+
+    # Fallback (still better than nothing on unusual setups).
+    ok2, out2 = await migrator._run_cmd(
+        [
+            "docker", "compose", "run", "-d", "--no-deps",
+            "--name", heal_name,
+            "--entrypoint", "bash",
+            service,
+            "-lc", "sleep 3600",
+        ],
+        cwd=cwd,
+        timeout=180,
+    )
+    if ok2:
+        return True, "compose-run"
+    migrator.job.log(
+        f"PostgreSQL heal: could not start sidecar: {(out2 or '')[-300:]}"
+    )
+    return False, ""
+
+
+async def recover_postgres_passwords_via_live_hba(
+    migrator,
+    service: str,
+    env_text: str,
+    *,
+    password: str,
+    admin_users: list[str] | None = None,
+) -> bool:
+    """Patch ``pg_hba.conf`` *inside the running* Timescale container, ALTER, restore.
+
+    Does not stop the DB and cannot attach the wrong volume. This is the primary
+    escalation after plain trust ALTER fails (custom scram-only local hba).
+    """
+    if not password or not service:
+        return False
+
+    text = env_text or ""
+    container_env: dict[str, str] = {}
+    try:
+        container_env = await read_db_container_init_env(migrator, service)
+    except Exception:
+        container_env = {}
+    roles = postgres_role_candidates(
+        text,
+        container_env.get("POSTGRES_USER"),
+        container_env.get("DB_USER"),
+        *(admin_users or []),
+        include_postgres_fallback=True,
+    ) or ["postgres", "pasarguard"]
+    users = list(
+        _unique_strings(
+            *(admin_users or []),
+            *postgres_admin_users(text),
+            container_env.get("POSTGRES_USER"),
+            "postgres",
+        )
+    ) or ["postgres"]
+    admin_dbs = _unique_strings(
+        target_database_name(text, "postgresql"),
+        container_env.get("POSTGRES_DB"),
+        "postgres",
+        "pasarguard",
+    )
+    cwd = str(PASARGUARD_DIR)
+
+    migrator.job.log(
+        f"PostgreSQL live-HBA recovery on {service}: patch pg_hba → reload → "
+        f"ALTER {len(roles)} role(s) → restore (no stop, same volume)..."
+    )
+
+    # Ensure service is up.
+    await migrator._run_cmd(
+        ["docker", "compose", "up", "-d", service], cwd=cwd, timeout=180,
+    )
+    await asyncio.sleep(2)
+
+    patched = False
+    try:
+        ok, out = await migrator._run_cmd(
+            [
+                "docker", "compose", "exec", "-T", "-u", "root",
+                service, "bash", "-lc", _pg_hba_trust_prepare_script(),
+            ],
+            cwd=cwd,
+            timeout=60,
+        )
+        if not ok or "pgclockmg-heal: pg_hba trust installed" not in (out or ""):
+            # Some images disallow root exec — try without -u root.
+            ok2, out2 = await migrator._run_cmd(
+                [
+                    "docker", "compose", "exec", "-T",
+                    service, "bash", "-lc", _pg_hba_trust_prepare_script(),
+                ],
+                cwd=cwd,
+                timeout=60,
+            )
+            if not ok2 or "pgclockmg-heal: pg_hba trust installed" not in (out2 or ""):
+                migrator.job.log(
+                    f"PostgreSQL live-HBA: could not patch pg_hba: "
+                    f"{(out2 or out or '')[-300:]}"
+                )
+                return False
+        patched = True
+
+        # Reload so trust takes effect without restart.
+        reloaded = False
+        for as_user in users:
+            for admin_db in admin_dbs:
+                for cmd in (
+                    [
+                        "docker", "compose", "exec", "-T", "-u", "postgres",
+                        service, "psql", "-d", admin_db, "-c",
+                        "SELECT pg_reload_conf();",
+                    ],
+                    [
+                        "docker", "compose", "exec", "-T",
+                        service, "psql", "-U", as_user, "-d", admin_db, "-c",
+                        "SELECT pg_reload_conf();",
+                    ],
+                ):
+                    rok, _ = await migrator._run_cmd(cmd, cwd=cwd, timeout=20)
+                    if rok:
+                        reloaded = True
+                        break
+                if reloaded:
+                    break
+            if reloaded:
+                break
+        if not reloaded:
+            # pg_ctl reload as postgres OS user
+            await migrator._run_cmd(
+                [
+                    "docker", "compose", "exec", "-T", "-u", "postgres",
+                    service, "bash", "-lc",
+                    "pg_ctl reload -D \"${PGDATA:-/var/lib/postgresql/data}\" || true",
+                ],
+                cwd=cwd,
+                timeout=30,
+            )
+        await asyncio.sleep(1)
+
+        any_ok = False
+        for role in roles:
+            synced = False
+            for as_user in users:
+                for admin_db in admin_dbs:
+                    if await _pg_alter_role_via_trust(
+                        migrator,
+                        service,
+                        as_user=as_user,
+                        role=role,
+                        password=password,
+                        database=admin_db,
+                    ):
+                        migrator.job.log(
+                            f"Live-HBA synced password for role {role} "
+                            f"(as {as_user} on {admin_db})"
+                        )
+                        synced = True
+                        any_ok = True
+                        break
+                if synced:
+                    break
+            if not synced:
+                migrator.job.log(f"Live-HBA could not ALTER ROLE {role}")
+        return any_ok
+    finally:
+        if patched:
+            await migrator._run_cmd(
+                [
+                    "docker", "compose", "exec", "-T", "-u", "root",
+                    service, "bash", "-lc", _pg_hba_trust_restore_script(),
+                ],
+                cwd=cwd,
+                timeout=60,
+            )
+            # Best-effort reload after restore
+            await migrator._run_cmd(
+                [
+                    "docker", "compose", "exec", "-T", "-u", "postgres",
+                    service, "bash", "-lc",
+                    "psql -d postgres -c 'SELECT pg_reload_conf();' "
+                    "|| psql -d pasarguard -c 'SELECT pg_reload_conf();' || true",
+                ],
+                cwd=cwd,
+                timeout=20,
+            )
+            try:
+                await refresh_pgbouncer_if_stale(
+                    migrator,
+                    "postgresql",
+                    env_text=text,
+                    password=password,
+                    force=True,
+                )
+            except Exception as exc:
+                migrator.job.log(f"PgBouncer refresh after live-HBA note: {exc}")
+
+
 async def recover_postgres_passwords_via_single_user(
     migrator,
     service: str,
@@ -697,8 +965,9 @@ async def recover_postgres_passwords_via_single_user(
 
     Used when in-container trust/peer ALTER cannot run (custom ``pg_hba``, no
     local trust, or SCRAM lockout). Stops the compose DB service, runs a one-shot
-    sibling on the *same data volume*, sets role passwords to the install .env
-    secret, then brings the normal service back. Does not wipe data.
+    sibling via ``--volumes-from`` the *existing* container (not ``compose run``,
+    which can attach a throwaway anonymous volume), sets role passwords to the
+    install .env secret, then brings the normal service back. Does not wipe data.
     """
     if not password or not service:
         return False
@@ -725,41 +994,19 @@ async def recover_postgres_passwords_via_single_user(
 
     migrator.job.log(
         f"PostgreSQL nuclear recovery on {service}: single-user ALTER for "
-        f"{len(roles)} role(s) (same volume, no data wipe)..."
+        f"{len(roles)} role(s) (volumes-from live container, no data wipe)..."
     )
-
-    await migrator._run_cmd(
-        ["docker", "rm", "-f", heal_name], cwd=cwd, timeout=60,
-    )
-    stop_ok, stop_out = await migrator._run_cmd(
-        ["docker", "compose", "stop", service], cwd=cwd, timeout=120,
-    )
-    if not stop_ok:
-        migrator.job.log(
-            f"PostgreSQL nuclear: could not stop {service}: {(stop_out or '')[-200:]}"
-        )
 
     success = False
     started = False
     try:
-        # Override entrypoint to bash so we never re-run image init on existing data.
-        run_ok, run_out = await migrator._run_cmd(
-            [
-                "docker", "compose", "run", "-d", "--no-deps",
-                "--name", heal_name,
-                "--entrypoint", "bash",
-                service,
-                "-lc", "sleep 3600",
-            ],
-            cwd=cwd,
-            timeout=180,
+        started, mode = await _start_heal_sidecar_volumes_from(
+            migrator, service=service, heal_name=heal_name,
         )
-        if not run_ok:
-            migrator.job.log(
-                f"PostgreSQL nuclear: compose run failed: {(run_out or '')[-300:]}"
-            )
+        if not started:
+            migrator.job.log("PostgreSQL nuclear: heal sidecar failed to start")
             return False
-        started = True
+        migrator.job.log(f"PostgreSQL nuclear: sidecar mode={mode}")
         await asyncio.sleep(2)
 
         ok, out = await migrator._run_cmd(
@@ -839,8 +1086,9 @@ async def recover_postgres_passwords_via_hba_trust(
 ) -> bool:
     """Second nuclear path: temporary ``pg_hba.conf`` trust → ALTER → restore hba.
 
-    Used when ``postgres --single`` cannot run (odd image layout). Same volume,
-    no data wipe.
+    Used when ``postgres --single`` cannot run (odd image layout). Uses
+    ``--volumes-from`` the live service container so we edit the real datadir,
+    not a throwaway ``compose run`` anonymous volume. No data wipe.
     """
     if not password or not service:
         return False
@@ -877,32 +1125,18 @@ async def recover_postgres_passwords_via_hba_trust(
 
     migrator.job.log(
         f"PostgreSQL HBA-trust recovery on {service}: temporary trust → ALTER "
-        f"{len(roles)} role(s) → restore pg_hba..."
-    )
-
-    await migrator._run_cmd(["docker", "rm", "-f", heal_name], cwd=cwd, timeout=60)
-    await migrator._run_cmd(
-        ["docker", "compose", "stop", service], cwd=cwd, timeout=120,
+        f"{len(roles)} role(s) → restore pg_hba (volumes-from live container)..."
     )
 
     hba_patched = False
     try:
-        run_ok, run_out = await migrator._run_cmd(
-            [
-                "docker", "compose", "run", "-d", "--no-deps",
-                "--name", heal_name,
-                "--entrypoint", "bash",
-                service,
-                "-lc", "sleep 3600",
-            ],
-            cwd=cwd,
-            timeout=180,
+        started, mode = await _start_heal_sidecar_volumes_from(
+            migrator, service=service, heal_name=heal_name,
         )
-        if not run_ok:
-            migrator.job.log(
-                f"PostgreSQL HBA heal: compose run failed: {(run_out or '')[-300:]}"
-            )
+        if not started:
+            migrator.job.log("PostgreSQL HBA heal: sidecar failed to start")
             return False
+        migrator.job.log(f"PostgreSQL HBA heal: sidecar mode={mode}")
         await asyncio.sleep(2)
         ok, out = await migrator._run_cmd(
             ["docker", "exec", heal_name, "bash", "-lc", _pg_hba_trust_prepare_script()],
@@ -978,23 +1212,14 @@ async def recover_postgres_passwords_via_hba_trust(
                 migrator.job.log(f"HBA-trust could not ALTER ROLE {role}")
     finally:
         if hba_patched:
-            # Restore original pg_hba via another one-shot, then reload.
+            # Restore original pg_hba via volumes-from sidecar, then reload.
             await migrator._run_cmd(
                 ["docker", "compose", "stop", service], cwd=cwd, timeout=120,
             )
-            await migrator._run_cmd(["docker", "rm", "-f", heal_name], cwd=cwd, timeout=60)
-            run_ok2, _ = await migrator._run_cmd(
-                [
-                    "docker", "compose", "run", "-d", "--no-deps",
-                    "--name", heal_name,
-                    "--entrypoint", "bash",
-                    service,
-                    "-lc", "sleep 600",
-                ],
-                cwd=cwd,
-                timeout=180,
+            started2, _ = await _start_heal_sidecar_volumes_from(
+                migrator, service=service, heal_name=heal_name,
             )
-            if run_ok2:
+            if started2:
                 await asyncio.sleep(1)
                 await migrator._run_cmd(
                     [
@@ -1045,7 +1270,10 @@ async def force_align_postgres_password(
     password: str,
     admin_users: list[str] | None = None,
 ) -> bool:
-    """Align live PG/Timescale roles to ``password`` — trust → single-user → HBA.
+    """Align live PG/Timescale roles to ``password``.
+
+    Order: trust ALTER → **live-HBA** (patch running container, same volume) →
+    single-user (``--volumes-from``) → stopped HBA-trust sidecar.
 
     This is the automation that makes sqlite→Timescale (and any convert) keep
     going when .env and the volume SCRAM secret drifted: we never ask the
@@ -1063,8 +1291,21 @@ async def force_align_postgres_password(
     if ok:
         return True
     migrator.job.log(
-        "Trust recovery insufficient — escalating to PostgreSQL single-user "
-        "password heal (same volume)..."
+        "Trust recovery insufficient — escalating to live pg_hba patch "
+        "(same running container / volume)..."
+    )
+    ok = await recover_postgres_passwords_via_live_hba(
+        migrator,
+        service,
+        env_text,
+        password=password,
+        admin_users=admin_users,
+    )
+    if ok:
+        return True
+    migrator.job.log(
+        "Live-HBA insufficient — escalating to PostgreSQL single-user "
+        "password heal (volumes-from live container)..."
     )
     ok = await recover_postgres_passwords_via_single_user(
         migrator,
@@ -1076,7 +1317,8 @@ async def force_align_postgres_password(
     if ok:
         return True
     migrator.job.log(
-        "Single-user heal insufficient — escalating to temporary pg_hba trust..."
+        "Single-user heal insufficient — escalating to temporary pg_hba trust "
+        "via volumes-from sidecar..."
     )
     return await recover_postgres_passwords_via_hba_trust(
         migrator,
