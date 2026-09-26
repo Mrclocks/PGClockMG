@@ -59,6 +59,66 @@ def mysql_password_candidates(env_text: str | None) -> list[str]:
     )
 
 
+def install_server_password(env_text: str | None, db_type: str) -> str:
+    """Canonical install password for a server target (never from sqlite backups).
+
+    SQLite backups have no DB password — sqlite→Timescale/MySQL convert must
+    authenticate only with the *installed* panel secrets (and container init).
+    """
+    text = env_text or ""
+    if db_type in ("postgresql", "timescaledb"):
+        cands = postgres_password_candidates(text)
+        return cands[0] if cands else ""
+    if db_type in ("mysql", "mariadb"):
+        cands = mysql_password_candidates(text)
+        return cands[0] if cands else ""
+    return ""
+
+
+def install_auth_env_for_convert(
+    *,
+    backup_db: str,
+    target_db: str,
+    install_env_snapshot: str | None,
+    live_env: str | None = None,
+) -> str:
+    """Env text used to resolve *target* auth during convert.
+
+    For passwordless sources (sqlite), always prefer the pre-merge install
+    snapshot so a merged backup .env cannot wipe POSTGRES_/MYSQL_ secrets.
+    """
+    install = (install_env_snapshot or "").strip()
+    live = (live_env or "").strip()
+    if (backup_db or "").lower() == "sqlite":
+        # SQLite has no server password — never authenticate the target from the
+        # post-merge live .env (which is backup-base and often lacks POSTGRES_*).
+        base = install or live
+        if not base:
+            return ""
+        # Ensure engine password keys exist even when only the URL held the secret.
+        pwd = install_server_password(base, target_db)
+        if pwd and target_db in ("postgresql", "timescaledb"):
+            if not read_env_var(base, "POSTGRES_PASSWORD"):
+                from app.services.env_migration import _set_env_var_simple
+
+                base = _set_env_var_simple(base, "POSTGRES_PASSWORD", pwd)
+            if not read_env_var(base, "DB_PASSWORD"):
+                from app.services.env_migration import _set_env_var_simple
+
+                base = _set_env_var_simple(base, "DB_PASSWORD", pwd)
+        elif pwd and target_db in ("mysql", "mariadb"):
+            if not read_env_var(base, "MYSQL_ROOT_PASSWORD"):
+                from app.services.env_migration import _set_env_var_simple
+
+                base = _set_env_var_simple(base, "MYSQL_ROOT_PASSWORD", pwd)
+            if not read_env_var(base, "DB_PASSWORD"):
+                from app.services.env_migration import _set_env_var_simple
+
+                base = _set_env_var_simple(base, "DB_PASSWORD", pwd)
+        return base
+    return install or live
+
+
 def postgres_admin_users(env_text: str | None) -> list[str]:
     text = env_text or ""
     users = _unique_strings(

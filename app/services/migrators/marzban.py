@@ -303,13 +303,16 @@ class MarzbanMigrator(BaseMigrator):
         await self._ensure_target_database_stack(target_db)
 
         env = install_env_snapshot or ""
+        from app.services.db_auth import install_server_password
+
         user = (
             read_env_var(env, "DB_USER")
             or read_env_var(env, "POSTGRES_USER")
             or read_env_var(env, "MYSQL_USER")
             or "pasarguard"
         )
-        password = (
+        # SQLite source has no password — only install Timescale/MySQL secrets.
+        password = install_server_password(env, target_db) or (
             read_env_var(env, "DB_PASSWORD")
             or read_env_var(env, "POSTGRES_PASSWORD")
             or read_env_var(env, "MYSQL_ROOT_PASSWORD")

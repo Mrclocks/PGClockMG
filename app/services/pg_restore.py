@@ -2842,7 +2842,31 @@ async def _maybe_cross_db_after_restore(
 
         # Prefer install .env for target auth — merged backup .env often still has
         # Timescale/Postgres secrets and incomplete MYSQL_* until finalize.
-        env_text = install_env_snapshot or _read_current_env()
+        # SQLite backups have NO server password — never resolve target auth from
+        # the post-merge live .env (backup-base); use install snapshot only.
+        from app.services.db_auth import (
+            ensure_target_auth_ready,
+            install_auth_env_for_convert,
+            install_server_password,
+        )
+
+        env_text = install_auth_env_for_convert(
+            backup_db=backup_db,
+            target_db=target_db,
+            install_env_snapshot=install_env_snapshot,
+            live_env=_read_current_env(),
+        )
+        install_pwd = (
+            password
+            or install_server_password(env_text, target_db)
+            or install_server_password(install_env_snapshot, target_db)
+            or ""
+        )
+        if backup_db == "sqlite":
+            job.log(
+                f"Source is sqlite (no DB password) — authenticating {target_db} "
+                "with install credentials / container init only"
+            )
         svc: str | None = None
         if target_db != "sqlite":
             svc = "timescaledb" if target_db == "timescaledb" else await _detect_db_container(job, target_db)
@@ -2852,18 +2876,36 @@ async def _maybe_cross_db_after_restore(
                 await _compose_up_services(job, svc, *extras, timeout=300)
                 await asyncio.sleep(5)
             probe_mini = _Mini(job, {"target_db": target_db, "_auto_db_credentials": True})
-            from app.services.db_auth import ensure_target_auth_ready
 
             try:
                 admin = await ensure_target_auth_ready(
                     probe_mini,
                     target_db,
                     env_text=env_text,
-                    password=password or None,
+                    password=install_pwd or None,
                 )
             except RuntimeError as probe_err:
-                # Fallback: try live merged .env (same-engine soft path may have updated it)
-                if install_env_snapshot:
+                # Non-sqlite: live merged .env may have updated secrets.
+                # Sqlite: never fall back to live (backup has no password) —
+                # retry once more with install snapshot + explicit install password.
+                if backup_db == "sqlite":
+                    job.log(
+                        f"Install auth failed for sqlite→{target_db} ({probe_err}) — "
+                        "retrying install credentials + container trust/skip-grant heal"
+                    )
+                    retry_env = install_auth_env_for_convert(
+                        backup_db=backup_db,
+                        target_db=target_db,
+                        install_env_snapshot=install_env_snapshot or env_text,
+                        live_env=None,
+                    )
+                    admin = await ensure_target_auth_ready(
+                        probe_mini,
+                        target_db,
+                        env_text=retry_env,
+                        password=install_pwd or None,
+                    )
+                elif install_env_snapshot:
                     job.log(
                         f"Install-snapshot auth failed ({probe_err}) — "
                         "retrying with live .env + full heal"
@@ -2872,17 +2914,18 @@ async def _maybe_cross_db_after_restore(
                         probe_mini,
                         target_db,
                         env_text=_read_current_env(),
-                        password=password or None,
+                        password=install_pwd or None,
                     )
                 else:
                     raise
             # Keep legacy sync helpers as a second pass for container-init secrets
             # that ensure_target_auth_ready already covered — no-op when already aligned.
+            sync_pwd = admin.get("password") or install_pwd or ""
             if target_db in ("postgresql", "timescaledb"):
                 await _sync_pg_role_passwords(
                     job,
                     svc or "timescaledb",
-                    admin.get("password") or password or "",
+                    sync_pwd,
                     admin.get("user") or "postgres",
                     db_name or "pasarguard",
                 )
@@ -2890,7 +2933,7 @@ async def _maybe_cross_db_after_restore(
                 await _sync_mysql_passwords(
                     job,
                     svc,
-                    admin.get("password") or password or "",
+                    sync_pwd,
                     user=admin.get("user") or "root",
                     db_type=target_db,
                     db_name=db_name or "pasarguard",
@@ -2922,15 +2965,24 @@ async def _maybe_cross_db_after_restore(
                 "and retrying convert once..."
             )
             mig_params["_auth_healed_once"] = True
-            heal_env = install_env_snapshot or _read_current_env()
+            heal_env = install_auth_env_for_convert(
+                backup_db=backup_db,
+                target_db=target_db,
+                install_env_snapshot=install_env_snapshot,
+                live_env=None if backup_db == "sqlite" else _read_current_env(),
+            )
             heal_mini = _Mini(job, {"target_db": target_db, "_auto_db_credentials": True})
-            from app.services.db_auth import ensure_target_auth_ready
-
+            heal_pwd = (
+                install_pwd
+                or password
+                or install_server_password(heal_env, target_db)
+                or ""
+            )
             admin = await ensure_target_auth_ready(
                 heal_mini,
                 target_db,
                 env_text=heal_env,
-                password=password or None,
+                password=heal_pwd or None,
             )
             if target_db in ("postgresql", "timescaledb"):
                 heal_svc = svc or (
@@ -2941,7 +2993,7 @@ async def _maybe_cross_db_after_restore(
                     await _sync_pg_role_passwords(
                         job,
                         heal_svc,
-                        admin.get("password") or password or "",
+                        admin.get("password") or heal_pwd or "",
                         admin.get("user") or "postgres",
                         db_name or "pasarguard",
                     )
@@ -2951,7 +3003,7 @@ async def _maybe_cross_db_after_restore(
                     await _sync_mysql_passwords(
                         job,
                         heal_svc,
-                        admin.get("password") or password or "",
+                        admin.get("password") or heal_pwd or "",
                         user=admin.get("user") or "root",
                         db_type=target_db,
                         db_name=db_name or "pasarguard",
@@ -3071,7 +3123,13 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
                 "کانتینر MariaDB ممکن است فقط باینری mariadb داشته باشد — ویزارد هر دو کلاینت را امتحان می‌کند",
                 "بعد از تبدیل از Timescale، ویزارد باید از رمز نصب (نه رمز Postgres بکاپ) استفاده کند",
             ]
-            if bak in ("postgresql", "timescaledb"):
+            if bak == "sqlite":
+                causes_fa = [
+                    "بکاپ sqlite پسورد ندارد — ویزارد فقط از رمز نصب MySQL/MariaDB استفاده می‌کند",
+                    "رمز MYSQL_ROOT_PASSWORD / DB_PASSWORD در .env نصب باید با کانتینر زنده یکی باشد",
+                    "کانتینر MariaDB ممکن است فقط باینری mariadb داشته باشد — ویزارد هر دو کلاینت را امتحان می‌کند",
+                ]
+            elif bak in ("postgresql", "timescaledb"):
                 causes_fa.insert(
                     0,
                     f"بکاپ={bak} → نصب={tgt or 'mysql/mariadb'}: رمز نصب MySQL/MariaDB را نگه دارید",
@@ -3079,11 +3137,18 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         elif tgt in ("postgresql", "timescaledb") or (
             bak in ("postgresql", "timescaledb") and tgt not in ("mysql", "mariadb")
         ):
-            causes_fa = [
-                "رمز POSTGRES_PASSWORD در .env با رمز واقعی کانتینر TimescaleDB/PostgreSQL یکی نیست",
-                "PgBouncer کش قدیمی دارد — ویزارد نقش‌ها را هم‌تراز و pgbouncer را ریستارت می‌کند",
-                "بعد از ریستور postgres، globals.sql ممکن است نقش‌ها را با رمز بکاپ برگرداند",
-            ]
+            if bak == "sqlite":
+                causes_fa = [
+                    "بکاپ sqlite پسورد ندارد — ویزارد فقط از رمز نصب Timescale/PostgreSQL استفاده می‌کند",
+                    "رمز POSTGRES_PASSWORD / DB_PASSWORD در .env نصب باید با کانتینر زنده یکی باشد (ویزارد با trust recovery هم‌تراز می‌کند)",
+                    "PgBouncer کش قدیمی دارد — ویزارد نقش‌ها را هم‌تراز و pgbouncer را ریستارت می‌کند",
+                ]
+            else:
+                causes_fa = [
+                    "رمز POSTGRES_PASSWORD در .env با رمز واقعی کانتینر TimescaleDB/PostgreSQL یکی نیست",
+                    "PgBouncer کش قدیمی دارد — ویزارد نقش‌ها را هم‌تراز و pgbouncer را ریستارت می‌کند",
+                    "بعد از ریستور postgres، globals.sql ممکن است نقش‌ها را با رمز بکاپ برگرداند",
+                ]
         else:
             causes_fa = [
                 "رمز دیتابیس در .env با رمز واقعی کانتینر یکی نیست",
@@ -3964,8 +4029,23 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         cur_mysql_root = read_env_var(current_env, "MYSQL_ROOT_PASSWORD")
         cur_user = read_env_var(current_env, "DB_USER")
         cur_name = read_env_var(current_env, "DB_NAME")
-        cur_pg_pass = read_env_var(current_env, "POSTGRES_PASSWORD") or cur_db_pass
-        job.add_secret(cur_db_pass, cur_mysql_root, cur_pg_pass)
+        from app.services.db_auth import install_server_password
+        from app.services.env_migration import parse_sqlalchemy_url
+
+        cur_url_pwd = (
+            parse_sqlalchemy_url(cur_url, current_env).get("password")
+            if cur_url and "sqlite" not in cur_url.lower()
+            else None
+        )
+        # Include URL password — many Timescale installs only store the secret
+        # inside SQLALCHEMY_DATABASE_URL (sqlite backups never provide one).
+        cur_pg_pass = (
+            read_env_var(current_env, "POSTGRES_PASSWORD")
+            or cur_db_pass
+            or cur_url_pwd
+            or ""
+        )
+        job.add_secret(cur_db_pass, cur_mysql_root, cur_pg_pass, cur_url_pwd)
 
         # Stage archive into official backup dir for traceability
         PASARGUARD_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
@@ -4158,21 +4238,36 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             # Hard convert into already-installed target — keep install credentials +
             # install SQLALCHEMY URL / engine stamp so a failed convert cannot leave
             # the panel on the backup's sqlite stamp forever.
+            # SQLite backups have no password — always stamp install server secrets.
+            install_pwd = (
+                install_server_password(current_env, target_db or installed_db or "")
+                or cur_pg_pass
+                or cur_mysql_root
+                or cur_db_pass
+                or ""
+            )
             preserve = {
-                "DB_PASSWORD": cur_db_pass,
+                "DB_PASSWORD": install_pwd or cur_db_pass,
                 "DB_USER": cur_user,
                 "DB_NAME": cur_name,
                 "PASARGUARD_DB_ENGINE": target_db or installed_db or "",
             }
             if (target_db or "") in ("mysql", "mariadb"):
-                preserve["MYSQL_ROOT_PASSWORD"] = cur_mysql_root or cur_db_pass
+                preserve["MYSQL_ROOT_PASSWORD"] = (
+                    cur_mysql_root or install_pwd or cur_db_pass
+                )
             elif (target_db or "") in ("postgresql", "timescaledb"):
-                preserve["POSTGRES_PASSWORD"] = cur_pg_pass or cur_db_pass
+                preserve["POSTGRES_PASSWORD"] = install_pwd or cur_pg_pass or cur_db_pass
             if cur_url and "sqlite" not in cur_url.lower():
                 preserve["SQLALCHEMY_DATABASE_URL"] = cur_url
             job.log(
                 f"Hard-convert merge: keeping install DB URL/stamp "
                 f"({preserve.get('PASARGUARD_DB_ENGINE') or target_db})"
+                + (
+                    " — sqlite source has no password; install Timescale/MySQL secret kept"
+                    if (backup_db or "") == "sqlite"
+                    else ""
+                )
             )
         else:
             # Same / soft-family engine: put OLD (backup) DB password into the new .env
@@ -4253,10 +4348,17 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         if target_db and restore_engine != target_db and not soft_db_family(restore_engine, target_db):
             # Engine-aware install password — never prefer leftover MYSQL_* on a
             # Timescale install (or POSTGRES_* on MySQL) during convert auth heal.
+            # SQLite source never contributes a password.
             if (target_db or "") in ("mysql", "mariadb"):
-                convert_pass = cur_mysql_root or cur_db_pass or ""
+                convert_pass = (
+                    install_server_password(install_env_snapshot, target_db)
+                    or cur_mysql_root or cur_db_pass or ""
+                )
             elif (target_db or "") in ("postgresql", "timescaledb"):
-                convert_pass = cur_pg_pass or cur_db_pass or ""
+                convert_pass = (
+                    install_server_password(install_env_snapshot, target_db)
+                    or cur_pg_pass or cur_db_pass or ""
+                )
             else:
                 convert_pass = cur_db_pass or cur_pg_pass or cur_mysql_root or ""
             convert_user = cur_user or (

@@ -33,6 +33,66 @@ SQLALCHEMY_DATABASE_URL=postgresql+asyncpg://pasarguard:app_secret@127.0.0.1:643
 """
 
 
+def test_install_server_password_from_url_only():
+    from app.services.db_auth import install_server_password
+
+    env = (
+        'SQLALCHEMY_DATABASE_URL="postgresql+asyncpg://pasarguard:urlOnly@127.0.0.1:6432/pasarguard"\n'
+        "PASARGUARD_DB_ENGINE=timescaledb\n"
+    )
+    assert install_server_password(env, "timescaledb") == "urlOnly"
+    assert install_server_password(
+        "SQLALCHEMY_DATABASE_URL=sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3\n",
+        "timescaledb",
+    ) == ""
+    print("OK: install_server_password from URL only")
+
+
+def test_install_auth_env_for_sqlite_source_ignores_live_merge():
+    from app.services.db_auth import install_auth_env_for_convert, install_server_password
+
+    install = (
+        "POSTGRES_PASSWORD=install-secret\n"
+        "DB_PASSWORD=install-secret\n"
+        'SQLALCHEMY_DATABASE_URL="postgresql+asyncpg://pasarguard:install-secret@127.0.0.1:6432/pasarguard"\n'
+        "PASARGUARD_DB_ENGINE=timescaledb\n"
+    )
+    # Live after merge starts from sqlite backup — no POSTGRES_PASSWORD
+    live = (
+        'SQLALCHEMY_DATABASE_URL="sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3"\n'
+        "PASARGUARD_DB_ENGINE=sqlite\n"
+        "SUDO_PASSWORD=\n"
+    )
+    env = install_auth_env_for_convert(
+        backup_db="sqlite",
+        target_db="timescaledb",
+        install_env_snapshot=install,
+        live_env=live,
+    )
+    assert "install-secret" in env
+    assert install_server_password(env, "timescaledb") == "install-secret"
+    assert "sqlite+aiosqlite" not in env.lower() or "install-secret" in env
+    # Must not pick empty live as auth source when install exists
+    assert "POSTGRES_PASSWORD=install-secret" in env.replace(" ", "")
+    print("OK: sqlite→timescale auth env uses install only")
+
+
+def test_explain_auth_sqlite_to_timescale_mentions_no_backup_password():
+    from app.services.pg_restore import explain_restore_error
+
+    info = explain_restore_error(
+        RuntimeError("SASL authentication failed"),
+        "sqlite",
+        "timescaledb",
+    )
+    joined = " ".join(info.get("causes_fa") or [])
+    assert "sqlite" in joined.lower()
+    assert "پسورد ندارد" in joined or "رمز نصب" in joined
+    assert "globals.sql" not in joined
+    assert "بکاپ=sqlite" in info["fa"]
+    print("OK: sqlite→timescale auth tips ignore backup password")
+
+
 def test_postgres_password_candidates_order():
     cands = postgres_password_candidates(ENV_PG)
     assert cands[0] == "super_secret"
@@ -1048,6 +1108,9 @@ def test_parse_published_port_prefers_loopback():
 
 
 if __name__ == "__main__":
+    test_install_server_password_from_url_only()
+    test_install_auth_env_for_sqlite_source_ignores_live_merge()
+    test_explain_auth_sqlite_to_timescale_mentions_no_backup_password()
     test_postgres_password_candidates_order()
     test_postgres_admin_users()
     test_postgres_role_candidates_prefers_app_over_postgres()
