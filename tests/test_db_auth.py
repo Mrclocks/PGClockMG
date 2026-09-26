@@ -124,7 +124,7 @@ def test_force_align_escalates_to_single_user_when_trust_fails():
         job = MigrationJob(job_id="pg-nuclear")
         migrator = Dummy(job, {})
         env = "POSTGRES_PASSWORD=live\nPOSTGRES_USER=pasarguard\nDB_NAME=pasarguard\n"
-        state = {"nuclear": 0}
+        state = {"nuclear": 0, "hba": 0}
 
         with patch(
             "app.services.db_auth.recover_postgres_passwords_via_trust",
@@ -134,17 +134,45 @@ def test_force_align_escalates_to_single_user_when_trust_fails():
             "app.services.db_auth.recover_postgres_passwords_via_single_user",
             new_callable=AsyncMock,
             return_value=True,
-        ) as nuclear:
+        ) as nuclear, patch(
+            "app.services.db_auth.recover_postgres_passwords_via_hba_trust",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as hba:
             ok = await force_align_postgres_password(
                 migrator, "timescaledb", env, password="live",
             )
             state["nuclear"] = nuclear.await_count
+            state["hba"] = hba.await_count
         assert ok is True
         assert state["nuclear"] == 1
+        assert state["hba"] == 0
         assert any("single-user" in line.lower() for line in job.logs)
 
+        job2 = MigrationJob(job_id="pg-hba")
+        migrator2 = Dummy(job2, {})
+        with patch(
+            "app.services.db_auth.recover_postgres_passwords_via_trust",
+            new_callable=AsyncMock,
+            return_value=False,
+        ), patch(
+            "app.services.db_auth.recover_postgres_passwords_via_single_user",
+            new_callable=AsyncMock,
+            return_value=False,
+        ), patch(
+            "app.services.db_auth.recover_postgres_passwords_via_hba_trust",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as hba2:
+            ok2 = await force_align_postgres_password(
+                migrator2, "timescaledb", env, password="live",
+            )
+        assert ok2 is True
+        assert hba2.await_count == 1
+        assert any("pg_hba" in line.lower() for line in job2.logs)
+
     asyncio.run(_run())
-    print("OK: force_align escalates to single-user")
+    print("OK: force_align escalates to single-user then HBA")
 
 
 def test_pg_resolve_uses_nuclear_when_trust_alter_fails():

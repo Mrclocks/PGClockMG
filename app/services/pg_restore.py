@@ -3137,9 +3137,9 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         ):
             if bak == "sqlite":
                 causes_fa = [
-                    "بکاپ sqlite پسورد ندارد — ویزارد فقط از رمز نصب Timescale/PostgreSQL استفاده می‌کند",
-                    "ویزارد رمز .env نصب را خودکار روی نقش‌های زنده می‌نشاند (trust و در صورت نیاز single-user)",
-                    "PgBouncer بعد از هم‌ترازی ریستارت می‌شود تا SASL روی :6432 نماند",
+                    "اول PGClockMG را به آخرین نسخه آپدیت کنید (هدر UI باید v4.6.13+ باشد)",
+                    "بکاپ sqlite پسورد ندارد — ویزارد فقط رمز نصب Timescale را خودکار روی کانتینر می‌نشاند",
+                    "اگر لازم باشد: trust → single-user → pg_hba موقت (بدون پاک کردن دیتا)",
                 ]
             else:
                 causes_fa = [
