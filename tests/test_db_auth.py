@@ -925,7 +925,132 @@ def test_pg_resolve_trust_recovery_raises_when_alter_fails():
     print("OK: PG resolve still raises when trust ALTER fails")
 
 
-def test_pg_resolve_accepts_password_verified_over_tcp():
+def test_pg_resolve_trust_no_published_port_heals_via_container_ip():
+    """Trust + no published 5432 must NOT hard-fail — heal then TCP via bridge IP."""
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.db_auth import resolve_live_admin_connection
+    from app.services.migrators.base import BaseMigrator, MigrationJob
+
+    class Dummy(BaseMigrator):
+        async def run(self, params):
+            return {}
+
+    async def _run():
+        job = MigrationJob(job_id="pg-no-publish")
+        migrator = Dummy(job, {})
+        env = (
+            "POSTGRES_PASSWORD=install-secret\n"
+            "POSTGRES_USER=pasarguard\n"
+            "POSTGRES_DB=pasarguard\n"
+        )
+        state = {"aligned": False, "healed": 0}
+
+        async def fake_run(cmd, cwd=None, timeout=600, *, quiet=False):
+            argv = list(cmd) if isinstance(cmd, list) else [cmd]
+            joined = " ".join(argv)
+            pwd = ""
+            for a in argv:
+                if a.startswith("PGPASSWORD="):
+                    pwd = a.split("=", 1)[1]
+            if "printenv" in joined:
+                return True, ""
+            if "compose ps" in joined:
+                return True, "dbcid\n"
+            if "{{.Config.Image}}" in joined:
+                return True, "timescale/timescaledb:latest-pg16\n"
+            if "NetworkSettings.Ports" in joined:
+                # No published ports — typical pgbouncer-only layout
+                return True, "{}"
+            if "NetworkSettings.Networks" in joined or "IPAddress" in joined:
+                return True, "172.18.0.4\n"
+            if "run" in argv and "--network" in argv:
+                # TCP via bridge IP only works after heal
+                if "172.18.0.4" in joined and state["aligned"] and pwd == "install-secret":
+                    return True, "1\n"
+                return False, "password authentication failed"
+            if "exec" in argv and "psql" in argv:
+                # Local trust accepts any password before/after
+                return True, "1\n"
+            return True, ""
+
+        async def fake_heal(*_a, **_k):
+            state["aligned"] = True
+            state["healed"] += 1
+            return True
+
+        with patch("app.services.db_auth.PASARGUARD_DIR", Path("/opt/pasarguard")), \
+             patch("app.services.db_auth.resolve_db_service", return_value="timescaledb"), \
+             patch.object(migrator, "_run_cmd", fake_run), \
+             patch("asyncio.sleep", new_callable=AsyncMock), \
+             patch(
+                 "app.services.db_auth.force_align_postgres_password",
+                 side_effect=fake_heal,
+             ), \
+             patch(
+                 "app.services.multiworker_stack.compose_has_service",
+                 return_value=False,
+             ), \
+             patch(
+                 "app.services.db_auth.refresh_pgbouncer_if_stale",
+                 new_callable=AsyncMock,
+                 return_value=True,
+             ):
+            conn = await resolve_live_admin_connection(
+                migrator, "timescaledb", env_text=env,
+            )
+        assert conn["password"] == "install-secret"
+        assert conn["host"] == "172.18.0.4"
+        assert conn["port"] == "5432"
+        assert state["healed"] == 1
+        assert any("not refusing" in line.lower() or "container ip" in line.lower()
+                    or "force-align" in line.lower() or "auto-align" in line.lower()
+                    for line in job.logs)
+
+    asyncio.run(_run())
+    print("OK: PG resolve heals via container IP when 5432 unpublished")
+
+
+def test_pg_tcp_endpoints_include_container_ip_when_unpublished():
+    import asyncio
+    from unittest.mock import patch
+
+    from app.services.db_auth import _resolve_pg_tcp_endpoints
+    from app.services.migrators.base import BaseMigrator, MigrationJob
+
+    class Dummy(BaseMigrator):
+        async def run(self, params):
+            return {}
+
+    async def _run():
+        job = MigrationJob(job_id="eps")
+        migrator = Dummy(job, {})
+
+        async def fake_run(cmd, cwd=None, timeout=600, *, quiet=False):
+            argv = list(cmd) if isinstance(cmd, list) else [cmd]
+            joined = " ".join(argv)
+            if "compose ps" in joined:
+                return True, "dbcid\n"
+            if "{{.Config.Image}}" in joined:
+                return True, "postgres:16\n"
+            if "NetworkSettings.Ports" in joined:
+                return True, "{}"
+            if "IPAddress" in joined:
+                return True, "172.19.0.7\n"
+            return True, ""
+
+        with patch("app.services.db_auth.PASARGUARD_DIR", Path("/opt/pasarguard")), \
+             patch.object(migrator, "_run_cmd", fake_run), \
+             patch(
+                 "app.services.multiworker_stack.compose_has_service",
+                 return_value=False,
+             ):
+            eps = await _resolve_pg_tcp_endpoints(migrator, "timescaledb")
+        assert eps == [("postgres:16", "172.19.0.7", "5432")]
+
+    asyncio.run(_run())
+    print("OK: TCP endpoints fall back to container IP")
     import asyncio
     from unittest.mock import patch
 
@@ -1380,6 +1505,8 @@ if __name__ == "__main__":
     test_force_align_escalates_live_hba_then_single_user_then_hba()
     test_heal_sidecar_prefers_volumes_from_over_compose_run()
     test_pg_resolve_uses_nuclear_when_trust_alter_fails()
+    test_pg_resolve_trust_no_published_port_heals_via_container_ip()
+    test_pg_tcp_endpoints_include_container_ip_when_unpublished()
     test_install_server_password_from_url_only()
     test_install_auth_env_for_sqlite_source_ignores_live_merge()
     test_explain_auth_sqlite_to_timescale_mentions_no_backup_password()

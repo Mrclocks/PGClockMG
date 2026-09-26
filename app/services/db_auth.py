@@ -380,7 +380,7 @@ def _parse_published_port(ports_json: str, container_port: str = "5432/tcp") -> 
 
 
 async def _resolve_pg_host_endpoint(migrator, service: str) -> tuple[str, str, str]:
-    """Return ``(image, host, port)`` for a TCP probe matching alembic/copy."""
+    """Return ``(image, host, port)`` for a published host TCP probe."""
     ok, cid = await migrator._run_cmd(
         ["docker", "compose", "ps", "-q", service],
         cwd=str(PASARGUARD_DIR),
@@ -402,6 +402,117 @@ async def _resolve_pg_host_endpoint(migrator, service: str) -> tuple[str, str, s
     return image, host, port
 
 
+async def _resolve_pg_container_ip_endpoint(
+    migrator, service: str,
+) -> tuple[str, str, str]:
+    """Return ``(image, container_ip, 5432)`` for TCP via docker bridge (no publish needed).
+
+    Many Timescale installs only expose PgBouncer (:6432) and leave the DB
+    unpublished. On Linux the bridge IP is reachable from the host, so SCRAM
+    can still be verified without a published 5432.
+    """
+    ok, cid = await migrator._run_cmd(
+        ["docker", "compose", "ps", "-q", service],
+        cwd=str(PASARGUARD_DIR),
+        timeout=30,
+    )
+    container = (cid or "").strip().splitlines()[0].strip() if ok else ""
+    if not container:
+        return "", "", ""
+    ok_img, image_out = await migrator._run_cmd(
+        ["docker", "inspect", "--format", "{{.Config.Image}}", container],
+        timeout=30,
+    )
+    image = (image_out or "").strip().splitlines()[0].strip() if ok_img else ""
+    ok_ip, ip_out = await migrator._run_cmd(
+        [
+            "docker", "inspect", "--format",
+            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+            container,
+        ],
+        timeout=30,
+    )
+    ip = ""
+    if ok_ip:
+        # Prefer the first non-empty IPv4-looking token.
+        for tok in (ip_out or "").replace("\n", " ").split():
+            tok = tok.strip()
+            if tok and tok[0].isdigit():
+                ip = tok
+                break
+    if not (image and ip):
+        return image, "", ""
+    return image, ip, "5432"
+
+
+async def _resolve_pg_tcp_endpoints(
+    migrator, service: str,
+) -> list[tuple[str, str, str]]:
+    """Ordered TCP targets: published 5432 → pgbouncer 6432 → container IP:5432."""
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str, str]] = []
+
+    def _add(image: str, host: str, port: str) -> None:
+        if not (image and host and port):
+            return
+        key = (host, port)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append((image, host, port))
+
+    image, host, port = await _resolve_pg_host_endpoint(migrator, service)
+    _add(image, host, port)
+
+    # Panel often publishes PgBouncer only — password check via :6432 still
+    # proves SCRAM; migration_port later remaps copy traffic to direct 5432.
+    try:
+        from app.services.multiworker_stack import compose_has_service
+    except Exception:
+        compose_has_service = None  # type: ignore
+    if compose_has_service and compose_has_service("pgbouncer"):
+        pb_img, pb_host, pb_port = await _resolve_pg_host_endpoint(migrator, "pgbouncer")
+        if not pb_port:
+            # Parse 6432 explicitly if Ports JSON uses that key only.
+            ok, cid = await migrator._run_cmd(
+                ["docker", "compose", "ps", "-q", "pgbouncer"],
+                cwd=str(PASARGUARD_DIR),
+                timeout=30,
+            )
+            container = (cid or "").strip().splitlines()[0].strip() if ok else ""
+            if container:
+                ok_ports, ports_out = await migrator._run_cmd(
+                    [
+                        "docker", "inspect", "--format",
+                        "{{json .NetworkSettings.Ports}}", container,
+                    ],
+                    timeout=30,
+                )
+                if ok_ports:
+                    pb_host, pb_port = _parse_published_port(
+                        ports_out or "", "6432/tcp",
+                    )
+                if not pb_img:
+                    ok_img, image_out = await migrator._run_cmd(
+                        [
+                            "docker", "inspect", "--format",
+                            "{{.Config.Image}}", container,
+                        ],
+                        timeout=30,
+                    )
+                    pb_img = (
+                        (image_out or "").strip().splitlines()[0].strip()
+                        if ok_img else ""
+                    )
+        # Prefer DB image for psql client when probing pgbouncer.
+        _add(image or pb_img, pb_host, pb_port or "")
+
+    cip_img, cip, cip_port = await _resolve_pg_container_ip_endpoint(migrator, service)
+    _add(cip_img or image, cip, cip_port)
+
+    return out
+
+
 async def _probe_pg_via_host_tcp(
     migrator,
     *,
@@ -412,7 +523,11 @@ async def _probe_pg_via_host_tcp(
     password: str,
     database: str,
 ) -> bool:
-    """Authenticate the way the panel/alembic does: host → published TCP port."""
+    """Authenticate the way the panel/alembic does: host → TCP port.
+
+    Uses ``--network host`` so published ports and docker-bridge IPs both work
+    on typical Linux VPS installs.
+    """
     if not image or not host or not port or not password:
         return False
     cmd = [
@@ -1401,9 +1516,10 @@ async def resolve_live_admin_connection(
         if container_env.get("POSTGRES_DB"):
             probe_dbs = _unique_strings(container_env.get("POSTGRES_DB"), *probe_dbs)
         trust_mode: bool | None = None
-        host_endpoint: tuple[str, str, str] | None = None
+        host_endpoints: list[tuple[str, str, str]] | None = None
         tcp_failures = 0
         local_probe_ok = False
+        missing_tcp_endpoint = False
 
         for user in users:
             for pwd in passwords:
@@ -1432,45 +1548,51 @@ async def resolve_live_admin_connection(
                     return conn
 
                 # Local socket is trust — only a host/TCP login proves the password.
-                if host_endpoint is None:
-                    host_endpoint = await _resolve_pg_host_endpoint(migrator, service)
-                    image, host, port = host_endpoint
-                    if not (image and host and port):
-                        raise RuntimeError(
-                            "PostgreSQL container uses local trust auth, but the published "
-                            "host port/image could not be resolved — refusing to accept an "
-                            "unverified password. Check that the DB service publishes 5432 "
-                            "and POSTGRES_PASSWORD / DB_PASSWORD match the running cluster."
+                if host_endpoints is None:
+                    host_endpoints = await _resolve_pg_tcp_endpoints(migrator, service)
+                    if not host_endpoints:
+                        missing_tcp_endpoint = True
+                        migrator.job.log(
+                            "PostgreSQL local socket is trust and no TCP endpoint "
+                            "was found yet (published 5432 / pgbouncer / container IP) — "
+                            "will force-align install password then re-resolve "
+                            "(not refusing unverified password early)."
                         )
+                        break
+                    ep0 = host_endpoints[0]
                     migrator.job.log(
                         f"PostgreSQL local socket is trust — verifying passwords via "
-                        f"TCP {host}:{port}..."
+                        f"TCP {ep0[1]}:{ep0[2]} "
+                        f"({len(host_endpoints)} endpoint candidate(s))..."
                     )
-                image, host, port = host_endpoint
-                for tcp_db in probe_dbs:
-                    if await _probe_pg_via_host_tcp(
-                        migrator,
-                        image=image,
-                        host=host,
-                        port=port,
-                        user=user,
-                        password=pwd,
-                        database=tcp_db,
-                    ):
-                        conn = {
-                            "db_type": db_type,
-                            "user": user,
-                            "password": pwd,
-                            "database": db_name,
-                            "host": host,
-                            "port": port,
-                        }
-                        migrator.job.log(
-                            f"PostgreSQL auth OK as {user} via TCP {host}:{port} "
-                            f"(db={tcp_db})"
-                        )
-                        return conn
+                for image, host, port in host_endpoints:
+                    for tcp_db in probe_dbs:
+                        if await _probe_pg_via_host_tcp(
+                            migrator,
+                            image=image,
+                            host=host,
+                            port=port,
+                            user=user,
+                            password=pwd,
+                            database=tcp_db,
+                        ):
+                            conn = {
+                                "db_type": db_type,
+                                "user": user,
+                                "password": pwd,
+                                "database": db_name,
+                                "host": host,
+                                "port": port,
+                            }
+                            migrator.job.log(
+                                f"PostgreSQL auth OK as {user} via TCP {host}:{port} "
+                                f"(db={tcp_db})"
+                            )
+                            return conn
                 tcp_failures += 1
+            else:
+                continue
+            break  # broken from inner loop when missing_tcp_endpoint
 
         # Always attempt auto-heal when no verified TCP/local password worked.
         # Prefer install .env secret; if missing (sqlite backups never have one),
@@ -1506,18 +1628,16 @@ async def resolve_live_admin_connection(
                     )
             except Exception as mint_exc:
                 migrator.job.log(f"Could not persist minted password to .env: {mint_exc}")
-        image = host = port = ""
-        if host_endpoint:
-            image, host, port = host_endpoint
-        elif service:
-            host_endpoint = await _resolve_pg_host_endpoint(migrator, service)
-            image, host, port = host_endpoint
+        endpoints = list(host_endpoints or [])
+        if not endpoints and service:
+            endpoints = await _resolve_pg_tcp_endpoints(migrator, service)
         recovered = False
         if preferred and service:
             migrator.job.log(
                 "PostgreSQL auth unresolved — auto-aligning roles to install password "
-                f"(local_probe_ok={local_probe_ok}, tcp_failures={tcp_failures}; "
-                "trust → single-user → pg_hba trust"
+                f"(local_probe_ok={local_probe_ok}, tcp_failures={tcp_failures}, "
+                f"missing_tcp_endpoint={missing_tcp_endpoint}; "
+                "trust → live-HBA → single-user → pg_hba"
                 + (", minted=yes" if minted else "")
                 + ")..."
             )
@@ -1528,54 +1648,72 @@ async def resolve_live_admin_connection(
                 password=preferred,
                 admin_users=users,
             )
-        if recovered and image and host and port:
+        if recovered:
+            # Re-resolve after heal — container IP / publishes may appear after restart.
+            endpoints = await _resolve_pg_tcp_endpoints(migrator, service) or endpoints
+        if recovered and endpoints:
             migrator.job.log(
-                "PostgreSQL password auto-heal applied — re-checking TCP auth..."
+                "PostgreSQL password auto-heal applied — re-checking TCP auth "
+                f"({len(endpoints)} endpoint(s))..."
             )
             # SCRAM secrets can take a moment to settle after ALTER ROLE;
             # retry a few times before declaring failure.
             for attempt in range(1, 5):
                 await asyncio.sleep(1.5 * attempt)
-                for user in users:
-                    for tcp_db in probe_dbs:
-                        if await _probe_pg_via_host_tcp(
-                            migrator,
-                            image=image,
-                            host=host,
-                            port=port,
-                            user=user,
-                            password=preferred,
-                            database=tcp_db,
-                        ):
-                            conn = {
-                                "db_type": db_type,
-                                "user": user,
-                                "password": preferred,
-                                "database": db_name,
-                                "host": host,
-                                "port": port,
-                            }
-                            migrator.job.log(
-                                f"PostgreSQL auth OK as {user} via TCP {host}:{port} "
-                                f"(after password auto-heal, db={tcp_db}, "
-                                f"attempt={attempt})"
-                            )
-                            return conn
+                for image, host, port in endpoints:
+                    for user in users:
+                        for tcp_db in probe_dbs:
+                            if await _probe_pg_via_host_tcp(
+                                migrator,
+                                image=image,
+                                host=host,
+                                port=port,
+                                user=user,
+                                password=preferred,
+                                database=tcp_db,
+                            ):
+                                conn = {
+                                    "db_type": db_type,
+                                    "user": user,
+                                    "password": preferred,
+                                    "database": db_name,
+                                    "host": host,
+                                    "port": port,
+                                }
+                                migrator.job.log(
+                                    f"PostgreSQL auth OK as {user} via TCP {host}:{port} "
+                                    f"(after password auto-heal, db={tcp_db}, "
+                                    f"attempt={attempt})"
+                                )
+                                return conn
             raise RuntimeError(
                 "PostgreSQL/TimescaleDB authentication failed over TCP — "
-                "password auto-heal aligned role passwords but the published host port "
-                f"({host}:{port}) still rejected every candidate. "
-                "Check that 5432 is published to the live Timescale/Postgres container."
+                "password auto-heal aligned role passwords but every TCP endpoint "
+                f"still rejected the install password "
+                f"({', '.join(f'{h}:{p}' for _, h, p in endpoints)}). "
+                "Check POSTGRES_PASSWORD / DB_PASSWORD and that Timescale is reachable "
+                "via published 5432, pgbouncer, or the container bridge IP."
             )
-        if trust_mode and tcp_failures:
+        if recovered and not endpoints:
+            raise RuntimeError(
+                "PostgreSQL/TimescaleDB password was auto-aligned, but no TCP endpoint "
+                "could be resolved (no published 5432, no pgbouncer publish, no "
+                "container IP). Expose 5432 on the timescaledb service (or ensure the "
+                "container is on a docker bridge) and retry."
+            )
+        if trust_mode and (tcp_failures or missing_tcp_endpoint):
             raise RuntimeError(
                 "PostgreSQL/TimescaleDB authentication failed over TCP — "
-                "in-container probes are trust-only and every .env password candidate "
-                "was rejected by the published host port"
+                "in-container probes are trust-only and the install password could not "
+                "be verified over TCP"
                 + (
-                    " (password auto-heal could not realign role passwords)."
-                    if not recovered
-                    else " (password auto-heal ran but TCP still rejected the .env password)."
+                    " (no published/bridge endpoint and password auto-heal failed)."
+                    if missing_tcp_endpoint and not recovered
+                    else (
+                        " (password auto-heal could not realign role passwords)."
+                        if not recovered
+                        else " (password auto-heal ran but TCP still rejected the password)."
+                    )
                 )
                 + " Update PGClockMG to the latest release and retry."
             )
