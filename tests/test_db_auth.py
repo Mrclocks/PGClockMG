@@ -90,7 +90,7 @@ def test_explain_auth_sqlite_to_timescale_mentions_no_backup_password():
     assert "پسورد ندارد" in joined or "رمز نصب" in joined
     assert "globals.sql" not in joined
     assert "بکاپ=sqlite" in info["fa"]
-    assert "4.6.14" in joined or "volumes-from" in joined.lower() or "live pg_hba" in joined.lower()
+    assert "4.6.14" in joined or "SCRAM" in joined or "eth0" in joined.lower()
     print("OK: sqlite→timescale auth tips ignore backup password")
 
 
@@ -265,7 +265,7 @@ def test_heal_sidecar_prefers_volumes_from_over_compose_run():
 
 
 def test_pg_resolve_uses_nuclear_when_trust_alter_fails():
-    """Trust ALTER fails → nuclear single-user → TCP OK."""
+    """Trust ALTER fails → nuclear single-user → eth0 SCRAM OK."""
     import asyncio
     from unittest.mock import AsyncMock, patch
 
@@ -284,7 +284,7 @@ def test_pg_resolve_uses_nuclear_when_trust_alter_fails():
             "POSTGRES_USER=pasarguard\n"
             "POSTGRES_DB=pasarguard\n"
         )
-        state = {"aligned": False, "tcp_ok": 0}
+        state = {"aligned": False, "scram_ok": 0}
 
         async def fake_run(cmd, cwd=None, timeout=600, *, quiet=False):
             argv = list(cmd) if isinstance(cmd, list) else [cmd]
@@ -301,15 +301,18 @@ def test_pg_resolve_uses_nuclear_when_trust_alter_fails():
                 return True, "timescale/timescaledb:latest-pg16\n"
             if "NetworkSettings.Ports" in joined:
                 return True, '{"5432/tcp":[{"HostIp":"127.0.0.1","HostPort":"5432"}]}'
-            if "run" in argv and "--network" in argv:
+            if "IPAddress" in joined:
+                return True, "172.18.0.4\n"
+            if "hostname -I" in joined or "pgclockmg-scram" in joined:
                 if state["aligned"] and pwd == "install-pw":
-                    state["tcp_ok"] += 1
-                    return True, "1\n"
+                    state["scram_ok"] += 1
+                    return True, "pgclockmg-scram:ok ip=172.18.0.4\n"
+                return False, "pgclockmg-scram:fail\n"
+            if "run" in argv and "--network" in argv:
                 return False, "password authentication failed"
             if "exec" in argv and "psql" in argv:
-                if "ALTER ROLE" in joined:
-                    return False, "ERROR: permission denied"
-                return False, "password authentication failed"
+                # Local trust: any password / bogus works
+                return True, "1\n"
             return True, ""
 
         async def fake_nuclear(*_a, **_k):
@@ -343,9 +346,12 @@ def test_pg_resolve_uses_nuclear_when_trust_alter_fails():
                 migrator, "timescaledb", env_text=env,
             )
         assert conn["password"] == "install-pw"
-        assert state["tcp_ok"] >= 1
-        assert any("auto-heal" in line.lower() or "nuclear" in line.lower()
-                    or "single-user" in line.lower() for line in job.logs)
+        assert state["scram_ok"] >= 1
+        assert any(
+            "force-align" in line.lower() or "single-user" in line.lower()
+            or "scram" in line.lower()
+            for line in job.logs
+        )
 
     asyncio.run(_run())
     print("OK: PG resolve uses nuclear when trust fails")
@@ -813,7 +819,7 @@ def test_mysql_probe_uses_argv_without_password_in_args():
 
 
 def test_pg_resolve_trust_recovers_stale_password():
-    """Local trust + TCP reject → ALTER ROLE via trust → TCP accepts .env password."""
+    """Local trust + eth0 SCRAM reject → force-align ALTER → eth0 SCRAM accepts."""
     import asyncio
     from unittest.mock import AsyncMock, patch
 
@@ -832,7 +838,7 @@ def test_pg_resolve_trust_recovers_stale_password():
             "POSTGRES_USER=pasarguard\n"
             "POSTGRES_DB=pasarguard\n"
         )
-        state = {"aligned": False, "alters": 0, "tcp_before": 0, "tcp_after": 0}
+        state = {"aligned": False, "alters": 0, "scram_ok": 0}
 
         async def fake_run(cmd, cwd=None, timeout=600, *, quiet=False):
             argv = list(cmd) if isinstance(cmd, list) else [cmd]
@@ -841,39 +847,47 @@ def test_pg_resolve_trust_recovers_stale_password():
             for a in argv:
                 if a.startswith("PGPASSWORD="):
                     pwd = a.split("=", 1)[1]
-            if "compose ps" in joined:
-                return True, "dbcid\n"
+            if "compose ps" in joined or "compose up" in joined:
+                return True, "dbcid\n" if "ps" in joined else ""
             if "{{.Config.Image}}" in joined:
                 return True, "postgres:16\n"
             if "NetworkSettings.Ports" in joined:
                 return True, '{"5432/tcp":[{"HostIp":"127.0.0.1","HostPort":"5432"}]}'
-            if "run" in argv and "--network" in argv:
+            if "IPAddress" in joined:
+                return True, "172.18.0.2\n"
+            if "hostname -I" in joined or "pgclockmg-scram" in joined:
                 if state["aligned"] and pwd == "stale-secret":
-                    state["tcp_after"] += 1
-                    return True, "1\n"
-                state["tcp_before"] += 1
+                    state["scram_ok"] += 1
+                    return True, "pgclockmg-scram:ok ip=172.18.0.2\n"
+                return False, "pgclockmg-scram:fail\n"
+            if "run" in argv and "--network" in argv:
                 return False, "password authentication failed"
             if "exec" in argv and "psql" in argv:
                 if "ALTER ROLE" in joined:
                     state["alters"] += 1
                     state["aligned"] = True
                     return True, "ALTER ROLE\n"
-                return True, "1\n"
+                return True, "1\n"  # local trust
             return True, ""
 
         with patch("app.services.db_auth.PASARGUARD_DIR", Path("/opt/pasarguard")), \
              patch("app.services.db_auth.resolve_db_service", return_value="postgresql"), \
              patch.object(migrator, "_run_cmd", fake_run), \
-             patch("asyncio.sleep", new_callable=AsyncMock):
+             patch("asyncio.sleep", new_callable=AsyncMock), \
+             patch(
+                 "app.services.db_auth.refresh_pgbouncer_if_stale",
+                 new_callable=AsyncMock,
+                 return_value=True,
+             ):
             conn = await resolve_live_admin_connection(
                 migrator, "postgresql", env_text=env,
             )
         assert conn["password"] == "stale-secret"
         assert conn["user"] == "pasarguard"
         assert state["alters"] >= 1
-        assert state["tcp_before"] >= 1
-        assert state["tcp_after"] >= 1
-        assert any("trust recovery" in line.lower() for line in job.logs)
+        assert state["scram_ok"] >= 1
+        assert any("force-align" in line.lower() or "scram" in line.lower()
+                    for line in job.logs)
 
     asyncio.run(_run())
     print("OK: PG resolve recovers stale password via trust ALTER")
@@ -898,12 +912,16 @@ def test_pg_resolve_trust_recovery_raises_when_alter_fails():
         async def fake_run(cmd, cwd=None, timeout=600, *, quiet=False):
             argv = list(cmd) if isinstance(cmd, list) else [cmd]
             joined = " ".join(argv)
-            if "compose ps" in joined:
-                return True, "dbcid\n"
+            if "compose ps" in joined or "compose up" in joined:
+                return True, "dbcid\n" if "ps" in joined else ""
             if "{{.Config.Image}}" in joined:
                 return True, "postgres:16\n"
             if "NetworkSettings.Ports" in joined:
                 return True, '{"5432/tcp":[{"HostIp":"127.0.0.1","HostPort":"5432"}]}'
+            if "IPAddress" in joined:
+                return True, "172.18.0.2\n"
+            if "hostname -I" in joined or "pgclockmg-scram" in joined:
+                return False, "pgclockmg-scram:fail\n"
             if "run" in argv and "--network" in argv:
                 return False, "password authentication failed"
             if "exec" in argv and "psql" in argv:
@@ -915,9 +933,15 @@ def test_pg_resolve_trust_recovery_raises_when_alter_fails():
         with patch("app.services.db_auth.PASARGUARD_DIR", Path("/opt/pasarguard")), \
              patch("app.services.db_auth.resolve_db_service", return_value="postgresql"), \
              patch.object(migrator, "_run_cmd", fake_run), \
-             patch("asyncio.sleep", new_callable=AsyncMock):
+             patch("asyncio.sleep", new_callable=AsyncMock), \
+             patch(
+                 "app.services.db_auth.force_align_postgres_password",
+                 new_callable=AsyncMock,
+                 return_value=False,
+             ):
             with __import__("pytest").raises(
-                RuntimeError, match="password auto-heal could not|trust recovery could not",
+                RuntimeError,
+                match="could not prove the install password|in-container SCRAM|auto-heal",
             ):
                 await resolve_live_admin_connection(migrator, "postgresql", env_text=env)
 
@@ -925,8 +949,8 @@ def test_pg_resolve_trust_recovery_raises_when_alter_fails():
     print("OK: PG resolve still raises when trust ALTER fails")
 
 
-def test_pg_resolve_trust_no_published_port_heals_via_container_ip():
-    """Trust + no published 5432 must NOT hard-fail — heal then TCP via bridge IP."""
+def test_pg_resolve_trust_no_published_port_heals_via_eth0_scram():
+    """Trust + no published 5432: heal then prove password via in-container eth0 SCRAM."""
     import asyncio
     from unittest.mock import AsyncMock, patch
 
@@ -956,23 +980,22 @@ def test_pg_resolve_trust_no_published_port_heals_via_container_ip():
                     pwd = a.split("=", 1)[1]
             if "printenv" in joined:
                 return True, ""
-            if "compose ps" in joined:
-                return True, "dbcid\n"
+            if "compose ps" in joined or "compose up" in joined:
+                return True, "dbcid\n" if "ps" in joined else ""
             if "{{.Config.Image}}" in joined:
                 return True, "timescale/timescaledb:latest-pg16\n"
             if "NetworkSettings.Ports" in joined:
-                # No published ports — typical pgbouncer-only layout
-                return True, "{}"
-            if "NetworkSettings.Networks" in joined or "IPAddress" in joined:
+                return True, "{}"  # unpublished — the production failure mode
+            if "IPAddress" in joined:
                 return True, "172.18.0.4\n"
+            if "hostname -I" in joined or "pgclockmg-scram" in joined:
+                if state["aligned"] and pwd == "install-secret":
+                    return True, "pgclockmg-scram:ok ip=172.18.0.4\n"
+                return False, "pgclockmg-scram:fail\n"
             if "run" in argv and "--network" in argv:
-                # TCP via bridge IP only works after heal
-                if "172.18.0.4" in joined and state["aligned"] and pwd == "install-secret":
-                    return True, "1\n"
                 return False, "password authentication failed"
-            if "exec" in argv and "psql" in argv:
-                # Local trust accepts any password before/after
-                return True, "1\n"
+            if "exec" in argv and ("psql" in argv or "bash" in argv):
+                return True, "1\n"  # local trust
             return True, ""
 
         async def fake_heal(*_a, **_k):
@@ -1004,12 +1027,11 @@ def test_pg_resolve_trust_no_published_port_heals_via_container_ip():
         assert conn["host"] == "172.18.0.4"
         assert conn["port"] == "5432"
         assert state["healed"] == 1
-        assert any("not refusing" in line.lower() or "container ip" in line.lower()
-                    or "force-align" in line.lower() or "auto-align" in line.lower()
-                    for line in job.logs)
+        assert any("scram" in line.lower() for line in job.logs)
+        assert not any("refusing to accept" in line.lower() for line in job.logs)
 
     asyncio.run(_run())
-    print("OK: PG resolve heals via container IP when 5432 unpublished")
+    print("OK: PG resolve heals via eth0 SCRAM when 5432 unpublished")
 
 
 def test_pg_tcp_endpoints_include_container_ip_when_unpublished():
@@ -1051,6 +1073,9 @@ def test_pg_tcp_endpoints_include_container_ip_when_unpublished():
 
     asyncio.run(_run())
     print("OK: TCP endpoints fall back to container IP")
+
+
+def test_pg_resolve_accepts_password_verified_over_eth0_scram():
     import asyncio
     from unittest.mock import patch
 
@@ -1073,32 +1098,38 @@ def test_pg_tcp_endpoints_include_container_ip_when_unpublished():
             for a in argv:
                 if a.startswith("PGPASSWORD="):
                     pwd = a.split("=", 1)[1]
-            if "compose ps" in joined:
-                return True, "dbcid\n"
+            if "compose ps" in joined or "compose up" in joined:
+                return True, "dbcid\n" if "ps" in joined else ""
             if "{{.Config.Image}}" in joined:
                 return True, "timescale/timescaledb:latest-pg16\n"
             if "NetworkSettings.Ports" in joined:
                 return True, '{"5432/tcp":[{"HostIp":"0.0.0.0","HostPort":"5432"}]}'
-            if "run" in argv and "--network" in argv:
+            if "IPAddress" in joined:
+                return True, "172.18.0.5\n"
+            if "hostname -I" in joined or "pgclockmg-scram" in joined:
                 if pwd == "real-secret":
-                    return True, "1\n"
-                return False, "password authentication failed"
+                    return True, "pgclockmg-scram:ok ip=172.18.0.5\n"
+                return False, "pgclockmg-scram:fail\n"
             if "exec" in argv and "psql" in argv:
                 return True, "1\n"  # trust
             return True, ""
 
         with patch("app.services.db_auth.PASARGUARD_DIR", Path("/opt/pasarguard")), \
              patch("app.services.db_auth.resolve_db_service", return_value="timescaledb"), \
-             patch.object(migrator, "_run_cmd", fake_run):
+             patch.object(migrator, "_run_cmd", fake_run), \
+             patch(
+                 "app.services.multiworker_stack.compose_has_service",
+                 return_value=False,
+             ):
             conn = await resolve_live_admin_connection(
                 migrator, "timescaledb", env_text=env,
             )
         assert conn["password"] == "real-secret"
         assert conn["port"] == "5432"
-        assert conn["host"] == "127.0.0.1"
+        assert conn["host"] == "127.0.0.1"  # prefers published loopback
 
     asyncio.run(_run())
-    print("OK: PG resolve accepts TCP-verified password under trust")
+    print("OK: PG resolve accepts eth0-SCRAM-verified password under trust")
 
 
 def test_mysql_resolve_skip_grant_recovers_stale_root():
@@ -1229,7 +1260,7 @@ def test_pg_resolve_recovers_when_local_probes_fail():
             "POSTGRES_USER=pasarguard\n"
             "POSTGRES_DB=pasarguard\n"
         )
-        state = {"aligned": False, "tcp_ok": 0}
+        state = {"aligned": False, "scram_ok": 0}
 
         async def fake_run(cmd, cwd=None, timeout=600, *, quiet=False):
             argv = list(cmd) if isinstance(cmd, list) else [cmd]
@@ -1240,16 +1271,20 @@ def test_pg_resolve_recovers_when_local_probes_fail():
                     pwd = a.split("=", 1)[1]
             if "printenv" in joined:
                 return True, ""
-            if "compose ps" in joined:
-                return True, "dbcid\n"
+            if "compose ps" in joined or "compose up" in joined:
+                return True, "dbcid\n" if "ps" in joined else ""
             if "{{.Config.Image}}" in joined:
                 return True, "timescale/timescaledb:latest-pg16\n"
             if "NetworkSettings.Ports" in joined:
                 return True, '{"5432/tcp":[{"HostIp":"127.0.0.1","HostPort":"5432"}]}'
-            if "run" in argv and "--network" in argv:
+            if "IPAddress" in joined:
+                return True, "172.18.0.8\n"
+            if "hostname -I" in joined or "pgclockmg-scram" in joined:
                 if state["aligned"] and pwd == "live-secret":
-                    state["tcp_ok"] += 1
-                    return True, "1\n"
+                    state["scram_ok"] += 1
+                    return True, "pgclockmg-scram:ok ip=172.18.0.8\n"
+                return False, "pgclockmg-scram:fail\n"
+            if "run" in argv and "--network" in argv:
                 return False, "password authentication failed"
             if "exec" in argv and "psql" in argv:
                 if "ALTER ROLE" in joined:
@@ -1273,11 +1308,11 @@ def test_pg_resolve_recovers_when_local_probes_fail():
             )
         assert conn["password"] == "live-secret"
         assert state["aligned"] is True
-        assert state["tcp_ok"] >= 1
+        assert state["scram_ok"] >= 1
         assert any(
             any(s in line.lower() for s in (
-                "trust password recovery",
-                "password auto-heal",
+                "force-align",
+                "scram",
                 "auto-aligning",
                 "single-user",
             ))
@@ -1379,26 +1414,26 @@ def test_pg_resolve_uses_container_init_password():
                 return True, "pasarguard\n"
             if "printenv" in joined:
                 return True, ""
-            if "compose ps" in joined:
-                return True, "dbcid\n"
+            if "compose ps" in joined or "compose up" in joined:
+                return True, "dbcid\n" if "ps" in joined else ""
             if "{{.Config.Image}}" in joined:
                 return True, "postgres:16\n"
             if "NetworkSettings.Ports" in joined:
                 return True, '{"5432/tcp":[{"HostIp":"0.0.0.0","HostPort":"5432"}]}'
-            if "run" in argv and "--network" in argv:
+            if "IPAddress" in joined:
+                return True, "172.18.0.9\n"
+            if "hostname -I" in joined or "pgclockmg-scram" in joined:
                 if state["aligned"] and pwd == "container-secret":
-                    return True, "1\n"
-                if pwd == "container-secret" and not state["aligned"]:
-                    # Before recovery TCP rejects (SCRAM drifted from init)
-                    return False, "password authentication failed"
+                    return True, "pgclockmg-scram:ok ip=172.18.0.9\n"
+                return False, "pgclockmg-scram:fail\n"
+            if "run" in argv and "--network" in argv:
                 return False, "password authentication failed"
             if "exec" in argv and "psql" in argv:
                 if "ALTER ROLE" in joined:
                     state["aligned"] = True
                     return True, "ALTER ROLE\n"
-                if pwd == "container-secret":
-                    return True, "1\n"
-                return False, "password authentication failed"
+                # Local trust for container-secret and bogus
+                return True, "1\n"
             return True, ""
 
         with patch("app.services.db_auth.PASARGUARD_DIR", Path("/opt/pasarguard")), \
@@ -1505,7 +1540,7 @@ if __name__ == "__main__":
     test_force_align_escalates_live_hba_then_single_user_then_hba()
     test_heal_sidecar_prefers_volumes_from_over_compose_run()
     test_pg_resolve_uses_nuclear_when_trust_alter_fails()
-    test_pg_resolve_trust_no_published_port_heals_via_container_ip()
+    test_pg_resolve_trust_no_published_port_heals_via_eth0_scram()
     test_pg_tcp_endpoints_include_container_ip_when_unpublished()
     test_install_server_password_from_url_only()
     test_install_auth_env_for_sqlite_source_ignores_live_merge()
@@ -1531,7 +1566,7 @@ if __name__ == "__main__":
     test_mysql_probe_uses_argv_without_password_in_args()
     test_pg_resolve_trust_recovers_stale_password()
     test_pg_resolve_trust_recovery_raises_when_alter_fails()
-    test_pg_resolve_accepts_password_verified_over_tcp()
+    test_pg_resolve_accepts_password_verified_over_eth0_scram()
     test_mysql_resolve_skip_grant_recovers_stale_root()
     test_sync_postgres_falls_back_to_trust_alter()
     test_pg_resolve_recovers_when_local_probes_fail()

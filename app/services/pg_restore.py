@@ -3139,7 +3139,7 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
                 causes_fa = [
                     "اول PGClockMG را به آخرین نسخه آپدیت کنید (هدر UI باید v4.6.14+ باشد)",
                     "بکاپ sqlite پسورد ندارد — ویزارد فقط رمز نصب Timescale را خودکار روی کانتینر می‌نشاند",
-                    "اگر پورت 5432 پابلیش نیست، ویزارد از IP کانتینر / pgbouncer و live pg_hba استفاده می‌کند",
+                    "اگر پورت 5432 پابلیش نیست، ویزارد از SCRAM داخل کانتینر (eth0) رمز را اثبات و heal می‌کند",
                 ]
             else:
                 causes_fa = [
