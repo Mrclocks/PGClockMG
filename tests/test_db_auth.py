@@ -93,6 +93,142 @@ def test_explain_auth_sqlite_to_timescale_mentions_no_backup_password():
     print("OK: sqlite→timescale auth tips ignore backup password")
 
 
+def test_pg_single_user_script_embeds_roles_and_braces_safe():
+    from app.services.db_auth import _pg_single_user_alter_script
+
+    script = _pg_single_user_alter_script(
+        ["pasarguard", "postgres"],
+        "sec{ret}'pass",
+    )
+    assert "ALTER ROLE \"pasarguard\"" in script
+    assert "ALTER ROLE \"postgres\"" in script
+    assert "postgres --single" in script
+    assert "pgclockmg-heal: single-user ALTER done" in script
+    # Password with braces must not break script generation
+    assert "sec{ret}" in script or "sec{ret}" in script.replace("''", "'")
+    print("OK: single-user script embeds roles / brace-safe")
+
+
+def test_force_align_escalates_to_single_user_when_trust_fails():
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.db_auth import force_align_postgres_password
+    from app.services.migrators.base import BaseMigrator, MigrationJob
+
+    class Dummy(BaseMigrator):
+        async def run(self, params):
+            return {}
+
+    async def _run():
+        job = MigrationJob(job_id="pg-nuclear")
+        migrator = Dummy(job, {})
+        env = "POSTGRES_PASSWORD=live\nPOSTGRES_USER=pasarguard\nDB_NAME=pasarguard\n"
+        state = {"nuclear": 0}
+
+        with patch(
+            "app.services.db_auth.recover_postgres_passwords_via_trust",
+            new_callable=AsyncMock,
+            return_value=False,
+        ), patch(
+            "app.services.db_auth.recover_postgres_passwords_via_single_user",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as nuclear:
+            ok = await force_align_postgres_password(
+                migrator, "timescaledb", env, password="live",
+            )
+            state["nuclear"] = nuclear.await_count
+        assert ok is True
+        assert state["nuclear"] == 1
+        assert any("single-user" in line.lower() for line in job.logs)
+
+    asyncio.run(_run())
+    print("OK: force_align escalates to single-user")
+
+
+def test_pg_resolve_uses_nuclear_when_trust_alter_fails():
+    """Trust ALTER fails → nuclear single-user → TCP OK."""
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.db_auth import resolve_live_admin_connection
+    from app.services.migrators.base import BaseMigrator, MigrationJob
+
+    class Dummy(BaseMigrator):
+        async def run(self, params):
+            return {}
+
+    async def _run():
+        job = MigrationJob(job_id="pg-resolve-nuclear")
+        migrator = Dummy(job, {})
+        env = (
+            "POSTGRES_PASSWORD=install-pw\n"
+            "POSTGRES_USER=pasarguard\n"
+            "POSTGRES_DB=pasarguard\n"
+        )
+        state = {"aligned": False, "tcp_ok": 0}
+
+        async def fake_run(cmd, cwd=None, timeout=600, *, quiet=False):
+            argv = list(cmd) if isinstance(cmd, list) else [cmd]
+            joined = " ".join(argv)
+            pwd = ""
+            for a in argv:
+                if a.startswith("PGPASSWORD="):
+                    pwd = a.split("=", 1)[1]
+            if "printenv" in joined:
+                return True, ""
+            if "compose ps" in joined or "compose stop" in joined or "compose up" in joined:
+                return True, "dbcid\n" if "ps" in joined else ""
+            if "{{.Config.Image}}" in joined:
+                return True, "timescale/timescaledb:latest-pg16\n"
+            if "NetworkSettings.Ports" in joined:
+                return True, '{"5432/tcp":[{"HostIp":"127.0.0.1","HostPort":"5432"}]}'
+            if "run" in argv and "--network" in argv:
+                if state["aligned"] and pwd == "install-pw":
+                    state["tcp_ok"] += 1
+                    return True, "1\n"
+                return False, "password authentication failed"
+            if "exec" in argv and "psql" in argv:
+                if "ALTER ROLE" in joined:
+                    return False, "ERROR: permission denied"
+                return False, "password authentication failed"
+            return True, ""
+
+        async def fake_nuclear(*_a, **_k):
+            state["aligned"] = True
+            return True
+
+        with patch("app.services.db_auth.PASARGUARD_DIR", Path("/opt/pasarguard")), \
+             patch("app.services.db_auth.resolve_db_service", return_value="timescaledb"), \
+             patch.object(migrator, "_run_cmd", fake_run), \
+             patch("asyncio.sleep", new_callable=AsyncMock), \
+             patch(
+                 "app.services.db_auth.recover_postgres_passwords_via_trust",
+                 new_callable=AsyncMock,
+                 return_value=False,
+             ), \
+             patch(
+                 "app.services.db_auth.recover_postgres_passwords_via_single_user",
+                 side_effect=fake_nuclear,
+             ), \
+             patch(
+                 "app.services.db_auth.refresh_pgbouncer_if_stale",
+                 new_callable=AsyncMock,
+                 return_value=True,
+             ):
+            conn = await resolve_live_admin_connection(
+                migrator, "timescaledb", env_text=env,
+            )
+        assert conn["password"] == "install-pw"
+        assert state["tcp_ok"] >= 1
+        assert any("auto-heal" in line.lower() or "nuclear" in line.lower()
+                    or "single-user" in line.lower() for line in job.logs)
+
+    asyncio.run(_run())
+    print("OK: PG resolve uses nuclear when trust fails")
+
+
 def test_postgres_password_candidates_order():
     cands = postgres_password_candidates(ENV_PG)
     assert cands[0] == "super_secret"
@@ -658,7 +794,9 @@ def test_pg_resolve_trust_recovery_raises_when_alter_fails():
              patch("app.services.db_auth.resolve_db_service", return_value="postgresql"), \
              patch.object(migrator, "_run_cmd", fake_run), \
              patch("asyncio.sleep", new_callable=AsyncMock):
-            with __import__("pytest").raises(RuntimeError, match="trust recovery could not"):
+            with __import__("pytest").raises(
+                RuntimeError, match="password auto-heal could not|trust recovery could not",
+            ):
                 await resolve_live_admin_connection(migrator, "postgresql", env_text=env)
 
     asyncio.run(_run())
@@ -889,7 +1027,15 @@ def test_pg_resolve_recovers_when_local_probes_fail():
         assert conn["password"] == "live-secret"
         assert state["aligned"] is True
         assert state["tcp_ok"] >= 1
-        assert any("trust password recovery" in line.lower() for line in job.logs)
+        assert any(
+            any(s in line.lower() for s in (
+                "trust password recovery",
+                "password auto-heal",
+                "auto-aligning",
+                "single-user",
+            ))
+            for line in job.logs
+        )
 
     asyncio.run(_run())
     print("OK: PG resolve recovers when local probes fail")
@@ -1108,6 +1254,9 @@ def test_parse_published_port_prefers_loopback():
 
 
 if __name__ == "__main__":
+    test_pg_single_user_script_embeds_roles_and_braces_safe()
+    test_force_align_escalates_to_single_user_when_trust_fails()
+    test_pg_resolve_uses_nuclear_when_trust_alter_fails()
     test_install_server_password_from_url_only()
     test_install_auth_env_for_sqlite_source_ignores_live_merge()
     test_explain_auth_sqlite_to_timescale_mentions_no_backup_password()
