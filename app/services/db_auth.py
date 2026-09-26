@@ -569,12 +569,14 @@ def _pg_single_user_alter_script(roles: list[str], password: str) -> str:
     return (
         "set -e\n"
         "PGDATA=\"\"\n"
+        # Prefer well-known paths, then a bounded find (Timescale HA / custom mounts).
         "for d in \\\n"
         "  \"${PGDATA:-}\" \\\n"
         "  /var/lib/postgresql/data \\\n"
         "  /home/postgres/pgdata/data \\\n"
         "  /var/lib/postgresql/pgdata \\\n"
-        "  /pgdata\n"
+        "  /pgdata \\\n"
+        "  /var/lib/postgresql\n"
         "do\n"
         "  [ -n \"$d\" ] || continue\n"
         "  if [ -f \"$d/PG_VERSION\" ]; then\n"
@@ -582,6 +584,12 @@ def _pg_single_user_alter_script(roles: list[str], password: str) -> str:
         "    break\n"
         "  fi\n"
         "done\n"
+        "if [ -z \"$PGDATA\" ]; then\n"
+        "  found=$(find /var/lib /home /pgdata /data -name PG_VERSION 2>/dev/null | head -1 || true)\n"
+        "  if [ -n \"$found\" ]; then\n"
+        "    PGDATA=$(dirname \"$found\")\n"
+        "  fi\n"
+        "fi\n"
         "if [ -z \"$PGDATA\" ]; then\n"
         "  echo \"pgclockmg-heal: PGDATA not found\" >&2\n"
         "  exit 1\n"
@@ -593,8 +601,10 @@ def _pg_single_user_alter_script(roles: list[str], password: str) -> str:
         "      gosu postgres \"$@\"\n"
         "    elif command -v su-exec >/dev/null 2>&1; then\n"
         "      su-exec postgres \"$@\"\n"
-        "    else\n"
+        "    elif command -v runuser >/dev/null 2>&1; then\n"
         "      runuser -u postgres -- \"$@\"\n"
+        "    else\n"
+        "      \"$@\"\n"
         "    fi\n"
         "  else\n"
         "    \"$@\"\n"
@@ -604,8 +614,74 @@ def _pg_single_user_alter_script(roles: list[str], password: str) -> str:
         f"{alters}\n"
         "PGCLOCKMG_SQL\n"
         ")\n"
-        "printf '%s\\n' \"$SQL\" | run_as_pg postgres --single -D \"$PGDATA\" postgres\n"
+        # Try single-user against postgres DB name, then pasarguard (Timescale often\n"
+        # has no 'postgres' DB).\n"
+        "ok=0\n"
+        "for db in postgres pasarguard template1; do\n"
+        "  if printf '%s\\n' \"$SQL\" | run_as_pg postgres --single -D \"$PGDATA\" \"$db\"\n"
+        "  then\n"
+        "    ok=1\n"
+        "    echo \"pgclockmg-heal: single-user ALTER via db=$db\"\n"
+        "    break\n"
+        "  fi\n"
+        "done\n"
+        "if [ \"$ok\" != \"1\" ]; then\n"
+        "  echo \"pgclockmg-heal: single-user ALTER failed for all DBs\" >&2\n"
+        "  exit 1\n"
+        "fi\n"
         "echo \"pgclockmg-heal: single-user ALTER done\"\n"
+    )
+
+
+def _pg_hba_trust_prepare_script() -> str:
+    """Rewrite pg_hba.conf to trust (backup first) so a normal boot accepts ALTER."""
+    return (
+        "set -e\n"
+        "PGDATA=\"\"\n"
+        "for d in /var/lib/postgresql/data /home/postgres/pgdata/data "
+        "/var/lib/postgresql/pgdata /pgdata /var/lib/postgresql; do\n"
+        "  if [ -f \"$d/PG_VERSION\" ]; then PGDATA=\"$d\"; break; fi\n"
+        "done\n"
+        "if [ -z \"$PGDATA\" ]; then\n"
+        "  found=$(find /var/lib /home /pgdata /data -name PG_VERSION 2>/dev/null | head -1 || true)\n"
+        "  [ -n \"$found\" ] && PGDATA=$(dirname \"$found\")\n"
+        "fi\n"
+        "if [ -z \"$PGDATA\" ] || [ ! -f \"$PGDATA/pg_hba.conf\" ]; then\n"
+        "  echo \"pgclockmg-heal: pg_hba.conf not found\" >&2\n"
+        "  exit 1\n"
+        "fi\n"
+        "cp -a \"$PGDATA/pg_hba.conf\" \"$PGDATA/pg_hba.conf.pgclockmg.bak\"\n"
+        "cat > \"$PGDATA/pg_hba.conf\" <<'HBA'\n"
+        "# pgclockmg temporary trust heal — restored after ALTER\n"
+        "local all all trust\n"
+        "host all all 127.0.0.1/32 trust\n"
+        "host all all ::1/32 trust\n"
+        "host all all 0.0.0.0/0 trust\n"
+        "host all all ::/0 trust\n"
+        "HBA\n"
+        "echo \"pgclockmg-heal: pg_hba trust installed on $PGDATA\"\n"
+    )
+
+
+def _pg_hba_trust_restore_script() -> str:
+    return (
+        "set -e\n"
+        "PGDATA=\"\"\n"
+        "for d in /var/lib/postgresql/data /home/postgres/pgdata/data "
+        "/var/lib/postgresql/pgdata /pgdata /var/lib/postgresql; do\n"
+        "  if [ -f \"$d/PG_VERSION\" ]; then PGDATA=\"$d\"; break; fi\n"
+        "done\n"
+        "if [ -z \"$PGDATA\" ]; then\n"
+        "  found=$(find /var/lib /home /pgdata /data -name PG_VERSION 2>/dev/null | head -1 || true)\n"
+        "  [ -n \"$found\" ] && PGDATA=$(dirname \"$found\")\n"
+        "fi\n"
+        "bak=\"$PGDATA/pg_hba.conf.pgclockmg.bak\"\n"
+        "if [ -n \"$PGDATA\" ] && [ -f \"$bak\" ]; then\n"
+        "  mv -f \"$bak\" \"$PGDATA/pg_hba.conf\"\n"
+        "  echo \"pgclockmg-heal: pg_hba restored\"\n"
+        "else\n"
+        "  echo \"pgclockmg-heal: no pg_hba backup to restore\"\n"
+        "fi\n"
     )
 
 
@@ -753,6 +829,214 @@ async def recover_postgres_passwords_via_single_user(
                 )
 
 
+async def recover_postgres_passwords_via_hba_trust(
+    migrator,
+    service: str,
+    env_text: str,
+    *,
+    password: str,
+    admin_users: list[str] | None = None,
+) -> bool:
+    """Second nuclear path: temporary ``pg_hba.conf`` trust → ALTER → restore hba.
+
+    Used when ``postgres --single`` cannot run (odd image layout). Same volume,
+    no data wipe.
+    """
+    if not password or not service:
+        return False
+
+    text = env_text or ""
+    container_env: dict[str, str] = {}
+    try:
+        container_env = await read_db_container_init_env(migrator, service)
+    except Exception:
+        container_env = {}
+    roles = postgres_role_candidates(
+        text,
+        container_env.get("POSTGRES_USER"),
+        container_env.get("DB_USER"),
+        *(admin_users or []),
+        include_postgres_fallback=True,
+    ) or ["postgres", "pasarguard"]
+    users = list(
+        _unique_strings(
+            *(admin_users or []),
+            *postgres_admin_users(text),
+            container_env.get("POSTGRES_USER"),
+            "postgres",
+        )
+    ) or ["postgres"]
+    admin_dbs = _unique_strings(
+        target_database_name(text, "postgresql"),
+        container_env.get("POSTGRES_DB"),
+        "postgres",
+        "pasarguard",
+    )
+    cwd = str(PASARGUARD_DIR)
+    heal_name = f"pasarguard-{service}-hba-heal"
+
+    migrator.job.log(
+        f"PostgreSQL HBA-trust recovery on {service}: temporary trust → ALTER "
+        f"{len(roles)} role(s) → restore pg_hba..."
+    )
+
+    await migrator._run_cmd(["docker", "rm", "-f", heal_name], cwd=cwd, timeout=60)
+    await migrator._run_cmd(
+        ["docker", "compose", "stop", service], cwd=cwd, timeout=120,
+    )
+
+    hba_patched = False
+    try:
+        run_ok, run_out = await migrator._run_cmd(
+            [
+                "docker", "compose", "run", "-d", "--no-deps",
+                "--name", heal_name,
+                "--entrypoint", "bash",
+                service,
+                "-lc", "sleep 3600",
+            ],
+            cwd=cwd,
+            timeout=180,
+        )
+        if not run_ok:
+            migrator.job.log(
+                f"PostgreSQL HBA heal: compose run failed: {(run_out or '')[-300:]}"
+            )
+            return False
+        await asyncio.sleep(2)
+        ok, out = await migrator._run_cmd(
+            ["docker", "exec", heal_name, "bash", "-lc", _pg_hba_trust_prepare_script()],
+            cwd=cwd,
+            timeout=60,
+        )
+        if not ok or "pgclockmg-heal: pg_hba trust installed" not in (out or ""):
+            migrator.job.log(
+                f"PostgreSQL HBA heal: could not patch pg_hba: {(out or '')[-300:]}"
+            )
+            return False
+        hba_patched = True
+    finally:
+        await migrator._run_cmd(["docker", "stop", heal_name], cwd=cwd, timeout=60)
+        await migrator._run_cmd(["docker", "rm", "-f", heal_name], cwd=cwd, timeout=60)
+
+    # Boot normal service under temporary trust, ALTER, then restore hba.
+    up_ok, up_out = await migrator._run_cmd(
+        ["docker", "compose", "up", "-d", service], cwd=cwd, timeout=180,
+    )
+    if not up_ok:
+        migrator.job.log(
+            f"PostgreSQL HBA heal: restart failed: {(up_out or '')[-300:]}"
+        )
+        return False
+
+    any_ok = False
+    try:
+        for _ in range(40):
+            await asyncio.sleep(2)
+            # Under trust, omit password.
+            for as_user in users:
+                for admin_db in admin_dbs:
+                    probe = await _pg_alter_role_via_trust(
+                        migrator,
+                        service,
+                        as_user=as_user,
+                        role=roles[0],
+                        password=password,
+                        database=admin_db,
+                    )
+                    if probe:
+                        break
+                else:
+                    continue
+                break
+            else:
+                continue
+            break
+
+        for role in roles:
+            synced = False
+            for as_user in users:
+                for admin_db in admin_dbs:
+                    if await _pg_alter_role_via_trust(
+                        migrator,
+                        service,
+                        as_user=as_user,
+                        role=role,
+                        password=password,
+                        database=admin_db,
+                    ):
+                        migrator.job.log(
+                            f"HBA-trust synced password for role {role} "
+                            f"(as {as_user} on {admin_db})"
+                        )
+                        synced = True
+                        any_ok = True
+                        break
+                if synced:
+                    break
+            if not synced:
+                migrator.job.log(f"HBA-trust could not ALTER ROLE {role}")
+    finally:
+        if hba_patched:
+            # Restore original pg_hba via another one-shot, then reload.
+            await migrator._run_cmd(
+                ["docker", "compose", "stop", service], cwd=cwd, timeout=120,
+            )
+            await migrator._run_cmd(["docker", "rm", "-f", heal_name], cwd=cwd, timeout=60)
+            run_ok2, _ = await migrator._run_cmd(
+                [
+                    "docker", "compose", "run", "-d", "--no-deps",
+                    "--name", heal_name,
+                    "--entrypoint", "bash",
+                    service,
+                    "-lc", "sleep 600",
+                ],
+                cwd=cwd,
+                timeout=180,
+            )
+            if run_ok2:
+                await asyncio.sleep(1)
+                await migrator._run_cmd(
+                    [
+                        "docker", "exec", heal_name, "bash", "-lc",
+                        _pg_hba_trust_restore_script(),
+                    ],
+                    cwd=cwd,
+                    timeout=60,
+                )
+            await migrator._run_cmd(["docker", "stop", heal_name], cwd=cwd, timeout=60)
+            await migrator._run_cmd(["docker", "rm", "-f", heal_name], cwd=cwd, timeout=60)
+            await migrator._run_cmd(
+                ["docker", "compose", "up", "-d", service], cwd=cwd, timeout=180,
+            )
+            await asyncio.sleep(3)
+            # Best-effort reload if still trusted briefly
+            for as_user in users:
+                for admin_db in admin_dbs:
+                    await migrator._run_cmd(
+                        [
+                            "docker", "compose", "exec", "-T",
+                            service, "psql", "-U", as_user, "-d", admin_db,
+                            "-c", "SELECT pg_reload_conf();",
+                        ],
+                        cwd=cwd,
+                        timeout=20,
+                    )
+
+    if any_ok:
+        try:
+            await refresh_pgbouncer_if_stale(
+                migrator,
+                "postgresql",
+                env_text=text,
+                password=password,
+                force=True,
+            )
+        except Exception as exc:
+            migrator.job.log(f"PgBouncer refresh after HBA heal note: {exc}")
+    return any_ok
+
+
 async def force_align_postgres_password(
     migrator,
     service: str,
@@ -761,7 +1045,7 @@ async def force_align_postgres_password(
     password: str,
     admin_users: list[str] | None = None,
 ) -> bool:
-    """Align live PG/Timescale roles to ``password`` — trust first, then nuclear.
+    """Align live PG/Timescale roles to ``password`` — trust → single-user → HBA.
 
     This is the automation that makes sqlite→Timescale (and any convert) keep
     going when .env and the volume SCRAM secret drifted: we never ask the
@@ -782,13 +1066,32 @@ async def force_align_postgres_password(
         "Trust recovery insufficient — escalating to PostgreSQL single-user "
         "password heal (same volume)..."
     )
-    return await recover_postgres_passwords_via_single_user(
+    ok = await recover_postgres_passwords_via_single_user(
         migrator,
         service,
         env_text,
         password=password,
         admin_users=admin_users,
     )
+    if ok:
+        return True
+    migrator.job.log(
+        "Single-user heal insufficient — escalating to temporary pg_hba trust..."
+    )
+    return await recover_postgres_passwords_via_hba_trust(
+        migrator,
+        service,
+        env_text,
+        password=password,
+        admin_users=admin_users,
+    )
+
+
+def mint_install_db_password() -> str:
+    """Generate a install password when .env has none (sqlite source path)."""
+    import secrets
+
+    return secrets.token_urlsafe(24)
 
 
 async def _probe_mysql(
@@ -927,10 +1230,40 @@ async def resolve_live_admin_connection(
                         return conn
                 tcp_failures += 1
 
-        # Always attempt trust recovery when no verified TCP/local password worked.
-        # Covers: trust socket + stale SCRAM, AND local probes that never succeeded
-        # (wrong DB name, empty .env secrets, container-only password).
+        # Always attempt auto-heal when no verified TCP/local password worked.
+        # Prefer install .env secret; if missing (sqlite backups never have one),
+        # mint a fresh password, force it onto live roles, and continue convert.
         preferred = passwords[0] if passwords else ""
+        minted = False
+        if not preferred:
+            preferred = mint_install_db_password()
+            minted = True
+            migrator.job.log(
+                "No install/container password candidates — minted a temporary "
+                "POSTGRES_PASSWORD and will force-align live roles to it"
+            )
+            try:
+                from app.services.env_migration import _set_env_var_simple, _set_sqlalchemy_url
+                from app.config import PASARGUARD_ENV as _PG_ENV
+
+                if _PG_ENV.exists():
+                    live = _PG_ENV.read_text(encoding="utf-8", errors="ignore")
+                    live = _set_env_var_simple(live, "POSTGRES_PASSWORD", preferred)
+                    live = _set_env_var_simple(live, "DB_PASSWORD", preferred)
+                    url = read_env_var(live, "SQLALCHEMY_DATABASE_URL") or ""
+                    if url and "sqlite" not in url.lower():
+                        from app.services.env_migration import _replace_sqlalchemy_password
+
+                        live = _set_sqlalchemy_url(
+                            live, _replace_sqlalchemy_password(url, preferred),
+                        )
+                    _PG_ENV.write_text(live, encoding="utf-8")
+                    text = live
+                    migrator.job.log(
+                        "Wrote minted POSTGRES_PASSWORD into live .env for convert/panel"
+                    )
+            except Exception as mint_exc:
+                migrator.job.log(f"Could not persist minted password to .env: {mint_exc}")
         image = host = port = ""
         if host_endpoint:
             image, host, port = host_endpoint
@@ -942,7 +1275,9 @@ async def resolve_live_admin_connection(
             migrator.job.log(
                 "PostgreSQL auth unresolved — auto-aligning roles to install password "
                 f"(local_probe_ok={local_probe_ok}, tcp_failures={tcp_failures}; "
-                "trust then single-user nuclear if needed)..."
+                "trust → single-user → pg_hba trust"
+                + (", minted=yes" if minted else "")
+                + ")..."
             )
             recovered = await force_align_postgres_password(
                 migrator,
@@ -1000,16 +1335,17 @@ async def resolve_live_admin_connection(
                     if not recovered
                     else " (password auto-heal ran but TCP still rejected the .env password)."
                 )
-                + " Fix POSTGRES_PASSWORD / DB_PASSWORD to match the running container, then retry."
+                + " Update PGClockMG to the latest release and retry."
             )
         raise RuntimeError(
             "PostgreSQL/TimescaleDB authentication failed — "
-            "POSTGRES_PASSWORD and DB_PASSWORD in /opt/pasarguard/.env do not match the running container"
+            "could not auto-align install password onto the live container"
             + (
                 " (password auto-heal could not realign role passwords)."
                 if preferred and not recovered
-                else ""
+                else "."
             )
+            + " Update PGClockMG to the latest release and retry."
         )
 
     if db_type in ("mysql", "mariadb"):
