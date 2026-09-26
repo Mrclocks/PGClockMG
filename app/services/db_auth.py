@@ -559,6 +559,238 @@ async def recover_postgres_passwords_via_trust(
     return any_ok
 
 
+def _pg_single_user_alter_script(roles: list[str], password: str) -> str:
+    """Bash script: find PGDATA, run ``postgres --single`` ALTER ROLE for each role."""
+    lit = _pg_sql_literal(password)
+    alters = "\n".join(
+        f'ALTER ROLE "{role}" WITH PASSWORD {lit};' for role in roles if role
+    )
+    # Do not use an f-string for the whole script — passwords may contain `{`.
+    return (
+        "set -e\n"
+        "PGDATA=\"\"\n"
+        "for d in \\\n"
+        "  \"${PGDATA:-}\" \\\n"
+        "  /var/lib/postgresql/data \\\n"
+        "  /home/postgres/pgdata/data \\\n"
+        "  /var/lib/postgresql/pgdata \\\n"
+        "  /pgdata\n"
+        "do\n"
+        "  [ -n \"$d\" ] || continue\n"
+        "  if [ -f \"$d/PG_VERSION\" ]; then\n"
+        "    PGDATA=\"$d\"\n"
+        "    break\n"
+        "  fi\n"
+        "done\n"
+        "if [ -z \"$PGDATA\" ]; then\n"
+        "  echo \"pgclockmg-heal: PGDATA not found\" >&2\n"
+        "  exit 1\n"
+        "fi\n"
+        "echo \"pgclockmg-heal: using PGDATA=$PGDATA\"\n"
+        "run_as_pg() {\n"
+        "  if [ \"$(id -u)\" = \"0\" ]; then\n"
+        "    if command -v gosu >/dev/null 2>&1; then\n"
+        "      gosu postgres \"$@\"\n"
+        "    elif command -v su-exec >/dev/null 2>&1; then\n"
+        "      su-exec postgres \"$@\"\n"
+        "    else\n"
+        "      runuser -u postgres -- \"$@\"\n"
+        "    fi\n"
+        "  else\n"
+        "    \"$@\"\n"
+        "  fi\n"
+        "}\n"
+        "SQL=$(cat <<'PGCLOCKMG_SQL'\n"
+        f"{alters}\n"
+        "PGCLOCKMG_SQL\n"
+        ")\n"
+        "printf '%s\\n' \"$SQL\" | run_as_pg postgres --single -D \"$PGDATA\" postgres\n"
+        "echo \"pgclockmg-heal: single-user ALTER done\"\n"
+    )
+
+
+async def recover_postgres_passwords_via_single_user(
+    migrator,
+    service: str,
+    env_text: str,
+    *,
+    password: str,
+    admin_users: list[str] | None = None,
+) -> bool:
+    """Last-resort PG password reset — same volume, ``postgres --single`` (no auth).
+
+    Used when in-container trust/peer ALTER cannot run (custom ``pg_hba``, no
+    local trust, or SCRAM lockout). Stops the compose DB service, runs a one-shot
+    sibling on the *same data volume*, sets role passwords to the install .env
+    secret, then brings the normal service back. Does not wipe data.
+    """
+    if not password or not service:
+        return False
+
+    text = env_text or ""
+    container_env: dict[str, str] = {}
+    try:
+        container_env = await read_db_container_init_env(migrator, service)
+    except Exception:
+        container_env = {}
+    roles = postgres_role_candidates(
+        text,
+        container_env.get("POSTGRES_USER"),
+        container_env.get("DB_USER"),
+        *(admin_users or []),
+        include_postgres_fallback=True,
+    )
+    if not roles:
+        roles = ["postgres", "pasarguard"]
+
+    cwd = str(PASARGUARD_DIR)
+    heal_name = f"pasarguard-{service}-pwd-heal"
+    script = _pg_single_user_alter_script(roles, password)
+
+    migrator.job.log(
+        f"PostgreSQL nuclear recovery on {service}: single-user ALTER for "
+        f"{len(roles)} role(s) (same volume, no data wipe)..."
+    )
+
+    await migrator._run_cmd(
+        ["docker", "rm", "-f", heal_name], cwd=cwd, timeout=60,
+    )
+    stop_ok, stop_out = await migrator._run_cmd(
+        ["docker", "compose", "stop", service], cwd=cwd, timeout=120,
+    )
+    if not stop_ok:
+        migrator.job.log(
+            f"PostgreSQL nuclear: could not stop {service}: {(stop_out or '')[-200:]}"
+        )
+
+    success = False
+    started = False
+    try:
+        # Override entrypoint to bash so we never re-run image init on existing data.
+        run_ok, run_out = await migrator._run_cmd(
+            [
+                "docker", "compose", "run", "-d", "--no-deps",
+                "--name", heal_name,
+                "--entrypoint", "bash",
+                service,
+                "-lc", "sleep 3600",
+            ],
+            cwd=cwd,
+            timeout=180,
+        )
+        if not run_ok:
+            migrator.job.log(
+                f"PostgreSQL nuclear: compose run failed: {(run_out or '')[-300:]}"
+            )
+            return False
+        started = True
+        await asyncio.sleep(2)
+
+        ok, out = await migrator._run_cmd(
+            ["docker", "exec", heal_name, "bash", "-lc", script],
+            cwd=cwd,
+            timeout=120,
+        )
+        if not ok or "pgclockmg-heal: single-user ALTER done" not in (out or ""):
+            migrator.job.log(
+                f"PostgreSQL nuclear: single-user ALTER failed: {(out or '')[-400:]}"
+            )
+            return False
+        migrator.job.log("PostgreSQL nuclear: role passwords set via single-user mode")
+        success = True
+        return True
+    finally:
+        if started:
+            await migrator._run_cmd(
+                ["docker", "stop", heal_name], cwd=cwd, timeout=60,
+            )
+        await migrator._run_cmd(
+            ["docker", "rm", "-f", heal_name], cwd=cwd, timeout=60,
+        )
+        up_ok, up_out = await migrator._run_cmd(
+            ["docker", "compose", "up", "-d", service], cwd=cwd, timeout=180,
+        )
+        if not up_ok:
+            migrator.job.log(
+                f"PostgreSQL nuclear: failed to restart {service}: {(up_out or '')[-300:]}"
+            )
+        elif success:
+            # Wait until TCP-ish local probe accepts the new password.
+            probe_dbs = _pg_probe_databases(text, "postgresql")
+            users = list(
+                _unique_strings(
+                    *(admin_users or []),
+                    *postgres_admin_users(text),
+                    container_env.get("POSTGRES_USER"),
+                    "postgres",
+                )
+            ) or ["postgres"]
+            for _ in range(30):
+                await asyncio.sleep(2)
+                ready = False
+                for user in users:
+                    if await _probe_pg_any_db(
+                        migrator, service, user, password, probe_dbs,
+                    ):
+                        ready = True
+                        break
+                if ready:
+                    migrator.job.log(
+                        f"PostgreSQL nuclear: {service} accepting new password"
+                    )
+                    break
+            try:
+                await refresh_pgbouncer_if_stale(
+                    migrator,
+                    "postgresql",
+                    env_text=text,
+                    password=password,
+                    force=True,
+                )
+            except Exception as exc:
+                migrator.job.log(
+                    f"PgBouncer refresh after nuclear recovery note: {exc}"
+                )
+
+
+async def force_align_postgres_password(
+    migrator,
+    service: str,
+    env_text: str,
+    *,
+    password: str,
+    admin_users: list[str] | None = None,
+) -> bool:
+    """Align live PG/Timescale roles to ``password`` — trust first, then nuclear.
+
+    This is the automation that makes sqlite→Timescale (and any convert) keep
+    going when .env and the volume SCRAM secret drifted: we never ask the
+    operator to hand-edit passwords mid-restore.
+    """
+    if not password or not service:
+        return False
+    ok = await recover_postgres_passwords_via_trust(
+        migrator,
+        service,
+        env_text,
+        password=password,
+        admin_users=admin_users,
+    )
+    if ok:
+        return True
+    migrator.job.log(
+        "Trust recovery insufficient — escalating to PostgreSQL single-user "
+        "password heal (same volume)..."
+    )
+    return await recover_postgres_passwords_via_single_user(
+        migrator,
+        service,
+        env_text,
+        password=password,
+        admin_users=admin_users,
+    )
+
+
 async def _probe_mysql(
     migrator,
     service: str,
@@ -708,10 +940,11 @@ async def resolve_live_admin_connection(
         recovered = False
         if preferred and service:
             migrator.job.log(
-                "PostgreSQL auth unresolved — attempting trust password recovery "
-                f"(local_probe_ok={local_probe_ok}, tcp_failures={tcp_failures})..."
+                "PostgreSQL auth unresolved — auto-aligning roles to install password "
+                f"(local_probe_ok={local_probe_ok}, tcp_failures={tcp_failures}; "
+                "trust then single-user nuclear if needed)..."
             )
-            recovered = await recover_postgres_passwords_via_trust(
+            recovered = await force_align_postgres_password(
                 migrator,
                 service,
                 text,
@@ -720,11 +953,11 @@ async def resolve_live_admin_connection(
             )
         if recovered and image and host and port:
             migrator.job.log(
-                "PostgreSQL trust recovery applied — re-checking TCP auth..."
+                "PostgreSQL password auto-heal applied — re-checking TCP auth..."
             )
             # SCRAM secrets can take a moment to settle after ALTER ROLE;
             # retry a few times before declaring failure.
-            for attempt in range(1, 4):
+            for attempt in range(1, 5):
                 await asyncio.sleep(1.5 * attempt)
                 for user in users:
                     for tcp_db in probe_dbs:
@@ -747,16 +980,15 @@ async def resolve_live_admin_connection(
                             }
                             migrator.job.log(
                                 f"PostgreSQL auth OK as {user} via TCP {host}:{port} "
-                                f"(after trust password recovery, db={tcp_db}, "
+                                f"(after password auto-heal, db={tcp_db}, "
                                 f"attempt={attempt})"
                             )
                             return conn
             raise RuntimeError(
                 "PostgreSQL/TimescaleDB authentication failed over TCP — "
-                "trust recovery aligned role passwords but the published host port "
+                "password auto-heal aligned role passwords but the published host port "
                 f"({host}:{port}) still rejected every candidate. "
-                "Check that 5432 is published to the live Timescale/Postgres container "
-                "and POSTGRES_PASSWORD / DB_PASSWORD match .env."
+                "Check that 5432 is published to the live Timescale/Postgres container."
             )
         if trust_mode and tcp_failures:
             raise RuntimeError(
@@ -764,9 +996,9 @@ async def resolve_live_admin_connection(
                 "in-container probes are trust-only and every .env password candidate "
                 "was rejected by the published host port"
                 + (
-                    " (trust recovery could not realign role passwords)."
+                    " (password auto-heal could not realign role passwords)."
                     if not recovered
-                    else " (trust recovery ran but TCP still rejected the .env password)."
+                    else " (password auto-heal ran but TCP still rejected the .env password)."
                 )
                 + " Fix POSTGRES_PASSWORD / DB_PASSWORD to match the running container, then retry."
             )
@@ -774,7 +1006,7 @@ async def resolve_live_admin_connection(
             "PostgreSQL/TimescaleDB authentication failed — "
             "POSTGRES_PASSWORD and DB_PASSWORD in /opt/pasarguard/.env do not match the running container"
             + (
-                " (trust recovery could not realign role passwords)."
+                " (password auto-heal could not realign role passwords)."
                 if preferred and not recovered
                 else ""
             )
@@ -1492,7 +1724,7 @@ async def sync_postgres_roles_to_app_password(
         failed_roles.append(role)
 
     if failed_roles or not any_ok:
-        recovered = await recover_postgres_passwords_via_trust(
+        recovered = await force_align_postgres_password(
             migrator,
             service,
             text,
@@ -1501,7 +1733,7 @@ async def sync_postgres_roles_to_app_password(
         )
         if recovered:
             any_ok = True
-            # recover_postgres_passwords_via_trust already force-refreshes pgbouncer
+            # force_align already force-refreshes pgbouncer
             return True
 
     await refresh_pgbouncer_if_stale(

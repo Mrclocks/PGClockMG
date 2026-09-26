@@ -2250,7 +2250,7 @@ async def _sync_pg_role_passwords(
             )
 
     if failed_roles or not synced_any:
-        from app.services.db_auth import recover_postgres_passwords_via_trust
+        from app.services.db_auth import force_align_postgres_password
 
         class _TrustMini:
             def __init__(self, j: MigrationJob):
@@ -2260,10 +2260,10 @@ async def _sync_pg_role_passwords(
                 return await _run(self.job, cmd, cwd=cwd, timeout=timeout, quiet=quiet)
 
         job.log(
-            "Falling back to PostgreSQL trust password recovery "
-            f"for {len(failed_roles) or len(roles)} role(s)..."
+            "Falling back to PostgreSQL password auto-heal "
+            f"(trust then single-user) for {len(failed_roles) or len(roles)} role(s)..."
         )
-        recovered = await recover_postgres_passwords_via_trust(
+        recovered = await force_align_postgres_password(
             _TrustMini(job),
             svc,
             env_now,
@@ -2271,7 +2271,7 @@ async def _sync_pg_role_passwords(
             admin_users=[u for u, _ in auth_attempts] or roles,
         )
         if recovered:
-            job.log("Trust password recovery aligned roles to .env password")
+            job.log("Password auto-heal aligned roles to .env password")
             try:
                 from app.services.db_auth import refresh_pgbouncer_if_stale
 
@@ -2293,7 +2293,7 @@ async def _sync_pg_role_passwords(
             except Exception as pgb_exc:
                 job.log(f"PgBouncer refresh after role sync note: {pgb_exc}")
         else:
-            job.log("Trust password recovery could not align all roles")
+            job.log("Password auto-heal could not align all roles")
     else:
         # Sync succeeded without trust fallback — still force-refresh PgBouncer so
         # panel :6432 cannot keep a stale SCRAM cache after convert/restore.
@@ -2697,17 +2697,15 @@ async def _prepare_panel_boot_after_finalize(
         try:
             admin = await resolve_live_admin_connection(mini, final_engine, env_text=env_now)
         except RuntimeError as probe_err:
-            from app.services.db_auth import (
-                recover_postgres_passwords_via_trust,
-            )
+            from app.services.db_auth import force_align_postgres_password
             from app.services.pasarguard_ops import resolve_db_service
 
             job.log(
                 f"Live admin probe: {probe_err} — "
-                "trying trust password recovery before panel boot"
+                "auto-healing install password onto live roles before panel boot"
             )
             svc = resolve_db_service(final_engine) or "timescaledb"
-            recovered = await recover_postgres_passwords_via_trust(
+            recovered = await force_align_postgres_password(
                 mini,
                 svc,
                 env_now,
@@ -2726,7 +2724,7 @@ async def _prepare_panel_boot_after_finalize(
                         "database": verify_db,
                     }
             else:
-                job.log("Trust recovery unavailable — syncing with finalized password")
+                job.log("Password auto-heal unavailable — syncing with finalized password")
                 admin = {
                     "user": verify_user,
                     "password": verify_pass,
@@ -3140,8 +3138,8 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
             if bak == "sqlite":
                 causes_fa = [
                     "بکاپ sqlite پسورد ندارد — ویزارد فقط از رمز نصب Timescale/PostgreSQL استفاده می‌کند",
-                    "رمز POSTGRES_PASSWORD / DB_PASSWORD در .env نصب باید با کانتینر زنده یکی باشد (ویزارد با trust recovery هم‌تراز می‌کند)",
-                    "PgBouncer کش قدیمی دارد — ویزارد نقش‌ها را هم‌تراز و pgbouncer را ریستارت می‌کند",
+                    "ویزارد رمز .env نصب را خودکار روی نقش‌های زنده می‌نشاند (trust و در صورت نیاز single-user)",
+                    "PgBouncer بعد از هم‌ترازی ریستارت می‌شود تا SASL روی :6432 نماند",
                 ]
             else:
                 causes_fa = [
