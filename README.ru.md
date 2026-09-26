@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.11`** — восстановление DB auth для restore/migrate (sqlite→Timescale и все движки)
+> 🚀 **`v4.6.12`** — автовыравнивание пароля Timescale даже без trust (single-user heal)
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
