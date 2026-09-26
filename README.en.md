@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.10`** — Marzban→PasarGuard migrate on MariaDB (mariadb/mysql client fallback)
+> 🚀 **`v4.6.11`** — DB auth heal for restore/migrate (sqlite→Timescale + all engines)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
