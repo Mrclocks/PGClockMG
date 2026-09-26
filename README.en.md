@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.11`** — DB auth heal for restore/migrate (sqlite→Timescale + all engines)
+> 🚀 **`v4.6.12`** — auto-align Timescale password even when trust is not enough (single-user heal)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
