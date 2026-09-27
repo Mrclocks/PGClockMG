@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.6.21`** — ریشهٔ شکست sqlite→Timescale: URL اسکیوالایت دیگر خراب نمی‌شود و container id از نویز compose جدا می‌شود
+> 🚀 **`v4.6.22`** — alembic asyncpg: `ssl=disable` به‌جای `ssl=false` (رفع ClientConfigurationError)
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

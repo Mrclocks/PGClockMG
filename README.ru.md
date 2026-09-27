@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.21`** — корневой фикс sqlite→Timescale: SQLite URL alembic больше не ломается, container id очищается от шума compose
+> 🚀 **`v4.6.22`** — alembic asyncpg: `ssl=disable` вместо неверного `ssl=false`
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

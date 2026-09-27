@@ -3365,12 +3365,20 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         else:
             fa = "ساخت اسکیمای مقصد با alembic شکست خورد (Phase 2)."
             en = "Target schema create via alembic upgrade head failed (Phase 2)."
-            causes_fa = [
-                "اول PGClockMG را به v4.6.21+ آپدیت کنید "
-                "(endpoint rotation + استخراج امن container id)",
-                "نسخه جدید compose DNS / container netns / bridge را درست می‌چرخاند",
-                "اگر باز هم fail شد، لاگ را برای خطای اسکیما یا auth ببینید — نه فقط وسط Traceback",
-            ]
+            if "sslmode" in low or ("clientconfigurationerror" in low and "ssl" in low):
+                causes_fa = [
+                    "اول PGClockMG را به v4.6.22+ آپدیت کنید "
+                    "(ssl=false دیگر به asyncpg پاس داده نمی‌شود — ssl=disable)",
+                    "نسخهٔ قبلی URL را با ssl=false می‌ساخت و asyncpg آن را رد می‌کرد",
+                    "اگر باز هم fail شد، لاگ auth/HBA را ببینید",
+                ]
+            else:
+                causes_fa = [
+                    "اول PGClockMG را به v4.6.22+ آپدیت کنید "
+                    "(endpoint rotation + استخراج امن container id + ssl=disable)",
+                    "نسخه جدید compose DNS / container netns / bridge را درست می‌چرخاند",
+                    "اگر باز هم fail شد، لاگ را برای خطای اسکیما یا auth ببینید — نه فقط وسط Traceback",
+                ]
     elif "pasarguard failed to start" in low or "did not reach ready state" in low:
         fa = "پنل PasarGuard بعد از ریستور بالا نیامد."
         en = "PasarGuard panel did not start after restore."
