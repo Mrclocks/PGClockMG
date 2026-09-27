@@ -259,6 +259,112 @@ def test_extract_failure_snippet_includes_exception_line():
     print("OK: failure snippet includes exception line")
 
 
+def test_telegram_conflict_is_noise_not_root_cause():
+    """Telegram getUpdates conflict must not dominate restore failure details."""
+    from app.services.pasarguard_ops import (
+        _extract_failure_snippet,
+        _line_indicates_failure,
+        _logs_dominated_by_telegram_noise,
+        _logs_show_panel_startup,
+    )
+
+    spam_line = (
+        "pasarguard-1 | Failed to fetch updates - TelegramConflictError: "
+        "Telegram server says - Conflict: terminated by other getUpdates request; "
+        "make sure that only one bot instance is running"
+    )
+    spam = "\n".join([spam_line] * 12)
+    assert _logs_dominated_by_telegram_noise(spam)
+    assert not _line_indicates_failure(spam_line)
+    snip = _extract_failure_snippet(spam)
+    assert "TelegramConflictError" not in snip or "ignored" in snip.lower()
+    assert "not a panel boot failure" in snip
+
+    # Real auth failure must still surface even when Telegram spam follows.
+    mixed = "\n".join([
+        "pasarguard-1 | asyncpg.exceptions.InvalidPasswordError: password authentication failed",
+        "pasarguard-1 | ERROR:    Application startup failed. Exiting.",
+        spam_line,
+        spam_line,
+        spam_line,
+    ])
+    mixed_snip = _extract_failure_snippet(mixed)
+    assert "InvalidPasswordError" in mixed_snip
+    assert "Application startup failed" in mixed_snip
+
+    # Startup marker still visible when spam has not fully scrolled it out.
+    with_boot = "\n".join([
+        "pasarguard-1 | Application startup complete",
+        spam_line,
+        spam_line,
+    ])
+    assert _logs_show_panel_startup(with_boot)
+    print("OK: TelegramConflictError treated as noise, real failures kept")
+
+
+def test_explain_restore_telegram_noise_on_panel_not_up():
+    from app.services.pg_restore import explain_restore_error
+
+    exc = RuntimeError(
+        "PasarGuard did not reach ready state (no 'Application startup complete' in logs).\n"
+        "pasarguard-1 | Failed to fetch updates - TelegramConflictError: "
+        "Telegram server says - Conflict: terminated by other getUpdates request"
+    )
+    info = explain_restore_error(exc, "sqlite", "timescaledb")
+    assert "تلگرام" in info["fa"] or "Telegram" in info["en"]
+    assert any("4.6.16" in c for c in info["causes_fa"])
+    print("OK: explain_restore maps TelegramConflict panel-not-up")
+
+
+def test_verify_healthy_accepts_telegram_noise_when_port_up():
+    """sqlite→timescaledb false-fail: Telegram spam + listening port = healthy."""
+    import app.services.pasarguard_ops as ops
+
+    spam_line = (
+        "pasarguard-1 | Failed to fetch updates - TelegramConflictError: "
+        "Telegram server says - Conflict: terminated by other getUpdates request; "
+        "make sure that only one bot instance is running"
+    )
+    spam = "\n".join([spam_line] * 10)
+
+    class _Mig:
+        def __init__(self):
+            self.job = MigrationJob(job_id="tg-noise")
+            self.params = {"target_db": "timescaledb"}
+
+    mig = _Mig()
+
+    async def _run():
+        with (
+            patch(
+                "app.services.multiworker_stack.detect_multiworker_stack",
+                return_value={
+                    "uvicorn_workers": 1,
+                    "uses_nats": False,
+                    "orchestrate": False,
+                },
+            ),
+            patch.object(ops, "fetch_pasarguard_logs", new_callable=AsyncMock, return_value=spam),
+            patch.object(
+                ops, "fetch_extended_panel_logs", new_callable=AsyncMock, return_value=spam
+            ),
+            patch.object(
+                ops, "_pasarguard_container_state", new_callable=AsyncMock, return_value="running"
+            ),
+            patch.object(
+                ops, "_panel_port_is_listening", new_callable=AsyncMock, return_value=True
+            ),
+            patch.object(ops.asyncio, "sleep", new_callable=AsyncMock),
+        ):
+            await ops.verify_pasarguard_healthy(mig, max_wait=60)
+
+    asyncio.run(_run())
+    blob = "\n".join(mig.job.logs)
+    assert "healthy" in blob.lower()
+    assert "TelegramConflictError" in blob or "telegram" in blob.lower()
+    print("OK: verify_pasarguard_healthy accepts Telegram noise when port is up")
+
+
 def test_try_heal_nats_imports_read_env_text_from_db_auth():
     """Regression: read_env_text lives in db_auth, not env_migration."""
     import asyncio
@@ -302,5 +408,8 @@ if __name__ == "__main__":
     test_pgbouncer_env_mismatch_detects_stale_credentials()
     test_extract_failure_snippet_includes_root_before_startup_failed()
     test_extract_failure_snippet_includes_exception_line()
+    test_telegram_conflict_is_noise_not_root_cause()
+    test_explain_restore_telegram_noise_on_panel_not_up()
+    test_verify_healthy_accepts_telegram_noise_when_port_up()
     test_try_heal_nats_imports_read_env_text_from_db_auth()
     print("\nAll multiworker restore tests passed")

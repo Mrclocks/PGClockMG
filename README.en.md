@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.15`** — large-upload override also raises zip entry limits (Zip entry too large fix)
+> 🚀 **`v4.6.16`** — TelegramConflictError log noise no longer false-fails restore
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

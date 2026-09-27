@@ -3319,11 +3319,26 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
     elif "pasarguard failed to start" in low or "did not reach ready state" in low:
         fa = "پنل PasarGuard بعد از ریستور بالا نیامد."
         en = "PasarGuard panel did not start after restore."
-        causes_fa = [
-            "لاگ pasarguard/panel را ببینید",
-            "multi-worker: NATS_URL و بالا بودن nats را چک کنید",
-            "ممکن است SSL یا SQLALCHEMY_DATABASE_URL اشتباه باشد",
-        ]
+        if (
+            "telegramconflicterror" in low
+            or "getupdates" in low
+            or "telegramconflict" in low
+            or "only one bot instance" in low
+        ):
+            fa = "پنل بالا آمد ولی لاگ تلگرام (Conflict) به‌اشتباه به‌عنوان خطای ریستور نشان داده شد."
+            en = "Panel was up; TelegramConflictError log noise was mistaken for a restore failure."
+            causes_fa = [
+                "اول PGClockMG را به v4.6.16+ آپدیت کنید — این نویز دیگر ریستور را fail نمی‌کند",
+                "چند instance همزمان با یک bot token getUpdates می‌زنند (سرور دیگر / webhook / چند worker)",
+                "پنل HTTP معمولاً سالم است؛ فقط ربات تلگرام را یک‌جا نگه دارید",
+            ]
+        else:
+            causes_fa = [
+                "لاگ pasarguard/panel را ببینید (نه فقط اسپم TelegramConflictError)",
+                "multi-worker: NATS_URL و بالا بودن nats را چک کنید",
+                "ممکن است SSL یا SQLALCHEMY_DATABASE_URL اشتباه باشد",
+                "اگر فقط TelegramConflictError می‌بینید، به v4.6.16+ آپدیت و دوباره ریستور کنید",
+            ]
     elif (
         "violates foreign key" in low
         or "foreign key constraint" in low

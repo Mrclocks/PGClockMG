@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.15`** — large-upload override поднимает и лимит zip entry (fix Zip entry too large)
+> 🚀 **`v4.6.16`** — шум TelegramConflictError больше не ломает restore ложно
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

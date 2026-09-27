@@ -67,6 +67,16 @@ BENIGN_LOG_PATTERNS = (
     "shutting down",
 )
 
+# Telegram bot polling conflict — panel is usually already up; spam fills docker logs
+# and pushes "Application startup complete" out of the --tail window.
+TELEGRAM_NOISE_PATTERNS = (
+    "TelegramConflictError",
+    "Failed to fetch updates",
+    "terminated by other getUpdates request",
+    "only one bot instance is running",
+    "Conflict: terminated by other getUpdates",
+)
+
 # Noise from no-SSL banners / SSH tunnel hints — never treat as the root cause
 BANNER_NOISE_PATTERNS = (
     "ssh -L",
@@ -214,6 +224,29 @@ def _strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", text or "")
 
 
+def _is_telegram_noise_line(line: str) -> bool:
+    return any(p in (line or "") for p in TELEGRAM_NOISE_PATTERNS)
+
+
+def _strip_telegram_noise(output: str) -> str:
+    return "\n".join(
+        ln for ln in (output or "").splitlines() if not _is_telegram_noise_line(ln)
+    )
+
+
+def _logs_dominated_by_telegram_noise(output: str) -> bool:
+    """True when most non-empty log lines are Telegram getUpdates conflict spam."""
+    lines = [
+        ln
+        for ln in (output or "").splitlines()
+        if ln.strip() and not _is_banner_noise(ln)
+    ]
+    if len(lines) < 3:
+        return False
+    noise = sum(1 for ln in lines if _is_telegram_noise_line(ln))
+    return noise >= max(3, (len(lines) + 1) // 2)
+
+
 def _is_banner_noise(line: str) -> bool:
     low = line.lower()
     # Keep real failures even if they share a word with banners
@@ -224,6 +257,8 @@ def _is_banner_noise(line: str) -> bool:
 
 def _line_indicates_failure(line: str) -> bool:
     if any(b in line for b in BENIGN_LOG_PATTERNS):
+        return False
+    if _is_telegram_noise_line(line):
         return False
     if _is_banner_noise(line):
         return False
@@ -244,7 +279,7 @@ def _extract_failure_snippet(output: str) -> str:
         if "Application startup failed" not in ln:
             continue
         for prev in lines[max(0, idx - 45) : idx]:
-            if not prev.strip() or _is_banner_noise(prev):
+            if not prev.strip() or _is_banner_noise(prev) or _is_telegram_noise_line(prev):
                 continue
             pl = prev.strip()
             if any(
@@ -285,6 +320,8 @@ def _extract_failure_snippet(output: str) -> str:
                     continue
                 if fs.startswith("Traceback (most recent call last)"):
                     break
+                if _is_telegram_noise_line(follow):
+                    continue
                 if (
                     re.match(r"^[A-Za-z_][\w.]*(?:Error|Exception):", fs)
                     or fs.startswith("RuntimeError:")
@@ -298,14 +335,26 @@ def _extract_failure_snippet(output: str) -> str:
         return "\n".join(base)
     useful = []
     for ln in lines:
-        if not ln.strip() or _is_banner_noise(ln):
+        if not ln.strip() or _is_banner_noise(ln) or _is_telegram_noise_line(ln):
             continue
         if any(x in ln for x in ("ERROR", "Error", "Traceback", "Exception", "failed", "FATAL", "ValueError")):
             useful.append(ln)
     if useful:
         return "\n".join(useful[-20:])
-    non_banner = [ln for ln in lines if ln.strip() and not _is_banner_noise(ln)]
-    return "\n".join(non_banner[-20:]) if non_banner else clean[-1500:]
+    non_banner = [
+        ln
+        for ln in lines
+        if ln.strip() and not _is_banner_noise(ln) and not _is_telegram_noise_line(ln)
+    ]
+    if non_banner:
+        return "\n".join(non_banner[-20:])
+    # Pure Telegram spam — do not present it as the restore root cause.
+    if _logs_dominated_by_telegram_noise(clean):
+        return (
+            "(TelegramConflictError log noise ignored — not a panel boot failure; "
+            "another bot instance is polling the same token.)"
+        )
+    return clean[-1500:]
 
 
 async def fetch_compose_logs(
@@ -1412,17 +1461,70 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                     "Startup marker seen but panel port not listening yet — waiting…"
                 )
                 stable_ready = 1
+        elif _logs_dominated_by_telegram_noise(out):
+            # getUpdates spam scrolls "Application startup complete" out of --tail.
+            # Re-check with a larger window, then accept port-up as healthy.
+            if probe_i % 2 == 1:
+                ext = await fetch_extended_panel_logs(migrator, tail=1500)
+                if ext.strip():
+                    out = ext
+            if _logs_show_panel_startup(out, stack):
+                stable_ready += 1
+                if stable_ready >= 2 and await _panel_port_is_listening(migrator):
+                    migrator.job.log(
+                        "PasarGuard healthy — startup marker found "
+                        "(TelegramConflictError log noise ignored)"
+                    )
+                    return
+                if stable_ready >= 2:
+                    stable_ready = 1
+            elif (
+                await _panel_port_is_listening(migrator)
+                and not _check_logs_for_failure(out)
+            ):
+                stable_ready += 1
+                if stable_ready >= 2:
+                    migrator.job.log(
+                        "PasarGuard healthy — panel port listening "
+                        "(TelegramConflictError log noise ignored)"
+                    )
+                    return
+            else:
+                stable_ready = 0
         else:
             stable_ready = 0
 
         await asyncio.sleep(4)
 
     out = await fetch_pasarguard_logs(migrator, tail=400, since=boot_since)
+    # Last chance: Telegram spam may have emptied the --since window of markers.
+    if _logs_dominated_by_telegram_noise(out) or not _logs_show_panel_startup(out, stack):
+        ext = await fetch_extended_panel_logs(migrator, tail=2000)
+        if ext.strip():
+            out = ext
     hit = _check_logs_for_failure(out)
     if hit:
         raise RuntimeError(
             "PasarGuard startup failed.\n" + _extract_failure_snippet(out)
         )
+    if _logs_show_panel_startup(out, stack) and await _panel_port_is_listening(migrator):
+        migrator.job.log(
+            "PasarGuard healthy — startup confirmed after extended log scan"
+        )
+        return
+    if (
+        last_known_state == "running"
+        and await _panel_port_is_listening(migrator)
+        and (
+            _logs_dominated_by_telegram_noise(out)
+            or "(TelegramConflictError log noise ignored" in _extract_failure_snippet(out)
+        )
+    ):
+        migrator.job.log(
+            "PasarGuard healthy — panel port listening at deadline "
+            "(TelegramConflictError log noise ignored)"
+        )
+        return
     last_up = last_upgrade_sig or _last_alembic_upgrade_line(out)
     if last_up and not _logs_show_panel_startup(out, stack):
         raise RuntimeError(
