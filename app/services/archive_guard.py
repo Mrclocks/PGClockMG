@@ -103,6 +103,53 @@ def zip_total_limit_bytes(allow_large: bool = False) -> int:
     return MAX_ZIP_TOTAL_BYTES
 
 
+def looks_like_panel_backup_zip(path: str | Path | zipfile.ZipFile) -> bool:
+    """True when zip namelist looks like a PasarGuard/PGClock panel backup.
+
+    Used to auto-raise large-upload ceilings for legitimate panel dumps without
+    weakening ratio / path-traversal bomb guards.
+    """
+    try:
+        if isinstance(path, zipfile.ZipFile):
+            names = [n.replace("\\", "/").lstrip("./") for n in path.namelist()]
+        else:
+            with zipfile.ZipFile(path, "r") as zf:
+                names = [n.replace("\\", "/").lstrip("./") for n in zf.namelist()]
+    except (OSError, zipfile.BadZipFile):
+        return False
+
+    lower = [n.lower() for n in names]
+    has_db = False
+    for n in lower:
+        base = n.rsplit("/", 1)[-1]
+        if base in ("db.sqlite3", "db_backup.sql") or n.endswith("/db.sqlite3"):
+            has_db = True
+            break
+        if n == "pg_dump/manifest.tsv" or n.startswith("pg_dump/"):
+            has_db = True
+            break
+        if base.endswith(".sql") and "dump" in base:
+            has_db = True
+            break
+    if not has_db:
+        # Any root-level .sql / .sqlite3 alongside .env is enough.
+        has_env = any(n == ".env" or n.endswith("/.env") for n in lower)
+        has_sqlish = any(
+            n.rsplit("/", 1)[-1].endswith((".sql", ".sqlite3", ".db"))
+            for n in lower
+            if not n.endswith("/")
+        )
+        return has_env and has_sqlish
+    return True
+
+
+def resolve_allow_large_for_zip(path: str | Path, requested: bool = False) -> bool:
+    """Honor explicit override, else auto-large for recognized panel backup zips."""
+    if requested:
+        return True
+    return looks_like_panel_backup_zip(path)
+
+
 def _entry_too_large_message(filename: str, size: int, limit: int, *, allow_large: bool) -> str:
     size_mb = max(1, size // (1024 * 1024))
     limit_mb = max(1, limit // (1024 * 1024))

@@ -29,6 +29,62 @@ def test_build_local_alembic_url():
     print("OK: build_local_alembic_url")
 
 
+def test_resolve_reachable_alembic_url_uses_bridge_when_loopback_dead():
+    """Unpublished 5432 must not leave alembic stuck on 127.0.0.1."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.services import pasarguard_ops as ops
+
+    url = "postgresql+asyncpg://pasarguard:secret@127.0.0.1:5432/pasarguard"
+    mig = MagicMock()
+    mig.params = {
+        "target_db": "timescaledb",
+        "target_db_user": "pasarguard",
+        "target_db_password": "secret",
+        "target_db_name": "pasarguard",
+        "target_db_port": "5432",
+    }
+    mig.job = MagicMock()
+    mig.job.log = MagicMock()
+
+    def _open(host, port, timeout=2.0):
+        return host == "172.18.0.2" and str(port) == "5432"
+
+    async def _go():
+        with (
+            patch.object(ops, "_tcp_port_open", side_effect=_open),
+            patch.object(ops, "resolve_db_service", return_value="timescaledb"),
+            patch(
+                "app.services.db_auth._resolve_pg_host_endpoint",
+                new_callable=AsyncMock,
+                return_value=("", "", ""),
+            ),
+            patch(
+                "app.services.db_auth._resolve_pg_container_ip_endpoint",
+                new_callable=AsyncMock,
+                return_value=("img", "172.18.0.2", "5432"),
+            ),
+        ):
+            return await ops._resolve_reachable_alembic_url(mig, url)
+
+    out = asyncio.run(_go())
+    assert "172.18.0.2:5432" in out
+    assert "secret" in out
+    logged = " ".join(str(c) for c in mig.job.log.call_args_list)
+    assert "docker-bridge" in logged
+    print("OK: alembic URL rewrites to bridge IP when loopback dead")
+
+
+def test_rewrite_sqlalchemy_host_port_keeps_password():
+    from app.services.pasarguard_ops import _rewrite_sqlalchemy_host_port
+
+    url = "postgresql+asyncpg://u:p%40ss@127.0.0.1:5432/pasarguard"
+    out = _rewrite_sqlalchemy_host_port(url, "10.0.0.5", 5432)
+    assert out.startswith("postgresql+asyncpg://u:p%40ss@10.0.0.5:5432/")
+    print("OK: sqlalchemy host rewrite keeps credentials")
+
+
 def test_sqlite_column_intersection():
     from app.services.native_migration.copy_core import (
         sqlite_columns, SKIP_TABLES, TABLE_ORDER,
@@ -1091,6 +1147,8 @@ def test_cross_db_has_pasarguard_env():
 
 if __name__ == "__main__":
     test_build_local_alembic_url()
+    test_resolve_reachable_alembic_url_uses_bridge_when_loopback_dead()
+    test_rewrite_sqlalchemy_host_port_keeps_password()
     test_sqlite_column_intersection()
     test_migration_strategy_matrix()
     test_read_alembic_from_sql_dump()

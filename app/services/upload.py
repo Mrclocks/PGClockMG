@@ -6,7 +6,11 @@ import uuid
 from pathlib import Path
 
 from app.config import UPLOAD_DIR
-from app.services.archive_guard import safe_extract_zip_file, safe_upload_name
+from app.services.archive_guard import (
+    resolve_allow_large_for_zip,
+    safe_extract_zip_file,
+    safe_upload_name,
+)
 from app.services.backup_analyzer import analyze_upload_directory, get_upload_dir as _dir_for_id
 
 
@@ -37,11 +41,13 @@ def save_upload(
 
         zip_error = None
         zip_meta = None
+        effective_large = bool(allow_large)
 
         if filename.lower().endswith(".zip"):
+            effective_large = resolve_allow_large_for_zip(dest_file, allow_large)
             try:
                 zip_meta = safe_extract_zip_file(
-                    dest_file, dest_dir / "extracted", allow_large=allow_large,
+                    dest_file, dest_dir / "extracted", allow_large=effective_large,
                 )
             except ValueError as e:
                 zip_error = str(e)
@@ -57,7 +63,7 @@ def save_upload(
             "size": dest_file.stat().st_size,
             "detected": detected,
             "analysis": analysis,
-            "allow_large_upload": bool(allow_large),
+            "allow_large_upload": bool(effective_large),
         }
         if zip_meta:
             result["zip_preflight"] = {

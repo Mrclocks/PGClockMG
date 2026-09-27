@@ -31,16 +31,20 @@ FAIL_LOG_PATTERNS = (
     "DuplicateColumnError",
     "ProgrammingError",
     "Traceback (most recent call last)",
-    "could not connect",
-    "connection refused",
     "password authentication failed",
     "SASL authentication failed",
     "cache lookup failed for type",
     "Application startup failed",
-    "ValueError:",
     "SSL certificate file",
     "NATS is required when running more than 1 worker",
     "column \"user_template_id\" of relation \"next_plans\" already exists",
+)
+
+# Brief docker/DB bounce lines — do not hard-fail health when the panel port is up.
+# Still surfaced in snippets when paired with "Application startup failed".
+TRANSIENT_CONNECT_PATTERNS = (
+    "connection refused",
+    "could not connect",
 )
 
 # Stamp Marzban-shaped DBs (still have `proxies`) just before PasarGuard transforms
@@ -65,6 +69,16 @@ BENIGN_LOG_PATTERNS = (
     "database system is shut down",
     "database system is ready to accept connections",
     "shutting down",
+)
+
+# Telegram bot polling conflict — panel is usually already up; spam fills docker logs
+# and pushes "Application startup complete" out of the --tail window.
+TELEGRAM_NOISE_PATTERNS = (
+    "TelegramConflictError",
+    "Failed to fetch updates",
+    "terminated by other getUpdates request",
+    "only one bot instance is running",
+    "Conflict: terminated by other getUpdates",
 )
 
 # Noise from no-SSL banners / SSH tunnel hints — never treat as the root cause
@@ -214,6 +228,36 @@ def _strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", text or "")
 
 
+def _is_transient_connect_line(line: str) -> bool:
+    low = (line or "").lower()
+    if "password authentication" in low or "sasl authentication" in low:
+        return False
+    return any(p in low for p in TRANSIENT_CONNECT_PATTERNS)
+
+
+def _is_telegram_noise_line(line: str) -> bool:
+    return any(p in (line or "") for p in TELEGRAM_NOISE_PATTERNS)
+
+
+def _strip_telegram_noise(output: str) -> str:
+    return "\n".join(
+        ln for ln in (output or "").splitlines() if not _is_telegram_noise_line(ln)
+    )
+
+
+def _logs_dominated_by_telegram_noise(output: str) -> bool:
+    """True when most non-empty log lines are Telegram getUpdates conflict spam."""
+    lines = [
+        ln
+        for ln in (output or "").splitlines()
+        if ln.strip() and not _is_banner_noise(ln)
+    ]
+    if len(lines) < 3:
+        return False
+    noise = sum(1 for ln in lines if _is_telegram_noise_line(ln))
+    return noise >= max(3, (len(lines) + 1) // 2)
+
+
 def _is_banner_noise(line: str) -> bool:
     low = line.lower()
     # Keep real failures even if they share a word with banners
@@ -225,13 +269,28 @@ def _is_banner_noise(line: str) -> bool:
 def _line_indicates_failure(line: str) -> bool:
     if any(b in line for b in BENIGN_LOG_PATTERNS):
         return False
+    if _is_telegram_noise_line(line):
+        return False
+    if _is_transient_connect_line(line):
+        return False
     if _is_banner_noise(line):
         return False
     # Multi-worker Uvicorn prints bare Traceback headers while workers retry;
     # the following Error/Exception line is the actionable signal.
     if "Traceback (most recent call last)" in line:
         return False
+    # Bare "ValueError:" is too broad (retry noise); real crashes also emit
+    # "Application startup failed" which remains a hard FAIL pattern.
+    if "ValueError:" in line and "Application startup failed" not in line:
+        return False
     return any(p in line for p in FAIL_LOG_PATTERNS)
+
+
+def _logs_only_transient_connect_noise(output: str) -> bool:
+    """True when logs show connect bounces and no hard FAIL patterns remain."""
+    if _check_logs_for_failure(output):
+        return False
+    return any(_is_transient_connect_line(ln) for ln in (output or "").splitlines())
 
 
 def _extract_failure_snippet(output: str) -> str:
@@ -244,7 +303,7 @@ def _extract_failure_snippet(output: str) -> str:
         if "Application startup failed" not in ln:
             continue
         for prev in lines[max(0, idx - 45) : idx]:
-            if not prev.strip() or _is_banner_noise(prev):
+            if not prev.strip() or _is_banner_noise(prev) or _is_telegram_noise_line(prev):
                 continue
             pl = prev.strip()
             if any(
@@ -285,6 +344,8 @@ def _extract_failure_snippet(output: str) -> str:
                     continue
                 if fs.startswith("Traceback (most recent call last)"):
                     break
+                if _is_telegram_noise_line(follow):
+                    continue
                 if (
                     re.match(r"^[A-Za-z_][\w.]*(?:Error|Exception):", fs)
                     or fs.startswith("RuntimeError:")
@@ -298,14 +359,26 @@ def _extract_failure_snippet(output: str) -> str:
         return "\n".join(base)
     useful = []
     for ln in lines:
-        if not ln.strip() or _is_banner_noise(ln):
+        if not ln.strip() or _is_banner_noise(ln) or _is_telegram_noise_line(ln):
             continue
         if any(x in ln for x in ("ERROR", "Error", "Traceback", "Exception", "failed", "FATAL", "ValueError")):
             useful.append(ln)
     if useful:
         return "\n".join(useful[-20:])
-    non_banner = [ln for ln in lines if ln.strip() and not _is_banner_noise(ln)]
-    return "\n".join(non_banner[-20:]) if non_banner else clean[-1500:]
+    non_banner = [
+        ln
+        for ln in lines
+        if ln.strip() and not _is_banner_noise(ln) and not _is_telegram_noise_line(ln)
+    ]
+    if non_banner:
+        return "\n".join(non_banner[-20:])
+    # Pure Telegram spam — do not present it as the restore root cause.
+    if _logs_dominated_by_telegram_noise(clean):
+        return (
+            "(TelegramConflictError log noise ignored — not a panel boot failure; "
+            "another bot instance is polling the same token.)"
+        )
+    return clean[-1500:]
 
 
 async def fetch_compose_logs(
@@ -1412,17 +1485,78 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                     "Startup marker seen but panel port not listening yet — waiting…"
                 )
                 stable_ready = 1
+        elif _logs_dominated_by_telegram_noise(out) or _logs_only_transient_connect_noise(out):
+            # Telegram spam or brief connection-refused bounce while the HTTP
+            # port is already up — do not false-fail the restore.
+            reason = (
+                "TelegramConflictError log noise"
+                if _logs_dominated_by_telegram_noise(out)
+                else "transient connection noise"
+            )
+            if probe_i % 2 == 1:
+                ext = await fetch_extended_panel_logs(migrator, tail=1500)
+                if ext.strip():
+                    out = ext
+            if _logs_show_panel_startup(out, stack):
+                stable_ready += 1
+                if stable_ready >= 2 and await _panel_port_is_listening(migrator):
+                    migrator.job.log(
+                        f"PasarGuard healthy — startup marker found ({reason} ignored)"
+                    )
+                    return
+                if stable_ready >= 2:
+                    stable_ready = 1
+            elif (
+                await _panel_port_is_listening(migrator)
+                and not _check_logs_for_failure(out)
+            ):
+                stable_ready += 1
+                if stable_ready >= 2:
+                    migrator.job.log(
+                        f"PasarGuard healthy — panel port listening ({reason} ignored)"
+                    )
+                    return
+            else:
+                stable_ready = 0
         else:
             stable_ready = 0
 
         await asyncio.sleep(4)
 
     out = await fetch_pasarguard_logs(migrator, tail=400, since=boot_since)
+    # Last chance: Telegram spam / connect bounce may have emptied markers.
+    if (
+        _logs_dominated_by_telegram_noise(out)
+        or _logs_only_transient_connect_noise(out)
+        or not _logs_show_panel_startup(out, stack)
+    ):
+        ext = await fetch_extended_panel_logs(migrator, tail=2000)
+        if ext.strip():
+            out = ext
     hit = _check_logs_for_failure(out)
     if hit:
         raise RuntimeError(
             "PasarGuard startup failed.\n" + _extract_failure_snippet(out)
         )
+    if _logs_show_panel_startup(out, stack) and await _panel_port_is_listening(migrator):
+        migrator.job.log(
+            "PasarGuard healthy — startup confirmed after extended log scan"
+        )
+        return
+    if (
+        last_known_state == "running"
+        and await _panel_port_is_listening(migrator)
+        and (
+            _logs_dominated_by_telegram_noise(out)
+            or _logs_only_transient_connect_noise(out)
+            or "(TelegramConflictError log noise ignored" in _extract_failure_snippet(out)
+        )
+    ):
+        migrator.job.log(
+            "PasarGuard healthy — panel port listening at deadline "
+            "(log noise ignored)"
+        )
+        return
     last_up = last_upgrade_sig or _last_alembic_upgrade_line(out)
     if last_up and not _logs_show_panel_startup(out, stack):
         raise RuntimeError(
@@ -1713,6 +1847,95 @@ def build_local_alembic_url(params: dict) -> str:
     return f"sqlite+aiosqlite:///{path}"
 
 
+def _tcp_port_open(host: str, port: int | str, *, timeout: float = 2.0) -> bool:
+    """Fast TCP probe — used so alembic does not hang 10min on dead 127.0.0.1:5432."""
+    import socket
+
+    try:
+        port_i = int(port)
+    except (TypeError, ValueError):
+        return False
+    if not host or port_i <= 0:
+        return False
+    try:
+        with socket.create_connection((host, port_i), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _rewrite_sqlalchemy_host_port(url: str, host: str, port: str | int) -> str:
+    """Replace host:port in a SQLAlchemy URL while keeping user/pass/db/query."""
+    from urllib.parse import urlparse, urlunparse
+
+    if not url or not host:
+        return url
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return url
+    userinfo = ""
+    if "@" in (parsed.netloc or ""):
+        userinfo, _sep, _hostport = parsed.netloc.rpartition("@")
+        userinfo = userinfo + "@"
+    new_netloc = f"{userinfo}{host}:{int(port)}"
+    return urlunparse(parsed._replace(netloc=new_netloc))
+
+
+async def _resolve_reachable_alembic_url(migrator, url: str) -> str:
+    """Prefer a TCP-reachable PG endpoint for host-network alembic.
+
+    Many Timescale installs leave 5432 unpublished (panel talks via pgbouncer
+    inside compose). Host-network alembic to 127.0.0.1:5432 then hangs until
+    the 600s timeout — the Phase 2 \"create schema at head\" false-stuck state.
+    Prefer: loopback if open → published DB port → docker-bridge DB IP:5432.
+    Never route DDL through pgbouncer (:6432).
+    """
+    target_db = (migrator.params or {}).get("target_db") or ""
+    if target_db not in ("postgresql", "timescaledb"):
+        return url
+
+    conn = get_target_connection(migrator.params)
+    port = migration_port(conn, target_db)
+    if _tcp_port_open("127.0.0.1", port):
+        return _rewrite_sqlalchemy_host_port(url, "127.0.0.1", port)
+
+    from app.services.db_auth import (
+        _resolve_pg_container_ip_endpoint,
+        _resolve_pg_host_endpoint,
+    )
+
+    svc = resolve_db_service(target_db)
+    if not svc:
+        migrator.job.log(
+            f"Alembic: 127.0.0.1:{port} not open and no {target_db} compose service — "
+            "continuing with default URL"
+        )
+        return url
+
+    _img, pub_host, pub_port = await _resolve_pg_host_endpoint(migrator, svc)
+    if pub_host and pub_port and _tcp_port_open(pub_host, pub_port):
+        migrator.job.log(
+            f"Alembic via published {pub_host}:{pub_port} "
+            f"(127.0.0.1:{port} not listening)"
+        )
+        return _rewrite_sqlalchemy_host_port(url, pub_host, pub_port)
+
+    _cimg, cip, cip_port = await _resolve_pg_container_ip_endpoint(migrator, svc)
+    if cip and cip_port and _tcp_port_open(cip, cip_port):
+        migrator.job.log(
+            f"Alembic via docker-bridge {cip}:{cip_port} "
+            f"(host {port} not published — avoids hang)"
+        )
+        return _rewrite_sqlalchemy_host_port(url, cip, cip_port)
+
+    migrator.job.log(
+        f"Alembic WARNING: no reachable PG TCP endpoint for {svc}; "
+        f"trying 127.0.0.1:{port} (may hang until timeout)"
+    )
+    return url
+
+
 def build_sqlite_alembic_url(path: str | Path) -> str:
     return f"sqlite+aiosqlite:///{Path(path).as_posix()}"
 
@@ -1775,16 +1998,37 @@ async def _run_pasarguard_alembic(
 ) -> tuple[bool, str]:
     """Run python -m alembic in panel image with host network.
 
-    Always uses 127.0.0.1 + sanitized env. Pass url_override for intermediate DBs.
+    Resolves a reachable DB TCP endpoint first so unpublished 5432 does not
+    freeze Phase 2 for the full command timeout.
     """
     image = resolve_pasarguard_image()
     url = url_override or build_local_alembic_url(migrator.params)
+    url = await _resolve_reachable_alembic_url(migrator, url)
     conn = get_target_connection(migrator.params)
+    safe_host = "127.0.0.1"
+    safe_port = migration_port(conn, migrator.params.get("target_db", ""))
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        if parsed.hostname:
+            safe_host = parsed.hostname
+        if parsed.port:
+            safe_port = str(parsed.port)
+    except Exception:
+        pass
     migrator.job.log(f"Host-network alembic: {' '.join(args)}")
     migrator.job.log(
         f"Alembic DB: user={conn.get('user')}, db={conn.get('database')}, "
-        f"host={conn.get('host')}:{migration_port(conn, migrator.params.get('target_db', ''))}"
+        f"host={safe_host}:{safe_port}"
     )
+    try:
+        migrator.job.set_progress(
+            max(getattr(migrator.job, "progress", 0) or 0, 93),
+            f"Alembic {' '.join(args)} via {safe_host}:{safe_port}…",
+        )
+    except Exception:
+        pass
 
     cmd: list[str] = ["docker", "run", "--rm", "--network", "host"]
     cmd.extend([

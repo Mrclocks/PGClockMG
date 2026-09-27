@@ -373,6 +373,7 @@ def test_atomic_write_text_and_compose_guard():
 
 
 def test_align_image_enospc_reverts_compose():
+    """wipe_data=False + pull ENOSPC: soft-skip (do not abort restore), revert tag."""
     import asyncio
     import tempfile
     import shutil
@@ -401,16 +402,83 @@ def test_align_image_enospc_reverts_compose():
             await mod._align_timescaledb_image(job, "2.27.0", wipe_data=False)
 
     try:
+        asyncio.run(_go())  # must not raise
+        assert compose.read_text(encoding="utf-8") == original
+        logged = " ".join(str(c) for c in job.log.call_args_list)
+        assert "without image align" in logged.lower() or "reverted" in logged.lower()
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    print("OK: ENOSPC pull soft-skips when wipe_data=False and reverts compose")
+
+
+def test_align_image_low_disk_soft_skips_without_wipe():
+    """Low free disk + wipe_data=False must not raise (optional retag)."""
+    import asyncio
+    import tempfile
+    import shutil
+    from unittest.mock import MagicMock, AsyncMock, patch
+    from app.services import pg_restore as mod
+
+    td = Path(tempfile.mkdtemp(prefix="pg-align-lowdisk-"))
+    compose = td / "docker-compose.yml"
+    original = "services:\n  timescaledb:\n    image: timescale/timescaledb:2.28.0-pg17\n"
+    compose.write_text(original, encoding="utf-8")
+    job = MagicMock()
+    job.log = MagicMock()
+    pull = AsyncMock(return_value=(True, ""))
+
+    async def _go():
+        with (
+            patch.object(mod, "PASARGUARD_DIR", td),
+            patch.object(mod, "_compose", pull),
+            patch.object(mod, "disk_free_bytes", return_value=100 * 1024 * 1024),
+        ):
+            await mod._align_timescaledb_image(job, "2.27.0", wipe_data=False)
+
+    try:
+        asyncio.run(_go())
+        assert compose.read_text(encoding="utf-8") == original
+        assert pull.await_count == 0  # never attempted pull
+        logged = " ".join(str(c) for c in job.log.call_args_list).lower()
+        assert "skipping" in logged
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    print("OK: low disk soft-skips Timescale align when wipe_data=False")
+
+
+def test_align_image_low_disk_still_hard_fails_with_wipe():
+    import asyncio
+    import tempfile
+    import shutil
+    from unittest.mock import MagicMock, patch
+    from app.services import pg_restore as mod
+
+    td = Path(tempfile.mkdtemp(prefix="pg-align-wipe-disk-"))
+    compose = td / "docker-compose.yml"
+    compose.write_text(
+        "services:\n  timescaledb:\n    image: timescale/timescaledb:2.28.0-pg17\n",
+        encoding="utf-8",
+    )
+    job = MagicMock()
+    job.log = MagicMock()
+
+    async def _go():
+        with (
+            patch.object(mod, "PASARGUARD_DIR", td),
+            patch.object(mod, "disk_free_bytes", return_value=100 * 1024 * 1024),
+        ):
+            await mod._align_timescaledb_image(job, "2.27.0", wipe_data=True)
+
+    try:
         raised = False
         try:
             asyncio.run(_go())
         except RuntimeError as e:
-            raised = "could not be pulled" in str(e).lower() or "no space" in str(e).lower()
+            raised = "not enough free disk" in str(e).lower()
         assert raised
-        assert compose.read_text(encoding="utf-8") == original
     finally:
         shutil.rmtree(td, ignore_errors=True)
-    print("OK: ENOSPC pull reverts compose tag")
+    print("OK: low disk still hard-fails when wipe_data=True")
 
 
 def test_parse_ts_post_restore_catalog_mismatch():
@@ -1406,6 +1474,8 @@ if __name__ == "__main__":
     test_ensure_timescaledb_emergency_clear_when_post_restore_fails()
     test_atomic_write_text_and_compose_guard()
     test_align_image_enospc_reverts_compose()
+    test_align_image_low_disk_soft_skips_without_wipe()
+    test_align_image_low_disk_still_hard_fails_with_wipe()
     test_parse_ts_post_restore_catalog_mismatch()
     test_filter_timescaledb_extension_sql()
     test_filter_timescaledb_strip_all_for_plain_pg()

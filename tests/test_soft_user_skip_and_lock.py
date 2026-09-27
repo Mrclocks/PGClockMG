@@ -115,6 +115,84 @@ def test_soft_user_rows_do_not_abort_partial_users():
     print("OK: soft user skip continues with report")
 
 
+def test_soft_schema_skew_templates_do_not_abort():
+    """Partial client_templates must not abort when soft schema policy is on."""
+    from app.services.native_migration.adapters import (
+        SqliteReader,
+        SqliteWriter,
+        copy_tables_universal,
+    )
+    from app.services.native_migration.copy_core import (
+        SOFT_SCHEMA_SKEW_TABLES,
+        SOFT_USER_RELATED_TABLES,
+    )
+    from app.services.native_migration.universal_copy import _soft_tables_from_params
+
+    soft = _soft_tables_from_params({"skip_bad_user_rows": True})
+    assert "client_templates" in soft
+    assert "hosts" not in soft
+    assert soft == frozenset(SOFT_USER_RELATED_TABLES | SOFT_SCHEMA_SKEW_TABLES)
+
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "src.sqlite3"
+        dst = Path(td) / "dst.sqlite3"
+        sconn = sqlite3.connect(str(src))
+        sconn.executescript(
+            """
+            CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT);
+            INSERT INTO users VALUES (1, 'u1');
+            CREATE TABLE client_templates (id INTEGER PRIMARY KEY, name TEXT);
+            INSERT INTO client_templates VALUES (1, 'a');
+            INSERT INTO client_templates VALUES (2, 'b');
+            """
+        )
+        sconn.commit()
+        sconn.close()
+        dconn = sqlite3.connect(str(dst))
+        dconn.executescript(
+            """
+            CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT);
+            CREATE TABLE client_templates (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+            """
+        )
+        dconn.commit()
+        dconn.close()
+
+        class FlakyWriter(SqliteWriter):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                self._n = 0
+
+            def insert(self, table, columns, values):
+                if table == "client_templates":
+                    self._n += 1
+                    if self._n > 1:
+                        raise RuntimeError("forced template skip")
+                return super().insert(table, columns, values)
+
+        reader = SqliteReader(str(src))
+        writer = FlakyWriter(str(dst))
+        try:
+            stats, report = copy_tables_universal(
+                reader,
+                writer,
+                lambda *_: None,
+                fail_hard=True,
+                soft_incomplete_tables=soft,
+            )
+        finally:
+            reader.close()
+            writer.close()
+
+        assert stats.get("client_templates") == 1
+        assert report.get("has_gaps") is False
+        soft_inc = report.get("soft_incomplete") or []
+        assert any("client_templates" in str(x) for x in soft_inc) or (
+            (report.get("incomplete") or []) == []
+        )
+    print("OK: soft schema skew keeps templates from aborting")
+
+
 def test_strict_user_rows_still_abort_without_soft_policy():
     from app.services.native_migration.adapters import copy_tables_universal, SqliteReader, SqliteWriter
 
@@ -203,6 +281,7 @@ def test_orchestrator_defaults_skip_for_all_panels():
 if __name__ == "__main__":
     test_shared_lock_blocks_migrate_while_restore_running()
     test_soft_user_rows_do_not_abort_partial_users()
+    test_soft_schema_skew_templates_do_not_abort()
     test_strict_user_rows_still_abort_without_soft_policy()
     test_migration_request_defaults()
     test_orchestrator_defaults_skip_for_all_panels()

@@ -11,15 +11,22 @@ from app.services.native_migration.adapters import (
     create_reader,
     create_writer,
 )
-from app.services.native_migration.copy_core import SOFT_USER_RELATED_TABLES
+from app.services.native_migration.copy_core import (
+    SOFT_SCHEMA_SKEW_TABLES,
+    SOFT_USER_RELATED_TABLES,
+)
 
 
 def _soft_tables_from_params(params: dict | None) -> frozenset[str]:
-    """When skip_bad_user_rows is enabled, soften user-related completeness checks."""
+    """When skip_bad_user_rows is enabled, soften user/template completeness checks.
+
+    Hosts/inbounds/groups/nodes/admins stay hard-complete so a truncated panel
+    cannot SUCCESS. Templates/settings/association skew become soft gaps.
+    """
     if not params:
         return frozenset()
     if params.get("skip_bad_user_rows", True):
-        return frozenset(SOFT_USER_RELATED_TABLES)
+        return frozenset(SOFT_USER_RELATED_TABLES | SOFT_SCHEMA_SKEW_TABLES)
     return frozenset()
 
 

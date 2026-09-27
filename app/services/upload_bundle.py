@@ -9,7 +9,12 @@ import uuid
 from pathlib import Path
 
 from app.config import UPLOAD_DIR
-from app.services.archive_guard import resolve_within, safe_extract_zip_file, safe_upload_name
+from app.services.archive_guard import (
+    resolve_allow_large_for_zip,
+    resolve_within,
+    safe_extract_zip_file,
+    safe_upload_name,
+)
 from app.services.backup_analyzer import analyze_upload_directory, resolve_extract_root
 from app.services.upload_requirements import get_upload_requirements
 
@@ -140,18 +145,22 @@ def save_bundle_slot(
         dest = sdir / filename
         shutil.copy2(src_path, dest)
 
+        effective_large = bool(allow_large)
+        if slot == "bundle_zip" or filename.lower().endswith(".zip"):
+            effective_large = resolve_allow_large_for_zip(dest, allow_large)
+
         slot_meta: dict = {
             "filename": filename,
             "size": dest.stat().st_size,
             "path": str(dest),
             "ok": True,
-            "allow_large_upload": bool(allow_large),
+            "allow_large_upload": bool(effective_large),
         }
 
         if slot == "bundle_zip" or filename.lower().endswith(".zip"):
             try:
                 report = safe_extract_zip_file(
-                    dest, sdir / "extracted", allow_large=allow_large,
+                    dest, sdir / "extracted", allow_large=effective_large,
                 )
                 slot_meta["zip_preflight"] = {
                     "files": report.files,
@@ -212,7 +221,7 @@ def save_bundle_slot(
         manifest["panel_id"] = panel_id
         manifest["source_db"] = source_db
         manifest["marzban_mode"] = marzban_mode
-        if allow_large:
+        if effective_large:
             manifest["allow_large_upload"] = True
         _save_manifest(bundle_id, manifest)
 

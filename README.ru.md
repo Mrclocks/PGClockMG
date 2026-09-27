@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.15`** — large-upload override поднимает и лимит zip entry (fix Zip entry too large)
+> 🚀 **`v4.6.18`** — alembic Phase2 больше не зависает на unpublished 127.0.0.1:5432
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
