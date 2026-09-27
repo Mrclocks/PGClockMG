@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.25`** — убран timeout= из URL alembic (фикс TypeError float+str в asyncpg)
+> 🚀 **`v4.6.26`** — большие restore больше не зависают на 93%: skip-at-head, длинный budget DDL, без rotate mid-DDL
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

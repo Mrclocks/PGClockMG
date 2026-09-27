@@ -381,6 +381,10 @@ def test_run_alembic_upgrade_heals_mysql_1060_then_succeeds():
         return True, "INFO Running upgrade -> head\n"
 
     with patch(
+        "app.services.pasarguard_ops.get_alembic_head_revisions",
+        new_callable=AsyncMock,
+        return_value=["abc123def456"],
+    ), patch(
         "app.services.pasarguard_ops._run_pasarguard_alembic",
         side_effect=fake_alembic,
     ), patch(

@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.25`** — strip timeout= from alembic URL (fixes asyncpg float+str TypeError)
+> 🚀 **`v4.6.26`** — large restores no longer stick at 93%: skip-at-head, long DDL budget, no mid-DDL rotate
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

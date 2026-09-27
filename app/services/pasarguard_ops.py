@@ -60,6 +60,14 @@ _MARZBAN_BRIDGE_REVISIONS = (
 # waiting for the panel (one per stuck revision, e.g. expire_temp then next).
 _MAX_ALEMBIC_DUP_HEALS = 6
 
+# Alembic docker-run budgets.
+# Empty Phase2 schema create finishes quickly; post-restore sync on a data-filled
+# DB (CREATE INDEX / ALTER on hundreds of MB) legitimately needs many minutes.
+_ALEMBIC_TIMEOUT_EMPTY_PG = 180
+_ALEMBIC_TIMEOUT_SQLITE = 600
+_ALEMBIC_TIMEOUT_DATA_FILLED = 2400  # 40min — large same-engine restore DDL
+_ALEMBIC_TIMEOUT_DATA_FILLED_RETRY = 3600
+
 # Harmless lines from DB restarts — must not fail the panel health check
 BENIGN_LOG_PATTERNS = (
     "terminating background worker",
@@ -1811,16 +1819,49 @@ def resolve_pasarguard_service() -> str:
 
 
 def _alembic_output_indicates_success(output: str) -> bool:
+    """True when alembic finished successfully despite a non-zero docker rc.
+
+    Do NOT treat bare ``Running upgrade`` as success — a mid-DDL kill also
+    emits that line, and marking it success left schema half-migrated.
+    """
     low = (output or "").lower()
+    if not low.strip():
+        return False
+    if "timeout" in low and "killed" in low:
+        return False
+    if low.strip() == "timeout" or low.rstrip().endswith("\ntimeout"):
+        return False
+    if "traceback" in low and "already at head" not in low:
+        return False
     return any(
         marker in low
         for marker in (
-            "running upgrade",
             "already at head",
-            "stamp",
-            "(head)",
+            "alembic stamped",
         )
     )
+
+
+def _alembic_output_shows_upgrade_progress(output: str) -> bool:
+    """True when alembic had already started applying revisions (not a connect hang)."""
+    low = (output or "").lower()
+    return "running upgrade" in low or "running stamp" in low
+
+
+def _is_alembic_mid_ddl_timeout(output: str) -> bool:
+    """Timeout after alembic had started upgrading — do not rotate endpoints."""
+    text = (output or "").strip()
+    low = text.lower()
+    timed_out = (
+        text == "Timeout"
+        or low == "timeout"
+        or "timed out after" in low
+        or "command timed out" in low
+        or low.rstrip().endswith("timeout")
+    )
+    if not timed_out:
+        return False
+    return _alembic_output_shows_upgrade_progress(output)
 
 
 def resolve_pasarguard_image() -> str:
@@ -2059,12 +2100,23 @@ def _is_alembic_connect_auth_error(output: str) -> bool:
     """True when alembic failed to reach / authenticate to the DB (healable)."""
     if _is_alembic_url_construction_error(output):
         return False
+    # Mid-DDL kill is NOT a connect failure — rotating endpoints restarts the
+    # same heavy CREATE INDEX on a filled DB and looks like a permanent hang.
+    if _is_alembic_mid_ddl_timeout(output):
+        return False
+    if _alembic_output_shows_upgrade_progress(output) and not (
+        "password authentication" in (output or "").lower()
+        or "invalidpassworderror" in (output or "").lower()
+    ):
+        return False
     text = (output or "").strip()
-    # Outer docker/command timeout from _run_cmd — treat as connect hang.
+    # Outer docker/command timeout — connect hang only if alembic never migrated.
     if text == "Timeout" or text.lower() == "timeout":
         return True
     low = text.lower()
-    if "timed out after" in low or "command timed out" in low:
+    if ("timed out after" in low or "command timed out" in low) and not (
+        _alembic_output_shows_upgrade_progress(output)
+    ):
         return True
     needles = (
         "password authentication failed",
@@ -2096,9 +2148,10 @@ def _is_alembic_connect_auth_error(output: str) -> bool:
         "could not translate host name",
     )
     if any(n.lower() in low for n in needles):
+        # "timed out" needle would false-positive mid-DDL; already gated above.
+        if "timed out" in low and _alembic_output_shows_upgrade_progress(output):
+            return False
         return True
-    # Mid-env.py OperationalError without a schema DDL marker → treat as connect.
-    # Do NOT match bare "asyncpg" — every PG alembic failure mentions it.
     if "operationalerror" in low and not _is_duplicate_schema_error(output):
         if any(
             s in low
@@ -2365,6 +2418,7 @@ async def _run_pasarguard_alembic_once(
     url: str,
     net_args: list[str],
     label: str,
+    attempt_timeout: int | None = None,
 ) -> tuple[bool, str]:
     """Single alembic docker-run attempt on one endpoint."""
     image = resolve_pasarguard_image()
@@ -2403,11 +2457,13 @@ async def _run_pasarguard_alembic_once(
         "--entrypoint", "python",
         image, "-m", "alembic", *args,
     ])
-    # Empty PG schema create should finish quickly; keep sqlite upgrades longer.
-    # Connect hangs: outer docker kill (no URL timeout= — that crashes asyncpg).
-    attempt_timeout = 600 if url_engine == "sqlite" else 180
+    if attempt_timeout is None:
+        if url_engine == "sqlite":
+            attempt_timeout = _ALEMBIC_TIMEOUT_SQLITE
+        else:
+            attempt_timeout = _ALEMBIC_TIMEOUT_EMPTY_PG
     try:
-        ok, out = await migrator._run_cmd(cmd, timeout=attempt_timeout)
+        ok, out = await migrator._run_cmd(cmd, timeout=int(attempt_timeout))
     except FileNotFoundError:
         return False, "docker command not found"
     if ok or _alembic_output_indicates_success(out or ""):
@@ -2416,20 +2472,28 @@ async def _run_pasarguard_alembic_once(
 
 
 async def _run_pasarguard_alembic(
-    migrator, *args: str, url_override: str | None = None,
+    migrator,
+    *args: str,
+    url_override: str | None = None,
+    attempt_timeout: int | None = None,
 ) -> tuple[bool, str]:
     """Run python -m alembic in panel image.
 
     Auto-heals connect/auth by rotating endpoints: compose DNS → DB container
-    netns → published → docker-bridge → host loopback. Schema errors return
-    immediately so callers can stamp/heal alembic_version.
+    netns → published → docker-bridge → host loopback. Schema errors and
+    mid-DDL timeouts return immediately (do not rotate TCP paths).
     """
     base_url = url_override or build_local_alembic_url(migrator.params)
     strategies = await _alembic_endpoint_strategies(migrator, base_url)
     last_out = ""
     for idx, (net_args, url, label) in enumerate(strategies):
         ok, out = await _run_pasarguard_alembic_once(
-            migrator, *args, url=url, net_args=net_args, label=label,
+            migrator,
+            *args,
+            url=url,
+            net_args=net_args,
+            label=label,
+            attempt_timeout=attempt_timeout,
         )
         if ok:
             if idx > 0:
@@ -2439,12 +2503,17 @@ async def _run_pasarguard_alembic(
                 )
             return True, out or ""
         last_out = out or last_out
-        # Schema/revision / bad-URL problems won't change with a different TCP path.
         if (
             _is_missing_revision_error(out or "")
             or _is_duplicate_schema_error(out or "")
             or _is_alembic_url_construction_error(out or "")
+            or _is_alembic_mid_ddl_timeout(out or "")
         ):
+            if _is_alembic_mid_ddl_timeout(out or ""):
+                migrator.job.log(
+                    f"Alembic [{label}] timed out mid-migration — "
+                    "not rotating endpoints (would restart heavy DDL)"
+                )
             return False, out or ""
         if idx + 1 < len(strategies) and _is_alembic_connect_auth_error(out or ""):
             migrator.job.log(
@@ -2452,7 +2521,6 @@ async def _run_pasarguard_alembic(
                 f"auto-trying next endpoint ({idx + 2}/{len(strategies)})…"
             )
             continue
-        # Schema / programming / unknown errors will not heal by changing TCP path.
         break
     return False, last_out
 
@@ -2825,16 +2893,28 @@ async def run_alembic_upgrade_head(
     url_override: str | None = None,
     heal_db: str | None = None,
     heal_conn: dict | None = None,
+    attempt_timeout: int | None = None,
 ) -> None:
-    """Upgrade schema to head — auto-heal connect/auth + stamp skew until success."""
+    """Upgrade schema to head — auto-heal connect/auth + stamp skew until success.
+
+    Used for empty Phase2 / staging upgrades (short budget by default).
+    """
     migrator.job.log("Alembic upgrade head...")
     max_auth_heals = 2
     auth_heals = 0
     last_out = ""
+    heads = await get_alembic_head_revisions(migrator)
+    upgrade_to = _alembic_upgrade_target(heads) if heads else "head"
+    if len(heads) > 1:
+        migrator.job.log(f"Alembic has {len(heads)} heads — using `upgrade {upgrade_to}`")
 
     for attempt in range(1, 8):
         ok, out = await _run_pasarguard_alembic(
-            migrator, "upgrade", "head", url_override=url_override,
+            migrator,
+            "upgrade",
+            upgrade_to,
+            url_override=url_override,
+            attempt_timeout=attempt_timeout,
         )
         if ok:
             if attempt > 1:
@@ -2876,15 +2956,12 @@ async def run_alembic_upgrade_head(
                     f"({auth_heals}/{max_auth_heals}) — retrying upgrade head…"
                 )
                 continue
-            # Auth heal unavailable — endpoint rotation already tried inside
-            # _run_pasarguard_alembic; one more full pass in case roles settled.
             if attempt < 3:
                 migrator.job.log(
                     "Alembic connect still failing — retrying endpoints…"
                 )
                 continue
 
-        # Non-healable or heals exhausted
         break
 
     raise RuntimeError(
@@ -2892,18 +2969,35 @@ async def run_alembic_upgrade_head(
     )
 
 
-async def get_alembic_head_revision(migrator) -> str | None:
+async def get_alembic_head_revisions(migrator) -> list[str]:
+    """All alembic head revision ids from the panel image (may be >1)."""
     ok, out = await _run_pasarguard_alembic(migrator, "heads")
     if not ok:
-        return None
+        return []
+    found: list[str] = []
+    seen: set[str] = set()
     for line in (out or "").splitlines():
         m = re.search(r"([0-9a-f]{12,})\s*\(head\)", line, re.I)
-        if m:
-            return m.group(1)
-        m = re.match(r"^([0-9a-f]{12,})", line.strip(), re.I)
-        if m:
-            return m.group(1)
-    return None
+        if not m:
+            m = re.match(r"^([0-9a-f]{12,})", line.strip(), re.I)
+        if not m:
+            continue
+        rev = m.group(1).lower()
+        if rev in seen:
+            continue
+        seen.add(rev)
+        found.append(rev)
+    return found
+
+
+async def get_alembic_head_revision(migrator) -> str | None:
+    heads = await get_alembic_head_revisions(migrator)
+    return heads[0] if heads else None
+
+
+def _alembic_upgrade_target(heads: list[str]) -> str:
+    """``heads`` when branched; ``head`` when single — avoids leaving a branch behind."""
+    return "heads" if len(heads) > 1 else "head"
 
 
 async def _heal_alembic_duplicate_schema(
@@ -2936,15 +3030,57 @@ async def _heal_alembic_duplicate_schema(
 
 
 async def _run_alembic_upgrade_head_with_heal(
-    migrator, target_db: str, max_attempts: int | None = None,
+    migrator,
+    target_db: str,
+    max_attempts: int | None = None,
+    *,
+    data_filled: bool = False,
+    attempt_timeout: int | None = None,
 ) -> None:
-    """Run upgrade head; auto-heal duplicate schema + connect/auth and retry."""
+    """Run upgrade head/heads; auto-heal duplicate schema + connect/auth and retry.
+
+    ``data_filled=True`` (same-engine restore after dump import) uses a long
+    docker budget so CREATE INDEX / ALTER on large tables can finish, and never
+    rotates endpoints after alembic has started applying revisions.
+    """
     attempts = _MAX_ALEMBIC_DUP_HEALS if max_attempts is None else int(max_attempts)
     attempts = max(attempts, 4)
     last_out = ""
     auth_heals = 0
+    mid_ddl_retries = 0
+    if attempt_timeout is None:
+        if data_filled and target_db in ("postgresql", "timescaledb", "mysql", "mariadb"):
+            attempt_timeout = _ALEMBIC_TIMEOUT_DATA_FILLED
+        elif target_db == "sqlite":
+            attempt_timeout = _ALEMBIC_TIMEOUT_SQLITE
+        else:
+            attempt_timeout = _ALEMBIC_TIMEOUT_EMPTY_PG
+
+    heads = await get_alembic_head_revisions(migrator)
+    upgrade_to = _alembic_upgrade_target(heads) if heads else "head"
+    if len(heads) > 1:
+        migrator.job.log(
+            f"Alembic has {len(heads)} heads — using `upgrade {upgrade_to}`"
+        )
+
     for attempt in range(1, attempts + 1):
-        ok, out = await _run_pasarguard_alembic(migrator, "upgrade", "head")
+        budget = attempt_timeout
+        if mid_ddl_retries and data_filled:
+            budget = max(int(attempt_timeout), _ALEMBIC_TIMEOUT_DATA_FILLED_RETRY)
+        try:
+            migrator.job.set_progress(
+                max(getattr(migrator.job, "progress", 0) or 0, 93),
+                f"Alembic upgrade {upgrade_to} "
+                f"(attempt {attempt}/{attempts}, budget {budget}s)…",
+            )
+        except Exception:
+            pass
+        ok, out = await _run_pasarguard_alembic(
+            migrator,
+            "upgrade",
+            upgrade_to,
+            attempt_timeout=budget,
+        )
         last_out = out or last_out
         if ok or (out and "already at head" in (out or "").lower()):
             return
@@ -2954,6 +3090,32 @@ async def _run_alembic_upgrade_head_with_heal(
             )
             if await _heal_alembic_duplicate_schema(migrator, target_db, out or ""):
                 continue
+        if _is_alembic_mid_ddl_timeout(out or ""):
+            mid_ddl_retries += 1
+            if mid_ddl_retries <= 1 and data_filled:
+                migrator.job.log(
+                    f"Alembic mid-DDL timeout — retrying same path with "
+                    f"{_ALEMBIC_TIMEOUT_DATA_FILLED_RETRY}s budget "
+                    "(endpoint rotation disabled)…"
+                )
+                continue
+            # Do NOT stamp-head after a blind kill — schema may be half-applied.
+            # Only stamp when the failure itself is duplicate-object (already migrated).
+            if _is_duplicate_schema_error(out or ""):
+                migrator.job.log(
+                    "Mid-DDL timeout with duplicate-schema markers — stamping…"
+                )
+                if await _heal_alembic_duplicate_schema(migrator, target_db, out or ""):
+                    ok2, out2 = await _run_pasarguard_alembic(
+                        migrator,
+                        "upgrade",
+                        upgrade_to,
+                        attempt_timeout=min(budget, _ALEMBIC_TIMEOUT_EMPTY_PG),
+                    )
+                    if ok2 or (out2 and "already at head" in (out2 or "").lower()):
+                        return
+                    last_out = out2 or last_out
+            break
         if _is_alembic_connect_auth_error(out or "") and auth_heals < 2:
             if await _try_heal_db_auth_mismatch(migrator, out or "", force=True):
                 auth_heals += 1
@@ -2973,18 +3135,29 @@ async def _run_alembic_upgrade_head_with_heal(
     )
 
 
-async def sync_alembic_for_startup(migrator, target_db: str) -> None:
+async def sync_alembic_for_startup(
+    migrator, target_db: str, *, data_filled: bool | None = None,
+) -> None:
     """
     Align alembic_version with physical schema BEFORE PasarGuard all-in-one starts.
-    Prevents DuplicateColumnError on panel restart after cross-DB migration.
+
+    Same-engine restore imports a full dump (data_filled=True): skip when already
+    at head, otherwise run a long-budget upgrade so large DDL can finish.
+    Convert/empty-schema callers keep the short budget.
     """
     from app.services.multiworker_stack import stop_panel_stack
 
     await stop_panel_stack(migrator.job)
 
+    filled = bool(data_filled) if data_filled is not None else (
+        target_db in ("postgresql", "timescaledb", "mysql", "mariadb")
+    )
+
     if target_db == "sqlite":
         migrator.job.log("SQLite target — running alembic upgrade head (one-shot)...")
-        await _run_alembic_upgrade_head_with_heal(migrator, target_db)
+        await _run_alembic_upgrade_head_with_heal(
+            migrator, target_db, data_filled=False,
+        )
         return
 
     if target_db not in ("postgresql", "timescaledb", "mysql", "mariadb"):
@@ -2993,8 +3166,42 @@ async def sync_alembic_for_startup(migrator, target_db: str) -> None:
     current = await read_target_alembic_version(migrator, target_db)
     migrator.job.log(f"Target alembic before sync: {current or '(none)'}")
 
-    migrator.job.log("Running alembic upgrade head (one-shot, before panel start)...")
-    await _run_alembic_upgrade_head_with_heal(migrator, target_db)
+    heads = await get_alembic_head_revisions(migrator)
+    head = heads[0] if heads else None
+    if current and head and current.lower() == head.lower() and len(heads) <= 1:
+        migrator.job.log(
+            f"Alembic already at head ({head}) — skip upgrade before panel start"
+        )
+        return
+    if current and heads and current.lower() in {h.lower() for h in heads} and len(heads) > 1:
+        # On one branch head but another head exists — still need upgrade heads.
+        migrator.job.log(
+            f"Alembic at {current} but image has {len(heads)} heads — upgrading heads"
+        )
+    elif current and head and current.lower() != head.lower():
+        # Unknown / foreign revision from older panel — heal stamp first.
+        if not await _revision_known_to_pasarguard(migrator, current):
+            migrator.job.log(
+                f"Unknown alembic revision {current} on restored DB — healing stamp…"
+            )
+            conn = get_target_connection(migrator.params)
+            await heal_unknown_alembic_revision(
+                migrator, target_db, conn, missing_revision=current,
+            )
+
+    budget = (
+        _ALEMBIC_TIMEOUT_DATA_FILLED if filled else _ALEMBIC_TIMEOUT_EMPTY_PG
+    )
+    migrator.job.log(
+        f"Running alembic upgrade "
+        f"({'data-filled' if filled else 'empty-schema'}, budget {budget}s)…"
+    )
+    await _run_alembic_upgrade_head_with_heal(
+        migrator,
+        target_db,
+        data_filled=filled,
+        attempt_timeout=budget,
+    )
     final = await read_target_alembic_version(migrator, target_db)
     migrator.job.log(f"Alembic ready for startup: {final or 'head'}")
 
@@ -3032,16 +3239,19 @@ async def safe_start_pasarguard(migrator, *, health_max_wait: int | None = None)
 
 
 async def stamp_alembic_head(migrator) -> bool:
-    ok, out = await _run_pasarguard_alembic(migrator, "stamp", "head")
+    heads = await get_alembic_head_revisions(migrator)
+    stamp_to = _alembic_upgrade_target(heads) if heads else "head"
+    # stamp heads / head — plural when branched
+    ok, out = await _run_pasarguard_alembic(migrator, "stamp", stamp_to)
     if ok:
-        migrator.job.log("Alembic stamped to head")
+        migrator.job.log(f"Alembic stamped to {stamp_to}")
         return True
-    head = await get_alembic_head_revision(migrator)
+    head = heads[0] if heads else await get_alembic_head_revision(migrator)
     target_db = migrator.params.get("target_db")
     if head and target_db and await set_target_alembic_version(migrator, target_db, head):
         migrator.job.log(f"Alembic stamped to head via SQL ({head})")
         return True
-    migrator.job.log(f"alembic stamp head failed: {(out or '')[-500:]}")
+    migrator.job.log(f"alembic stamp {stamp_to} failed: {(out or '')[-500:]}")
     return False
 
 

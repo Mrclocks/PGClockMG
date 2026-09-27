@@ -218,11 +218,128 @@ def test_alembic_strategies_prefer_compose_over_open_loopback():
 
 
 def test_alembic_timeout_is_connect_error_for_rotation():
-    from app.services.pasarguard_ops import _is_alembic_connect_auth_error
+    from app.services.pasarguard_ops import (
+        _is_alembic_connect_auth_error,
+        _is_alembic_mid_ddl_timeout,
+    )
 
     assert _is_alembic_connect_auth_error("Timeout")
     assert _is_alembic_connect_auth_error("command timed out after 180s — killed")
-    print("OK: alembic Timeout rotates endpoints")
+    mid = (
+        "INFO  [alembic.runtime.migration] Running upgrade "
+        "f9c69a49f544 -> c9b48df42f10, add api keys table\n"
+        "command timed out after 180s — killed"
+    )
+    assert _is_alembic_mid_ddl_timeout(mid)
+    assert not _is_alembic_connect_auth_error(mid)
+    print("OK: alembic Timeout rotates endpoints; mid-DDL does not")
+
+
+def test_alembic_success_marker_ignores_bare_running_upgrade():
+    from app.services.pasarguard_ops import _alembic_output_indicates_success
+
+    assert not _alembic_output_indicates_success(
+        "INFO  [alembic.runtime.migration] Running upgrade a -> b"
+    )
+    assert _alembic_output_indicates_success("INFO  Context impl … already at head")
+    print("OK: bare Running upgrade is not success")
+
+
+def test_alembic_upgrade_target_heads_when_branched():
+    from app.services.pasarguard_ops import _alembic_upgrade_target
+
+    assert _alembic_upgrade_target(["abc123def456"]) == "head"
+    assert _alembic_upgrade_target(["abc123def456", "fed654cba321"]) == "heads"
+    print("OK: upgrade target heads when branched")
+
+
+def test_sync_alembic_skips_when_already_at_head():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.services import pasarguard_ops as ops
+
+    mig = MagicMock()
+    mig.params = {"target_db": "timescaledb"}
+    mig.job = MagicMock()
+    mig.job.log = MagicMock()
+
+    async def _go():
+        with (
+            patch.object(ops, "stop_panel_stack", new_callable=AsyncMock)
+            if False else patch(
+                "app.services.multiworker_stack.stop_panel_stack",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                ops, "read_target_alembic_version",
+                new_callable=AsyncMock, return_value="abc123def4567890",
+            ),
+            patch.object(
+                ops, "get_alembic_head_revisions",
+                new_callable=AsyncMock, return_value=["abc123def4567890"],
+            ),
+            patch.object(
+                ops, "_run_alembic_upgrade_head_with_heal",
+                new_callable=AsyncMock,
+            ) as upgrade,
+        ):
+            await ops.sync_alembic_for_startup(mig, "timescaledb", data_filled=True)
+            upgrade.assert_not_awaited()
+
+    asyncio.run(_go())
+    logged = " ".join(str(c) for c in mig.job.log.call_args_list)
+    assert "already at head" in logged.lower() or "skip upgrade" in logged.lower()
+    print("OK: sync skips when already at head")
+
+
+def test_run_alembic_data_filled_uses_long_timeout_no_endpoint_rotate():
+    """Mid-DDL timeout must retry same path with long budget, not rotate TCP."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.services import pasarguard_ops as ops
+
+    mig = MagicMock()
+    mig.params = {"target_db": "timescaledb"}
+    mig.job = MagicMock()
+    mig.job.log = MagicMock()
+    mig.job.progress = 90
+    mig.job.set_progress = MagicMock()
+
+    mid = (
+        "INFO  [alembic.runtime.migration] Running upgrade "
+        "aa -> bb, add hot path indexes\n"
+        "command timed out after 2400s — killed"
+    )
+    calls: list[tuple] = []
+
+    async def _run(*args, **kwargs):
+        calls.append((args, kwargs))
+        if len(calls) == 1:
+            return False, mid
+        return True, "already at head"
+
+    async def _go():
+        with (
+            patch.object(
+                ops, "get_alembic_head_revisions",
+                new_callable=AsyncMock, return_value=["deadbeefcafebabe"],
+            ),
+            patch.object(ops, "_run_pasarguard_alembic", side_effect=_run),
+        ):
+            await ops._run_alembic_upgrade_head_with_heal(
+                mig, "timescaledb", data_filled=True, max_attempts=3,
+            )
+
+    asyncio.run(_go())
+    assert len(calls) >= 2
+    # First and second must both request long budgets (no 180 connect rotate).
+    assert calls[0][1].get("attempt_timeout") == ops._ALEMBIC_TIMEOUT_DATA_FILLED
+    assert calls[1][1].get("attempt_timeout") == ops._ALEMBIC_TIMEOUT_DATA_FILLED_RETRY
+    logged = " ".join(str(c) for c in mig.job.log.call_args_list)
+    assert "mid-DDL" in logged or "endpoint rotation disabled" in logged
+    print("OK: data-filled mid-DDL uses long timeout, no rotate")
 
 
 def test_alembic_strategies_include_container_netns():
@@ -312,7 +429,7 @@ def test_run_pasarguard_alembic_rotates_endpoints_on_auth_fail():
     )
     calls: list[str] = []
 
-    async def _once(migrator, *args, url, net_args, label):
+    async def _once(migrator, *args, url, net_args, label, attempt_timeout=None):
         calls.append(label)
         if label.startswith("compose-dns"):
             return False, auth_fail
@@ -363,6 +480,10 @@ def test_run_alembic_upgrade_head_auth_heals_and_retries():
 
     async def _go():
         with (
+            patch.object(
+                ops, "get_alembic_head_revisions",
+                new_callable=AsyncMock, return_value=["abc123def456"],
+            ),
             patch.object(ops, "_run_pasarguard_alembic", side_effect=_run),
             patch.object(
                 ops, "_try_heal_db_auth_mismatch",
@@ -606,7 +727,7 @@ def test_run_pasarguard_alembic_does_not_rotate_on_invalid_sqlite_url():
     )
     calls: list[str] = []
 
-    async def _once(migrator, *args, url, net_args, label):
+    async def _once(migrator, *args, url, net_args, label, attempt_timeout=None):
         calls.append(label)
         return False, invalid
 
@@ -1695,6 +1816,10 @@ if __name__ == "__main__":
     test_resolve_alembic_prefers_compose_network_dns()
     test_alembic_strategies_prefer_compose_over_open_loopback()
     test_alembic_timeout_is_connect_error_for_rotation()
+    test_alembic_success_marker_ignores_bare_running_upgrade()
+    test_alembic_upgrade_target_heads_when_branched()
+    test_sync_alembic_skips_when_already_at_head()
+    test_run_alembic_data_filled_uses_long_timeout_no_endpoint_rotate()
     test_alembic_strategies_include_container_netns()
     test_run_pasarguard_alembic_rotates_endpoints_on_auth_fail()
     test_run_alembic_upgrade_head_auth_heals_and_retries()
