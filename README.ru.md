@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.22`** — alembic asyncpg: `ssl=disable` вместо неверного `ssl=false`
+> 🚀 **`v4.6.23`** — полный аудит sqlite→server: пароль auth, без ловушки PgBouncer, enum none, жёсткий pre-count
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

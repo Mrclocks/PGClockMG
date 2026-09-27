@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.6.22`** — alembic asyncpg: `ssl=disable` به‌جای `ssl=false` (رفع ClientConfigurationError)
+> 🚀 **`v4.6.23`** — ممیزی کامل sqlite→server: auth/password، endpoint بدون PgBouncer، enum none، pre-count سخت
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

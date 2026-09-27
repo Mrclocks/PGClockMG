@@ -328,6 +328,11 @@ def test_is_alembic_connect_auth_error_detects_env_py_failures():
     assert not _is_alembic_connect_auth_error(
         "sqlalchemy.exc.ProgrammingError: (psycopg2.errors.DuplicateColumn) column already exists"
     )
+    # Bare asyncpg mention in a schema OperationalError must NOT rotate endpoints
+    assert not _is_alembic_connect_auth_error(
+        "sqlalchemy.exc.OperationalError: (asyncpg.exceptions.UndefinedColumnError) "
+        "column \"expire_temp\" of relation \"users\" does not exist"
+    )
     print("OK: connect/auth detector")
 
 
@@ -362,6 +367,7 @@ def test_ensure_asyncpg_ssl_disable_not_false():
     from app.services.pasarguard_ops import (
         _ensure_asyncpg_ssl_false,
         _is_alembic_url_construction_error,
+        build_alembic_url_from_conn,
     )
 
     for raw in (
@@ -378,7 +384,36 @@ def test_ensure_asyncpg_ssl_disable_not_false():
         "asyncpg.exceptions._base.ClientConfigurationError: "
         "`sslmode` parameter must be one of: disable, allow, prefer, require"
     )
+    from_conn = build_alembic_url_from_conn(
+        "timescaledb",
+        {"user": "u", "password": "a@b", "database": "pasarguard", "port": "5432"},
+    )
+    assert "ssl=disable" in from_conn
+    assert "a%40b" in from_conn
     print("OK: asyncpg ssl normalized to disable")
+
+
+def test_postgres_fit_enum_keeps_none_label():
+    """sqlite→PG must not NULL hosts.security/fingerprint when label is 'none'."""
+    from app.services.native_migration.adapters import PostgresWriter
+
+    w = PostgresWriter.__new__(PostgresWriter)
+    w._enum_cache = {
+        "proxyhostsecurity": ["inbound_default", "none", "tls"],
+        "proxyhostfingerprint": ["none", "chrome", "firefox"],
+    }
+    w._col_types = {}
+    w._col_nullable = {}
+
+    def _labels(name):
+        return w._enum_cache.get(name.lower(), [])
+
+    w._enum_labels_for = _labels  # type: ignore[method-assign]
+    assert w._fit_enum("proxyhostsecurity", "none", True) == "none"
+    assert w._fit_enum("proxyhostfingerprint", "none", True) == "none"
+    assert w._fit_enum("proxyhostsecurity", "tls", True) == "tls"
+    assert w._fit_enum("proxyhostsecurity", "bogus", True) is None
+    print("OK: postgres _fit_enum keeps none label")
 
 
 def test_rewrite_sqlalchemy_host_port_never_touches_sqlite():
@@ -1580,6 +1615,7 @@ if __name__ == "__main__":
     test_format_alembic_failure_surfaces_root_exception()
     test_rewrite_sqlalchemy_host_port_keeps_password()
     test_ensure_asyncpg_ssl_disable_not_false()
+    test_postgres_fit_enum_keeps_none_label()
     test_rewrite_sqlalchemy_host_port_never_touches_sqlite()
     test_alembic_strategies_sqlite_ignores_timescaledb_target()
     test_extract_docker_container_id_skips_pgadmin_warning()

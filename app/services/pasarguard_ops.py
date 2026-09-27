@@ -513,7 +513,9 @@ async def _pasarguard_container_state(migrator) -> str:
         quiet=True,
     )
     if ok2 and (ids or "").strip():
-        cid = (ids or "").strip().splitlines()[0].strip()
+        cid = extract_docker_container_id(ids or "")
+        if not cid:
+            return "unknown"
         ok3, st = await migrator._run_cmd(
             ["docker", "inspect", "-f", "{{.State.Status}}", cid],
             cwd=cwd,
@@ -2073,17 +2075,20 @@ def _is_alembic_connect_auth_error(output: str) -> bool:
     if any(n.lower() in low for n in needles):
         return True
     # Mid-env.py OperationalError without a schema DDL marker → treat as connect.
+    # Do NOT match bare "asyncpg" — every PG alembic failure mentions it.
     if "operationalerror" in low and not _is_duplicate_schema_error(output):
         if any(
             s in low
             for s in (
-                "asyncpg",
                 "connect",
                 "password",
-                "ssl",
                 "timeout",
                 "refused",
                 "hba",
+                "name or service not known",
+                "gaierror",
+                "connectionreset",
+                "server closed",
             )
         ):
             return True
@@ -2271,18 +2276,24 @@ def build_sqlite_alembic_url(path: str | Path) -> str:
 
 def build_alembic_url_from_conn(db_type: str, conn: dict) -> str:
     """Build alembic SQLAlchemy URL for any engine from a connection dict."""
-    pwd = conn.get("password") or ""
+    from urllib.parse import quote_plus
+
     if db_type == "sqlite":
         path = conn.get("sqlite_path") or str(PASARGUARD_DATA / "db.sqlite3")
         return build_sqlite_alembic_url(path)
-    user = conn.get("user") or (
-        "postgres" if db_type in ("postgresql", "timescaledb") else "root"
+    pwd = quote_plus(conn.get("password") or "")
+    user = quote_plus(
+        conn.get("user")
+        or ("postgres" if db_type in ("postgresql", "timescaledb") else "root")
     )
     db = conn.get("database") or "pasarguard"
     port = migration_port(conn, db_type)
-    host = "127.0.0.1"
+    host = conn.get("host") or "127.0.0.1"
     if db_type in ("postgresql", "timescaledb"):
-        return f"postgresql+asyncpg://{user}:{pwd}@{host}:{port}/{db}"
+        return (
+            f"postgresql+asyncpg://{user}:{pwd}@{host}:{port}/{db}"
+            f"?ssl=disable"
+        )
     return f"mysql+asyncmy://{user}:{pwd}@{host}:{port}/{db}"
 
 
@@ -2411,13 +2422,7 @@ async def _run_pasarguard_alembic(
                 f"auto-trying next endpoint ({idx + 2}/{len(strategies)})…"
             )
             continue
-        if idx + 1 < len(strategies):
-            # Unknown failure — still rotate once more (some drivers omit markers).
-            migrator.job.log(
-                f"Alembic [{label}] failed — trying next endpoint "
-                f"({idx + 2}/{len(strategies)})…"
-            )
-            continue
+        # Schema / programming / unknown errors will not heal by changing TCP path.
         break
     return False, last_out
 
