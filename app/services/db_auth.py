@@ -379,27 +379,140 @@ def _parse_published_port(ports_json: str, container_port: str = "5432/tcp") -> 
     return fallback
 
 
+def _docker_inspect_first_line(out: str | None) -> str:
+    lines = (out or "").strip().splitlines()
+    return lines[0].strip() if lines else ""
+
+
 async def _resolve_pg_host_endpoint(migrator, service: str) -> tuple[str, str, str]:
-    """Return ``(image, host, port)`` for a TCP probe matching alembic/copy."""
+    """Return ``(image, host, port)`` for a published host TCP probe."""
     ok, cid = await migrator._run_cmd(
         ["docker", "compose", "ps", "-q", service],
         cwd=str(PASARGUARD_DIR),
         timeout=30,
     )
-    container = (cid or "").strip().splitlines()[0].strip() if ok else ""
+    container = _docker_inspect_first_line(cid) if ok else ""
     if not container:
         return "", "", ""
     ok_img, image_out = await migrator._run_cmd(
         ["docker", "inspect", "--format", "{{.Config.Image}}", container],
         timeout=30,
     )
-    image = (image_out or "").strip().splitlines()[0].strip() if ok_img else ""
+    image = _docker_inspect_first_line(image_out) if ok_img else ""
     ok_ports, ports_out = await migrator._run_cmd(
         ["docker", "inspect", "--format", "{{json .NetworkSettings.Ports}}", container],
         timeout=30,
     )
     host, port = _parse_published_port(ports_out or "") if ok_ports else ("", "")
     return image, host, port
+
+
+async def _resolve_pg_container_ip_endpoint(
+    migrator, service: str,
+) -> tuple[str, str, str]:
+    """Return ``(image, container_ip, 5432)`` for TCP via docker bridge (no publish needed).
+
+    Many Timescale installs only expose PgBouncer (:6432) and leave the DB
+    unpublished. On Linux the bridge IP is reachable from the host, so SCRAM
+    can still be verified without a published 5432.
+    """
+    ok, cid = await migrator._run_cmd(
+        ["docker", "compose", "ps", "-q", service],
+        cwd=str(PASARGUARD_DIR),
+        timeout=30,
+    )
+    container = _docker_inspect_first_line(cid) if ok else ""
+    if not container:
+        return "", "", ""
+    ok_img, image_out = await migrator._run_cmd(
+        ["docker", "inspect", "--format", "{{.Config.Image}}", container],
+        timeout=30,
+    )
+    image = _docker_inspect_first_line(image_out) if ok_img else ""
+    ok_ip, ip_out = await migrator._run_cmd(
+        [
+            "docker", "inspect", "--format",
+            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+            container,
+        ],
+        timeout=30,
+    )
+    ip = ""
+    if ok_ip:
+        # Prefer the first non-empty IPv4-looking token.
+        for tok in (ip_out or "").replace("\n", " ").split():
+            tok = tok.strip()
+            if tok and tok[0].isdigit():
+                ip = tok
+                break
+    if not (image and ip):
+        return image, "", ""
+    return image, ip, "5432"
+
+
+async def _resolve_pg_tcp_endpoints(
+    migrator, service: str,
+) -> list[tuple[str, str, str]]:
+    """Ordered TCP targets: published 5432 → pgbouncer 6432 → container IP:5432."""
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str, str]] = []
+
+    def _add(image: str, host: str, port: str) -> None:
+        if not (image and host and port):
+            return
+        key = (host, port)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append((image, host, port))
+
+    image, host, port = await _resolve_pg_host_endpoint(migrator, service)
+    _add(image, host, port)
+
+    # Panel often publishes PgBouncer only — password check via :6432 still
+    # proves SCRAM; migration_port later remaps copy traffic to direct 5432.
+    try:
+        from app.services.multiworker_stack import compose_has_service
+    except Exception:
+        compose_has_service = None  # type: ignore
+    if compose_has_service and compose_has_service("pgbouncer"):
+        pb_img, pb_host, pb_port = await _resolve_pg_host_endpoint(migrator, "pgbouncer")
+        if not pb_port:
+            # Parse 6432 explicitly if Ports JSON uses that key only.
+            ok, cid = await migrator._run_cmd(
+                ["docker", "compose", "ps", "-q", "pgbouncer"],
+                cwd=str(PASARGUARD_DIR),
+                timeout=30,
+            )
+            container = _docker_inspect_first_line(cid) if ok else ""
+            if container:
+                ok_ports, ports_out = await migrator._run_cmd(
+                    [
+                        "docker", "inspect", "--format",
+                        "{{json .NetworkSettings.Ports}}", container,
+                    ],
+                    timeout=30,
+                )
+                if ok_ports:
+                    pb_host, pb_port = _parse_published_port(
+                        ports_out or "", "6432/tcp",
+                    )
+                if not pb_img:
+                    ok_img, image_out = await migrator._run_cmd(
+                        [
+                            "docker", "inspect", "--format",
+                            "{{.Config.Image}}", container,
+                        ],
+                        timeout=30,
+                    )
+                    pb_img = _docker_inspect_first_line(image_out) if ok_img else ""
+        # Prefer DB image for psql client when probing pgbouncer.
+        _add(image or pb_img, pb_host, pb_port or "")
+
+    cip_img, cip, cip_port = await _resolve_pg_container_ip_endpoint(migrator, service)
+    _add(cip_img or image, cip, cip_port)
+
+    return out
 
 
 async def _probe_pg_via_host_tcp(
@@ -412,7 +525,11 @@ async def _probe_pg_via_host_tcp(
     password: str,
     database: str,
 ) -> bool:
-    """Authenticate the way the panel/alembic does: host → published TCP port."""
+    """Authenticate via host → TCP port (published or docker-bridge IP).
+
+    Uses ``--network host`` so published ports and docker-bridge IPs both work
+    on typical Linux VPS installs. Secondary to :func:`_probe_pg_scram_inside`.
+    """
     if not image or not host or not port or not password:
         return False
     cmd = [
@@ -424,6 +541,130 @@ async def _probe_pg_via_host_tcp(
     ]
     ok, out = await migrator._run_cmd(cmd, timeout=90)
     return ok and "1" in (out or "")
+
+
+# In-container SCRAM proof: connect to the container's *own eth0 IP*, which hits
+# ``host all all all scram-sha-256`` on official images — NOT local/127.0.0.1 trust.
+# Needs no published host port, no firewall hole, no ``docker run --network host``.
+_PG_SCRAM_INSIDE_SCRIPT = r"""
+set +e
+IP=""
+for cand in $(hostname -I 2>/dev/null; hostname -i 2>/dev/null); do
+  case "$cand" in
+    127.*|::1|"") ;;
+    *.*) IP="$cand"; break ;;
+  esac
+done
+if [ -z "$IP" ]; then
+  IP=$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1)
+fi
+if [ -z "$IP" ]; then
+  echo "pgclockmg-scram:no-ip"
+  exit 2
+fi
+OUT=$(psql -h "$IP" -p "${PGPORT:-5432}" -U "$PGUSER" -d "$PGDATABASE" -tAc "SELECT 1" 2>/tmp/pgclockmg-scram.err)
+EC=$?
+if [ "$EC" -eq 0 ] && echo "$OUT" | grep -q '^[[:space:]]*1[[:space:]]*$'; then
+  echo "pgclockmg-scram:ok ip=$IP"
+  exit 0
+fi
+echo "pgclockmg-scram:fail ip=$IP"
+tail -c 240 /tmp/pgclockmg-scram.err 2>/dev/null
+exit 1
+"""
+
+
+async def _probe_pg_scram_inside(
+    migrator,
+    service: str,
+    user: str,
+    password: str,
+    database: str,
+) -> bool:
+    """True when ``password`` authenticates over in-container eth0 TCP (SCRAM).
+
+    This is the ground-truth password check for Timescale/Postgres restores:
+    independent of host port publishes, ufw, and ``compose run`` volume pitfalls.
+    """
+    if not service or not user or not password or not database:
+        return False
+    ok, out = await migrator._run_cmd(
+        [
+            "docker", "compose", "exec", "-T",
+            "-e", f"PGPASSWORD={password}",
+            "-e", f"PGUSER={user}",
+            "-e", f"PGDATABASE={database}",
+            service, "bash", "-lc", _PG_SCRAM_INSIDE_SCRIPT,
+        ],
+        cwd=str(PASARGUARD_DIR),
+        timeout=45,
+    )
+    return bool(ok and "pgclockmg-scram:ok" in (out or ""))
+
+
+async def _pg_eth0_is_trust(
+    migrator,
+    service: str,
+    user: str,
+    database: str,
+) -> bool:
+    """True when eth0 TCP also accepts a bogus password (wide-open hba)."""
+    bogus = f"pgmig-eth0-trust-{os.getpid()}-{id(migrator)}"
+    return await _probe_pg_scram_inside(migrator, service, user, bogus, database)
+
+
+async def _probe_pg_scram_any_db(
+    migrator,
+    service: str,
+    user: str,
+    password: str,
+    databases: list[str],
+) -> str | None:
+    for database in databases:
+        if await _probe_pg_scram_inside(migrator, service, user, password, database):
+            return database
+    return None
+
+
+async def _pick_pg_migration_endpoint(
+    migrator, service: str,
+) -> tuple[str, str]:
+    """Best host:port for host-side asyncpg after SCRAM is proven inside."""
+    endpoints = await _resolve_pg_tcp_endpoints(migrator, service)
+    for _img, host, port in endpoints:
+        if host in ("127.0.0.1", "localhost"):
+            return host, port
+    if endpoints:
+        return endpoints[0][1], endpoints[0][2]
+    # Last resort — rare (no bridge IP). Callers that need TCP will still fail
+    # loudly later; SCRAM-inside already proved the password.
+    return "127.0.0.1", "5432"
+
+
+def _persist_install_pg_password(password: str, env_text: str) -> str:
+    """Write POSTGRES_PASSWORD / DB_PASSWORD (+ URL) into live .env; return text."""
+    try:
+        from app.services.env_migration import (
+            _replace_sqlalchemy_password,
+            _set_env_var_simple,
+            _set_sqlalchemy_url,
+        )
+        from app.config import PASARGUARD_ENV as _PG_ENV
+
+        if not _PG_ENV.exists():
+            return env_text
+        live = _PG_ENV.read_text(encoding="utf-8", errors="ignore")
+        live = _set_env_var_simple(live, "POSTGRES_PASSWORD", password)
+        live = _set_env_var_simple(live, "DB_PASSWORD", password)
+        url = read_env_var(live, "SQLALCHEMY_DATABASE_URL") or ""
+        if url and "sqlite" not in url.lower():
+            live = _set_sqlalchemy_url(
+                live, _replace_sqlalchemy_password(url, password),
+            )
+        _PG_ENV.write_text(live, encoding="utf-8")
+        return live
+    except Exception:
+        return env_text
 
 
 def _pg_sql_literal(value: str) -> str:
@@ -685,6 +926,274 @@ def _pg_hba_trust_restore_script() -> str:
     )
 
 
+async def _pg_service_container_id(migrator, service: str) -> str:
+    """Return compose container id for ``service`` (running or stopped)."""
+    cwd = str(PASARGUARD_DIR)
+    for args in (
+        ["docker", "compose", "ps", "-aq", service],
+        ["docker", "compose", "ps", "-q", service],
+    ):
+        ok, out = await migrator._run_cmd(args, cwd=cwd, timeout=30)
+        cid = (out or "").strip().splitlines()
+        if ok and cid and cid[-1].strip():
+            return cid[-1].strip()
+    return ""
+
+
+async def _pg_service_image(migrator, container_id: str) -> str:
+    if not container_id:
+        return ""
+    ok, out = await migrator._run_cmd(
+        ["docker", "inspect", "--format", "{{.Config.Image}}", container_id],
+        timeout=30,
+    )
+    return (out or "").strip().splitlines()[0].strip() if ok else ""
+
+
+async def _start_heal_sidecar_volumes_from(
+    migrator,
+    *,
+    service: str,
+    heal_name: str,
+) -> tuple[bool, str]:
+    """Start a one-shot container that mounts the *exact* live DB volume.
+
+    ``docker compose run`` can attach a fresh anonymous volume when the image
+    declares VOLUME and compose does not pin a named volume — then ALTER ROLE
+    would heal a throwaway datadir while the real Timescale cluster stays
+    locked. ``--volumes-from`` of the existing service container avoids that.
+    """
+    cwd = str(PASARGUARD_DIR)
+    await migrator._run_cmd(["docker", "rm", "-f", heal_name], cwd=cwd, timeout=60)
+
+    # Prefer stopping cleanly so single-user / hba edits are safe.
+    await migrator._run_cmd(
+        ["docker", "compose", "stop", service], cwd=cwd, timeout=120,
+    )
+    cid = await _pg_service_container_id(migrator, service)
+    image = await _pg_service_image(migrator, cid) if cid else ""
+    if cid and image:
+        migrator.job.log(
+            f"PostgreSQL heal sidecar: volumes-from={cid[:12]} image={image}"
+        )
+        ok, out = await migrator._run_cmd(
+            [
+                "docker", "run", "-d",
+                "--name", heal_name,
+                "--volumes-from", cid,
+                "--entrypoint", "bash",
+                image,
+                "-lc", "sleep 3600",
+            ],
+            cwd=cwd,
+            timeout=180,
+        )
+        if ok:
+            return True, "volumes-from"
+        migrator.job.log(
+            f"PostgreSQL heal: volumes-from run failed, falling back to compose run: "
+            f"{(out or '')[-200:]}"
+        )
+
+    # Fallback (still better than nothing on unusual setups).
+    ok2, out2 = await migrator._run_cmd(
+        [
+            "docker", "compose", "run", "-d", "--no-deps",
+            "--name", heal_name,
+            "--entrypoint", "bash",
+            service,
+            "-lc", "sleep 3600",
+        ],
+        cwd=cwd,
+        timeout=180,
+    )
+    if ok2:
+        return True, "compose-run"
+    migrator.job.log(
+        f"PostgreSQL heal: could not start sidecar: {(out2 or '')[-300:]}"
+    )
+    return False, ""
+
+
+async def recover_postgres_passwords_via_live_hba(
+    migrator,
+    service: str,
+    env_text: str,
+    *,
+    password: str,
+    admin_users: list[str] | None = None,
+) -> bool:
+    """Patch ``pg_hba.conf`` *inside the running* Timescale container, ALTER, restore.
+
+    Does not stop the DB and cannot attach the wrong volume. This is the primary
+    escalation after plain trust ALTER fails (custom scram-only local hba).
+    """
+    if not password or not service:
+        return False
+
+    text = env_text or ""
+    container_env: dict[str, str] = {}
+    try:
+        container_env = await read_db_container_init_env(migrator, service)
+    except Exception:
+        container_env = {}
+    roles = postgres_role_candidates(
+        text,
+        container_env.get("POSTGRES_USER"),
+        container_env.get("DB_USER"),
+        *(admin_users or []),
+        include_postgres_fallback=True,
+    ) or ["postgres", "pasarguard"]
+    users = list(
+        _unique_strings(
+            *(admin_users or []),
+            *postgres_admin_users(text),
+            container_env.get("POSTGRES_USER"),
+            "postgres",
+        )
+    ) or ["postgres"]
+    admin_dbs = _unique_strings(
+        target_database_name(text, "postgresql"),
+        container_env.get("POSTGRES_DB"),
+        "postgres",
+        "pasarguard",
+    )
+    cwd = str(PASARGUARD_DIR)
+
+    migrator.job.log(
+        f"PostgreSQL live-HBA recovery on {service}: patch pg_hba → reload → "
+        f"ALTER {len(roles)} role(s) → restore (no stop, same volume)..."
+    )
+
+    # Ensure service is up.
+    await migrator._run_cmd(
+        ["docker", "compose", "up", "-d", service], cwd=cwd, timeout=180,
+    )
+    await asyncio.sleep(2)
+
+    patched = False
+    try:
+        ok, out = await migrator._run_cmd(
+            [
+                "docker", "compose", "exec", "-T", "-u", "root",
+                service, "bash", "-lc", _pg_hba_trust_prepare_script(),
+            ],
+            cwd=cwd,
+            timeout=60,
+        )
+        if not ok or "pgclockmg-heal: pg_hba trust installed" not in (out or ""):
+            # Some images disallow root exec — try without -u root.
+            ok2, out2 = await migrator._run_cmd(
+                [
+                    "docker", "compose", "exec", "-T",
+                    service, "bash", "-lc", _pg_hba_trust_prepare_script(),
+                ],
+                cwd=cwd,
+                timeout=60,
+            )
+            if not ok2 or "pgclockmg-heal: pg_hba trust installed" not in (out2 or ""):
+                migrator.job.log(
+                    f"PostgreSQL live-HBA: could not patch pg_hba: "
+                    f"{(out2 or out or '')[-300:]}"
+                )
+                return False
+        patched = True
+
+        # Reload so trust takes effect without restart.
+        reloaded = False
+        for as_user in users:
+            for admin_db in admin_dbs:
+                for cmd in (
+                    [
+                        "docker", "compose", "exec", "-T", "-u", "postgres",
+                        service, "psql", "-d", admin_db, "-c",
+                        "SELECT pg_reload_conf();",
+                    ],
+                    [
+                        "docker", "compose", "exec", "-T",
+                        service, "psql", "-U", as_user, "-d", admin_db, "-c",
+                        "SELECT pg_reload_conf();",
+                    ],
+                ):
+                    rok, _ = await migrator._run_cmd(cmd, cwd=cwd, timeout=20)
+                    if rok:
+                        reloaded = True
+                        break
+                if reloaded:
+                    break
+            if reloaded:
+                break
+        if not reloaded:
+            # pg_ctl reload as postgres OS user
+            await migrator._run_cmd(
+                [
+                    "docker", "compose", "exec", "-T", "-u", "postgres",
+                    service, "bash", "-lc",
+                    "pg_ctl reload -D \"${PGDATA:-/var/lib/postgresql/data}\" || true",
+                ],
+                cwd=cwd,
+                timeout=30,
+            )
+        await asyncio.sleep(1)
+
+        any_ok = False
+        for role in roles:
+            synced = False
+            for as_user in users:
+                for admin_db in admin_dbs:
+                    if await _pg_alter_role_via_trust(
+                        migrator,
+                        service,
+                        as_user=as_user,
+                        role=role,
+                        password=password,
+                        database=admin_db,
+                    ):
+                        migrator.job.log(
+                            f"Live-HBA synced password for role {role} "
+                            f"(as {as_user} on {admin_db})"
+                        )
+                        synced = True
+                        any_ok = True
+                        break
+                if synced:
+                    break
+            if not synced:
+                migrator.job.log(f"Live-HBA could not ALTER ROLE {role}")
+        return any_ok
+    finally:
+        if patched:
+            await migrator._run_cmd(
+                [
+                    "docker", "compose", "exec", "-T", "-u", "root",
+                    service, "bash", "-lc", _pg_hba_trust_restore_script(),
+                ],
+                cwd=cwd,
+                timeout=60,
+            )
+            # Best-effort reload after restore
+            await migrator._run_cmd(
+                [
+                    "docker", "compose", "exec", "-T", "-u", "postgres",
+                    service, "bash", "-lc",
+                    "psql -d postgres -c 'SELECT pg_reload_conf();' "
+                    "|| psql -d pasarguard -c 'SELECT pg_reload_conf();' || true",
+                ],
+                cwd=cwd,
+                timeout=20,
+            )
+            try:
+                await refresh_pgbouncer_if_stale(
+                    migrator,
+                    "postgresql",
+                    env_text=text,
+                    password=password,
+                    force=True,
+                )
+            except Exception as exc:
+                migrator.job.log(f"PgBouncer refresh after live-HBA note: {exc}")
+
+
 async def recover_postgres_passwords_via_single_user(
     migrator,
     service: str,
@@ -697,8 +1206,9 @@ async def recover_postgres_passwords_via_single_user(
 
     Used when in-container trust/peer ALTER cannot run (custom ``pg_hba``, no
     local trust, or SCRAM lockout). Stops the compose DB service, runs a one-shot
-    sibling on the *same data volume*, sets role passwords to the install .env
-    secret, then brings the normal service back. Does not wipe data.
+    sibling via ``--volumes-from`` the *existing* container (not ``compose run``,
+    which can attach a throwaway anonymous volume), sets role passwords to the
+    install .env secret, then brings the normal service back. Does not wipe data.
     """
     if not password or not service:
         return False
@@ -725,41 +1235,19 @@ async def recover_postgres_passwords_via_single_user(
 
     migrator.job.log(
         f"PostgreSQL nuclear recovery on {service}: single-user ALTER for "
-        f"{len(roles)} role(s) (same volume, no data wipe)..."
+        f"{len(roles)} role(s) (volumes-from live container, no data wipe)..."
     )
-
-    await migrator._run_cmd(
-        ["docker", "rm", "-f", heal_name], cwd=cwd, timeout=60,
-    )
-    stop_ok, stop_out = await migrator._run_cmd(
-        ["docker", "compose", "stop", service], cwd=cwd, timeout=120,
-    )
-    if not stop_ok:
-        migrator.job.log(
-            f"PostgreSQL nuclear: could not stop {service}: {(stop_out or '')[-200:]}"
-        )
 
     success = False
     started = False
     try:
-        # Override entrypoint to bash so we never re-run image init on existing data.
-        run_ok, run_out = await migrator._run_cmd(
-            [
-                "docker", "compose", "run", "-d", "--no-deps",
-                "--name", heal_name,
-                "--entrypoint", "bash",
-                service,
-                "-lc", "sleep 3600",
-            ],
-            cwd=cwd,
-            timeout=180,
+        started, mode = await _start_heal_sidecar_volumes_from(
+            migrator, service=service, heal_name=heal_name,
         )
-        if not run_ok:
-            migrator.job.log(
-                f"PostgreSQL nuclear: compose run failed: {(run_out or '')[-300:]}"
-            )
+        if not started:
+            migrator.job.log("PostgreSQL nuclear: heal sidecar failed to start")
             return False
-        started = True
+        migrator.job.log(f"PostgreSQL nuclear: sidecar mode={mode}")
         await asyncio.sleep(2)
 
         ok, out = await migrator._run_cmd(
@@ -839,8 +1327,9 @@ async def recover_postgres_passwords_via_hba_trust(
 ) -> bool:
     """Second nuclear path: temporary ``pg_hba.conf`` trust → ALTER → restore hba.
 
-    Used when ``postgres --single`` cannot run (odd image layout). Same volume,
-    no data wipe.
+    Used when ``postgres --single`` cannot run (odd image layout). Uses
+    ``--volumes-from`` the live service container so we edit the real datadir,
+    not a throwaway ``compose run`` anonymous volume. No data wipe.
     """
     if not password or not service:
         return False
@@ -877,32 +1366,18 @@ async def recover_postgres_passwords_via_hba_trust(
 
     migrator.job.log(
         f"PostgreSQL HBA-trust recovery on {service}: temporary trust → ALTER "
-        f"{len(roles)} role(s) → restore pg_hba..."
-    )
-
-    await migrator._run_cmd(["docker", "rm", "-f", heal_name], cwd=cwd, timeout=60)
-    await migrator._run_cmd(
-        ["docker", "compose", "stop", service], cwd=cwd, timeout=120,
+        f"{len(roles)} role(s) → restore pg_hba (volumes-from live container)..."
     )
 
     hba_patched = False
     try:
-        run_ok, run_out = await migrator._run_cmd(
-            [
-                "docker", "compose", "run", "-d", "--no-deps",
-                "--name", heal_name,
-                "--entrypoint", "bash",
-                service,
-                "-lc", "sleep 3600",
-            ],
-            cwd=cwd,
-            timeout=180,
+        started, mode = await _start_heal_sidecar_volumes_from(
+            migrator, service=service, heal_name=heal_name,
         )
-        if not run_ok:
-            migrator.job.log(
-                f"PostgreSQL HBA heal: compose run failed: {(run_out or '')[-300:]}"
-            )
+        if not started:
+            migrator.job.log("PostgreSQL HBA heal: sidecar failed to start")
             return False
+        migrator.job.log(f"PostgreSQL HBA heal: sidecar mode={mode}")
         await asyncio.sleep(2)
         ok, out = await migrator._run_cmd(
             ["docker", "exec", heal_name, "bash", "-lc", _pg_hba_trust_prepare_script()],
@@ -978,23 +1453,14 @@ async def recover_postgres_passwords_via_hba_trust(
                 migrator.job.log(f"HBA-trust could not ALTER ROLE {role}")
     finally:
         if hba_patched:
-            # Restore original pg_hba via another one-shot, then reload.
+            # Restore original pg_hba via volumes-from sidecar, then reload.
             await migrator._run_cmd(
                 ["docker", "compose", "stop", service], cwd=cwd, timeout=120,
             )
-            await migrator._run_cmd(["docker", "rm", "-f", heal_name], cwd=cwd, timeout=60)
-            run_ok2, _ = await migrator._run_cmd(
-                [
-                    "docker", "compose", "run", "-d", "--no-deps",
-                    "--name", heal_name,
-                    "--entrypoint", "bash",
-                    service,
-                    "-lc", "sleep 600",
-                ],
-                cwd=cwd,
-                timeout=180,
+            started2, _ = await _start_heal_sidecar_volumes_from(
+                migrator, service=service, heal_name=heal_name,
             )
-            if run_ok2:
+            if started2:
                 await asyncio.sleep(1)
                 await migrator._run_cmd(
                     [
@@ -1045,7 +1511,10 @@ async def force_align_postgres_password(
     password: str,
     admin_users: list[str] | None = None,
 ) -> bool:
-    """Align live PG/Timescale roles to ``password`` — trust → single-user → HBA.
+    """Align live PG/Timescale roles to ``password``.
+
+    Order: trust ALTER → **live-HBA** (patch running container, same volume) →
+    single-user (``--volumes-from``) → stopped HBA-trust sidecar.
 
     This is the automation that makes sqlite→Timescale (and any convert) keep
     going when .env and the volume SCRAM secret drifted: we never ask the
@@ -1063,8 +1532,21 @@ async def force_align_postgres_password(
     if ok:
         return True
     migrator.job.log(
-        "Trust recovery insufficient — escalating to PostgreSQL single-user "
-        "password heal (same volume)..."
+        "Trust recovery insufficient — escalating to live pg_hba patch "
+        "(same running container / volume)..."
+    )
+    ok = await recover_postgres_passwords_via_live_hba(
+        migrator,
+        service,
+        env_text,
+        password=password,
+        admin_users=admin_users,
+    )
+    if ok:
+        return True
+    migrator.job.log(
+        "Live-HBA insufficient — escalating to PostgreSQL single-user "
+        "password heal (volumes-from live container)..."
     )
     ok = await recover_postgres_passwords_via_single_user(
         migrator,
@@ -1076,7 +1558,8 @@ async def force_align_postgres_password(
     if ok:
         return True
     migrator.job.log(
-        "Single-user heal insufficient — escalating to temporary pg_hba trust..."
+        "Single-user heal insufficient — escalating to temporary pg_hba trust "
+        "via volumes-from sidecar..."
     )
     return await recover_postgres_passwords_via_hba_trust(
         migrator,
@@ -1145,6 +1628,14 @@ async def resolve_live_admin_connection(
         migrator.job.log(f"Container init-env probe note: {exc}")
 
     if db_type in ("postgresql", "timescaledb"):
+        # Ensure the DB service is up before any probe/heal.
+        await migrator._run_cmd(
+            ["docker", "compose", "up", "-d", service],
+            cwd=str(PASARGUARD_DIR),
+            timeout=180,
+        )
+        await asyncio.sleep(1)
+
         users = _unique_strings(
             *postgres_admin_users(text),
             container_env.get("POSTGRES_USER"),
@@ -1158,11 +1649,22 @@ async def resolve_live_admin_connection(
         probe_dbs = _pg_probe_databases(text, db_type)
         if container_env.get("POSTGRES_DB"):
             probe_dbs = _unique_strings(container_env.get("POSTGRES_DB"), *probe_dbs)
-        trust_mode: bool | None = None
-        host_endpoint: tuple[str, str, str] | None = None
-        tcp_failures = 0
-        local_probe_ok = False
 
+        # Canonical install password (sqlite backups never supply one).
+        preferred = passwords[0] if passwords else ""
+        minted = False
+        if not preferred:
+            preferred = mint_install_db_password()
+            minted = True
+            migrator.job.log(
+                "No install/container password candidates — minted POSTGRES_PASSWORD "
+                "and will force-align live roles to it"
+            )
+            text = _persist_install_pg_password(preferred, text)
+            passwords = _unique_strings(preferred, *passwords)
+
+        # --- Fast path: local socket is NOT trust → password already proven ---
+        trust_mode: bool | None = None
         for user in users:
             for pwd in passwords:
                 hit_db = await _probe_pg_any_db(
@@ -1170,130 +1672,142 @@ async def resolve_live_admin_connection(
                 )
                 if not hit_db:
                     continue
-                local_probe_ok = True
-                if trust_mode is None:
-                    trust_mode = await _pg_in_container_is_trust(
-                        migrator, service, user, hit_db,
+                trust_mode = await _pg_in_container_is_trust(
+                    migrator, service, user, hit_db,
+                )
+                if trust_mode is False:
+                    host, port = await _pick_pg_migration_endpoint(migrator, service)
+                    migrator.job.log(
+                        f"PostgreSQL auth OK as {user} on {hit_db} "
+                        f"(local socket requires password; endpoint {host}:{port})"
                     )
-                if not trust_mode:
-                    conn = {
+                    return {
                         "db_type": db_type,
                         "user": user,
                         "password": pwd,
                         "database": db_name,
-                        "host": "127.0.0.1",
-                        "port": "5432",
+                        "host": host,
+                        "port": port,
                     }
-                    migrator.job.log(
-                        f"PostgreSQL auth OK as {user} on {hit_db} (direct port 5432)"
-                    )
-                    return conn
+                # Local is trust — stop scanning; SCRAM/heal path below is authoritative.
+                break
+            if trust_mode is True:
+                break
 
-                # Local socket is trust — only a host/TCP login proves the password.
-                if host_endpoint is None:
-                    host_endpoint = await _resolve_pg_host_endpoint(migrator, service)
-                    image, host, port = host_endpoint
-                    if not (image and host and port):
-                        raise RuntimeError(
-                            "PostgreSQL container uses local trust auth, but the published "
-                            "host port/image could not be resolved — refusing to accept an "
-                            "unverified password. Check that the DB service publishes 5432 "
-                            "and POSTGRES_PASSWORD / DB_PASSWORD match the running cluster."
-                        )
-                    migrator.job.log(
-                        f"PostgreSQL local socket is trust — verifying passwords via "
-                        f"TCP {host}:{port}..."
-                    )
-                image, host, port = host_endpoint
-                for tcp_db in probe_dbs:
-                    if await _probe_pg_via_host_tcp(
-                        migrator,
-                        image=image,
-                        host=host,
-                        port=port,
-                        user=user,
-                        password=pwd,
-                        database=tcp_db,
-                    ):
-                        conn = {
-                            "db_type": db_type,
-                            "user": user,
-                            "password": pwd,
-                            "database": db_name,
-                            "host": host,
-                            "port": port,
-                        }
-                        migrator.job.log(
-                            f"PostgreSQL auth OK as {user} via TCP {host}:{port} "
-                            f"(db={tcp_db})"
-                        )
-                        return conn
-                tcp_failures += 1
+        # --- Trust / SCRAM-unknown path: prove password via eth0 SCRAM inside ---
+        # Never hard-fail on "no published 5432" — that was the v4.6.13 production bug.
+        migrator.job.log(
+            "PostgreSQL local socket is trust (or unproven) — verifying install "
+            "password via in-container eth0 SCRAM (no host publish required)..."
+        )
 
-        # Always attempt auto-heal when no verified TCP/local password worked.
-        # Prefer install .env secret; if missing (sqlite backups never have one),
-        # mint a fresh password, force it onto live roles, and continue convert.
-        preferred = passwords[0] if passwords else ""
-        minted = False
-        if not preferred:
-            preferred = mint_install_db_password()
-            minted = True
+        async def _scram_hit(pwd: str) -> tuple[str, str] | None:
+            for user in users:
+                hit = await _probe_pg_scram_any_db(
+                    migrator, service, user, pwd, probe_dbs,
+                )
+                if hit:
+                    return user, hit
+            return None
+
+        # 1) Already correct?
+        hit = await _scram_hit(preferred)
+        if hit:
+            user, hit_db = hit
+            host, port = await _pick_pg_migration_endpoint(migrator, service)
             migrator.job.log(
-                "No install/container password candidates — minted a temporary "
-                "POSTGRES_PASSWORD and will force-align live roles to it"
+                f"PostgreSQL SCRAM OK as {user} via eth0 (db={hit_db}); "
+                f"migration endpoint {host}:{port}"
             )
-            try:
-                from app.services.env_migration import _set_env_var_simple, _set_sqlalchemy_url
-                from app.config import PASARGUARD_ENV as _PG_ENV
+            return {
+                "db_type": db_type,
+                "user": user,
+                "password": preferred,
+                "database": db_name,
+                "host": host,
+                "port": port,
+            }
 
-                if _PG_ENV.exists():
-                    live = _PG_ENV.read_text(encoding="utf-8", errors="ignore")
-                    live = _set_env_var_simple(live, "POSTGRES_PASSWORD", preferred)
-                    live = _set_env_var_simple(live, "DB_PASSWORD", preferred)
-                    url = read_env_var(live, "SQLALCHEMY_DATABASE_URL") or ""
-                    if url and "sqlite" not in url.lower():
-                        from app.services.env_migration import _replace_sqlalchemy_password
+        # 2) Another candidate already works on SCRAM — prefer install secret
+        #    but accept working one and heal roles to preferred next.
+        working_pwd = ""
+        working_user = users[0]
+        for pwd in passwords:
+            if pwd == preferred:
+                continue
+            hit = await _scram_hit(pwd)
+            if hit:
+                working_user, _ = hit
+                working_pwd = pwd
+                break
 
-                        live = _set_sqlalchemy_url(
-                            live, _replace_sqlalchemy_password(url, preferred),
-                        )
-                    _PG_ENV.write_text(live, encoding="utf-8")
-                    text = live
+        # 3) Always force-align to install/minted preferred (root heal).
+        migrator.job.log(
+            "PostgreSQL SCRAM not yet aligned to install password — force-aligning "
+            f"roles (trust → live-HBA → single-user volumes-from → HBA"
+            + (", minted=yes" if minted else "")
+            + (", had-working-alt=yes" if working_pwd else "")
+            + ")..."
+        )
+        recovered = await force_align_postgres_password(
+            migrator,
+            service,
+            text,
+            password=preferred,
+            admin_users=users,
+        )
+        # Persist preferred into .env even when it came from container init.
+        if preferred and not minted:
+            text = _persist_install_pg_password(preferred, text)
+
+        if recovered:
+            for attempt in range(1, 6):
+                await asyncio.sleep(1.2 * attempt)
+                hit = await _scram_hit(preferred)
+                if hit:
+                    user, hit_db = hit
+                    host, port = await _pick_pg_migration_endpoint(migrator, service)
                     migrator.job.log(
-                        "Wrote minted POSTGRES_PASSWORD into live .env for convert/panel"
+                        f"PostgreSQL SCRAM OK as {user} via eth0 after heal "
+                        f"(db={hit_db}, attempt={attempt}); endpoint {host}:{port}"
                     )
-            except Exception as mint_exc:
-                migrator.job.log(f"Could not persist minted password to .env: {mint_exc}")
-        image = host = port = ""
-        if host_endpoint:
-            image, host, port = host_endpoint
-        elif service:
-            host_endpoint = await _resolve_pg_host_endpoint(migrator, service)
-            image, host, port = host_endpoint
-        recovered = False
-        if preferred and service:
-            migrator.job.log(
-                "PostgreSQL auth unresolved — auto-aligning roles to install password "
-                f"(local_probe_ok={local_probe_ok}, tcp_failures={tcp_failures}; "
-                "trust → single-user → pg_hba trust"
-                + (", minted=yes" if minted else "")
-                + ")..."
-            )
-            recovered = await force_align_postgres_password(
-                migrator,
-                service,
-                text,
-                password=preferred,
-                admin_users=users,
-            )
-        if recovered and image and host and port:
-            migrator.job.log(
-                "PostgreSQL password auto-heal applied — re-checking TCP auth..."
-            )
-            # SCRAM secrets can take a moment to settle after ALTER ROLE;
-            # retry a few times before declaring failure.
-            for attempt in range(1, 5):
-                await asyncio.sleep(1.5 * attempt)
+                    return {
+                        "db_type": db_type,
+                        "user": user,
+                        "password": preferred,
+                        "database": db_name,
+                        "host": host,
+                        "port": port,
+                    }
+
+            # Eth0 might itself be trust (wide-open hba) — then SCRAM probe is
+            # meaningless; accept preferred after successful ALTER + optional host TCP.
+            eth0_trust = False
+            for user in users:
+                for db in probe_dbs:
+                    if await _pg_eth0_is_trust(migrator, service, user, db):
+                        eth0_trust = True
+                        break
+                if eth0_trust:
+                    break
+            if eth0_trust:
+                host, port = await _pick_pg_migration_endpoint(migrator, service)
+                migrator.job.log(
+                    "PostgreSQL eth0 is also trust — accepting install password after "
+                    f"successful role heal; endpoint {host}:{port}"
+                )
+                return {
+                    "db_type": db_type,
+                    "user": users[0],
+                    "password": preferred,
+                    "database": db_name,
+                    "host": host,
+                    "port": port,
+                }
+
+            # Secondary: host-side TCP (published / bridge / pgbouncer).
+            endpoints = await _resolve_pg_tcp_endpoints(migrator, service)
+            for image, host, port in endpoints:
                 for user in users:
                     for tcp_db in probe_dbs:
                         if await _probe_pg_via_host_tcp(
@@ -1305,7 +1819,11 @@ async def resolve_live_admin_connection(
                             password=preferred,
                             database=tcp_db,
                         ):
-                            conn = {
+                            migrator.job.log(
+                                f"PostgreSQL auth OK as {user} via host TCP "
+                                f"{host}:{port} after heal (db={tcp_db})"
+                            )
+                            return {
                                 "db_type": db_type,
                                 "user": user,
                                 "password": preferred,
@@ -1313,39 +1831,29 @@ async def resolve_live_admin_connection(
                                 "host": host,
                                 "port": port,
                             }
-                            migrator.job.log(
-                                f"PostgreSQL auth OK as {user} via TCP {host}:{port} "
-                                f"(after password auto-heal, db={tcp_db}, "
-                                f"attempt={attempt})"
-                            )
-                            return conn
-            raise RuntimeError(
-                "PostgreSQL/TimescaleDB authentication failed over TCP — "
-                "password auto-heal aligned role passwords but the published host port "
-                f"({host}:{port}) still rejected every candidate. "
-                "Check that 5432 is published to the live Timescale/Postgres container."
+
+        # 4) Fall back to a password that already SCRAM-worked (rare).
+        if working_pwd:
+            host, port = await _pick_pg_migration_endpoint(migrator, service)
+            migrator.job.log(
+                f"PostgreSQL using alternate SCRAM-verified password as {working_user} "
+                f"(heal to install secret failed or unverified); endpoint {host}:{port}"
             )
-        if trust_mode and tcp_failures:
-            raise RuntimeError(
-                "PostgreSQL/TimescaleDB authentication failed over TCP — "
-                "in-container probes are trust-only and every .env password candidate "
-                "was rejected by the published host port"
-                + (
-                    " (password auto-heal could not realign role passwords)."
-                    if not recovered
-                    else " (password auto-heal ran but TCP still rejected the .env password)."
-                )
-                + " Update PGClockMG to the latest release and retry."
-            )
+            return {
+                "db_type": db_type,
+                "user": working_user,
+                "password": working_pwd,
+                "database": db_name,
+                "host": host,
+                "port": port,
+            }
+
         raise RuntimeError(
-            "PostgreSQL/TimescaleDB authentication failed — "
-            "could not auto-align install password onto the live container"
-            + (
-                " (password auto-heal could not realign role passwords)."
-                if preferred and not recovered
-                else "."
-            )
-            + " Update PGClockMG to the latest release and retry."
+            "PostgreSQL/TimescaleDB authentication failed — could not prove the "
+            "install password over in-container SCRAM (eth0) after auto-heal "
+            f"(recovered={bool(recovered)}, minted={minted}). "
+            "Update PGClockMG to v4.6.14+ and retry; if it persists, check that the "
+            "timescaledb container is running and roles exist."
         )
 
     if db_type in ("mysql", "mariadb"):
