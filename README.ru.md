@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.20`** — alembic Phase2 автоматически лечит connect/auth и продолжает до успеха
+> 🚀 **`v4.6.21`** — корневой фикс sqlite→Timescale: SQLite URL alembic больше не ломается, container id очищается от шума compose
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

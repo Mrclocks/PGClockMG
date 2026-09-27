@@ -354,6 +354,133 @@ def test_rewrite_sqlalchemy_host_port_keeps_password():
     print("OK: sqlalchemy host rewrite keeps credentials")
 
 
+def test_rewrite_sqlalchemy_host_port_never_touches_sqlite():
+    """Regression: sqlite→TS Phase1 must not become sqlite://127.0.0.1:5432//path."""
+    from app.services.pasarguard_ops import (
+        _rewrite_sqlalchemy_host_port,
+        build_sqlite_alembic_url,
+    )
+
+    url = build_sqlite_alembic_url("/var/lib/pasarguard/db.sqlite3")
+    out = _rewrite_sqlalchemy_host_port(url, "127.0.0.1", 5432)
+    assert out == url
+    assert "127.0.0.1" not in out
+    assert ":5432" not in out
+    print("OK: sqlite URL rewrite is a no-op")
+
+
+def test_alembic_strategies_sqlite_ignores_timescaledb_target():
+    """Phase1 sqlite upgrade while target_db=timescaledb must stay on sqlite-file."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.services import pasarguard_ops as ops
+
+    url = "sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3"
+    mig = MagicMock()
+    mig.params = {
+        "target_db": "timescaledb",
+        "target_db_user": "pasarguard",
+        "target_db_password": "secret",
+        "target_db_name": "pasarguard",
+        "target_db_port": "5432",
+    }
+    mig.job = MagicMock()
+
+    async def _go():
+        with (
+            patch.object(ops, "_tcp_port_open", return_value=True),
+            patch.object(ops, "resolve_db_service", return_value="timescaledb"),
+            patch.object(
+                ops, "_compose_network_name", new_callable=AsyncMock, return_value="net",
+            ),
+            patch.object(
+                ops,
+                "_compose_service_container_id",
+                new_callable=AsyncMock,
+                return_value="abcdef012345",
+            ),
+            patch(
+                "app.services.env_migration.silence_compose_pgadmin_warnings",
+                return_value=False,
+            ),
+        ):
+            return await ops._alembic_endpoint_strategies(mig, url)
+
+    strategies = asyncio.run(_go())
+    assert len(strategies) == 1
+    net_args, out_url, label = strategies[0]
+    assert label == "sqlite-file"
+    assert net_args == ["--network", "host"]
+    assert out_url == url
+    assert "127.0.0.1" not in out_url
+    print("OK: sqlite strategies ignore timescaledb target_db")
+
+
+def test_extract_docker_container_id_skips_pgadmin_warning():
+    """Exact failure from the field: compose warning became --network=container:time=…"""
+    from app.services.pasarguard_ops import extract_docker_container_id
+
+    noisy = (
+        'time="2026-09-27T09:09:09Z" level=warning msg="The \\"PGADMIN_EMAIL\\" '
+        'variable is not set. Defaulting to a blank string."\n'
+        "a1b2c3d4e5f6789012345678abcdef01\n"
+    )
+    assert extract_docker_container_id(noisy) == "a1b2c3d4e5f6789012345678abcdef01"
+    assert extract_docker_container_id(
+        'time="2026-09-27T09:09:09Z" level=warning msg="The PGADMIN_EMAIL variable is not set"\n'
+    ) == ""
+    assert extract_docker_container_id("deadbeefcafe") == "deadbeefcafe"
+    print("OK: extract_docker_container_id skips compose warnings")
+
+
+def test_run_pasarguard_alembic_does_not_rotate_on_invalid_sqlite_url():
+    """Invalid SQLite URL must fail fast — rotating to container-netns made it worse."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.services import pasarguard_ops as ops
+
+    mig = MagicMock()
+    mig.params = {"target_db": "timescaledb"}
+    mig.job = MagicMock()
+    mig.job.log = MagicMock()
+    mig.job.progress = 90
+    mig.job.set_progress = MagicMock()
+
+    bad_url = "sqlite+aiosqlite://127.0.0.1:5432//var/lib/pasarguard/db.sqlite3"
+    strategies = [
+        (["--network", "host"], bad_url, "host-loopback"),
+        (["--network=container:cid"], bad_url, "container-netns:timescaledb"),
+    ]
+    invalid = (
+        "sqlalchemy.exc.ArgumentError: Invalid SQLite URL: "
+        "sqlite+aiosqlite://127.0.0.1:5432//var/lib/pasarguard/db.sqlite3"
+    )
+    calls: list[str] = []
+
+    async def _once(migrator, *args, url, net_args, label):
+        calls.append(label)
+        return False, invalid
+
+    async def _go():
+        with (
+            patch.object(
+                ops, "_alembic_endpoint_strategies",
+                new_callable=AsyncMock, return_value=strategies,
+            ),
+            patch.object(ops, "_run_pasarguard_alembic_once", side_effect=_once),
+            patch.object(ops, "build_local_alembic_url", return_value=bad_url),
+        ):
+            return await ops._run_pasarguard_alembic(mig, "upgrade", "head")
+
+    ok, out = asyncio.run(_go())
+    assert ok is False
+    assert calls == ["host-loopback"]  # must NOT try container-netns
+    assert "Invalid SQLite URL" in out
+    print("OK: alembic does not rotate on Invalid SQLite URL")
+
+
 def test_sqlite_column_intersection():
     from app.services.native_migration.copy_core import (
         sqlite_columns, SKIP_TABLES, TABLE_ORDER,
@@ -1425,6 +1552,10 @@ if __name__ == "__main__":
     test_is_alembic_connect_auth_error_detects_env_py_failures()
     test_format_alembic_failure_surfaces_root_exception()
     test_rewrite_sqlalchemy_host_port_keeps_password()
+    test_rewrite_sqlalchemy_host_port_never_touches_sqlite()
+    test_alembic_strategies_sqlite_ignores_timescaledb_target()
+    test_extract_docker_container_id_skips_pgadmin_warning()
+    test_run_pasarguard_alembic_does_not_rotate_on_invalid_sqlite_url()
     test_sqlite_column_intersection()
     test_migration_strategy_matrix()
     test_read_alembic_from_sql_dump()

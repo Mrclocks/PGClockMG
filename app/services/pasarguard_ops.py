@@ -1873,11 +1873,44 @@ def _tcp_port_open(host: str, port: int | str, *, timeout: float = 2.0) -> bool:
         return False
 
 
+def _alembic_url_engine(url: str) -> str:
+    """Dialect family for an alembic SQLAlchemy URL (sqlite / mysql / postgresql)."""
+    from urllib.parse import urlparse
+
+    if not url:
+        return ""
+    try:
+        scheme = (urlparse(url).scheme or "").lower()
+    except Exception:
+        scheme = ""
+    base = scheme.split("+", 1)[0]
+    if base == "sqlite":
+        return "sqlite"
+    if base in ("mysql", "mariadb"):
+        return "mysql"
+    if base in ("postgresql", "postgres"):
+        return "postgresql"
+    low = url.lower()
+    if low.startswith("sqlite"):
+        return "sqlite"
+    if "mysql" in low.split("://", 1)[0]:
+        return "mysql"
+    if "postgres" in low.split("://", 1)[0]:
+        return "postgresql"
+    return ""
+
+
 def _rewrite_sqlalchemy_host_port(url: str, host: str, port: str | int) -> str:
-    """Replace host:port in a SQLAlchemy URL while keeping user/pass/db/query."""
+    """Replace host:port in a SQLAlchemy URL while keeping user/pass/db/query.
+
+    Never rewrite SQLite URLs — injecting host:port produces
+    ``sqlite+aiosqlite://127.0.0.1:5432//path`` which SQLAlchemy rejects.
+    """
     from urllib.parse import urlparse, urlunparse
 
     if not url or not host:
+        return url
+    if _alembic_url_engine(url) == "sqlite":
         return url
     try:
         parsed = urlparse(url)
@@ -1906,6 +1939,31 @@ def _ensure_asyncpg_ssl_false(url: str) -> str:
     return urlunparse(parsed._replace(query=urlencode(q)))
 
 
+# docker compose merges stderr warnings into the same pipe as ``ps -q``.
+# Example noise: time="…" level=warning msg="The \"PGADMIN_EMAIL\" variable is not set"
+_DOCKER_CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{12,64}$", re.I)
+
+
+def extract_docker_container_id(output: str) -> str:
+    """Pick a real container id from noisy ``docker compose ps -q`` output.
+
+    Never trust the first line — Compose variable-interpolation warnings often
+    land before the hex id and previously poisoned ``--network=container:…``.
+    """
+    found: list[str] = []
+    for raw in (output or "").splitlines():
+        line = (raw or "").strip()
+        if not line:
+            continue
+        if _DOCKER_CONTAINER_ID_RE.fullmatch(line):
+            found.append(line)
+            continue
+        tok = line.split()[0]
+        if _DOCKER_CONTAINER_ID_RE.fullmatch(tok):
+            found.append(tok)
+    return found[-1] if found else ""
+
+
 async def _compose_service_container_id(migrator, service: str) -> str:
     """Running compose service container id, or empty string."""
     ok, cid = await migrator._run_cmd(
@@ -1916,8 +1974,7 @@ async def _compose_service_container_id(migrator, service: str) -> str:
     )
     if not ok:
         return ""
-    lines = (cid or "").strip().splitlines()
-    return lines[0].strip() if lines else ""
+    return extract_docker_container_id(cid or "")
 
 
 async def _compose_network_name(migrator, service: str) -> str:
@@ -1943,8 +2000,25 @@ async def _compose_network_name(migrator, service: str) -> str:
     return ""
 
 
+def _is_alembic_url_construction_error(output: str) -> bool:
+    """True when the SQLAlchemy URL itself is invalid — do not rotate endpoints."""
+    low = (output or "").lower()
+    if "invalid sqlite url" in low:
+        return True
+    if "argumenterror" in low and "sqlite" in low:
+        return True
+    if "could not parse rfc1738 url" in low:
+        return True
+    if "invalid argument" in low and "--network" in low:
+        # docker run rejected a polluted --network=container:<compose warning>
+        return True
+    return False
+
+
 def _is_alembic_connect_auth_error(output: str) -> bool:
     """True when alembic failed to reach / authenticate to the DB (healable)."""
+    if _is_alembic_url_construction_error(output):
+        return False
     low = (output or "").lower()
     needles = (
         "password authentication failed",
@@ -2002,14 +2076,34 @@ async def _alembic_endpoint_strategies(
 
     Never route alembic DDL through PgBouncer (:6432). Prefer paths that match
     HBA / SCRAM the way the panel does (compose DNS, then DB container netns).
+
+    Strategies follow the **URL dialect**, not ``params['target_db']``. Phase 1
+    of sqlite→timescaledb upgrades an intermediate SQLite file while target_db
+    is already timescaledb — rewriting that URL with PG host:port is what
+    produced ``Invalid SQLite URL: sqlite+aiosqlite://127.0.0.1:5432//…``.
     """
+    # Best-effort: keep compose ps -q free of PGADMIN interpolation warnings.
+    try:
+        from app.services.env_migration import silence_compose_pgadmin_warnings
+
+        silence_compose_pgadmin_warnings()
+    except Exception:
+        pass
+
     url = _ensure_asyncpg_ssl_false(url)
+    url_engine = _alembic_url_engine(url)
     target_db = (migrator.params or {}).get("target_db") or ""
-    if target_db not in ("postgresql", "timescaledb"):
+
+    # File / MySQL URLs: host network only — never inject PG endpoints.
+    if url_engine == "sqlite":
+        return [(["--network", "host"], url, "sqlite-file")]
+    if url_engine == "mysql" or (
+        url_engine != "postgresql" and target_db not in ("postgresql", "timescaledb")
+    ):
         return [(["--network", "host"], url, "host")]
 
     conn = get_target_connection(migrator.params)
-    port = migration_port(conn, target_db)
+    port = migration_port(conn, target_db if target_db in ("postgresql", "timescaledb") else "timescaledb")
     strategies: list[tuple[list[str], str, str]] = []
     seen: set[tuple[tuple[str, ...], str]] = set()
 
@@ -2029,7 +2123,9 @@ async def _alembic_endpoint_strategies(
             "host-loopback",
         )
 
-    svc = resolve_db_service(target_db)
+    svc = resolve_db_service(
+        target_db if target_db in ("postgresql", "timescaledb") else "timescaledb"
+    )
     if svc:
         net = await _compose_network_name(migrator, svc)
         if net:
@@ -2281,8 +2377,12 @@ async def _run_pasarguard_alembic(
                 )
             return True, out or ""
         last_out = out or last_out
-        # Schema/revision problems won't change with a different TCP path.
-        if _is_missing_revision_error(out or "") or _is_duplicate_schema_error(out or ""):
+        # Schema/revision / bad-URL problems won't change with a different TCP path.
+        if (
+            _is_missing_revision_error(out or "")
+            or _is_duplicate_schema_error(out or "")
+            or _is_alembic_url_construction_error(out or "")
+        ):
             return False, out or ""
         if idx + 1 < len(strategies) and _is_alembic_connect_auth_error(out or ""):
             migrator.job.log(

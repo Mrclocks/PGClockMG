@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.6.20`** — alembic Phase2 خطاهای connect/auth را اتوماتیک heal می‌کند و تا موفقیت ادامه می‌دهد
+> 🚀 **`v4.6.21`** — ریشهٔ شکست sqlite→Timescale: URL اسکیوالایت دیگر خراب نمی‌شود و container id از نویز compose جدا می‌شود
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

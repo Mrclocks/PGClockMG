@@ -1092,10 +1092,13 @@ def sanitize_ssl_env(text: str, install_env: str | None = None) -> str:
 
 
 def ensure_pgadmin_env(text: str, install_env: str) -> str:
-    """Preserve pgAdmin credentials from live install when compose includes pgadmin."""
-    if not _compose_has_pgadmin():
-        return text
+    """Fill PGADMIN_* so compose interpolation never emits warning noise.
 
+    Compose merges those warnings onto the same pipe as ``ps -q``. Even when
+    the pgadmin service is unused, referenced ``${PGADMIN_EMAIL}`` vars must
+    resolve or container-id parsers historically mistook the warning line for
+    a container id (``--network=container:time=…``).
+    """
     for key in ("PGADMIN_EMAIL", "PGADMIN_PASSWORD"):
         if not read_env_var(text, key):
             val = read_env_var(install_env, key)
@@ -1108,7 +1111,30 @@ def ensure_pgadmin_env(text: str, install_env: str) -> str:
         live = read_env_var(install_env, "PGADMIN_PASSWORD")
         if live:
             text = _set_env_var_simple(text, "PGADMIN_PASSWORD", live)
+        elif not read_env_var(text, "PGADMIN_PASSWORD"):
+            text = _set_env_var_simple(text, "PGADMIN_PASSWORD", "pgadmin")
     return text
+
+
+def silence_compose_pgadmin_warnings(
+    *,
+    install_env: str | None = None,
+) -> bool:
+    """Ensure live PasarGuard .env has PGADMIN_* defaults. Returns True if written."""
+    if not PASARGUARD_ENV.exists():
+        return False
+    try:
+        text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    fixed = ensure_pgadmin_env(text, install_env or text)
+    if fixed == text:
+        return False
+    try:
+        PASARGUARD_ENV.write_text(fixed, encoding="utf-8")
+    except OSError:
+        return False
+    return True
 
 
 def env_points_to_db(text: str, target_db: str) -> bool:

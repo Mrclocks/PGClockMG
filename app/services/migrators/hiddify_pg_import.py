@@ -541,7 +541,9 @@ async def run_hiddify_user_import(migrator, users: list[dict], work: Path) -> di
             )
             cid = ""
             if ok_cid and cid_out:
-                cid = cid_out.strip().splitlines()[0].strip()
+                from app.services.pasarguard_ops import extract_docker_container_id
+
+                cid = extract_docker_container_id(cid_out)
             if not cid:
                 continue
             # Pull env from running container so DB URL/hostnames match
