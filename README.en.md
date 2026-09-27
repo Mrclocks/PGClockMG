@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.17`** — fewer restore false-fails (transient logs, templates, Timescale disk, large panel zips)
+> 🚀 **`v4.6.18`** — Phase2 alembic no longer hangs on unpublished 127.0.0.1:5432
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
