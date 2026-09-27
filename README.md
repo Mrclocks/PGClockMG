@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.6.26`** — ریستور بزرگ دیگر روی ۹۳٪ گیر نمی‌کند: skip-at-head، timeout بلند، بدون rotate وسط DDL
+> 🚀 **`v4.6.27`** — نویز «node controlled by another client» دیگر ریستور را fail نمی‌کند (مثل Telegram)
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

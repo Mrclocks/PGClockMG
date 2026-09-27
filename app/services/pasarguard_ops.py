@@ -89,6 +89,16 @@ TELEGRAM_NOISE_PATTERNS = (
     "Conflict: terminated by other getUpdates",
 )
 
+# Node gRPC/session conflict — another panel/client still holds the node.
+# Same class of false-fail as Telegram spam: panel HTTP is up, ops logs scream.
+NODE_CONTROL_NOISE_PATTERNS = (
+    "node is controlled by another client",
+    "controlled by another client",
+    "Failed to connect node",
+    "Failed to get outbounds stats from node",
+    "Failed to get users stats from node",
+)
+
 # Noise from no-SSL banners / SSH tunnel hints — never treat as the root cause
 BANNER_NOISE_PATTERNS = (
     "ssh -L",
@@ -247,9 +257,19 @@ def _is_telegram_noise_line(line: str) -> bool:
     return any(p in (line or "") for p in TELEGRAM_NOISE_PATTERNS)
 
 
+def _is_node_control_noise_line(line: str) -> bool:
+    low = (line or "").lower()
+    return any(p.lower() in low for p in NODE_CONTROL_NOISE_PATTERNS)
+
+
+def _is_panel_ops_noise_line(line: str) -> bool:
+    """Operational spam that must not fail restore health (Telegram / node session)."""
+    return _is_telegram_noise_line(line) or _is_node_control_noise_line(line)
+
+
 def _strip_telegram_noise(output: str) -> str:
     return "\n".join(
-        ln for ln in (output or "").splitlines() if not _is_telegram_noise_line(ln)
+        ln for ln in (output or "").splitlines() if not _is_panel_ops_noise_line(ln)
     )
 
 
@@ -266,6 +286,44 @@ def _logs_dominated_by_telegram_noise(output: str) -> bool:
     return noise >= max(3, (len(lines) + 1) // 2)
 
 
+def _logs_dominated_by_node_control_noise(output: str) -> bool:
+    """True when most non-empty log lines are node 'controlled by another client' spam."""
+    lines = [
+        ln
+        for ln in (output or "").splitlines()
+        if ln.strip() and not _is_banner_noise(ln)
+    ]
+    if len(lines) < 3:
+        return False
+    noise = sum(1 for ln in lines if _is_node_control_noise_line(ln))
+    return noise >= max(3, (len(lines) + 1) // 2)
+
+
+def _logs_dominated_by_panel_ops_noise(output: str) -> bool:
+    """Telegram and/or node-session spam filling the log tail."""
+    if _logs_dominated_by_telegram_noise(output):
+        return True
+    if _logs_dominated_by_node_control_noise(output):
+        return True
+    lines = [
+        ln
+        for ln in (output or "").splitlines()
+        if ln.strip() and not _is_banner_noise(ln)
+    ]
+    if len(lines) < 3:
+        return False
+    noise = sum(1 for ln in lines if _is_panel_ops_noise_line(ln))
+    return noise >= max(3, (len(lines) + 1) // 2)
+
+
+def _panel_ops_noise_reason(output: str) -> str:
+    if _logs_dominated_by_node_control_noise(output):
+        return "node 'controlled by another client' log noise"
+    if _logs_dominated_by_telegram_noise(output):
+        return "TelegramConflictError log noise"
+    return "panel operational log noise"
+
+
 def _is_banner_noise(line: str) -> bool:
     low = line.lower()
     # Keep real failures even if they share a word with banners
@@ -277,7 +335,7 @@ def _is_banner_noise(line: str) -> bool:
 def _line_indicates_failure(line: str) -> bool:
     if any(b in line for b in BENIGN_LOG_PATTERNS):
         return False
-    if _is_telegram_noise_line(line):
+    if _is_panel_ops_noise_line(line):
         return False
     if _is_transient_connect_line(line):
         return False
@@ -311,7 +369,7 @@ def _extract_failure_snippet(output: str) -> str:
         if "Application startup failed" not in ln:
             continue
         for prev in lines[max(0, idx - 45) : idx]:
-            if not prev.strip() or _is_banner_noise(prev) or _is_telegram_noise_line(prev):
+            if not prev.strip() or _is_banner_noise(prev) or _is_panel_ops_noise_line(prev):
                 continue
             pl = prev.strip()
             if any(
@@ -352,7 +410,7 @@ def _extract_failure_snippet(output: str) -> str:
                     continue
                 if fs.startswith("Traceback (most recent call last)"):
                     break
-                if _is_telegram_noise_line(follow):
+                if _is_panel_ops_noise_line(follow):
                     continue
                 if (
                     re.match(r"^[A-Za-z_][\w.]*(?:Error|Exception):", fs)
@@ -367,7 +425,7 @@ def _extract_failure_snippet(output: str) -> str:
         return "\n".join(base)
     useful = []
     for ln in lines:
-        if not ln.strip() or _is_banner_noise(ln) or _is_telegram_noise_line(ln):
+        if not ln.strip() or _is_banner_noise(ln) or _is_panel_ops_noise_line(ln):
             continue
         if any(x in ln for x in ("ERROR", "Error", "Traceback", "Exception", "failed", "FATAL", "ValueError")):
             useful.append(ln)
@@ -376,11 +434,16 @@ def _extract_failure_snippet(output: str) -> str:
     non_banner = [
         ln
         for ln in lines
-        if ln.strip() and not _is_banner_noise(ln) and not _is_telegram_noise_line(ln)
+        if ln.strip() and not _is_banner_noise(ln) and not _is_panel_ops_noise_line(ln)
     ]
     if non_banner:
         return "\n".join(non_banner[-20:])
-    # Pure Telegram spam — do not present it as the restore root cause.
+    # Pure operational spam — do not present it as the restore root cause.
+    if _logs_dominated_by_node_control_noise(clean):
+        return (
+            "(node 'controlled by another client' log noise ignored — not a panel "
+            "boot failure; another client/panel still holds the node session.)"
+        )
     if _logs_dominated_by_telegram_noise(clean):
         return (
             "(TelegramConflictError log noise ignored — not a panel boot failure; "
@@ -1495,12 +1558,12 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                     "Startup marker seen but panel port not listening yet — waiting…"
                 )
                 stable_ready = 1
-        elif _logs_dominated_by_telegram_noise(out) or _logs_only_transient_connect_noise(out):
-            # Telegram spam or brief connection-refused bounce while the HTTP
-            # port is already up — do not false-fail the restore.
+        elif _logs_dominated_by_panel_ops_noise(out) or _logs_only_transient_connect_noise(out):
+            # Telegram / node-session spam or brief connection-refused bounce
+            # while the HTTP port is already up — do not false-fail the restore.
             reason = (
-                "TelegramConflictError log noise"
-                if _logs_dominated_by_telegram_noise(out)
+                _panel_ops_noise_reason(out)
+                if _logs_dominated_by_panel_ops_noise(out)
                 else "transient connection noise"
             )
             if probe_i % 2 == 1:
@@ -1534,9 +1597,9 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
         await asyncio.sleep(4)
 
     out = await fetch_pasarguard_logs(migrator, tail=400, since=boot_since)
-    # Last chance: Telegram spam / connect bounce may have emptied markers.
+    # Last chance: ops spam / connect bounce may have emptied markers.
     if (
-        _logs_dominated_by_telegram_noise(out)
+        _logs_dominated_by_panel_ops_noise(out)
         or _logs_only_transient_connect_noise(out)
         or not _logs_show_panel_startup(out, stack)
     ):
@@ -1553,13 +1616,14 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
             "PasarGuard healthy — startup confirmed after extended log scan"
         )
         return
+    snip = _extract_failure_snippet(out)
     if (
         last_known_state == "running"
         and await _panel_port_is_listening(migrator)
         and (
-            _logs_dominated_by_telegram_noise(out)
+            _logs_dominated_by_panel_ops_noise(out)
             or _logs_only_transient_connect_noise(out)
-            or "(TelegramConflictError log noise ignored" in _extract_failure_snippet(out)
+            or "log noise ignored" in snip
         )
     ):
         migrator.job.log(

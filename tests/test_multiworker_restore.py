@@ -392,6 +392,97 @@ def test_verify_healthy_accepts_telegram_noise_when_port_up():
     print("OK: verify_pasarguard_healthy accepts Telegram noise when port is up")
 
 
+def test_node_control_conflict_is_noise_not_root_cause():
+    """node controlled by another client must not fail restore health details."""
+    from app.services.pasarguard_ops import (
+        _extract_failure_snippet,
+        _line_indicates_failure,
+        _logs_dominated_by_node_control_noise,
+        _logs_show_panel_startup,
+    )
+
+    spam_line = (
+        "pasarguard-1 | ERROR:    - Node-operation - Failed to connect node nl, al "
+        "with id 7, Error: node is controlled by another client"
+    )
+    spam = "\n".join([spam_line] * 10)
+    assert _logs_dominated_by_node_control_noise(spam)
+    assert not _line_indicates_failure(spam_line)
+    snip = _extract_failure_snippet(spam)
+    assert "controlled by another client" not in snip or "ignored" in snip.lower()
+    assert "not a panel boot failure" in snip
+
+    with_boot = "\n".join([
+        "pasarguard-1 | Application startup complete",
+        spam_line,
+        spam_line,
+    ])
+    assert _logs_show_panel_startup(with_boot)
+    print("OK: node controlled-by-another-client treated as noise")
+
+
+def test_explain_restore_node_control_noise_on_panel_not_up():
+    from app.services.pg_restore import explain_restore_error
+
+    exc = RuntimeError(
+        "PasarGuard did not reach ready state (no 'Application startup complete' in logs).\n"
+        "pasarguard-1 | ERROR: - Node-operation - Failed to connect node nl, al "
+        "with id 7, Error: node is controlled by another client"
+    )
+    info = explain_restore_error(exc, "sqlite", "postgresql")
+    assert "نود" in info["fa"] or "node" in info["en"].lower()
+    assert any("4.6.27" in c for c in info["causes_fa"])
+    print("OK: explain_restore maps node-control panel-not-up")
+
+
+def test_verify_healthy_accepts_node_control_noise_when_port_up():
+    """sqlite→postgresql false-fail: node-session spam + listening port = healthy."""
+    import app.services.pasarguard_ops as ops
+
+    spam_line = (
+        "pasarguard-1 | ERROR:    - Record-usages - Failed to get users stats "
+        "from node 7, error: node is controlled by another client"
+    )
+    spam = "\n".join([spam_line] * 10)
+
+    class _Mig:
+        def __init__(self):
+            self.job = MigrationJob(job_id="node-noise")
+            self.params = {"target_db": "postgresql"}
+
+    mig = _Mig()
+
+    async def _run():
+        with (
+            patch(
+                "app.services.multiworker_stack.detect_multiworker_stack",
+                return_value={
+                    "uvicorn_workers": 1,
+                    "uses_nats": False,
+                    "orchestrate": False,
+                },
+            ),
+            patch.object(ops, "fetch_pasarguard_logs", new_callable=AsyncMock, return_value=spam),
+            patch.object(
+                ops, "fetch_extended_panel_logs", new_callable=AsyncMock, return_value=spam
+            ),
+            patch.object(
+                ops, "_pasarguard_container_state", new_callable=AsyncMock, return_value="running"
+            ),
+            patch.object(
+                ops, "_panel_port_is_listening", new_callable=AsyncMock, return_value=True
+            ),
+            patch.object(ops.asyncio, "sleep", new_callable=AsyncMock),
+        ):
+            await ops.verify_pasarguard_healthy(mig, max_wait=60)
+
+    asyncio.run(_run())
+    blob = "\n".join(mig.job.logs)
+    assert "healthy" in blob.lower()
+    assert "node" in blob.lower() or "controlled" in blob.lower()
+    print("OK: verify_pasarguard_healthy accepts node-control noise when port is up")
+
+
 def test_try_heal_nats_imports_read_env_text_from_db_auth():
     """Regression: read_env_text lives in db_auth, not env_migration."""
     import asyncio
@@ -439,5 +530,8 @@ if __name__ == "__main__":
     test_telegram_conflict_is_noise_not_root_cause()
     test_explain_restore_telegram_noise_on_panel_not_up()
     test_verify_healthy_accepts_telegram_noise_when_port_up()
+    test_node_control_conflict_is_noise_not_root_cause()
+    test_explain_restore_node_control_noise_on_panel_not_up()
+    test_verify_healthy_accepts_node_control_noise_when_port_up()
     test_try_heal_nats_imports_read_env_text_from_db_auth()
     print("\nAll multiworker restore tests passed")

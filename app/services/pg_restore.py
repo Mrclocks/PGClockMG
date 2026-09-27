@@ -3470,6 +3470,19 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         fa = "پنل PasarGuard بعد از ریستور بالا نیامد."
         en = "PasarGuard panel did not start after restore."
         if (
+            "controlled by another client" in low
+            or "failed to connect node" in low
+            or "failed to get outbounds stats from node" in low
+            or "failed to get users stats from node" in low
+        ):
+            fa = "پنل بالا آمد ولی لاگ نود (controlled by another client) به‌اشتباه به‌عنوان خطای ریستور نشان داده شد."
+            en = "Panel was up; node 'controlled by another client' log noise was mistaken for a restore failure."
+            causes_fa = [
+                "اول PGClockMG را به v4.6.27+ آپدیت کنید — این نویز دیگر ریستور را fail نمی‌کند",
+                "نود هنوز توسط پنل/کلاینت دیگری کنترل می‌شود (اینستنس قبلی / سرور دیگر / session باز)",
+                "پنل HTTP معمولاً سالم است؛ فقط یک کنترلر برای هر نود نگه دارید",
+            ]
+        elif (
             "telegramconflicterror" in low
             or "getupdates" in low
             or "telegramconflict" in low
@@ -3484,10 +3497,10 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
             ]
         else:
             causes_fa = [
-                "لاگ pasarguard/panel را ببینید (نه فقط اسپم TelegramConflictError)",
+                "لاگ pasarguard/panel را ببینید (نه فقط اسپم Telegram / node-control)",
                 "multi-worker: NATS_URL و بالا بودن nats را چک کنید",
                 "ممکن است SSL یا SQLALCHEMY_DATABASE_URL اشتباه باشد",
-                "اگر فقط TelegramConflictError می‌بینید، به v4.6.17+ آپدیت و دوباره ریستور کنید",
+                "اگر فقط TelegramConflict یا node controlled by another client می‌بینید، به v4.6.27+ آپدیت کنید",
             ]
     elif (
         "violates foreign key" in low
