@@ -72,6 +72,7 @@ def test_save_upload_passes_allow_large(tmp_path, monkeypatch):
     importlib.reload(ag_mod)
     # Re-bind after reload
     up.safe_extract_zip_file = ag_mod.safe_extract_zip_file
+    up.resolve_allow_large_for_zip = ag_mod.resolve_allow_large_for_zip
 
     monkeypatch.setattr(ag_mod, "MAX_ZIP_ENTRY_BYTES", 100)
     monkeypatch.setattr(ag_mod, "MAX_OVERRIDE_ZIP_ENTRY_BYTES", 10_000)
@@ -80,12 +81,42 @@ def test_save_upload_passes_allow_large(tmp_path, monkeypatch):
 
     zpath = tmp_path / "payload.zip"
     with zipfile.ZipFile(zpath, "w") as zf:
-        zf.writestr("db.sqlite3", b"Q" * 400)
+        # Non-panel junk — must still require explicit allow_large
+        zf.writestr("random.bin", b"Q" * 400)
 
     blocked = up.save_upload(zpath, "payload.zip", allow_large=False)
     assert blocked.get("error")
     assert "too large" in blocked["error"].lower()
 
     ok = up.save_upload(zpath, "payload.zip", allow_large=True)
+    assert not ok.get("error"), ok.get("error")
+    assert ok.get("allow_large_upload") is True
+
+
+def test_panel_backup_zip_auto_allows_large_entry(tmp_path, monkeypatch):
+    """Recognized panel backup layout auto-raises entry ceiling without UI tick."""
+    monkeypatch.setenv("PG_MIGRATOR_HOME", str(tmp_path))
+    import importlib
+    import app.config as cfg
+    importlib.reload(cfg)
+    import app.services.upload as up
+    importlib.reload(up)
+    import app.services.archive_guard as ag_mod
+    importlib.reload(ag_mod)
+    up.safe_extract_zip_file = ag_mod.safe_extract_zip_file
+    up.resolve_allow_large_for_zip = ag_mod.resolve_allow_large_for_zip
+
+    monkeypatch.setattr(ag_mod, "MAX_ZIP_ENTRY_BYTES", 100)
+    monkeypatch.setattr(ag_mod, "MAX_OVERRIDE_ZIP_ENTRY_BYTES", 10_000)
+    monkeypatch.setattr(ag_mod, "MAX_ZIP_TOTAL_BYTES", 50)
+    monkeypatch.setattr(ag_mod, "MAX_OVERRIDE_ZIP_TOTAL_BYTES", 50_000)
+
+    zpath = tmp_path / "panel.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        zf.writestr(".env", "UVICORN_PORT=8000\n")
+        zf.writestr("db.sqlite3", b"S" * 400)
+
+    assert ag_mod.looks_like_panel_backup_zip(zpath)
+    ok = up.save_upload(zpath, "panel.zip", allow_large=False)
     assert not ok.get("error"), ok.get("error")
     assert ok.get("allow_large_upload") is True

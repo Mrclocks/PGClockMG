@@ -122,6 +122,17 @@ SOFT_USER_RELATED_TABLES = frozenset({
     "node_user_usages",
 })
 
+# Schema/template skew after cross-DB: partial rows are logged, not fatal.
+# Critical panel tables (hosts/inbounds/groups/nodes/admins) stay hard-complete.
+# ``settings`` zero-rows still abort via MIGRATION_ABORT_IF_ZERO.
+SOFT_SCHEMA_SKEW_TABLES = frozenset({
+    "client_templates",
+    "user_templates",
+    "core_configs",
+    "settings",
+    "inbounds_groups_association",
+})
+
 # PasarGuard ALPN enum labels (Marzban aliases → canonical)
 HOST_ALPN_MAP = {
     "h1": "http/1.1",

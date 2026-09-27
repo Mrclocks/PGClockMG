@@ -31,16 +31,20 @@ FAIL_LOG_PATTERNS = (
     "DuplicateColumnError",
     "ProgrammingError",
     "Traceback (most recent call last)",
-    "could not connect",
-    "connection refused",
     "password authentication failed",
     "SASL authentication failed",
     "cache lookup failed for type",
     "Application startup failed",
-    "ValueError:",
     "SSL certificate file",
     "NATS is required when running more than 1 worker",
     "column \"user_template_id\" of relation \"next_plans\" already exists",
+)
+
+# Brief docker/DB bounce lines — do not hard-fail health when the panel port is up.
+# Still surfaced in snippets when paired with "Application startup failed".
+TRANSIENT_CONNECT_PATTERNS = (
+    "connection refused",
+    "could not connect",
 )
 
 # Stamp Marzban-shaped DBs (still have `proxies`) just before PasarGuard transforms
@@ -224,6 +228,13 @@ def _strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", text or "")
 
 
+def _is_transient_connect_line(line: str) -> bool:
+    low = (line or "").lower()
+    if "password authentication" in low or "sasl authentication" in low:
+        return False
+    return any(p in low for p in TRANSIENT_CONNECT_PATTERNS)
+
+
 def _is_telegram_noise_line(line: str) -> bool:
     return any(p in (line or "") for p in TELEGRAM_NOISE_PATTERNS)
 
@@ -260,13 +271,26 @@ def _line_indicates_failure(line: str) -> bool:
         return False
     if _is_telegram_noise_line(line):
         return False
+    if _is_transient_connect_line(line):
+        return False
     if _is_banner_noise(line):
         return False
     # Multi-worker Uvicorn prints bare Traceback headers while workers retry;
     # the following Error/Exception line is the actionable signal.
     if "Traceback (most recent call last)" in line:
         return False
+    # Bare "ValueError:" is too broad (retry noise); real crashes also emit
+    # "Application startup failed" which remains a hard FAIL pattern.
+    if "ValueError:" in line and "Application startup failed" not in line:
+        return False
     return any(p in line for p in FAIL_LOG_PATTERNS)
+
+
+def _logs_only_transient_connect_noise(output: str) -> bool:
+    """True when logs show connect bounces and no hard FAIL patterns remain."""
+    if _check_logs_for_failure(output):
+        return False
+    return any(_is_transient_connect_line(ln) for ln in (output or "").splitlines())
 
 
 def _extract_failure_snippet(output: str) -> str:
@@ -1461,9 +1485,14 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                     "Startup marker seen but panel port not listening yet — waiting…"
                 )
                 stable_ready = 1
-        elif _logs_dominated_by_telegram_noise(out):
-            # getUpdates spam scrolls "Application startup complete" out of --tail.
-            # Re-check with a larger window, then accept port-up as healthy.
+        elif _logs_dominated_by_telegram_noise(out) or _logs_only_transient_connect_noise(out):
+            # Telegram spam or brief connection-refused bounce while the HTTP
+            # port is already up — do not false-fail the restore.
+            reason = (
+                "TelegramConflictError log noise"
+                if _logs_dominated_by_telegram_noise(out)
+                else "transient connection noise"
+            )
             if probe_i % 2 == 1:
                 ext = await fetch_extended_panel_logs(migrator, tail=1500)
                 if ext.strip():
@@ -1472,8 +1501,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                 stable_ready += 1
                 if stable_ready >= 2 and await _panel_port_is_listening(migrator):
                     migrator.job.log(
-                        "PasarGuard healthy — startup marker found "
-                        "(TelegramConflictError log noise ignored)"
+                        f"PasarGuard healthy — startup marker found ({reason} ignored)"
                     )
                     return
                 if stable_ready >= 2:
@@ -1485,8 +1513,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                 stable_ready += 1
                 if stable_ready >= 2:
                     migrator.job.log(
-                        "PasarGuard healthy — panel port listening "
-                        "(TelegramConflictError log noise ignored)"
+                        f"PasarGuard healthy — panel port listening ({reason} ignored)"
                     )
                     return
             else:
@@ -1497,8 +1524,12 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
         await asyncio.sleep(4)
 
     out = await fetch_pasarguard_logs(migrator, tail=400, since=boot_since)
-    # Last chance: Telegram spam may have emptied the --since window of markers.
-    if _logs_dominated_by_telegram_noise(out) or not _logs_show_panel_startup(out, stack):
+    # Last chance: Telegram spam / connect bounce may have emptied markers.
+    if (
+        _logs_dominated_by_telegram_noise(out)
+        or _logs_only_transient_connect_noise(out)
+        or not _logs_show_panel_startup(out, stack)
+    ):
         ext = await fetch_extended_panel_logs(migrator, tail=2000)
         if ext.strip():
             out = ext
@@ -1517,12 +1548,13 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
         and await _panel_port_is_listening(migrator)
         and (
             _logs_dominated_by_telegram_noise(out)
+            or _logs_only_transient_connect_noise(out)
             or "(TelegramConflictError log noise ignored" in _extract_failure_snippet(out)
         )
     ):
         migrator.job.log(
             "PasarGuard healthy — panel port listening at deadline "
-            "(TelegramConflictError log noise ignored)"
+            "(log noise ignored)"
         )
         return
     last_up = last_upgrade_sig or _last_alembic_upgrade_line(out)

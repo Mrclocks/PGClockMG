@@ -28,7 +28,8 @@ from app.services.upload_requirements import get_upload_requirements
 from app.services.archive_guard import (
     MAX_UPLOAD_BYTES, MAX_OVERRIDE_UPLOAD_BYTES, MAX_ZIP_ENTRY_BYTES, MAX_ZIP_FILES, MAX_ZIP_RATIO,
     MAX_ZIP_TOTAL_BYTES, MAX_OVERRIDE_ZIP_ENTRY_BYTES, MAX_OVERRIDE_ZIP_TOTAL_BYTES,
-    allowed_upload_bytes, safe_upload_name, zip_entry_limit_bytes, zip_total_limit_bytes,
+    allowed_upload_bytes, looks_like_panel_backup_zip, resolve_allow_large_for_zip,
+    safe_upload_name, zip_entry_limit_bytes, zip_total_limit_bytes,
 )
 from app.services.pg_access import get_panel_access_info
 from app.services.pg_restore import (
@@ -41,7 +42,7 @@ from app.services.auth import (
 )
 from app.config import WEB_PORT
 
-APP_VERSION = "4.6.16"
+APP_VERSION = "4.6.17"
 
 
 @asynccontextmanager
@@ -470,7 +471,12 @@ async def api_upload(
     tmp_path = tmp_dir / filename
     size = 0
     use_large_upload_limit = str(allow_large_upload or "").strip().lower() in ("1", "true", "yes", "on")
-    max_upload_bytes = allowed_upload_bytes(use_large_upload_limit)
+    # Zip panel backups may exceed the default HTTP ceiling; stream up to the
+    # override cap, then require a recognized panel-backup layout (or explicit tick).
+    is_zip = filename.lower().endswith(".zip")
+    default_cap = allowed_upload_bytes(False)
+    override_cap = allowed_upload_bytes(True)
+    stream_cap = override_cap if (use_large_upload_limit or is_zip) else default_cap
     try:
         with open(tmp_path, "wb") as out:
             while True:
@@ -478,10 +484,23 @@ async def api_upload(
                 if not chunk:
                     break
                 size += len(chunk)
-                if size > max_upload_bytes:
-                    limit_mb = max_upload_bytes // (1024 * 1024)
+                if size > stream_cap:
+                    limit_mb = stream_cap // (1024 * 1024)
                     raise HTTPException(400, f"حداکثر حجم فایل {limit_mb} مگابایت است")
                 out.write(chunk)
+
+        if not use_large_upload_limit and is_zip and size > default_cap:
+            if not looks_like_panel_backup_zip(tmp_path):
+                limit_mb = default_cap // (1024 * 1024)
+                raise HTTPException(
+                    400,
+                    f"حجم فایل از {limit_mb}MB بیشتر است. تیک «آپلود بزرگ» را بزنید "
+                    "یا یک بکاپ استاندارد پنل (db.sqlite3 / db_backup.sql) آپلود کنید.",
+                )
+            use_large_upload_limit = True
+
+        if is_zip and not use_large_upload_limit:
+            use_large_upload_limit = resolve_allow_large_for_zip(tmp_path, False)
 
         if slot or bundle_id:
             bid = bundle_id or init_bundle()

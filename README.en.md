@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.16`** — TelegramConflictError log noise no longer false-fails restore
+> 🚀 **`v4.6.17`** — fewer restore false-fails (transient logs, templates, Timescale disk, large panel zips)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.16`** — шум TelegramConflictError больше не ломает restore ложно
+> 🚀 **`v4.6.17`** — меньше ложных fail при restore (шум логов, шаблоны, диск Timescale, большие zip)
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

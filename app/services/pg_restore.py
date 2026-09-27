@@ -902,9 +902,10 @@ def is_auth_failure_text(text: str) -> bool:
 
 
 def _zip_allow_large(zip_path: Path) -> bool:
-    """Trusted local backups / staged uploads may exceed the default entry ceiling."""
+    """Trusted local backups / staged uploads / recognized panel zips may exceed defaults."""
     try:
         from app.config import BACKUP_DIR, UPLOAD_DIR
+        from app.services.archive_guard import looks_like_panel_backup_zip
 
         resolved = zip_path.resolve()
         for root in (BACKUP_DIR, UPLOAD_DIR):
@@ -913,6 +914,7 @@ def _zip_allow_large(zip_path: Path) -> bool:
                 return True
             except (ValueError, OSError):
                 continue
+        return looks_like_panel_backup_zip(resolved)
     except Exception:
         pass
     return False
@@ -1755,9 +1757,20 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
 
     free = disk_free_bytes("/var/lib")
     if free >= 0 and free < _TS_PULL_MIN_FREE_BYTES:
+        need_mib = _TS_PULL_MIN_FREE_BYTES // (1024 * 1024)
+        free_mib = free // (1024 * 1024)
+        if not wipe_data:
+            # Optional post-restore retag — do not abort a healthy panel just
+            # because a multi-GB image pull cannot run. Emergency GUC clear /
+            # already-restored data remain usable.
+            job.log(
+                f"Skipping Timescale image align to {new_tag}: only {free_mib} MiB "
+                f"free (need ≥{need_mib} MiB) and wipe_data=False"
+            )
+            return
         raise RuntimeError(
             f"Not enough free disk to pull TimescaleDB {new_tag} "
-            f"({free // (1024 * 1024)} MiB free; need ≥{_TS_PULL_MIN_FREE_BYTES // (1024 * 1024)} MiB). "
+            f"({free_mib} MiB free; need ≥{need_mib} MiB). "
             "Free disk space or skip image align and clear timescaledb.restoring manually."
         )
 
@@ -1799,10 +1812,12 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
                 f"TimescaleDB image {new_tag} could not be pulled — "
                 f"restore stopped before touching the database:\n{pull_blob[-800:]}"
             )
-        raise RuntimeError(
-            f"TimescaleDB image {new_tag} could not be pulled "
-            f"(compose tag reverted):\n{pull_blob[-800:]}"
+        job.log(
+            f"TimescaleDB image {new_tag} pull failed (compose tag reverted); "
+            "continuing without image align because wipe_data=False:\n"
+            f"{pull_blob[-400:]}"
         )
+        return
 
     job.set_progress(28, "Recreating TimescaleDB with matching version...")
     from app.services.multiworker_stack import stop_panel_stack
@@ -3328,7 +3343,7 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
             fa = "پنل بالا آمد ولی لاگ تلگرام (Conflict) به‌اشتباه به‌عنوان خطای ریستور نشان داده شد."
             en = "Panel was up; TelegramConflictError log noise was mistaken for a restore failure."
             causes_fa = [
-                "اول PGClockMG را به v4.6.16+ آپدیت کنید — این نویز دیگر ریستور را fail نمی‌کند",
+                "اول PGClockMG را به v4.6.17+ آپدیت کنید — این نویز دیگر ریستور را fail نمی‌کند",
                 "چند instance همزمان با یک bot token getUpdates می‌زنند (سرور دیگر / webhook / چند worker)",
                 "پنل HTTP معمولاً سالم است؛ فقط ربات تلگرام را یک‌جا نگه دارید",
             ]
@@ -3337,7 +3352,7 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
                 "لاگ pasarguard/panel را ببینید (نه فقط اسپم TelegramConflictError)",
                 "multi-worker: NATS_URL و بالا بودن nats را چک کنید",
                 "ممکن است SSL یا SQLALCHEMY_DATABASE_URL اشتباه باشد",
-                "اگر فقط TelegramConflictError می‌بینید، به v4.6.16+ آپدیت و دوباره ریستور کنید",
+                "اگر فقط TelegramConflictError می‌بینید، به v4.6.17+ آپدیت و دوباره ریستور کنید",
             ]
     elif (
         "violates foreign key" in low

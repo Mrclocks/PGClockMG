@@ -212,6 +212,33 @@ def test_bare_traceback_not_treated_as_failure():
     print("OK: bare traceback ignored until exception line")
 
 
+def test_transient_connect_and_bare_valueerror_not_hard_fail():
+    from app.services.pasarguard_ops import (
+        _check_logs_for_failure,
+        _line_indicates_failure,
+        _logs_only_transient_connect_noise,
+    )
+
+    assert not _line_indicates_failure(
+        'pasarguard-1 | asyncpg.exceptions.CannotConnectNowError: could not connect'
+    )
+    assert not _line_indicates_failure(
+        "pasarguard-1 | ConnectionRefusedError: [Errno 111] Connection refused"
+    )
+    assert not _line_indicates_failure("pasarguard-1 | ValueError: temporary retry")
+    assert _line_indicates_failure(
+        "pasarguard-1 | ERROR: Application startup failed. Exiting."
+    )
+    assert _check_logs_for_failure(
+        "pasarguard-1 | password authentication failed for user \"x\""
+    )
+    assert _logs_only_transient_connect_noise(
+        "pasarguard-1 | could not connect to server: Connection refused\n"
+        "pasarguard-1 | retrying…"
+    )
+    print("OK: transient connect / bare ValueError are soft; auth/startup still hard")
+
+
 def test_pgbouncer_env_mismatch_detects_stale_credentials():
     from app.services.db_auth import pgbouncer_env_mismatch
 
@@ -312,7 +339,7 @@ def test_explain_restore_telegram_noise_on_panel_not_up():
     )
     info = explain_restore_error(exc, "sqlite", "timescaledb")
     assert "تلگرام" in info["fa"] or "Telegram" in info["en"]
-    assert any("4.6.16" in c for c in info["causes_fa"])
+    assert any("4.6.17" in c for c in info["causes_fa"])
     print("OK: explain_restore maps TelegramConflict panel-not-up")
 
 
@@ -405,6 +432,7 @@ if __name__ == "__main__":
     test_compose_file_prefix_uses_both_main_and_multi()
     test_start_panel_stack_multi_worker()
     test_bare_traceback_not_treated_as_failure()
+    test_transient_connect_and_bare_valueerror_not_hard_fail()
     test_pgbouncer_env_mismatch_detects_stale_credentials()
     test_extract_failure_snippet_includes_root_before_startup_failed()
     test_extract_failure_snippet_includes_exception_line()
