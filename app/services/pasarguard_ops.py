@@ -1845,10 +1845,11 @@ def build_local_alembic_url(params: dict) -> str:
     db = conn.get("database") or "pasarguard"
     port = migration_port(conn, target_db)
     if target_db in ("postgresql", "timescaledb"):
-        # ssl=false: local/docker TCP must not negotiate TLS (common hang/fail in env.py)
+        # asyncpg maps URL ``ssl=`` to sslmode — must be disable/allow/prefer/…
+        # (``ssl=false`` raises ClientConfigurationError on modern asyncpg).
         return (
             f"postgresql+asyncpg://{user}:{pwd}@127.0.0.1:{port}/{db}"
-            f"?ssl=false"
+            f"?ssl=disable"
         )
     if target_db in ("mysql", "mariadb"):
         return f"mysql+asyncmy://{user}:{pwd}@127.0.0.1:{port}/{db}"
@@ -1925,7 +1926,13 @@ def _rewrite_sqlalchemy_host_port(url: str, host: str, port: str | int) -> str:
 
 
 def _ensure_asyncpg_ssl_false(url: str) -> str:
-    """Force ssl=false on asyncpg URLs so env.py does not stall on TLS."""
+    """Force local/docker asyncpg URLs to ``ssl=disable`` (no TLS negotiation).
+
+    SQLAlchemy's asyncpg dialect forwards the ``ssl`` query param as asyncpg
+    ``sslmode``. Valid modes: disable, allow, prefer, require, verify-ca,
+    verify-full. Boolean-looking values like ``false``/``true`` raise
+    ``ClientConfigurationError`` before any TCP connect.
+    """
     if "postgresql+asyncpg://" not in (url or ""):
         return url
     from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -1935,7 +1942,17 @@ def _ensure_asyncpg_ssl_false(url: str) -> str:
     except Exception:
         return url
     q = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    q["ssl"] = "false"
+    # Drop legacy / invalid aliases that asyncpg rejects as sslmode.
+    for key in ("ssl", "sslmode"):
+        val = (q.get(key) or "").strip().lower()
+        if val in ("", "false", "0", "no", "off", "none", "disable"):
+            q.pop(key, None)
+        elif val in ("true", "1", "yes", "on"):
+            # Prefer was historically "try TLS" — for local docker we still
+            # want plain TCP; callers that need TLS pass an explicit mode.
+            q.pop(key, None)
+    q["ssl"] = "disable"
+    q.pop("sslmode", None)  # single canonical knob via ssl=
     return urlunparse(parsed._replace(query=urlencode(q)))
 
 
@@ -2011,6 +2028,10 @@ def _is_alembic_url_construction_error(output: str) -> bool:
         return True
     if "invalid argument" in low and "--network" in low:
         # docker run rejected a polluted --network=container:<compose warning>
+        return True
+    if "sslmode" in low and "must be one of" in low:
+        return True
+    if "clientconfigurationerror" in low and "ssl" in low:
         return True
     return False
 

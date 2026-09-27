@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.21`** — root-fix sqlite→Timescale: keep SQLite alembic URLs intact and sanitize compose container ids
+> 🚀 **`v4.6.22`** — alembic asyncpg uses `ssl=disable` instead of invalid `ssl=false`
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

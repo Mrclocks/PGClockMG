@@ -26,7 +26,8 @@ def test_build_local_alembic_url():
     url = build_local_alembic_url(params)
     assert ":5432/" in url
     assert "pasarguard:secret@127.0.0.1:5432/pasarguard" in url
-    assert "ssl=false" in url
+    assert "ssl=disable" in url
+    assert "ssl=false" not in url
     print("OK: build_local_alembic_url")
 
 
@@ -42,7 +43,7 @@ def test_build_local_alembic_url_encodes_special_password():
     }
     url = build_local_alembic_url(params)
     assert "a%40b%3Ac%2Fd" in url
-    assert "ssl=false" in url
+    assert "ssl=disable" in url
     print("OK: alembic URL encodes special password chars")
 
 
@@ -97,7 +98,8 @@ def test_resolve_reachable_alembic_url_uses_bridge_when_loopback_dead():
     out = asyncio.run(_go())
     assert "172.18.0.2:5432" in out
     assert "secret" in out
-    assert "ssl=false" in out
+    assert "ssl=disable" in out
+    assert "ssl=false" not in out
     logged = " ".join(str(c) for c in mig.job.log.call_args_list)
     assert "docker-bridge" in logged
     print("OK: alembic URL rewrites to bridge IP when loopback dead")
@@ -154,7 +156,8 @@ def test_resolve_alembic_prefers_compose_network_dns():
     net, out = asyncio.run(_go())
     assert net == ["--network", "pasarguard_default"]
     assert "@timescaledb:5432/" in out
-    assert "ssl=false" in out
+    assert "ssl=disable" in out
+    assert "ssl=false" not in out
     logged = " ".join(str(c) for c in mig.job.log.call_args_list)
     assert "compose network" in logged
     print("OK: alembic prefers compose network DNS")
@@ -238,8 +241,8 @@ def test_run_pasarguard_alembic_rotates_endpoints_on_auth_fail():
     mig.job.set_progress = MagicMock()
 
     strategies = [
-        (["--network", "net_a"], "postgresql+asyncpg://u:p@timescaledb:5432/db?ssl=false", "compose-dns:timescaledb"),
-        (["--network=container:cid1"], "postgresql+asyncpg://u:p@127.0.0.1:5432/db?ssl=false", "container-netns:timescaledb"),
+        (["--network", "net_a"], "postgresql+asyncpg://u:p@timescaledb:5432/db?ssl=disable", "compose-dns:timescaledb"),
+        (["--network=container:cid1"], "postgresql+asyncpg://u:p@127.0.0.1:5432/db?ssl=disable", "container-netns:timescaledb"),
     ]
     auth_fail = (
         "sqlalchemy.exc.OperationalError: "
@@ -352,6 +355,30 @@ def test_rewrite_sqlalchemy_host_port_keeps_password():
     out = _rewrite_sqlalchemy_host_port(url, "10.0.0.5", 5432)
     assert out.startswith("postgresql+asyncpg://u:p%40ss@10.0.0.5:5432/")
     print("OK: sqlalchemy host rewrite keeps credentials")
+
+
+def test_ensure_asyncpg_ssl_disable_not_false():
+    """Regression: ssl=false → asyncpg ClientConfigurationError on sslmode."""
+    from app.services.pasarguard_ops import (
+        _ensure_asyncpg_ssl_false,
+        _is_alembic_url_construction_error,
+    )
+
+    for raw in (
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db",
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db?ssl=false",
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db?sslmode=false",
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db?ssl=0&sslmode=prefer",
+    ):
+        out = _ensure_asyncpg_ssl_false(raw)
+        assert "ssl=disable" in out
+        assert "ssl=false" not in out
+        assert "sslmode=false" not in out
+    assert _is_alembic_url_construction_error(
+        "asyncpg.exceptions._base.ClientConfigurationError: "
+        "`sslmode` parameter must be one of: disable, allow, prefer, require"
+    )
+    print("OK: asyncpg ssl normalized to disable")
 
 
 def test_rewrite_sqlalchemy_host_port_never_touches_sqlite():
@@ -1552,6 +1579,7 @@ if __name__ == "__main__":
     test_is_alembic_connect_auth_error_detects_env_py_failures()
     test_format_alembic_failure_surfaces_root_exception()
     test_rewrite_sqlalchemy_host_port_keeps_password()
+    test_ensure_asyncpg_ssl_disable_not_false()
     test_rewrite_sqlalchemy_host_port_never_touches_sqlite()
     test_alembic_strategies_sqlite_ignores_timescaledb_target()
     test_extract_docker_container_id_skips_pgadmin_warning()
