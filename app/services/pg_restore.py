@@ -3517,6 +3517,19 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
                 "اگر فقط TelegramConflict یا node controlled by another client می‌بینید، به v4.6.27+ آپدیت کنید",
             ]
     elif (
+        "appears stuck on the same revision" in low
+        or "exceeded maximum wait" in low
+        or "e422f859847f" in low
+        or "refactor sub updated" in low
+    ):
+        fa = "Alembic روی revision سنگین گیر کرد (مثلاً refactor sub_updated_at)."
+        en = "Alembic hung on a heavy revision (e.g. refactor sub_updated_at)."
+        causes_fa = [
+            "اول PGClockMG را به v4.6.29+ آپدیت کنید — e422 با bulk SQL خودکار heal می‌شود",
+            "v4.6.28 روی ORM ردیف‌به‌ردیف users گیر می‌کرد و به batch_alter نمی‌رسید",
+            "بعد از آپدیت همان مهاجرت/ریستور را دوباره بزنید",
+        ]
+    elif (
         "violates foreign key" in low
         or "foreign key constraint" in low
         or "is not present in table" in low

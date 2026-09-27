@@ -439,6 +439,16 @@ def test_alembic_still_running_helpers():
     assert _is_heavy_alembic_upgrade(last) is True
     assert _is_heavy_alembic_upgrade("Running upgrade a -> b, add note") is False
     assert _is_heavy_alembic_upgrade("Running upgrade a -> b, migrate_to_groups") is True
+    assert _is_heavy_alembic_upgrade(
+        "Running upgrade 343ad7904b19 -> e422f859847f, refactor sub updated at"
+    ) is True
+
+    from app.services.pasarguard_ops import _is_refactor_sub_updated_upgrade
+
+    assert _is_refactor_sub_updated_upgrade(
+        "Running upgrade 343ad7904b19 -> e422f859847f, refactor sub updated at"
+    )
+    assert _is_refactor_sub_updated_upgrade("Running upgrade a -> b") is False
 
     # Empty/timeout logs still count as active when we recently saw an upgrade
     now = 1_000_000.0

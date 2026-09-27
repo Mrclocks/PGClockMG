@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.28`** — fixed 97% hang on port 8000: probe published / in-container panel port
+> 🚀 **`v4.6.29`** — fixed alembic hang on `refactor sub updated at` (bulk SQL heal)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

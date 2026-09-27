@@ -1151,8 +1151,27 @@ def _is_heavy_alembic_upgrade(upgrade_line: str | None) -> bool:
             "rebuild",
             "drop proxies",
             "create index",
+            # e422f859847f — ORM row copy + batch_alter on users (known hang)
+            "refactor sub updated",
+            "e422f859847f",
+            "user_subscription_updates",
+            "sub_updated_at",
         )
     )
+
+
+def _is_refactor_sub_updated_upgrade(upgrade_line: str | None) -> bool:
+    """PasarGuard e422f859847f — row-by-row ORM hang on data-filled DBs."""
+    low = (upgrade_line or "").lower()
+    return (
+        "e422f859847f" in low
+        or "refactor sub updated" in low
+    )
+
+
+# After this many seconds on e422, finish via bulk SQL (ORM never completes).
+_REFACTOR_SUB_HEAL_AFTER_S = 60
+_REFACTOR_SUB_HEALS_MAX = 2
 
 
 def _should_refresh_alembic_progress(container_state: str | None, logs: str) -> bool:
@@ -1296,6 +1315,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
     alembic_dup_heals = 0
     silent_loop_healed = False
     soft_up_during_alembic = False
+    refactor_sub_heals = 0
     prev_restart_count = 0
     alembic_extensions = 0
     probe_i = 0
@@ -1328,6 +1348,32 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
             )
             if _has_alembic_bootstrap_markers(out_end):
                 saw_alembic_bootstrap = True
+            # Known hang: finish e422 via bulk SQL before giving up at soft deadline.
+            if (
+                refactor_sub_heals < _REFACTOR_SUB_HEALS_MAX
+                and (
+                    _is_refactor_sub_updated_upgrade(last_upgrade_sig)
+                    or _is_refactor_sub_updated_upgrade(_last_alembic_upgrade_line(out_end))
+                )
+            ):
+                from app.services.marzban_preboot_heal import (
+                    heal_stuck_refactor_sub_updated_at,
+                )
+
+                migrator.job.log(
+                    "Alembic soft-deadline on refactor sub_updated_at — "
+                    "bulk-SQL heal + stamp…"
+                )
+                if await heal_stuck_refactor_sub_updated_at(migrator):
+                    refactor_sub_heals += 1
+                    last_upgrade_sig = None
+                    last_progress_at = asyncio.get_event_loop().time()
+                    revision_started_at = last_progress_at
+                    soft_up_during_alembic = False
+                    await _ensure_pasarguard_up(migrator)
+                    deadline = asyncio.get_event_loop().time() + max(120, soft_budget // 2)
+                    await asyncio.sleep(8)
+                    continue
             if _alembic_wait_active(
                 out_end,
                 last_upgrade_sig=last_upgrade_sig,
@@ -1434,7 +1480,48 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
             elapsed = int(now - started_at)
             same_for = int(now - last_progress_at)
             on_rev = int(now - revision_started_at)
+            # e422f859847f: ORM row-copy hangs on data-filled DBs — heal early.
+            if (
+                refactor_sub_heals < _REFACTOR_SUB_HEALS_MAX
+                and _is_refactor_sub_updated_upgrade(sig)
+                and on_rev >= _REFACTOR_SUB_HEAL_AFTER_S
+            ):
+                from app.services.marzban_preboot_heal import (
+                    heal_stuck_refactor_sub_updated_at,
+                )
+
+                migrator.job.log(
+                    f"Alembic stuck on refactor sub_updated_at for {on_rev}s — "
+                    "bulk-SQL heal + stamp, then recreate panel…"
+                )
+                if await heal_stuck_refactor_sub_updated_at(migrator):
+                    refactor_sub_heals += 1
+                    last_upgrade_sig = None
+                    last_progress_at = now
+                    revision_started_at = now
+                    soft_up_during_alembic = False
+                    await _ensure_pasarguard_up(migrator)
+                    deadline = max(deadline, now + max(120, soft_budget // 2))
+                    await asyncio.sleep(8)
+                    continue
             if same_for >= stuck_limit:
+                # Last chance: if the stuck line is e422, heal instead of hard-fail.
+                if (
+                    refactor_sub_heals < _REFACTOR_SUB_HEALS_MAX
+                    and _is_refactor_sub_updated_upgrade(sig)
+                ):
+                    from app.services.marzban_preboot_heal import (
+                        heal_stuck_refactor_sub_updated_at,
+                    )
+
+                    if await heal_stuck_refactor_sub_updated_at(migrator):
+                        refactor_sub_heals += 1
+                        last_upgrade_sig = None
+                        last_progress_at = now
+                        revision_started_at = now
+                        await _ensure_pasarguard_up(migrator)
+                        await asyncio.sleep(8)
+                        continue
                 raise RuntimeError(
                     "PasarGuard alembic appears stuck on the same revision "
                     f"for {same_for}s.\n"
@@ -3188,6 +3275,19 @@ async def run_alembic_upgrade_head(
             ):
                 continue
 
+        if _is_alembic_mid_ddl_timeout(last_out) and _is_refactor_sub_updated_upgrade(
+            last_out
+        ):
+            from app.services.marzban_preboot_heal import (
+                heal_stuck_refactor_sub_updated_at,
+            )
+
+            migrator.job.log(
+                "Alembic timeout on refactor sub_updated_at — bulk-SQL heal…"
+            )
+            if await heal_stuck_refactor_sub_updated_at(migrator):
+                continue
+
         if (
             _is_alembic_connect_auth_error(last_out)
             and auth_heals < max_auth_heals
@@ -3338,6 +3438,18 @@ async def _run_alembic_upgrade_head_with_heal(
                 continue
         if _is_alembic_mid_ddl_timeout(out or ""):
             mid_ddl_retries += 1
+            # Known hang: e422 ORM copy — finish with bulk SQL then retry upgrade.
+            if _is_refactor_sub_updated_upgrade(out or ""):
+                from app.services.marzban_preboot_heal import (
+                    heal_stuck_refactor_sub_updated_at,
+                )
+
+                migrator.job.log(
+                    "Alembic mid-DDL timeout on refactor sub_updated_at — "
+                    "bulk-SQL heal + stamp, then retry…"
+                )
+                if await heal_stuck_refactor_sub_updated_at(migrator):
+                    continue
             if mid_ddl_retries <= 1 and data_filled:
                 migrator.job.log(
                     f"Alembic mid-DDL timeout — retrying same path with "

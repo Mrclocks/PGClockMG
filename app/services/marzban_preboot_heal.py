@@ -981,6 +981,240 @@ async def heal_heavy_usage_tables(migrator) -> list[tuple[str, int]]:
     return truncated
 
 
+# PasarGuard alembic e422f859847f — row-by-row ORM copy + batch_alter on users.
+# On data-filled SQLite/MySQL this hangs (open session + table rebuild). We apply
+# the same transform with bulk SQL and stamp past it so panel boot can continue.
+REFACTOR_SUB_UPDATED_AT_REV = "e422f859847f"
+REFACTOR_SUB_UPDATED_AT_PARENT = "343ad7904b19"
+
+
+def logs_indicate_refactor_sub_updated_at(text: str | None) -> bool:
+    """True when alembic is on / failed in the known-hanging e422 revision."""
+    low = (text or "").lower()
+    return (
+        REFACTOR_SUB_UPDATED_AT_REV in low
+        or "refactor sub updated" in low
+        or "user_subscription_updates" in low
+    )
+
+
+def apply_refactor_sub_updated_at_on_conn(db_type: str, conn: dict) -> dict[str, int]:
+    """Bulk-SQL equivalent of alembic e422f859847f. Idempotent.
+
+    Returns counts: created_table (0/1), inserted, dropped_columns (0/1).
+    """
+    db_type = (db_type or "").lower()
+    stats = {"created_table": 0, "inserted": 0, "dropped_columns": 0}
+    if db_type == "sqlite":
+        path = conn.get("sqlite_path") or str(PASARGUARD_DATA / "db.sqlite3")
+        if not Path(path).exists():
+            return stats
+        db = sqlite3.connect(str(path))
+        try:
+            if not _sqlite_table_exists(db, "users"):
+                return stats
+            if not _sqlite_table_exists(db, "user_subscription_updates"):
+                db.execute(
+                    "CREATE TABLE user_subscription_updates ("
+                    "id INTEGER NOT NULL PRIMARY KEY, "
+                    "user_id INTEGER NOT NULL, "
+                    "created_at DATETIME NOT NULL, "
+                    "user_agent VARCHAR(512) NOT NULL, "
+                    "FOREIGN KEY(user_id) REFERENCES users (id))"
+                )
+                stats["created_table"] = 1
+            if _sqlite_column_exists(db, "users", "sub_updated_at"):
+                cur = db.execute(
+                    "INSERT INTO user_subscription_updates "
+                    "(user_id, created_at, user_agent) "
+                    "SELECT u.id, u.sub_updated_at, "
+                    "COALESCE(u.sub_last_user_agent, 'Unknown') "
+                    "FROM users u "
+                    "WHERE u.sub_updated_at IS NOT NULL "
+                    "AND NOT EXISTS ("
+                    "  SELECT 1 FROM user_subscription_updates x "
+                    "  WHERE x.user_id = u.id AND x.created_at = u.sub_updated_at"
+                    ")"
+                )
+                stats["inserted"] = max(0, cur.rowcount or 0)
+                # Prefer DROP COLUMN (SQLite ≥ 3.35); fall back to no-op leave
+                # columns if unsupported — stamp still lets alembic skip e422
+                # only when columns are gone; otherwise duplicate-heal path.
+                try:
+                    if _sqlite_column_exists(db, "users", "sub_last_user_agent"):
+                        db.execute("ALTER TABLE users DROP COLUMN sub_last_user_agent")
+                    if _sqlite_column_exists(db, "users", "sub_updated_at"):
+                        db.execute("ALTER TABLE users DROP COLUMN sub_updated_at")
+                    stats["dropped_columns"] = 1
+                except sqlite3.OperationalError:
+                    pass
+            db.commit()
+        finally:
+            db.close()
+        return stats
+
+    host = conn.get("host") or "127.0.0.1"
+    port = int(migration_port(conn, db_type))
+    user = conn.get("user") or (
+        "postgres" if db_type in ("postgresql", "timescaledb") else "root"
+    )
+    password = conn.get("password") or ""
+    database = conn.get("database") or "pasarguard"
+
+    if db_type in ("postgresql", "timescaledb"):
+        import psycopg2
+
+        with psycopg2.connect(
+            host=host, port=port, dbname=database, user=user, password=password,
+        ) as pg:
+            with pg.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema='public' AND table_name='users' LIMIT 1"
+                )
+                if not cur.fetchone():
+                    return stats
+                cur.execute(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema='public' "
+                    "AND table_name='user_subscription_updates' LIMIT 1"
+                )
+                if not cur.fetchone():
+                    cur.execute(
+                        "CREATE TABLE user_subscription_updates ("
+                        "id SERIAL PRIMARY KEY, "
+                        "user_id INTEGER NOT NULL REFERENCES users(id), "
+                        "created_at TIMESTAMPTZ NOT NULL, "
+                        "user_agent VARCHAR(512) NOT NULL)"
+                    )
+                    stats["created_table"] = 1
+                cur.execute(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema='public' AND table_name='users' "
+                    "AND column_name='sub_updated_at' LIMIT 1"
+                )
+                if cur.fetchone():
+                    cur.execute(
+                        "INSERT INTO user_subscription_updates "
+                        "(user_id, created_at, user_agent) "
+                        "SELECT u.id, u.sub_updated_at, "
+                        "COALESCE(u.sub_last_user_agent, 'Unknown') "
+                        "FROM users u "
+                        "WHERE u.sub_updated_at IS NOT NULL "
+                        "AND NOT EXISTS ("
+                        "  SELECT 1 FROM user_subscription_updates x "
+                        "  WHERE x.user_id = u.id AND x.created_at = u.sub_updated_at"
+                        ")"
+                    )
+                    stats["inserted"] = max(0, cur.rowcount or 0)
+                    cur.execute(
+                        "ALTER TABLE users "
+                        "DROP COLUMN IF EXISTS sub_last_user_agent, "
+                        "DROP COLUMN IF EXISTS sub_updated_at"
+                    )
+                    stats["dropped_columns"] = 1
+            pg.commit()
+        return stats
+
+    if db_type in ("mysql", "mariadb"):
+        import pymysql
+
+        with pymysql.connect(
+            host=host, port=port, user=user, password=password,
+            database=database, charset="utf8mb4", autocommit=True,
+        ) as mysql:
+            with mysql.cursor() as cur:
+                if not _mysql_table_exists(cur, database, "users"):
+                    return stats
+                if not _mysql_table_exists(cur, database, "user_subscription_updates"):
+                    cur.execute(
+                        "CREATE TABLE user_subscription_updates ("
+                        "id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, "
+                        "user_id INT NOT NULL, "
+                        "created_at DATETIME(6) NOT NULL, "
+                        "user_agent VARCHAR(512) NOT NULL, "
+                        "FOREIGN KEY (user_id) REFERENCES users(id))"
+                    )
+                    stats["created_table"] = 1
+                if _mysql_column_exists(cur, database, "users", "sub_updated_at"):
+                    cur.execute(
+                        "INSERT INTO user_subscription_updates "
+                        "(user_id, created_at, user_agent) "
+                        "SELECT u.id, u.sub_updated_at, "
+                        "COALESCE(u.sub_last_user_agent, 'Unknown') "
+                        "FROM users u "
+                        "WHERE u.sub_updated_at IS NOT NULL "
+                        "AND NOT EXISTS ("
+                        "  SELECT 1 FROM user_subscription_updates x "
+                        "  WHERE x.user_id = u.id AND x.created_at = u.sub_updated_at"
+                        ")"
+                    )
+                    stats["inserted"] = max(0, cur.rowcount or 0)
+                    # DROP COLUMN — ignore if already gone
+                    for col in ("sub_last_user_agent", "sub_updated_at"):
+                        if _mysql_column_exists(cur, database, "users", col):
+                            try:
+                                cur.execute(f"ALTER TABLE users DROP COLUMN `{col}`")
+                                stats["dropped_columns"] = 1
+                            except Exception:
+                                pass
+        return stats
+
+    return stats
+
+
+async def heal_stuck_refactor_sub_updated_at(migrator) -> bool:
+    """Finish e422f859847f via bulk SQL + stamp, then caller restarts panel.
+
+    Call when panel alembic is stuck on «refactor sub updated at» (ORM hang /
+    SQLite batch_alter lock). Stops the panel first so SQLite locks release.
+    """
+    from app.services.multiworker_stack import stop_panel_stack
+    from app.services.pasarguard_ops import (
+        set_target_alembic_version,
+        write_alembic_version_on_conn,
+    )
+
+    params = migrator.params or {}
+    target_db = (params.get("target_db") or "").lower()
+    if target_db not in ("sqlite", "mysql", "mariadb", "postgresql", "timescaledb"):
+        return False
+
+    try:
+        await stop_panel_stack(migrator.job)
+    except Exception as e:
+        migrator.job.log(f"refactor-sub heal: panel stop note — {e}")
+
+    conn = dict(get_target_connection(params))
+    if target_db == "sqlite":
+        conn["sqlite_path"] = conn.get("sqlite_path") or str(PASARGUARD_DATA / "db.sqlite3")
+
+    try:
+        stats = apply_refactor_sub_updated_at_on_conn(target_db, conn)
+    except Exception as e:
+        migrator.job.log(f"refactor-sub bulk SQL failed: {e}")
+        return False
+
+    stamped = False
+    try:
+        stamped = await set_target_alembic_version(
+            migrator, target_db, REFACTOR_SUB_UPDATED_AT_REV,
+        )
+    except Exception:
+        stamped = False
+    if not stamped:
+        stamped = write_alembic_version_on_conn(
+            target_db, conn, REFACTOR_SUB_UPDATED_AT_REV,
+        )
+
+    migrator.job.log(
+        f"Healed alembic {REFACTOR_SUB_UPDATED_AT_REV} via bulk SQL "
+        f"(table={stats.get('created_table')}, inserted={stats.get('inserted')}, "
+        f"dropped={stats.get('dropped_columns')}, stamped={stamped})"
+    )
+    return bool(stamped or stats.get("inserted") or stats.get("dropped_columns") or stats.get("created_table"))
+
+
 async def heal_marzban_preboot(migrator) -> dict[str, int]:
     """Run all safe Marzban pre-boot heals. No-op on clean small dumps.
 
