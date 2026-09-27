@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.26`** — большие restore больше не зависают на 93%: skip-at-head, длинный budget DDL, без rotate mid-DDL
+> 🚀 **`v4.6.27`** — шум «node controlled by another client» больше не валит restore (как Telegram)
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

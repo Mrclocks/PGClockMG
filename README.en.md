@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.26`** — large restores no longer stick at 93%: skip-at-head, long DDL budget, no mid-DDL rotate
+> 🚀 **`v4.6.27`** — node "controlled by another client" log noise no longer fails restore (like Telegram)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
