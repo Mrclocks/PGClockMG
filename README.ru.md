@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.18`** — alembic Phase2 больше не зависает на unpublished 127.0.0.1:5432
+> 🚀 **`v4.6.19`** — alembic Phase2 подключается к timescaledb через compose network (fix env.py)
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

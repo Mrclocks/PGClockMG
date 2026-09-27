@@ -3331,6 +3331,16 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
             "NATS_URL داخل کانتینر باید nats://nats:4222 باشد — localhost کار نمی‌کند",
             "ویزارد جدید NATS را قبل از پنل بالا می‌آورد؛ اگر باز خطا بود node-worker/scheduler را هم چک کنید",
         ]
+    elif "failed alembic upgrade head" in low or (
+        "alembic" in low and "upgrade" in low and ("error" in low or "failed" in low)
+    ):
+        fa = "ساخت اسکیمای مقصد با alembic شکست خورد (Phase 2)."
+        en = "Target schema create via alembic upgrade head failed (Phase 2)."
+        causes_fa = [
+            "اول PGClockMG را به v4.6.19+ آپدیت کنید (alembic روی شبکه compose به timescaledb وصل می‌شود)",
+            "لاگ را برای خطای واقعی ببینید (password / SSL / connection) — نه فقط وسط Traceback",
+            "اگر پورت 5432 پابلیش نیست، نسخه جدید از DNS سرویس timescaledb استفاده می‌کند",
+        ]
     elif "pasarguard failed to start" in low or "did not reach ready state" in low:
         fa = "پنل PasarGuard بعد از ریستور بالا نیامد."
         en = "PasarGuard panel did not start after restore."

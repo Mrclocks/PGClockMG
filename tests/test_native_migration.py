@@ -26,7 +26,24 @@ def test_build_local_alembic_url():
     url = build_local_alembic_url(params)
     assert ":5432/" in url
     assert "pasarguard:secret@127.0.0.1:5432/pasarguard" in url
+    assert "ssl=false" in url
     print("OK: build_local_alembic_url")
+
+
+def test_build_local_alembic_url_encodes_special_password():
+    from app.services.pasarguard_ops import build_local_alembic_url
+
+    params = {
+        "target_db": "timescaledb",
+        "target_db_user": "pasarguard",
+        "target_db_password": "a@b:c/d",
+        "target_db_name": "pasarguard",
+        "target_db_port": "5432",
+    }
+    url = build_local_alembic_url(params)
+    assert "a%40b%3Ac%2Fd" in url
+    assert "ssl=false" in url
+    print("OK: alembic URL encodes special password chars")
 
 
 def test_resolve_reachable_alembic_url_uses_bridge_when_loopback_dead():
@@ -36,7 +53,7 @@ def test_resolve_reachable_alembic_url_uses_bridge_when_loopback_dead():
 
     from app.services import pasarguard_ops as ops
 
-    url = "postgresql+asyncpg://pasarguard:secret@127.0.0.1:5432/pasarguard"
+    url = "postgresql+asyncpg://pasarguard:secret@127.0.0.1:5432/pasarguard?ssl=false"
     mig = MagicMock()
     mig.params = {
         "target_db": "timescaledb",
@@ -55,6 +72,9 @@ def test_resolve_reachable_alembic_url_uses_bridge_when_loopback_dead():
         with (
             patch.object(ops, "_tcp_port_open", side_effect=_open),
             patch.object(ops, "resolve_db_service", return_value="timescaledb"),
+            patch.object(
+                ops, "_compose_network_name", new_callable=AsyncMock, return_value="",
+            ),
             patch(
                 "app.services.db_auth._resolve_pg_host_endpoint",
                 new_callable=AsyncMock,
@@ -71,9 +91,68 @@ def test_resolve_reachable_alembic_url_uses_bridge_when_loopback_dead():
     out = asyncio.run(_go())
     assert "172.18.0.2:5432" in out
     assert "secret" in out
+    assert "ssl=false" in out
     logged = " ".join(str(c) for c in mig.job.log.call_args_list)
     assert "docker-bridge" in logged
     print("OK: alembic URL rewrites to bridge IP when loopback dead")
+
+
+def test_resolve_alembic_prefers_compose_network_dns():
+    """Prefer compose network + timescaledb:5432 over bridge IP."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.services import pasarguard_ops as ops
+
+    url = "postgresql+asyncpg://pasarguard:secret@127.0.0.1:5432/pasarguard"
+    mig = MagicMock()
+    mig.params = {
+        "target_db": "timescaledb",
+        "target_db_user": "pasarguard",
+        "target_db_password": "secret",
+        "target_db_name": "pasarguard",
+        "target_db_port": "5432",
+    }
+    mig.job = MagicMock()
+    mig.job.log = MagicMock()
+
+    async def _go():
+        with (
+            patch.object(ops, "_tcp_port_open", return_value=False),
+            patch.object(ops, "resolve_db_service", return_value="timescaledb"),
+            patch.object(
+                ops,
+                "_compose_network_name",
+                new_callable=AsyncMock,
+                return_value="pasarguard_default",
+            ),
+        ):
+            return await ops._resolve_alembic_network_and_url(mig, url)
+
+    net, out = asyncio.run(_go())
+    assert net == ["--network", "pasarguard_default"]
+    assert "@timescaledb:5432/" in out
+    assert "ssl=false" in out
+    logged = " ".join(str(c) for c in mig.job.log.call_args_list)
+    assert "compose network" in logged
+    print("OK: alembic prefers compose network DNS")
+
+
+def test_format_alembic_failure_surfaces_root_exception():
+    from app.services.pasarguard_ops import _format_alembic_failure
+
+    blob = "\n".join([
+        "Traceback (most recent call last):",
+        '  File "/code/.venv/lib/python3.14/site-packages/alembic/config.py", line 1029, in main',
+        "    self.run_cmd(cfg, options)",
+        '  File "/code/.venv/lib/python3.14/site-packages/alembic/script/base.py", line 550, in run_env',
+        '    util.load_python_file(self.dir, "env.py")',
+        "sqlalchemy.exc.OperationalError: (asyncpg.exceptions.InvalidPasswordError) password authentication failed",
+    ])
+    out = _format_alembic_failure(blob)
+    assert "InvalidPasswordError" in out or "password authentication failed" in out
+    assert "load_python_file" in out or "---" in out
+    print("OK: alembic failure formatter surfaces root exception")
 
 
 def test_rewrite_sqlalchemy_host_port_keeps_password():
@@ -1147,7 +1226,10 @@ def test_cross_db_has_pasarguard_env():
 
 if __name__ == "__main__":
     test_build_local_alembic_url()
+    test_build_local_alembic_url_encodes_special_password()
     test_resolve_reachable_alembic_url_uses_bridge_when_loopback_dead()
+    test_resolve_alembic_prefers_compose_network_dns()
+    test_format_alembic_failure_surfaces_root_exception()
     test_rewrite_sqlalchemy_host_port_keeps_password()
     test_sqlite_column_intersection()
     test_migration_strategy_matrix()

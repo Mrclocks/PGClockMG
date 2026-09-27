@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.6.18`** — alembic Phase2 دیگر روی 127.0.0.1:5432 پابلیش‌نشده هنگ نمی‌کند
+> 🚀 **`v4.6.19`** — alembic Phase2 روی شبکه compose به timescaledb وصل می‌شود (رفع fail در env.py)
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
