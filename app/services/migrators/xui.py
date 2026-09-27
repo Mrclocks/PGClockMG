@@ -2698,6 +2698,8 @@ class XuiMigrator(BaseMigrator):
         self.job.log(" ".join(lines))
 
     async def _compose_container_id(self, service: str) -> str:
+        from app.services.pasarguard_ops import extract_docker_container_id
+
         ok, out = await self._run_cmd(
             ["docker", "compose", "ps", "-q", service],
             cwd=str(PASARGUARD_DIR),
@@ -2706,11 +2708,7 @@ class XuiMigrator(BaseMigrator):
         )
         if not ok:
             return ""
-        for line in (out or "").splitlines():
-            container = line.strip()
-            if container:
-                return container
-        return ""
+        return extract_docker_container_id(out or "")
 
     async def _container_env(self, container: str) -> dict[str, str]:
         ok, out = await self._run_cmd(

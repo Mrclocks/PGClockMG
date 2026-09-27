@@ -2118,7 +2118,7 @@ def _compose_looks_usable(text: str) -> bool:
 
 async def _resolve_running_db_container_id(job: MigrationJob, svc: str) -> str | None:
     """Find a running container id/name when ``docker compose exec`` is unusable."""
-    from app.services.pasarguard_ops import _active_compose_paths
+    from app.services.pasarguard_ops import _active_compose_paths, extract_docker_container_id
 
     paths = _active_compose_paths()
     if paths:
@@ -2129,9 +2129,9 @@ async def _resolve_running_db_container_id(job: MigrationJob, svc: str) -> str |
             timeout=20,
             quiet=True,
         )
-        cid = (out or "").strip().splitlines()
-        if ok and cid and cid[-1].strip():
-            return cid[-1].strip()
+        cid = extract_docker_container_id(out or "") if ok else ""
+        if cid:
+            return cid
     # Fallback: match running container names.
     ok2, out2 = await _run(
         job,
@@ -2147,6 +2147,9 @@ async def _resolve_running_db_container_id(job: MigrationJob, svc: str) -> str |
         if len(parts) < 2:
             continue
         cid, name = parts[0], parts[1].lower()
+        # docker ps --format {{.ID}} is already a short hex id
+        if not extract_docker_container_id(cid):
+            continue
         if svc_l and svc_l in name:
             return cid
         if "timescaledb" in name or "postgres" in name:
@@ -2828,6 +2831,16 @@ async def _maybe_cross_db_after_restore(
     job.set_progress(85, f"Converting {backup_db} → {target_db}…")
     job.log(f"Auto DB convert: {backup_db} → {target_db}")
 
+    # Silence compose ${PGADMIN_*} interpolation warnings before any
+    # ``docker compose ps -q`` (those warnings previously poisoned container ids).
+    try:
+        from app.services.env_migration import silence_compose_pgadmin_warnings
+
+        if silence_compose_pgadmin_warnings(install_env=install_env_snapshot):
+            job.log("Filled missing PGADMIN_EMAIL/PASSWORD defaults (compose noise)")
+    except Exception as e:
+        job.log(f"PGADMIN defaults note: {e}")
+
     # Resolve source path for two-phase engine
     path = source_path
     if not path:
@@ -3334,13 +3347,30 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
     elif "failed alembic upgrade head" in low or (
         "alembic" in low and "upgrade" in low and ("error" in low or "failed" in low)
     ):
-        fa = "ساخت اسکیمای مقصد با alembic شکست خورد (Phase 2)."
-        en = "Target schema create via alembic upgrade head failed (Phase 2)."
-        causes_fa = [
-            "اول PGClockMG را به v4.6.20+ آپدیت کنید (alembic connect/auth را اتوماتیک heal می‌کند)",
-            "نسخه جدید چند endpoint (compose DNS / container netns / bridge) را می‌چرخاند و auth را sync می‌کند",
-            "اگر باز هم fail شد، لاگ را برای خطای اسکیما ببینید — نه فقط وسط Traceback",
-        ]
+        phase1 = (
+            "sqlite+aiosqlite" in low
+            or "invalid sqlite url" in low
+            or "intermediate sqlite" in low
+            or ("phase1" in low and "sqlite" in low)
+        )
+        if phase1:
+            fa = "آپدیت اسکیمای میانی SQLite با alembic شکست خورد (Phase 1)."
+            en = "Intermediate SQLite schema upgrade via alembic failed (Phase 1)."
+            causes_fa = [
+                "اول PGClockMG را به v4.6.21+ آپدیت کنید "
+                "(URL اسکیوالایت دیگر با host/port پستگرس خراب نمی‌شود)",
+                "Compose warning (مثل PGADMIN_EMAIL) دیگر به‌عنوان container id استفاده نمی‌شود",
+                "اگر باز هم fail شد، لاگ ArgumentError / Invalid SQLite URL را ببینید",
+            ]
+        else:
+            fa = "ساخت اسکیمای مقصد با alembic شکست خورد (Phase 2)."
+            en = "Target schema create via alembic upgrade head failed (Phase 2)."
+            causes_fa = [
+                "اول PGClockMG را به v4.6.21+ آپدیت کنید "
+                "(endpoint rotation + استخراج امن container id)",
+                "نسخه جدید compose DNS / container netns / bridge را درست می‌چرخاند",
+                "اگر باز هم fail شد، لاگ را برای خطای اسکیما یا auth ببینید — نه فقط وسط Traceback",
+            ]
     elif "pasarguard failed to start" in low or "did not reach ready state" in low:
         fa = "پنل PasarGuard بعد از ریستور بالا نیامد."
         en = "PasarGuard panel did not start after restore."

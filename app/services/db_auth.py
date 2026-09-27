@@ -380,8 +380,16 @@ def _parse_published_port(ports_json: str, container_port: str = "5432/tcp") -> 
 
 
 def _docker_inspect_first_line(out: str | None) -> str:
+    """First non-empty line (for inspect templates that emit a single value)."""
     lines = (out or "").strip().splitlines()
     return lines[0].strip() if lines else ""
+
+
+def _docker_compose_container_id(out: str | None) -> str:
+    """Hex container id from noisy ``compose ps -q`` (skip PGADMIN warnings)."""
+    from app.services.pasarguard_ops import extract_docker_container_id
+
+    return extract_docker_container_id(out or "")
 
 
 async def _resolve_pg_host_endpoint(migrator, service: str) -> tuple[str, str, str]:
@@ -391,7 +399,7 @@ async def _resolve_pg_host_endpoint(migrator, service: str) -> tuple[str, str, s
         cwd=str(PASARGUARD_DIR),
         timeout=30,
     )
-    container = _docker_inspect_first_line(cid) if ok else ""
+    container = _docker_compose_container_id(cid) if ok else ""
     if not container:
         return "", "", ""
     ok_img, image_out = await migrator._run_cmd(
@@ -421,7 +429,7 @@ async def _resolve_pg_container_ip_endpoint(
         cwd=str(PASARGUARD_DIR),
         timeout=30,
     )
-    container = _docker_inspect_first_line(cid) if ok else ""
+    container = _docker_compose_container_id(cid) if ok else ""
     if not container:
         return "", "", ""
     ok_img, image_out = await migrator._run_cmd(
@@ -484,7 +492,7 @@ async def _resolve_pg_tcp_endpoints(
                 cwd=str(PASARGUARD_DIR),
                 timeout=30,
             )
-            container = _docker_inspect_first_line(cid) if ok else ""
+            container = _docker_compose_container_id(cid) if ok else ""
             if container:
                 ok_ports, ports_out = await migrator._run_cmd(
                     [
@@ -928,15 +936,19 @@ def _pg_hba_trust_restore_script() -> str:
 
 async def _pg_service_container_id(migrator, service: str) -> str:
     """Return compose container id for ``service`` (running or stopped)."""
+    from app.services.pasarguard_ops import extract_docker_container_id
+
     cwd = str(PASARGUARD_DIR)
     for args in (
         ["docker", "compose", "ps", "-aq", service],
         ["docker", "compose", "ps", "-q", service],
     ):
         ok, out = await migrator._run_cmd(args, cwd=cwd, timeout=30)
-        cid = (out or "").strip().splitlines()
-        if ok and cid and cid[-1].strip():
-            return cid[-1].strip()
+        if not ok:
+            continue
+        cid = extract_docker_container_id(out or "")
+        if cid:
+            return cid
     return ""
 
 

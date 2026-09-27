@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.20`** — Phase2 alembic auto-heals connect/auth failures and continues until success
+> 🚀 **`v4.6.21`** — root-fix sqlite→Timescale: keep SQLite alembic URLs intact and sanitize compose container ids
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
