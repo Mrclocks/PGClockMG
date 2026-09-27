@@ -75,6 +75,12 @@ def test_resolve_reachable_alembic_url_uses_bridge_when_loopback_dead():
             patch.object(
                 ops, "_compose_network_name", new_callable=AsyncMock, return_value="",
             ),
+            patch.object(
+                ops,
+                "_compose_service_container_id",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
             patch(
                 "app.services.db_auth._resolve_pg_host_endpoint",
                 new_callable=AsyncMock,
@@ -126,6 +132,22 @@ def test_resolve_alembic_prefers_compose_network_dns():
                 new_callable=AsyncMock,
                 return_value="pasarguard_default",
             ),
+            patch.object(
+                ops,
+                "_compose_service_container_id",
+                new_callable=AsyncMock,
+                return_value="abc123cid",
+            ),
+            patch(
+                "app.services.db_auth._resolve_pg_host_endpoint",
+                new_callable=AsyncMock,
+                return_value=("", "", ""),
+            ),
+            patch(
+                "app.services.db_auth._resolve_pg_container_ip_endpoint",
+                new_callable=AsyncMock,
+                return_value=("", "", ""),
+            ),
         ):
             return await ops._resolve_alembic_network_and_url(mig, url)
 
@@ -136,6 +158,174 @@ def test_resolve_alembic_prefers_compose_network_dns():
     logged = " ".join(str(c) for c in mig.job.log.call_args_list)
     assert "compose network" in logged
     print("OK: alembic prefers compose network DNS")
+
+
+def test_alembic_strategies_include_container_netns():
+    """Unpublished DB must offer container-netns as an auto-heal path."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.services import pasarguard_ops as ops
+
+    url = "postgresql+asyncpg://pasarguard:secret@127.0.0.1:5432/pasarguard"
+    mig = MagicMock()
+    mig.params = {
+        "target_db": "timescaledb",
+        "target_db_user": "pasarguard",
+        "target_db_password": "secret",
+        "target_db_name": "pasarguard",
+        "target_db_port": "5432",
+    }
+    mig.job = MagicMock()
+
+    async def _go():
+        with (
+            patch.object(ops, "_tcp_port_open", return_value=False),
+            patch.object(ops, "resolve_db_service", return_value="timescaledb"),
+            patch.object(
+                ops,
+                "_compose_network_name",
+                new_callable=AsyncMock,
+                return_value="pasarguard_default",
+            ),
+            patch.object(
+                ops,
+                "_compose_service_container_id",
+                new_callable=AsyncMock,
+                return_value="deadbeefcid",
+            ),
+            patch(
+                "app.services.db_auth._resolve_pg_host_endpoint",
+                new_callable=AsyncMock,
+                return_value=("", "", ""),
+            ),
+            patch(
+                "app.services.db_auth._resolve_pg_container_ip_endpoint",
+                new_callable=AsyncMock,
+                return_value=("", "", ""),
+            ),
+        ):
+            return await ops._alembic_endpoint_strategies(mig, url)
+
+    strategies = asyncio.run(_go())
+    labels = [s[2] for s in strategies]
+    assert any(l.startswith("compose-dns:") for l in labels)
+    assert any(l.startswith("container-netns:") for l in labels)
+    netns = next(s for s in strategies if s[2].startswith("container-netns:"))
+    assert netns[0] == ["--network=container:deadbeefcid"]
+    assert "@127.0.0.1:5432/" in netns[1]
+    print("OK: alembic strategies include container-netns")
+
+
+def test_run_pasarguard_alembic_rotates_endpoints_on_auth_fail():
+    """Connect/auth failure on first endpoint must auto-try the next."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.services import pasarguard_ops as ops
+
+    mig = MagicMock()
+    mig.params = {
+        "target_db": "timescaledb",
+        "target_db_user": "pasarguard",
+        "target_db_password": "secret",
+        "target_db_name": "pasarguard",
+        "target_db_port": "5432",
+    }
+    mig.job = MagicMock()
+    mig.job.log = MagicMock()
+    mig.job.progress = 90
+    mig.job.set_progress = MagicMock()
+
+    strategies = [
+        (["--network", "net_a"], "postgresql+asyncpg://u:p@timescaledb:5432/db?ssl=false", "compose-dns:timescaledb"),
+        (["--network=container:cid1"], "postgresql+asyncpg://u:p@127.0.0.1:5432/db?ssl=false", "container-netns:timescaledb"),
+    ]
+    auth_fail = (
+        "sqlalchemy.exc.OperationalError: "
+        "(asyncpg.exceptions.InvalidPasswordError) password authentication failed"
+    )
+    calls: list[str] = []
+
+    async def _once(migrator, *args, url, net_args, label):
+        calls.append(label)
+        if label.startswith("compose-dns"):
+            return False, auth_fail
+        return True, "INFO  [alembic.runtime.migration] Running upgrade -> head"
+
+    async def _go():
+        with (
+            patch.object(
+                ops, "_alembic_endpoint_strategies",
+                new_callable=AsyncMock, return_value=strategies,
+            ),
+            patch.object(
+                ops, "_run_pasarguard_alembic_once", side_effect=_once,
+            ),
+            patch.object(ops, "build_local_alembic_url", return_value=strategies[0][1]),
+        ):
+            return await ops._run_pasarguard_alembic(mig, "upgrade", "head")
+
+    ok, out = asyncio.run(_go())
+    assert ok is True
+    assert calls == ["compose-dns:timescaledb", "container-netns:timescaledb"]
+    assert "Running upgrade" in out
+    logged = " ".join(str(c) for c in mig.job.log.call_args_list)
+    assert "auto-trying next endpoint" in logged or "succeeded via endpoint" in logged
+    print("OK: alembic rotates endpoints on auth fail")
+
+
+def test_run_alembic_upgrade_head_auth_heals_and_retries():
+    """Auth mismatch must heal roles then succeed — not surface as hard fail."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.services import pasarguard_ops as ops
+
+    mig = MagicMock()
+    mig.params = {"target_db": "timescaledb"}
+    mig.job = MagicMock()
+    mig.job.log = MagicMock()
+
+    auth_fail = "password authentication failed for user \"pasarguard\""
+    results = [
+        (False, auth_fail),
+        (True, "Running upgrade -> head"),
+    ]
+
+    async def _run(*a, **k):
+        return results.pop(0)
+
+    async def _go():
+        with (
+            patch.object(ops, "_run_pasarguard_alembic", side_effect=_run),
+            patch.object(
+                ops, "_try_heal_db_auth_mismatch",
+                new_callable=AsyncMock, return_value=True,
+            ) as heal,
+        ):
+            await ops.run_alembic_upgrade_head(mig, heal_db="timescaledb")
+            assert heal.await_count == 1
+
+    asyncio.run(_go())
+    logged = " ".join(str(c) for c in mig.job.log.call_args_list)
+    assert "auth healed" in logged.lower() or "succeeded after auto-heal" in logged.lower()
+    print("OK: upgrade head auth-heals and retries")
+
+
+def test_is_alembic_connect_auth_error_detects_env_py_failures():
+    from app.services.pasarguard_ops import _is_alembic_connect_auth_error
+
+    assert _is_alembic_connect_auth_error(
+        "sqlalchemy.exc.OperationalError: (asyncpg.exceptions.InvalidPasswordError) "
+        "password authentication failed"
+    )
+    assert _is_alembic_connect_auth_error("FATAL: no pg_hba.conf entry for host")
+    assert _is_alembic_connect_auth_error("socket.gaierror: Name or service not known")
+    assert not _is_alembic_connect_auth_error(
+        "sqlalchemy.exc.ProgrammingError: (psycopg2.errors.DuplicateColumn) column already exists"
+    )
+    print("OK: connect/auth detector")
 
 
 def test_format_alembic_failure_surfaces_root_exception():
@@ -1229,6 +1419,10 @@ if __name__ == "__main__":
     test_build_local_alembic_url_encodes_special_password()
     test_resolve_reachable_alembic_url_uses_bridge_when_loopback_dead()
     test_resolve_alembic_prefers_compose_network_dns()
+    test_alembic_strategies_include_container_netns()
+    test_run_pasarguard_alembic_rotates_endpoints_on_auth_fail()
+    test_run_alembic_upgrade_head_auth_heals_and_retries()
+    test_is_alembic_connect_auth_error_detects_env_py_failures()
     test_format_alembic_failure_surfaces_root_exception()
     test_rewrite_sqlalchemy_host_port_keeps_password()
     test_sqlite_column_intersection()

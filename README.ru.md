@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.19`** — alembic Phase2 подключается к timescaledb через compose network (fix env.py)
+> 🚀 **`v4.6.20`** — alembic Phase2 автоматически лечит connect/auth и продолжает до успеха
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

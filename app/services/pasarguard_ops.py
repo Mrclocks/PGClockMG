@@ -1906,16 +1906,23 @@ def _ensure_asyncpg_ssl_false(url: str) -> str:
     return urlunparse(parsed._replace(query=urlencode(q)))
 
 
-async def _compose_network_name(migrator, service: str) -> str:
-    """First docker network attached to a compose service container."""
+async def _compose_service_container_id(migrator, service: str) -> str:
+    """Running compose service container id, or empty string."""
     ok, cid = await migrator._run_cmd(
         ["docker", "compose", *compose_file_prefix(), "ps", "-q", service],
         cwd=str(PASARGUARD_DIR),
         timeout=30,
         quiet=True,
     )
-    container = (cid or "").strip().splitlines()
-    container = container[0].strip() if container else ""
+    if not ok:
+        return ""
+    lines = (cid or "").strip().splitlines()
+    return lines[0].strip() if lines else ""
+
+
+async def _compose_network_name(migrator, service: str) -> str:
+    """First docker network attached to a compose service container."""
+    container = await _compose_service_container_id(migrator, service)
     if not container:
         return ""
     ok2, nets = await migrator._run_cmd(
@@ -1936,84 +1943,176 @@ async def _compose_network_name(migrator, service: str) -> str:
     return ""
 
 
-async def _resolve_alembic_network_and_url(
+def _is_alembic_connect_auth_error(output: str) -> bool:
+    """True when alembic failed to reach / authenticate to the DB (healable)."""
+    low = (output or "").lower()
+    needles = (
+        "password authentication failed",
+        "invalidpassworderror",
+        "sasl authentication failed",
+        "authentication failed for",
+        "no pg_hba.conf entry",
+        "could not connect",
+        "connection refused",
+        "connectionreseterror",
+        "connectiondoesnotexisterror",
+        "timeoutError",
+        "timeout expired",
+        "timed out",
+        "network is unreachable",
+        "no route to host",
+        "name or service not known",
+        "temporary failure in name resolution",
+        "nodename nor servname",
+        "gaierror",
+        "ssl connection has been closed",
+        "server closed the connection",
+        "failed to establish a new connection",
+        "cannot connect to server",
+        "connection was closed",
+        "oserror:",
+        "asyncpg.exceptions.invalidpassworderror",
+        "asyncpg.exceptions.cannotconnectnowerror",
+        "could not translate host name",
+    )
+    if any(n.lower() in low for n in needles):
+        return True
+    # Mid-env.py OperationalError without a schema DDL marker → treat as connect.
+    if "operationalerror" in low and not _is_duplicate_schema_error(output):
+        if any(
+            s in low
+            for s in (
+                "asyncpg",
+                "connect",
+                "password",
+                "ssl",
+                "timeout",
+                "refused",
+                "hba",
+            )
+        ):
+            return True
+    return False
+
+
+async def _alembic_endpoint_strategies(
     migrator, url: str,
-) -> tuple[list[str], str]:
-    """Pick docker --network args + SQLAlchemy URL for a reachable PG endpoint.
+) -> list[tuple[list[str], str, str]]:
+    """Ordered ``(net_args, url, label)`` endpoints to try until alembic succeeds.
 
-    Order of preference for unpublished Timescale (no host :5432):
-    1. Compose network + service DNS (``timescaledb:5432``) — best HBA/DNS match
-    2. Host network + published port / docker-bridge IP (legacy fallback)
-    3. Host network + 127.0.0.1 (may hang — last resort)
-
-    Never route alembic DDL through PgBouncer (:6432).
+    Never route alembic DDL through PgBouncer (:6432). Prefer paths that match
+    HBA / SCRAM the way the panel does (compose DNS, then DB container netns).
     """
     url = _ensure_asyncpg_ssl_false(url)
     target_db = (migrator.params or {}).get("target_db") or ""
     if target_db not in ("postgresql", "timescaledb"):
-        return ["--network", "host"], url
+        return [(["--network", "host"], url, "host")]
 
     conn = get_target_connection(migrator.params)
     port = migration_port(conn, target_db)
+    strategies: list[tuple[list[str], str, str]] = []
+    seen: set[tuple[tuple[str, ...], str]] = set()
+
+    def _add(net_args: list[str], rewritten: str, label: str) -> None:
+        key = (tuple(net_args), rewritten)
+        if key in seen:
+            return
+        seen.add(key)
+        strategies.append(
+            (net_args, _ensure_asyncpg_ssl_false(rewritten), label)
+        )
+
     if _tcp_port_open("127.0.0.1", port):
-        return (
+        _add(
             ["--network", "host"],
-            _ensure_asyncpg_ssl_false(
-                _rewrite_sqlalchemy_host_port(url, "127.0.0.1", port)
-            ),
+            _rewrite_sqlalchemy_host_port(url, "127.0.0.1", port),
+            "host-loopback",
         )
 
     svc = resolve_db_service(target_db)
     if svc:
         net = await _compose_network_name(migrator, svc)
         if net:
-            # Inside compose DNS the DB listens on 5432 even when unpublished on host.
-            migrated = _ensure_asyncpg_ssl_false(
-                _rewrite_sqlalchemy_host_port(url, svc, "5432")
+            _add(
+                ["--network", net],
+                _rewrite_sqlalchemy_host_port(url, svc, "5432"),
+                f"compose-dns:{svc}",
             )
-            migrator.job.log(
-                f"Alembic via compose network '{net}' → {svc}:5432 "
-                f"(host {port} not published)"
+
+        cid = await _compose_service_container_id(migrator, svc)
+        if cid:
+            # Share the DB container network namespace → always hit 127.0.0.1:5432
+            # inside the same netns (works when host publish + bridge HBA fail).
+            _add(
+                [f"--network=container:{cid}"],
+                _rewrite_sqlalchemy_host_port(url, "127.0.0.1", "5432"),
+                f"container-netns:{svc}",
             )
-            return ["--network", net], migrated
 
-    from app.services.db_auth import (
-        _resolve_pg_container_ip_endpoint,
-        _resolve_pg_host_endpoint,
-    )
+        from app.services.db_auth import (
+            _resolve_pg_container_ip_endpoint,
+            _resolve_pg_host_endpoint,
+        )
 
-    if svc:
         _img, pub_host, pub_port = await _resolve_pg_host_endpoint(migrator, svc)
         if pub_host and pub_port and _tcp_port_open(pub_host, pub_port):
-            migrator.job.log(
-                f"Alembic via published {pub_host}:{pub_port} "
-                f"(127.0.0.1:{port} not listening)"
-            )
-            return (
+            _add(
                 ["--network", "host"],
-                _ensure_asyncpg_ssl_false(
-                    _rewrite_sqlalchemy_host_port(url, pub_host, pub_port)
-                ),
+                _rewrite_sqlalchemy_host_port(url, pub_host, pub_port),
+                f"published:{pub_host}:{pub_port}",
             )
 
         _cimg, cip, cip_port = await _resolve_pg_container_ip_endpoint(migrator, svc)
         if cip and cip_port and _tcp_port_open(cip, cip_port):
-            migrator.job.log(
-                f"Alembic via docker-bridge {cip}:{cip_port} "
-                f"(host {port} not published — fallback)"
-            )
-            return (
+            _add(
                 ["--network", "host"],
-                _ensure_asyncpg_ssl_false(
-                    _rewrite_sqlalchemy_host_port(url, cip, cip_port)
-                ),
+                _rewrite_sqlalchemy_host_port(url, cip, cip_port),
+                f"docker-bridge:{cip}:{cip_port}",
             )
 
-    migrator.job.log(
-        f"Alembic WARNING: no reachable PG endpoint; "
-        f"trying host-network 127.0.0.1:{port} (may hang or fail in env.py)"
-    )
-    return ["--network", "host"], url
+    if not strategies:
+        _add(
+            ["--network", "host"],
+            _rewrite_sqlalchemy_host_port(url, "127.0.0.1", port),
+            f"host-fallback:{port}",
+        )
+    return strategies
+
+
+async def _resolve_alembic_network_and_url(
+    migrator, url: str,
+) -> tuple[list[str], str]:
+    """Preferred docker --network args + URL (first auto-heal strategy)."""
+    strategies = await _alembic_endpoint_strategies(migrator, url)
+    net_args, resolved, label = strategies[0]
+    if label.startswith("compose-dns:"):
+        svc = label.split(":", 1)[-1]
+        net = net_args[1] if len(net_args) > 1 else "?"
+        migrator.job.log(
+            f"Alembic via compose network '{net}' → {svc}:5432 "
+            f"(host not published)"
+        )
+    elif label.startswith("docker-bridge:"):
+        migrator.job.log(
+            f"Alembic via docker-bridge {label.split(':', 1)[-1]} "
+            f"(host not published — fallback)"
+        )
+    elif label.startswith("published:"):
+        migrator.job.log(
+            f"Alembic via published {label.split(':', 1)[-1]} "
+            f"(127.0.0.1 not listening)"
+        )
+    elif label.startswith("container-netns:"):
+        migrator.job.log(
+            f"Alembic via DB container network namespace "
+            f"({label.split(':', 1)[-1]} → 127.0.0.1:5432)"
+        )
+    elif label.startswith("host-fallback"):
+        migrator.job.log(
+            "Alembic WARNING: no reachable PG endpoint; "
+            f"trying {label} (may hang or fail in env.py)"
+        )
+    return net_args, resolved
 
 
 # Kept for tests / callers that only need the URL rewrite path.
@@ -2106,18 +2205,15 @@ def write_docker_env_file(src: Path) -> Path:
     return Path(path)
 
 
-async def _run_pasarguard_alembic(
-    migrator, *args: str, url_override: str | None = None,
+async def _run_pasarguard_alembic_once(
+    migrator,
+    *args: str,
+    url: str,
+    net_args: list[str],
+    label: str,
 ) -> tuple[bool, str]:
-    """Run python -m alembic in panel image.
-
-    Prefer the compose network + DB service DNS when host :5432 is unpublished
-    so env.py can connect (bridge-IP auth/HBA often fails). Fall back to host
-    network + published/bridge endpoints.
-    """
+    """Single alembic docker-run attempt on one endpoint."""
     image = resolve_pasarguard_image()
-    url = url_override or build_local_alembic_url(migrator.params)
-    net_args, url = await _resolve_alembic_network_and_url(migrator, url)
     conn = get_target_connection(migrator.params)
     safe_host = "127.0.0.1"
     safe_port = migration_port(conn, migrator.params.get("target_db", ""))
@@ -2131,8 +2227,7 @@ async def _run_pasarguard_alembic(
             safe_port = str(parsed.port)
     except Exception:
         pass
-    net_label = " ".join(net_args) if net_args else "default"
-    migrator.job.log(f"Alembic ({net_label}): {' '.join(args)}")
+    migrator.job.log(f"Alembic [{label}]: {' '.join(args)}")
     migrator.job.log(
         f"Alembic DB: user={conn.get('user')}, db={conn.get('database')}, "
         f"host={safe_host}:{safe_port}"
@@ -2160,6 +2255,50 @@ async def _run_pasarguard_alembic(
     if ok or _alembic_output_indicates_success(out or ""):
         return True, out or ""
     return False, out or ""
+
+
+async def _run_pasarguard_alembic(
+    migrator, *args: str, url_override: str | None = None,
+) -> tuple[bool, str]:
+    """Run python -m alembic in panel image.
+
+    Auto-heals connect/auth by rotating endpoints: host loopback → compose DNS
+    → DB container netns → published → docker-bridge. Schema errors return
+    immediately so callers can stamp/heal alembic_version.
+    """
+    base_url = url_override or build_local_alembic_url(migrator.params)
+    strategies = await _alembic_endpoint_strategies(migrator, base_url)
+    last_out = ""
+    for idx, (net_args, url, label) in enumerate(strategies):
+        ok, out = await _run_pasarguard_alembic_once(
+            migrator, *args, url=url, net_args=net_args, label=label,
+        )
+        if ok:
+            if idx > 0:
+                migrator.job.log(
+                    f"Alembic succeeded via endpoint [{label}] "
+                    f"after {idx} prior connect attempt(s)"
+                )
+            return True, out or ""
+        last_out = out or last_out
+        # Schema/revision problems won't change with a different TCP path.
+        if _is_missing_revision_error(out or "") or _is_duplicate_schema_error(out or ""):
+            return False, out or ""
+        if idx + 1 < len(strategies) and _is_alembic_connect_auth_error(out or ""):
+            migrator.job.log(
+                f"Alembic [{label}] connect/auth failed — "
+                f"auto-trying next endpoint ({idx + 2}/{len(strategies)})…"
+            )
+            continue
+        if idx + 1 < len(strategies):
+            # Unknown failure — still rotate once more (some drivers omit markers).
+            migrator.job.log(
+                f"Alembic [{label}] failed — trying next endpoint "
+                f"({idx + 2}/{len(strategies)})…"
+            )
+            continue
+        break
+    return False, last_out
 
 
 def _parse_missing_revision(output: str) -> str | None:
@@ -2531,42 +2670,69 @@ async def run_alembic_upgrade_head(
     heal_db: str | None = None,
     heal_conn: dict | None = None,
 ) -> None:
-    """Upgrade schema to head only — never bootstrap to a source revision."""
+    """Upgrade schema to head — auto-heal connect/auth + stamp skew until success."""
     migrator.job.log("Alembic upgrade head...")
-    ok, out = await _run_pasarguard_alembic(
-        migrator, "upgrade", "head", url_override=url_override,
-    )
-    if ok:
-        return
+    max_auth_heals = 2
+    auth_heals = 0
+    last_out = ""
 
-    if _is_missing_revision_error(out or "") and heal_db and heal_conn:
-        missing = _parse_missing_revision(out or "")
-        migrator.job.log(
-            f"Alembic missing revision {missing} — healing staging stamp..."
+    for attempt in range(1, 8):
+        ok, out = await _run_pasarguard_alembic(
+            migrator, "upgrade", "head", url_override=url_override,
         )
-        if await heal_unknown_alembic_revision(
-            migrator, heal_db, heal_conn, missing_revision=missing,
-        ):
-            ok2, out2 = await _run_pasarguard_alembic(
-                migrator, "upgrade", "head", url_override=url_override,
-            )
-            if ok2:
-                return
-            out = out2 or out
+        if ok:
+            if attempt > 1:
+                migrator.job.log(
+                    f"Alembic upgrade head succeeded after auto-heal "
+                    f"(attempt {attempt})"
+                )
+            return
+        last_out = out or last_out
 
-    if _is_duplicate_schema_error(out or "") and heal_db:
-        migrator.job.log("Schema partially exists — healing alembic_version...")
-        if await _heal_alembic_duplicate_schema(
-            migrator, heal_db, out or "", heal_conn=heal_conn,
-        ):
-            ok2, out2 = await _run_pasarguard_alembic(
-                migrator, "upgrade", "head", url_override=url_override,
+        if _is_missing_revision_error(last_out) and heal_db and heal_conn:
+            missing = _parse_missing_revision(last_out)
+            migrator.job.log(
+                f"Alembic missing revision {missing} — healing staging stamp..."
             )
-            if ok2:
-                return
-            out = out2 or out
+            if await heal_unknown_alembic_revision(
+                migrator, heal_db, heal_conn, missing_revision=missing,
+            ):
+                continue
+
+        if _is_duplicate_schema_error(last_out) and heal_db:
+            migrator.job.log("Schema partially exists — healing alembic_version...")
+            if await _heal_alembic_duplicate_schema(
+                migrator, heal_db, last_out, heal_conn=heal_conn,
+            ):
+                continue
+
+        if (
+            _is_alembic_connect_auth_error(last_out)
+            and auth_heals < max_auth_heals
+        ):
+            healed = await _try_heal_db_auth_mismatch(
+                migrator, last_out, force=True,
+            )
+            if healed:
+                auth_heals += 1
+                migrator.job.log(
+                    f"Alembic DB auth healed "
+                    f"({auth_heals}/{max_auth_heals}) — retrying upgrade head…"
+                )
+                continue
+            # Auth heal unavailable — endpoint rotation already tried inside
+            # _run_pasarguard_alembic; one more full pass in case roles settled.
+            if attempt < 3:
+                migrator.job.log(
+                    "Alembic connect still failing — retrying endpoints…"
+                )
+                continue
+
+        # Non-healable or heals exhausted
+        break
+
     raise RuntimeError(
-        "Failed alembic upgrade head:\n" + _format_alembic_failure(out or "")
+        "Failed alembic upgrade head:\n" + _format_alembic_failure(last_out or "")
     )
 
 
@@ -2616,18 +2782,34 @@ async def _heal_alembic_duplicate_schema(
 async def _run_alembic_upgrade_head_with_heal(
     migrator, target_db: str, max_attempts: int | None = None,
 ) -> None:
-    """Run upgrade head; on duplicate-column errors heal alembic_version and retry."""
+    """Run upgrade head; auto-heal duplicate schema + connect/auth and retry."""
     attempts = _MAX_ALEMBIC_DUP_HEALS if max_attempts is None else int(max_attempts)
+    attempts = max(attempts, 4)
     last_out = ""
+    auth_heals = 0
     for attempt in range(1, attempts + 1):
         ok, out = await _run_pasarguard_alembic(migrator, "upgrade", "head")
         last_out = out or last_out
         if ok or (out and "already at head" in (out or "").lower()):
             return
         if _is_duplicate_schema_error(out or ""):
-            migrator.job.log(f"Alembic duplicate schema (attempt {attempt}/{attempts}) — healing...")
+            migrator.job.log(
+                f"Alembic duplicate schema (attempt {attempt}/{attempts}) — healing..."
+            )
             if await _heal_alembic_duplicate_schema(migrator, target_db, out or ""):
                 continue
+        if _is_alembic_connect_auth_error(out or "") and auth_heals < 2:
+            if await _try_heal_db_auth_mismatch(migrator, out or "", force=True):
+                auth_heals += 1
+                migrator.job.log(
+                    f"Alembic auth healed ({auth_heals}/2) before panel sync — retrying…"
+                )
+                continue
+            migrator.job.log(
+                f"Alembic connect fail (attempt {attempt}/{attempts}) — "
+                "retrying alternate endpoints…"
+            )
+            continue
         break
     raise RuntimeError(
         "Failed to sync Alembic before PasarGuard startup. "

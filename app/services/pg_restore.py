@@ -3337,9 +3337,9 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         fa = "ساخت اسکیمای مقصد با alembic شکست خورد (Phase 2)."
         en = "Target schema create via alembic upgrade head failed (Phase 2)."
         causes_fa = [
-            "اول PGClockMG را به v4.6.19+ آپدیت کنید (alembic روی شبکه compose به timescaledb وصل می‌شود)",
-            "لاگ را برای خطای واقعی ببینید (password / SSL / connection) — نه فقط وسط Traceback",
-            "اگر پورت 5432 پابلیش نیست، نسخه جدید از DNS سرویس timescaledb استفاده می‌کند",
+            "اول PGClockMG را به v4.6.20+ آپدیت کنید (alembic connect/auth را اتوماتیک heal می‌کند)",
+            "نسخه جدید چند endpoint (compose DNS / container netns / bridge) را می‌چرخاند و auth را sync می‌کند",
+            "اگر باز هم fail شد، لاگ را برای خطای اسکیما ببینید — نه فقط وسط Traceback",
         ]
     elif "pasarguard failed to start" in low or "did not reach ready state" in low:
         fa = "پنل PasarGuard بعد از ریستور بالا نیامد."

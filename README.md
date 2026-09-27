@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.6.19`** — alembic Phase2 روی شبکه compose به timescaledb وصل می‌شود (رفع fail در env.py)
+> 🚀 **`v4.6.20`** — alembic Phase2 خطاهای connect/auth را اتوماتیک heal می‌کند و تا موفقیت ادامه می‌دهد
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

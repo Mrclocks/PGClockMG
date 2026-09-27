@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.19`** — Phase2 alembic connects via compose network to timescaledb (env.py fail fix)
+> 🚀 **`v4.6.20`** — Phase2 alembic auto-heals connect/auth failures and continues until success
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
