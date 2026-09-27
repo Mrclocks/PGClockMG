@@ -1848,10 +1848,12 @@ def build_local_alembic_url(params: dict) -> str:
     port = migration_port(conn, target_db)
     if target_db in ("postgresql", "timescaledb"):
         # asyncpg maps URL ``ssl=`` to sslmode — must be disable/allow/prefer/…
-        # ``timeout=20`` fails hung connect fast so endpoint rotation can continue.
+        # Never put ``timeout=`` in the URL: SQLAlchemy forwards query values as
+        # strings and asyncpg does ``loop.time() + timeout`` → TypeError
+        # (float + str). Hung connects are bounded by the outer docker run timeout.
         return (
             f"postgresql+asyncpg://{user}:{pwd}@127.0.0.1:{port}/{db}"
-            f"?ssl=disable&timeout=20"
+            f"?ssl=disable"
         )
     if target_db in ("mysql", "mariadb"):
         return f"mysql+asyncmy://{user}:{pwd}@127.0.0.1:{port}/{db}"
@@ -1931,8 +1933,16 @@ def _ensure_asyncpg_ssl_false(url: str) -> str:
     """Normalize local/docker asyncpg URLs for alembic.
 
     - ``ssl=disable`` (asyncpg sslmode; ``ssl=false`` is invalid)
-    - ``timeout=20`` connection timeout so a hung TCP/auth path fails fast
-      and endpoint rotation can continue (instead of sitting silent for 10min)
+    - Strip ``timeout`` / ``command_timeout`` / ``connect_timeout`` query keys.
+
+    SQLAlchemy passes every URL query value to asyncpg as a **str**. asyncpg's
+    ``connect(timeout=…)`` requires a float; a string yields::
+
+        TypeError: unsupported operand type(s) for +: 'float' and 'str'
+
+    inside ``asyncio.timeout`` — exactly the Phase2 / sync-alembic crash on
+    timescale→timescale restore. Connect hangs are bounded by the outer
+    ``docker run`` timeout in ``_run_pasarguard_alembic_once``, not the URL.
     """
     if "postgresql+asyncpg://" not in (url or ""):
         return url
@@ -1954,13 +1964,9 @@ def _ensure_asyncpg_ssl_false(url: str) -> str:
             q.pop(key, None)
     q["ssl"] = "disable"
     q.pop("sslmode", None)  # single canonical knob via ssl=
-    # asyncpg connect() timeout (seconds). Keep existing if already set lower.
-    try:
-        existing = float(q.get("timeout") or "0")
-    except (TypeError, ValueError):
-        existing = 0.0
-    if existing <= 0 or existing > 20:
-        q["timeout"] = "20"
+    # NEVER forward timeout* via URL — string values crash asyncpg connect.
+    for key in ("timeout", "command_timeout", "connect_timeout"):
+        q.pop(key, None)
     return urlunparse(parsed._replace(query=urlencode(q)))
 
 
@@ -2040,6 +2046,11 @@ def _is_alembic_url_construction_error(output: str) -> bool:
     if "sslmode" in low and "must be one of" in low:
         return True
     if "clientconfigurationerror" in low and "ssl" in low:
+        return True
+    # asyncpg got timeout as str from URL query (float + str in asyncio.timeout).
+    if "unsupported operand" in low and "float" in low and "str" in low:
+        return True
+    if "typeerror" in low and "timeout" in low and "str" in low:
         return True
     return False
 
@@ -2304,9 +2315,10 @@ def build_alembic_url_from_conn(db_type: str, conn: dict) -> str:
     port = migration_port(conn, db_type)
     host = conn.get("host") or "127.0.0.1"
     if db_type in ("postgresql", "timescaledb"):
+        # No timeout= in URL — see _ensure_asyncpg_ssl_false docstring.
         return (
             f"postgresql+asyncpg://{user}:{pwd}@{host}:{port}/{db}"
-            f"?ssl=disable&timeout=20"
+            f"?ssl=disable"
         )
     return f"mysql+asyncmy://{user}:{pwd}@{host}:{port}/{db}"
 
@@ -2392,7 +2404,7 @@ async def _run_pasarguard_alembic_once(
         image, "-m", "alembic", *args,
     ])
     # Empty PG schema create should finish quickly; keep sqlite upgrades longer.
-    # Connect hangs fail via URL timeout=20 + this outer cap, then rotate.
+    # Connect hangs: outer docker kill (no URL timeout= — that crashes asyncpg).
     attempt_timeout = 600 if url_engine == "sqlite" else 180
     try:
         ok, out = await migrator._run_cmd(cmd, timeout=attempt_timeout)

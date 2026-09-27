@@ -3392,8 +3392,14 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
             "NATS_URL داخل کانتینر باید nats://nats:4222 باشد — localhost کار نمی‌کند",
             "ویزارد جدید NATS را قبل از پنل بالا می‌آورد؛ اگر باز خطا بود node-worker/scheduler را هم چک کنید",
         ]
-    elif "failed alembic upgrade head" in low or (
-        "alembic" in low and "upgrade" in low and ("error" in low or "failed" in low)
+    elif (
+        "failed alembic upgrade head" in low
+        or "failed to sync alembic" in low
+        or (
+            "alembic" in low
+            and ("upgrade" in low or "sync" in low)
+            and ("error" in low or "failed" in low)
+        )
     ):
         phase1 = (
             "sqlite+aiosqlite" in low
@@ -3410,23 +3416,37 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
                 "Compose warning (مثل PGADMIN_EMAIL) دیگر به‌عنوان container id استفاده نمی‌شود",
                 "اگر باز هم fail شد، لاگ ArgumentError / Invalid SQLite URL را ببینید",
             ]
+        elif (
+            "unsupported operand" in low
+            and "float" in low
+            and "str" in low
+        ) or ("typeerror" in low and "timeout" in low):
+            fa = "اتصال alembic به Timescale به‌خاطر timeout رشته‌ای در URL شکست خورد."
+            en = "Alembic→Timescale connect crashed: string timeout= in SQLAlchemy URL."
+            causes_fa = [
+                "اول PGClockMG را به v4.6.25+ آپدیت کنید "
+                "(timeout= از URL آلِمبیک حذف شد — asyncpg فقط float می‌پذیرد)",
+                "v4.6.24 به‌اشتباه timeout=20 را به‌صورت str در URL می‌گذاشت",
+                "hang همچنان با timeout بیرونی docker محدود می‌شود",
+            ]
+        elif "sslmode" in low or ("clientconfigurationerror" in low and "ssl" in low):
+            fa = "ساخت اسکیمای مقصد با alembic شکست خورد (Phase 2)."
+            en = "Target schema create via alembic upgrade head failed (Phase 2)."
+            causes_fa = [
+                "اول PGClockMG را به v4.6.22+ آپدیت کنید "
+                "(ssl=false دیگر به asyncpg پاس داده نمی‌شود — ssl=disable)",
+                "نسخهٔ قبلی URL را با ssl=false می‌ساخت و asyncpg آن را رد می‌کرد",
+                "اگر باز هم fail شد، لاگ auth/HBA را ببینید",
+            ]
         else:
             fa = "ساخت اسکیمای مقصد با alembic شکست خورد (Phase 2)."
             en = "Target schema create via alembic upgrade head failed (Phase 2)."
-            if "sslmode" in low or ("clientconfigurationerror" in low and "ssl" in low):
-                causes_fa = [
-                    "اول PGClockMG را به v4.6.22+ آپدیت کنید "
-                    "(ssl=false دیگر به asyncpg پاس داده نمی‌شود — ssl=disable)",
-                    "نسخهٔ قبلی URL را با ssl=false می‌ساخت و asyncpg آن را رد می‌کرد",
-                    "اگر باز هم fail شد، لاگ auth/HBA را ببینید",
-                ]
-            else:
-                causes_fa = [
-                    "اول PGClockMG را به v4.6.22+ آپدیت کنید "
-                    "(endpoint rotation + استخراج امن container id + ssl=disable)",
-                    "نسخه جدید compose DNS / container netns / bridge را درست می‌چرخاند",
-                    "اگر باز هم fail شد، لاگ را برای خطای اسکیما یا auth ببینید — نه فقط وسط Traceback",
-                ]
+            causes_fa = [
+                "اول PGClockMG را به v4.6.25+ آپدیت کنید "
+                "(timeout= رشته‌ای از URL حذف + endpoint rotation + ssl=disable)",
+                "نسخه جدید compose DNS / container netns / bridge را درست می‌چرخاند",
+                "اگر باز هم fail شد، لاگ را برای خطای اسکیما یا auth ببینید — نه فقط وسط Traceback",
+            ]
     elif "pasarguard failed to start" in low or "did not reach ready state" in low:
         fa = "پنل PasarGuard بعد از ریستور بالا نیامد."
         en = "PasarGuard panel did not start after restore."

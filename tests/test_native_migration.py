@@ -28,7 +28,7 @@ def test_build_local_alembic_url():
     assert "pasarguard:secret@127.0.0.1:5432/pasarguard" in url
     assert "ssl=disable" in url
     assert "ssl=false" not in url
-    assert "timeout=20" in url
+    assert "timeout=" not in url
     print("OK: build_local_alembic_url")
 
 
@@ -437,23 +437,45 @@ def test_ensure_asyncpg_ssl_disable_not_false():
         "postgresql+asyncpg://u:p@127.0.0.1:5432/db?ssl=false",
         "postgresql+asyncpg://u:p@127.0.0.1:5432/db?sslmode=false",
         "postgresql+asyncpg://u:p@127.0.0.1:5432/db?ssl=0&sslmode=prefer",
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db?ssl=disable&timeout=20",
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/db?timeout=30&command_timeout=10",
     ):
         out = _ensure_asyncpg_ssl_false(raw)
         assert "ssl=disable" in out
         assert "ssl=false" not in out
         assert "sslmode=false" not in out
-        assert "timeout=20" in out
+        assert "timeout=" not in out
+        assert "command_timeout=" not in out
     assert _is_alembic_url_construction_error(
         "asyncpg.exceptions._base.ClientConfigurationError: "
         "`sslmode` parameter must be one of: disable, allow, prefer, require"
+    )
+    assert _is_alembic_url_construction_error(
+        "TypeError: unsupported operand type(s) for +: 'float' and 'str'"
     )
     from_conn = build_alembic_url_from_conn(
         "timescaledb",
         {"user": "u", "password": "a@b", "database": "pasarguard", "port": "5432"},
     )
     assert "ssl=disable" in from_conn
+    assert "timeout=" not in from_conn
     assert "a%40b" in from_conn
     print("OK: asyncpg ssl normalized to disable")
+
+
+def test_ensure_asyncpg_strips_string_timeout_query():
+    """v4.6.24 regression: URL timeout=20 (str) crashes asyncpg connect."""
+    from app.services.pasarguard_ops import _ensure_asyncpg_ssl_false
+
+    poisoned = (
+        "postgresql+asyncpg://pasarguard:secret@127.0.0.1:5432/pasarguard"
+        "?ssl=disable&timeout=20"
+    )
+    out = _ensure_asyncpg_ssl_false(poisoned)
+    assert out.endswith("/pasarguard?ssl=disable") or (
+        "ssl=disable" in out and "timeout=" not in out
+    )
+    print("OK: string timeout stripped from asyncpg URL")
 
 
 def test_postgres_fit_enum_keeps_none_label():
@@ -1680,6 +1702,7 @@ if __name__ == "__main__":
     test_format_alembic_failure_surfaces_root_exception()
     test_rewrite_sqlalchemy_host_port_keeps_password()
     test_ensure_asyncpg_ssl_disable_not_false()
+    test_ensure_asyncpg_strips_string_timeout_query()
     test_postgres_fit_enum_keeps_none_label()
     test_rewrite_sqlalchemy_host_port_never_touches_sqlite()
     test_alembic_strategies_sqlite_ignores_timescaledb_target()
