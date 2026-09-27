@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.6.28`** — گیر ۹۷٪ «port 8000» رفع شد: probe روی پورت publish‌شده / داخل کانتینر
+> 🚀 **`v4.6.29`** — گیر alembic روی `refactor sub updated at` رفع شد (bulk SQL heal)
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

@@ -348,6 +348,90 @@ def test_heal_marzban_preboot_shrinks_before_orphan_cleanup():
     print("OK: preboot heal order shrink→names→orphans")
 
 
+def test_apply_refactor_sub_updated_at_sqlite_bulk():
+    """e422 hang: bulk SQL must copy sub_updated_at then drop columns."""
+    from app.services.marzban_preboot_heal import (
+        REFACTOR_SUB_UPDATED_AT_REV,
+        apply_refactor_sub_updated_at_on_conn,
+        logs_indicate_refactor_sub_updated_at,
+    )
+    from app.services.pasarguard_ops import (
+        _is_heavy_alembic_upgrade,
+        _is_refactor_sub_updated_upgrade,
+        write_alembic_version_on_conn,
+    )
+
+    assert logs_indicate_refactor_sub_updated_at(
+        "Running upgrade 343ad7904b19 -> e422f859847f, refactor sub updated at"
+    )
+    assert _is_refactor_sub_updated_upgrade(
+        "INFO Running upgrade 343ad7904b19 -> e422f859847f, refactor sub updated at"
+    )
+    assert _is_heavy_alembic_upgrade(
+        "Running upgrade 343ad7904b19 -> e422f859847f, refactor sub updated at"
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "db.sqlite3"
+        db = sqlite3.connect(str(path))
+        db.execute(
+            "CREATE TABLE users ("
+            "id INTEGER PRIMARY KEY, "
+            "username TEXT, "
+            "sub_updated_at DATETIME, "
+            "sub_last_user_agent VARCHAR(512))"
+        )
+        db.executemany(
+            "INSERT INTO users VALUES (?, ?, ?, ?)",
+            [
+                (1, "a", "2024-01-01 00:00:00", "ua-a"),
+                (2, "b", None, None),
+                (3, "c", "2024-06-01 12:00:00", None),
+            ],
+        )
+        db.commit()
+        db.close()
+
+        stats = apply_refactor_sub_updated_at_on_conn(
+            "sqlite", {"sqlite_path": str(path)},
+        )
+        assert stats["created_table"] == 1
+        assert stats["inserted"] == 2
+        assert stats["dropped_columns"] == 1
+
+        db = sqlite3.connect(str(path))
+        cols = {r[1] for r in db.execute("PRAGMA table_info(users)").fetchall()}
+        assert "sub_updated_at" not in cols
+        assert "sub_last_user_agent" not in cols
+        n = db.execute("SELECT COUNT(*) FROM user_subscription_updates").fetchone()[0]
+        assert n == 2
+        agents = {
+            r[0]
+            for r in db.execute(
+                "SELECT user_agent FROM user_subscription_updates"
+            ).fetchall()
+        }
+        assert "ua-a" in agents
+        assert "Unknown" in agents
+        db.close()
+
+        # Idempotent second pass
+        stats2 = apply_refactor_sub_updated_at_on_conn(
+            "sqlite", {"sqlite_path": str(path)},
+        )
+        assert stats2["inserted"] == 0
+
+        assert write_alembic_version_on_conn(
+            "sqlite", {"sqlite_path": str(path)}, REFACTOR_SUB_UPDATED_AT_REV,
+        )
+        db = sqlite3.connect(str(path))
+        ver = db.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        db.close()
+        assert ver == REFACTOR_SUB_UPDATED_AT_REV
+
+    print("OK: refactor sub_updated_at bulk SQL heal on sqlite")
+
+
 def test_sqlite_reader_count_rows_uses_count_star():
     from app.services.native_migration.adapters import SqliteReader
 
@@ -379,5 +463,6 @@ if __name__ == "__main__":
     test_orphan_null_falls_back_to_delete_when_not_null()
     test_orphan_cleanup_sql_script_repoints_hosts_not_deletes()
     test_heal_marzban_preboot_shrinks_before_orphan_cleanup()
+    test_apply_refactor_sub_updated_at_sqlite_bulk()
     test_sqlite_reader_count_rows_uses_count_star()
     print("\nAll marzban_preboot_heal tests passed.")

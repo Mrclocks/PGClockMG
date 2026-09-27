@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.28`** — зависание на 97% из-за port 8000: probe published / in-container порта панели
+> 🚀 **`v4.6.29`** — зависание alembic на `refactor sub updated at` исправлено (bulk SQL heal)
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
