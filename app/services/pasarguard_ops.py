@@ -506,29 +506,172 @@ async def fetch_extended_panel_logs(migrator, tail: int = 500) -> str:
     return await fetch_pasarguard_logs(migrator, tail=tail, since=None)
 
 
-async def _panel_port_is_listening(migrator) -> bool:
-    """Best-effort TCP check against finalized UVICORN_PORT (localhost)."""
+def _tcp_connect_ok(host: str, port: int, *, timeout: float = 2.5) -> bool:
     import socket
 
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+async def _panel_uvicorn_port(migrator) -> int:
+    """UVICORN_PORT from panel .env (default 8000)."""
     from app.services.env_migration import read_env_var
 
     try:
         env_text = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
     except OSError:
-        return True  # cannot read env — don't block on probe
+        return 8000
     port_raw = (read_env_var(env_text, "UVICORN_PORT") or "8000").strip()
     try:
         port = int(port_raw)
     except ValueError:
-        return True
+        return 8000
     if port <= 0 or port > 65535:
-        return True
+        return 8000
+    return port
+
+
+async def _panel_published_host_port(migrator, container_port: int) -> tuple[str, int]:
+    """Host IP/port published for the panel container's UVICORN_PORT."""
+    from app.services.db_auth import _parse_published_port
+
+    panel = panel_compose_service()
+    prefix = compose_file_prefix()
+    ok, cid_out = await migrator._run_cmd(
+        ["docker", "compose", *prefix, "ps", "-q", panel],
+        cwd=str(PASARGUARD_DIR),
+        timeout=15,
+        quiet=True,
+    )
+    cid = extract_docker_container_id(cid_out or "") if ok else ""
+    if not cid:
+        return "", 0
+    ok_ports, ports_out = await migrator._run_cmd(
+        ["docker", "inspect", "--format", "{{json .NetworkSettings.Ports}}", cid],
+        timeout=15,
+        quiet=True,
+    )
+    if not ok_ports:
+        return "", 0
+    host, hport = _parse_published_port(ports_out or "", f"{int(container_port)}/tcp")
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=2.5):
+        return host, int(hport) if hport else 0
+    except (TypeError, ValueError):
+        return host, 0
+
+
+async def _panel_container_ip(migrator) -> str:
+    panel = panel_compose_service()
+    prefix = compose_file_prefix()
+    ok, cid_out = await migrator._run_cmd(
+        ["docker", "compose", *prefix, "ps", "-q", panel],
+        cwd=str(PASARGUARD_DIR),
+        timeout=15,
+        quiet=True,
+    )
+    cid = extract_docker_container_id(cid_out or "") if ok else ""
+    if not cid:
+        return ""
+    ok_ip, ip_out = await migrator._run_cmd(
+        [
+            "docker", "inspect", "--format",
+            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+            cid,
+        ],
+        timeout=15,
+        quiet=True,
+    )
+    if not ok_ip:
+        return ""
+    for tok in (ip_out or "").replace("\n", " ").split():
+        tok = tok.strip()
+        if tok and tok[0].isdigit():
+            return tok
+    return ""
+
+
+async def _panel_port_reachable_inside_container(migrator, port: int) -> bool:
+    """True when the panel process accepts TCP on 127.0.0.1:port *inside* its container.
+
+    Host ``127.0.0.1:UVICORN_PORT`` is often wrong: compose publishes e.g. ``2087:8000``.
+    """
+    panel = panel_compose_service()
+    prefix = compose_file_prefix()
+    # Prefer a tiny Python probe — curl/wget may be missing in the image.
+    py = (
+        "import socket,sys;\n"
+        f"s=socket.socket();\n"
+        f"s.settimeout(2.0);\n"
+        "try:\n"
+        f" s.connect(('127.0.0.1',{int(port)}));\n"
+        " sys.exit(0)\n"
+        "except Exception:\n"
+        " sys.exit(1)\n"
+    )
+    ok, _out = await migrator._run_cmd(
+        [
+            "docker", "compose", *prefix, "exec", "-T", panel,
+            "python", "-c", py,
+        ],
+        cwd=str(PASARGUARD_DIR),
+        timeout=20,
+        quiet=True,
+    )
+    if ok:
+        return True
+    # Fallback: /dev/tcp via bash if python missing in entrypoint path.
+    ok2, _ = await migrator._run_cmd(
+        [
+            "docker", "compose", *prefix, "exec", "-T", panel,
+            "bash", "-c",
+            f"exec 3<>/dev/tcp/127.0.0.1/{int(port)}",
+        ],
+        cwd=str(PASARGUARD_DIR),
+        timeout=15,
+        quiet=True,
+    )
+    return bool(ok2)
+
+
+async def _panel_port_is_listening(migrator) -> bool:
+    """Best-effort readiness: host UVICORN_PORT → published map → bridge IP → in-container.
+
+    Root cause of sqlite→PG 'stuck at 97%': startup marker is inside the container
+    while we only probed host ``127.0.0.1:8000``, which is often unpublished.
+    """
+    port = await _panel_uvicorn_port(migrator)
+
+    if _tcp_connect_ok("127.0.0.1", port):
+        return True
+
+    pub_host, pub_port = await _panel_published_host_port(migrator, port)
+    if pub_port and (pub_host or "127.0.0.1"):
+        host = pub_host or "127.0.0.1"
+        if _tcp_connect_ok(host, pub_port):
+            if pub_port != port:
+                migrator.job.log(
+                    f"Panel reachable via published {host}:{pub_port} "
+                    f"(container UVICORN_PORT={port})"
+                )
             return True
-    except OSError:
-        migrator.job.log(f"Panel port {port} not accepting connections yet")
-        return False
+
+    cip = await _panel_container_ip(migrator)
+    if cip and _tcp_connect_ok(cip, port):
+        migrator.job.log(f"Panel reachable via container IP {cip}:{port}")
+        return True
+
+    if await _panel_port_reachable_inside_container(migrator, port):
+        migrator.job.log(
+            f"Panel listening inside container on :{port} "
+            "(host publish not required for restore health)"
+        )
+        return True
+
+    migrator.job.log(f"Panel port {port} not accepting connections yet")
+    return False
 
 
 def _panel_startup_markers_for_stack(stack: dict | None = None) -> tuple[str, ...]:
@@ -1145,6 +1288,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
     await asyncio.sleep(8)
 
     stable_ready = 0
+    marker_no_port_streak = 0
     not_running_streak = 0
     unknown_streak = 0
     restarting_streak = 0
@@ -1554,9 +1698,23 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                 if await _panel_port_is_listening(migrator):
                     migrator.job.log("PasarGuard healthy — application startup confirmed")
                     return
+                marker_no_port_streak += 1
                 migrator.job.log(
                     "Startup marker seen but panel port not listening yet — waiting…"
                 )
+                # Host UVICORN_PORT is often unpublished (e.g. 2087:8000). After
+                # several sightings of Application startup complete with a running
+                # container and no hard FAIL, do not burn the full 180s budget.
+                if (
+                    marker_no_port_streak >= 5
+                    and "Application startup complete" in (out or "")
+                    and not _check_logs_for_failure(out)
+                ):
+                    migrator.job.log(
+                        "PasarGuard healthy — Application startup complete "
+                        "(host port unreachable; panel is up inside compose)"
+                    )
+                    return
                 stable_ready = 1
         elif _logs_dominated_by_panel_ops_noise(out) or _logs_only_transient_connect_noise(out):
             # Telegram / node-session spam or brief connection-refused bounce
@@ -1578,6 +1736,17 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                     )
                     return
                 if stable_ready >= 2:
+                    marker_no_port_streak += 1
+                    if (
+                        marker_no_port_streak >= 5
+                        and "Application startup complete" in (out or "")
+                        and not _check_logs_for_failure(out)
+                    ):
+                        migrator.job.log(
+                            "PasarGuard healthy — Application startup complete "
+                            f"({reason} ignored; host port unreachable)"
+                        )
+                        return
                     stable_ready = 1
             elif (
                 await _panel_port_is_listening(migrator)
@@ -1591,8 +1760,10 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                     return
             else:
                 stable_ready = 0
+                marker_no_port_streak = 0
         else:
             stable_ready = 0
+            marker_no_port_streak = 0
 
         await asyncio.sleep(4)
 
@@ -1629,6 +1800,17 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
         migrator.job.log(
             "PasarGuard healthy — panel port listening at deadline "
             "(log noise ignored)"
+        )
+        return
+    # Deadline: startup complete + running container, even if host port unpublished.
+    if (
+        last_known_state == "running"
+        and "Application startup complete" in (out or "")
+        and not hit
+    ):
+        migrator.job.log(
+            "PasarGuard healthy — Application startup complete at deadline "
+            "(host UVICORN_PORT may be unpublished)"
         )
         return
     last_up = last_upgrade_sig or _last_alembic_upgrade_line(out)

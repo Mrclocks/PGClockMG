@@ -3495,11 +3495,25 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
                 "چند instance همزمان با یک bot token getUpdates می‌زنند (سرور دیگر / webhook / چند worker)",
                 "پنل HTTP معمولاً سالم است؛ فقط ربات تلگرام را یک‌جا نگه دارید",
             ]
+        elif (
+            "panel port" in low
+            or "not accepting connections" in low
+            or "not listening" in low
+            or "uvicorn_port may be unpublished" in low
+        ):
+            fa = "پنل بالا آمد ولی health روی پورت host گیر کرد (مثلاً compose روی 2087:8000)."
+            en = "Panel was up; health hung probing host UVICORN_PORT (e.g. compose 2087:8000)."
+            causes_fa = [
+                "اول PGClockMG را به v4.6.28+ آپدیت کنید — probe روی پورت publish‌شده / داخل کانتینر",
+                "v4.6.27 فقط 127.0.0.1:UVICORN_PORT را چک می‌کرد و وقتی map فرق داشت ۹۷٪ گیر می‌کرد",
+                "Application startup complete در لاگ یعنی پنل داخل compose بالاست",
+            ]
         else:
             causes_fa = [
                 "لاگ pasarguard/panel را ببینید (نه فقط اسپم Telegram / node-control)",
                 "multi-worker: NATS_URL و بالا بودن nats را چک کنید",
                 "ممکن است SSL یا SQLALCHEMY_DATABASE_URL اشتباه باشد",
+                "گیر ۹۷٪ روی port 8000: به v4.6.28+ آپدیت کنید",
                 "اگر فقط TelegramConflict یا node controlled by another client می‌بینید، به v4.6.27+ آپدیت کنید",
             ]
     elif (
