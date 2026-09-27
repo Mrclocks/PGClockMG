@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.24`** — alembic больше не виснет молча 10 минут: live-логи, timeout, compose первым
+> 🚀 **`v4.6.25`** — убран timeout= из URL alembic (фикс TypeError float+str в asyncpg)
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

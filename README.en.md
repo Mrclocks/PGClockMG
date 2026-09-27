@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.24`** — alembic no longer silent-hangs for 10min: live logs, timeouts, compose-first
+> 🚀 **`v4.6.25`** — strip timeout= from alembic URL (fixes asyncpg float+str TypeError)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

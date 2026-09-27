@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.6.24`** — alembic دیگر ۱۰ دقیقه silent hang نمی‌کند: لاگ زنده، timeout، compose اول
+> 🚀 **`v4.6.25`** — حذف timeout= از URL آلِمبیک (رفع TypeError float+str در asyncpg)
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
