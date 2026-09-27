@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.18`** — Phase2 alembic no longer hangs on unpublished 127.0.0.1:5432
+> 🚀 **`v4.6.19`** — Phase2 alembic connects via compose network to timescaledb (env.py fail fix)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

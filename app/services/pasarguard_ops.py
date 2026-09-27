@@ -1833,14 +1833,23 @@ def resolve_pasarguard_image() -> str:
 
 
 def build_local_alembic_url(params: dict) -> str:
+    from urllib.parse import quote_plus
+
     target_db = params["target_db"]
     conn = get_target_connection(params)
-    pwd = conn.get("password") or ""
-    user = conn.get("user") or ("postgres" if target_db in ("postgresql", "timescaledb") else "root")
+    pwd = quote_plus(conn.get("password") or "")
+    user = quote_plus(
+        conn.get("user")
+        or ("postgres" if target_db in ("postgresql", "timescaledb") else "root")
+    )
     db = conn.get("database") or "pasarguard"
     port = migration_port(conn, target_db)
     if target_db in ("postgresql", "timescaledb"):
-        return f"postgresql+asyncpg://{user}:{pwd}@127.0.0.1:{port}/{db}"
+        # ssl=false: local/docker TCP must not negotiate TLS (common hang/fail in env.py)
+        return (
+            f"postgresql+asyncpg://{user}:{pwd}@127.0.0.1:{port}/{db}"
+            f"?ssl=false"
+        )
     if target_db in ("mysql", "mariadb"):
         return f"mysql+asyncmy://{user}:{pwd}@127.0.0.1:{port}/{db}"
     path = conn.get("sqlite_path") or (PASARGUARD_DATA / "db.sqlite3").as_posix()
@@ -1882,58 +1891,162 @@ def _rewrite_sqlalchemy_host_port(url: str, host: str, port: str | int) -> str:
     return urlunparse(parsed._replace(netloc=new_netloc))
 
 
-async def _resolve_reachable_alembic_url(migrator, url: str) -> str:
-    """Prefer a TCP-reachable PG endpoint for host-network alembic.
+def _ensure_asyncpg_ssl_false(url: str) -> str:
+    """Force ssl=false on asyncpg URLs so env.py does not stall on TLS."""
+    if "postgresql+asyncpg://" not in (url or ""):
+        return url
+    from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-    Many Timescale installs leave 5432 unpublished (panel talks via pgbouncer
-    inside compose). Host-network alembic to 127.0.0.1:5432 then hangs until
-    the 600s timeout — the Phase 2 \"create schema at head\" false-stuck state.
-    Prefer: loopback if open → published DB port → docker-bridge DB IP:5432.
-    Never route DDL through pgbouncer (:6432).
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return url
+    q = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    q["ssl"] = "false"
+    return urlunparse(parsed._replace(query=urlencode(q)))
+
+
+async def _compose_network_name(migrator, service: str) -> str:
+    """First docker network attached to a compose service container."""
+    ok, cid = await migrator._run_cmd(
+        ["docker", "compose", *compose_file_prefix(), "ps", "-q", service],
+        cwd=str(PASARGUARD_DIR),
+        timeout=30,
+        quiet=True,
+    )
+    container = (cid or "").strip().splitlines()
+    container = container[0].strip() if container else ""
+    if not container:
+        return ""
+    ok2, nets = await migrator._run_cmd(
+        [
+            "docker", "inspect", "--format",
+            "{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}",
+            container,
+        ],
+        timeout=20,
+        quiet=True,
+    )
+    if not ok2:
+        return ""
+    for tok in (nets or "").split():
+        tok = tok.strip()
+        if tok:
+            return tok
+    return ""
+
+
+async def _resolve_alembic_network_and_url(
+    migrator, url: str,
+) -> tuple[list[str], str]:
+    """Pick docker --network args + SQLAlchemy URL for a reachable PG endpoint.
+
+    Order of preference for unpublished Timescale (no host :5432):
+    1. Compose network + service DNS (``timescaledb:5432``) — best HBA/DNS match
+    2. Host network + published port / docker-bridge IP (legacy fallback)
+    3. Host network + 127.0.0.1 (may hang — last resort)
+
+    Never route alembic DDL through PgBouncer (:6432).
     """
+    url = _ensure_asyncpg_ssl_false(url)
     target_db = (migrator.params or {}).get("target_db") or ""
     if target_db not in ("postgresql", "timescaledb"):
-        return url
+        return ["--network", "host"], url
 
     conn = get_target_connection(migrator.params)
     port = migration_port(conn, target_db)
     if _tcp_port_open("127.0.0.1", port):
-        return _rewrite_sqlalchemy_host_port(url, "127.0.0.1", port)
+        return (
+            ["--network", "host"],
+            _ensure_asyncpg_ssl_false(
+                _rewrite_sqlalchemy_host_port(url, "127.0.0.1", port)
+            ),
+        )
+
+    svc = resolve_db_service(target_db)
+    if svc:
+        net = await _compose_network_name(migrator, svc)
+        if net:
+            # Inside compose DNS the DB listens on 5432 even when unpublished on host.
+            migrated = _ensure_asyncpg_ssl_false(
+                _rewrite_sqlalchemy_host_port(url, svc, "5432")
+            )
+            migrator.job.log(
+                f"Alembic via compose network '{net}' → {svc}:5432 "
+                f"(host {port} not published)"
+            )
+            return ["--network", net], migrated
 
     from app.services.db_auth import (
         _resolve_pg_container_ip_endpoint,
         _resolve_pg_host_endpoint,
     )
 
-    svc = resolve_db_service(target_db)
-    if not svc:
-        migrator.job.log(
-            f"Alembic: 127.0.0.1:{port} not open and no {target_db} compose service — "
-            "continuing with default URL"
-        )
-        return url
+    if svc:
+        _img, pub_host, pub_port = await _resolve_pg_host_endpoint(migrator, svc)
+        if pub_host and pub_port and _tcp_port_open(pub_host, pub_port):
+            migrator.job.log(
+                f"Alembic via published {pub_host}:{pub_port} "
+                f"(127.0.0.1:{port} not listening)"
+            )
+            return (
+                ["--network", "host"],
+                _ensure_asyncpg_ssl_false(
+                    _rewrite_sqlalchemy_host_port(url, pub_host, pub_port)
+                ),
+            )
 
-    _img, pub_host, pub_port = await _resolve_pg_host_endpoint(migrator, svc)
-    if pub_host and pub_port and _tcp_port_open(pub_host, pub_port):
-        migrator.job.log(
-            f"Alembic via published {pub_host}:{pub_port} "
-            f"(127.0.0.1:{port} not listening)"
-        )
-        return _rewrite_sqlalchemy_host_port(url, pub_host, pub_port)
-
-    _cimg, cip, cip_port = await _resolve_pg_container_ip_endpoint(migrator, svc)
-    if cip and cip_port and _tcp_port_open(cip, cip_port):
-        migrator.job.log(
-            f"Alembic via docker-bridge {cip}:{cip_port} "
-            f"(host {port} not published — avoids hang)"
-        )
-        return _rewrite_sqlalchemy_host_port(url, cip, cip_port)
+        _cimg, cip, cip_port = await _resolve_pg_container_ip_endpoint(migrator, svc)
+        if cip and cip_port and _tcp_port_open(cip, cip_port):
+            migrator.job.log(
+                f"Alembic via docker-bridge {cip}:{cip_port} "
+                f"(host {port} not published — fallback)"
+            )
+            return (
+                ["--network", "host"],
+                _ensure_asyncpg_ssl_false(
+                    _rewrite_sqlalchemy_host_port(url, cip, cip_port)
+                ),
+            )
 
     migrator.job.log(
-        f"Alembic WARNING: no reachable PG TCP endpoint for {svc}; "
-        f"trying 127.0.0.1:{port} (may hang until timeout)"
+        f"Alembic WARNING: no reachable PG endpoint; "
+        f"trying host-network 127.0.0.1:{port} (may hang or fail in env.py)"
     )
-    return url
+    return ["--network", "host"], url
+
+
+# Kept for tests / callers that only need the URL rewrite path.
+async def _resolve_reachable_alembic_url(migrator, url: str) -> str:
+    _net, resolved = await _resolve_alembic_network_and_url(migrator, url)
+    return resolved
+
+
+def _format_alembic_failure(output: str) -> str:
+    """Surface the real exception, not mid-traceback frames for the UI."""
+    clean = _strip_ansi(output or "")
+    lines = clean.splitlines()
+    if not lines:
+        return "(no alembic output)"
+
+    root_idxs: list[int] = []
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if not s:
+            continue
+        if re.match(r"^[A-Za-z_][\w.]*(?:Error|Exception):", s):
+            root_idxs.append(i)
+        elif s.startswith("FATAL:") or "password authentication failed" in s.lower():
+            root_idxs.append(i)
+        elif "Could not connect" in s or "Connection refused" in s:
+            root_idxs.append(i)
+        elif "ssl" in s.lower() and ("error" in s.lower() or "required" in s.lower()):
+            root_idxs.append(i)
+    if root_idxs:
+        i = root_idxs[-1]
+        head = lines[max(0, i - 3) : i + 1]
+        return "\n".join(head) + "\n---\n" + "\n".join(lines[-40:])
+    return "\n".join(lines[-60:])
 
 
 def build_sqlite_alembic_url(path: str | Path) -> str:
@@ -1996,14 +2109,15 @@ def write_docker_env_file(src: Path) -> Path:
 async def _run_pasarguard_alembic(
     migrator, *args: str, url_override: str | None = None,
 ) -> tuple[bool, str]:
-    """Run python -m alembic in panel image with host network.
+    """Run python -m alembic in panel image.
 
-    Resolves a reachable DB TCP endpoint first so unpublished 5432 does not
-    freeze Phase 2 for the full command timeout.
+    Prefer the compose network + DB service DNS when host :5432 is unpublished
+    so env.py can connect (bridge-IP auth/HBA often fails). Fall back to host
+    network + published/bridge endpoints.
     """
     image = resolve_pasarguard_image()
     url = url_override or build_local_alembic_url(migrator.params)
-    url = await _resolve_reachable_alembic_url(migrator, url)
+    net_args, url = await _resolve_alembic_network_and_url(migrator, url)
     conn = get_target_connection(migrator.params)
     safe_host = "127.0.0.1"
     safe_port = migration_port(conn, migrator.params.get("target_db", ""))
@@ -2017,7 +2131,8 @@ async def _run_pasarguard_alembic(
             safe_port = str(parsed.port)
     except Exception:
         pass
-    migrator.job.log(f"Host-network alembic: {' '.join(args)}")
+    net_label = " ".join(net_args) if net_args else "default"
+    migrator.job.log(f"Alembic ({net_label}): {' '.join(args)}")
     migrator.job.log(
         f"Alembic DB: user={conn.get('user')}, db={conn.get('database')}, "
         f"host={safe_host}:{safe_port}"
@@ -2030,7 +2145,7 @@ async def _run_pasarguard_alembic(
     except Exception:
         pass
 
-    cmd: list[str] = ["docker", "run", "--rm", "--network", "host"]
+    cmd: list[str] = ["docker", "run", "--rm", *net_args]
     cmd.extend([
         "-e", f"SQLALCHEMY_DATABASE_URL={url}",
         "-v", f"{PASARGUARD_DATA}:/var/lib/pasarguard",
@@ -2450,7 +2565,9 @@ async def run_alembic_upgrade_head(
             if ok2:
                 return
             out = out2 or out
-    raise RuntimeError(f"Failed alembic upgrade head:\n{(out or '')[-3000:]}")
+    raise RuntimeError(
+        "Failed alembic upgrade head:\n" + _format_alembic_failure(out or "")
+    )
 
 
 async def get_alembic_head_revision(migrator) -> str | None:

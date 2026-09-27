@@ -155,6 +155,26 @@ async def _reset_target_schema(migrator, target_db: str) -> None:
         out_b, _ = await proc.communicate()
         last_out = (out_b or b"").decode("utf-8", errors="ignore")
         ok = proc.returncode == 0
+        if ok and target_db == "timescaledb":
+            # Best-effort: recreate extension after CASCADE wipe (needs superuser).
+            ext_proc = await asyncio.create_subprocess_exec(
+                "docker", "compose", "exec", "-T",
+                "-e", f"PGPASSWORD={pwd}",
+                service, "psql", "-U", user, "-d", db, "-c",
+                "CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;",
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            ext_b, _ = await ext_proc.communicate()
+            ext_out = (ext_b or b"").decode("utf-8", errors="ignore")
+            if ext_proc.returncode == 0:
+                migrator.job.log("Recreated timescaledb extension after schema wipe")
+            else:
+                migrator.job.log(
+                    "timescaledb extension recreate note (continuing): "
+                    + ext_out[-300:]
+                )
     else:
         from app.services.pasarguard_ops import mysql_client_bins
         from app.services.native_migration.sql_staging import mysql_create_db_sql
