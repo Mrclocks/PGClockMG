@@ -1848,10 +1848,10 @@ def build_local_alembic_url(params: dict) -> str:
     port = migration_port(conn, target_db)
     if target_db in ("postgresql", "timescaledb"):
         # asyncpg maps URL ``ssl=`` to sslmode — must be disable/allow/prefer/…
-        # (``ssl=false`` raises ClientConfigurationError on modern asyncpg).
+        # ``timeout=20`` fails hung connect fast so endpoint rotation can continue.
         return (
             f"postgresql+asyncpg://{user}:{pwd}@127.0.0.1:{port}/{db}"
-            f"?ssl=disable"
+            f"?ssl=disable&timeout=20"
         )
     if target_db in ("mysql", "mariadb"):
         return f"mysql+asyncmy://{user}:{pwd}@127.0.0.1:{port}/{db}"
@@ -1928,12 +1928,11 @@ def _rewrite_sqlalchemy_host_port(url: str, host: str, port: str | int) -> str:
 
 
 def _ensure_asyncpg_ssl_false(url: str) -> str:
-    """Force local/docker asyncpg URLs to ``ssl=disable`` (no TLS negotiation).
+    """Normalize local/docker asyncpg URLs for alembic.
 
-    SQLAlchemy's asyncpg dialect forwards the ``ssl`` query param as asyncpg
-    ``sslmode``. Valid modes: disable, allow, prefer, require, verify-ca,
-    verify-full. Boolean-looking values like ``false``/``true`` raise
-    ``ClientConfigurationError`` before any TCP connect.
+    - ``ssl=disable`` (asyncpg sslmode; ``ssl=false`` is invalid)
+    - ``timeout=20`` connection timeout so a hung TCP/auth path fails fast
+      and endpoint rotation can continue (instead of sitting silent for 10min)
     """
     if "postgresql+asyncpg://" not in (url or ""):
         return url
@@ -1955,6 +1954,13 @@ def _ensure_asyncpg_ssl_false(url: str) -> str:
             q.pop(key, None)
     q["ssl"] = "disable"
     q.pop("sslmode", None)  # single canonical knob via ssl=
+    # asyncpg connect() timeout (seconds). Keep existing if already set lower.
+    try:
+        existing = float(q.get("timeout") or "0")
+    except (TypeError, ValueError):
+        existing = 0.0
+    if existing <= 0 or existing > 20:
+        q["timeout"] = "20"
     return urlunparse(parsed._replace(query=urlencode(q)))
 
 
@@ -2042,7 +2048,13 @@ def _is_alembic_connect_auth_error(output: str) -> bool:
     """True when alembic failed to reach / authenticate to the DB (healable)."""
     if _is_alembic_url_construction_error(output):
         return False
-    low = (output or "").lower()
+    text = (output or "").strip()
+    # Outer docker/command timeout from _run_cmd — treat as connect hang.
+    if text == "Timeout" or text.lower() == "timeout":
+        return True
+    low = text.lower()
+    if "timed out after" in low or "command timed out" in low:
+        return True
     needles = (
         "password authentication failed",
         "invalidpassworderror",
@@ -2142,16 +2154,11 @@ async def _alembic_endpoint_strategies(
             (net_args, _ensure_asyncpg_ssl_false(rewritten), label)
         )
 
-    if _tcp_port_open("127.0.0.1", port):
-        _add(
-            ["--network", "host"],
-            _rewrite_sqlalchemy_host_port(url, "127.0.0.1", port),
-            "host-loopback",
-        )
-
     svc = resolve_db_service(
         target_db if target_db in ("postgresql", "timescaledb") else "timescaledb"
     )
+    # Prefer compose DNS / DB netns FIRST. Host-loopback can accept TCP yet hang
+    # on auth for minutes; that used to freeze restore UI at 93% before rotating.
     if svc:
         net = await _compose_network_name(migrator, svc)
         if net:
@@ -2191,6 +2198,13 @@ async def _alembic_endpoint_strategies(
                 _rewrite_sqlalchemy_host_port(url, cip, cip_port),
                 f"docker-bridge:{cip}:{cip_port}",
             )
+
+    if _tcp_port_open("127.0.0.1", port):
+        _add(
+            ["--network", "host"],
+            _rewrite_sqlalchemy_host_port(url, "127.0.0.1", port),
+            "host-loopback",
+        )
 
     if not strategies:
         _add(
@@ -2292,7 +2306,7 @@ def build_alembic_url_from_conn(db_type: str, conn: dict) -> str:
     if db_type in ("postgresql", "timescaledb"):
         return (
             f"postgresql+asyncpg://{user}:{pwd}@{host}:{port}/{db}"
-            f"?ssl=disable"
+            f"?ssl=disable&timeout=20"
         )
     return f"mysql+asyncmy://{user}:{pwd}@{host}:{port}/{db}"
 
@@ -2345,6 +2359,7 @@ async def _run_pasarguard_alembic_once(
     conn = get_target_connection(migrator.params)
     safe_host = "127.0.0.1"
     safe_port = migration_port(conn, migrator.params.get("target_db", ""))
+    url_engine = _alembic_url_engine(url)
     try:
         from urllib.parse import urlparse
 
@@ -2376,8 +2391,11 @@ async def _run_pasarguard_alembic_once(
         "--entrypoint", "python",
         image, "-m", "alembic", *args,
     ])
+    # Empty PG schema create should finish quickly; keep sqlite upgrades longer.
+    # Connect hangs fail via URL timeout=20 + this outer cap, then rotate.
+    attempt_timeout = 600 if url_engine == "sqlite" else 180
     try:
-        ok, out = await migrator._run_cmd(cmd, timeout=600)
+        ok, out = await migrator._run_cmd(cmd, timeout=attempt_timeout)
     except FileNotFoundError:
         return False, "docker command not found"
     if ok or _alembic_output_indicates_success(out or ""):
@@ -2390,8 +2408,8 @@ async def _run_pasarguard_alembic(
 ) -> tuple[bool, str]:
     """Run python -m alembic in panel image.
 
-    Auto-heals connect/auth by rotating endpoints: host loopback → compose DNS
-    → DB container netns → published → docker-bridge. Schema errors return
+    Auto-heals connect/auth by rotating endpoints: compose DNS → DB container
+    netns → published → docker-bridge → host loopback. Schema errors return
     immediately so callers can stamp/heal alembic_version.
     """
     base_url = url_override or build_local_alembic_url(migrator.params)

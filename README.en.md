@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.23`** — full sqlite→server audit: auth password return, no PgBouncer remap trap, enum none, hard pre-count
+> 🚀 **`v4.6.24`** — alembic no longer silent-hangs for 10min: live logs, timeouts, compose-first
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.23`** — полный аудит sqlite→server: пароль auth, без ловушки PgBouncer, enum none, жёсткий pre-count
+> 🚀 **`v4.6.24`** — alembic больше не виснет молча 10 минут: live-логи, timeout, compose первым
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
