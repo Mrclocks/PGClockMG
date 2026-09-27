@@ -2992,6 +2992,9 @@ async def _maybe_cross_db_after_restore(
             }
 
         mig_params["_auto_db_credentials"] = True
+        # Restore convert must not soft-skip incomplete users/templates —
+        # partial copy after DROP SCHEMA leaves an empty/broken panel.
+        mig_params["skip_bad_user_rows"] = False
         mini = _Mini(job, mig_params)
         try:
             await run_cross_db_migration(mini, path, backup_db, target_db)
@@ -3054,6 +3057,7 @@ async def _maybe_cross_db_after_restore(
             mig_params = migration_params_from_connection(backup_db, target_db, admin)
             mig_params["_auto_db_credentials"] = True
             mig_params["_auth_healed_once"] = True
+            mig_params["skip_bad_user_rows"] = False
             mini = _Mini(job, mig_params)
             await run_cross_db_migration(mini, path, backup_db, target_db)
         stats = getattr(mini, "copy_stats", None) or {}
@@ -4522,12 +4526,19 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                 verify_pass = (
                     cur_mysql_root or cur_db_pass or live_admin.get("password") or ""
                 )
-                if not verify_user or verify_user == "pasarguard":
-                    # MySQL convert auth uses root more often than app user
-                    verify_user = cur_user or "root"
+                # Prefer convert's live admin (usually root) — never leave
+                # verify_user=pasarguard with root password.
+                if live_admin.get("user"):
+                    verify_user = live_admin["user"]
+                elif not verify_user or verify_user == "pasarguard":
+                    verify_user = "root"
             else:
                 # Prefer POSTGRES_PASSWORD (cur_pg_pass already falls back to DB_PASSWORD)
-                verify_pass = cur_pg_pass or live_admin.get("password") or ""
+                verify_pass = (
+                    live_admin.get("password") or cur_pg_pass or ""
+                )
+                if live_admin.get("user"):
+                    verify_user = live_admin["user"]
         else:
             verify_user = bak_user or cur_user or live_admin.get("user") or "pasarguard"
             verify_pass = (

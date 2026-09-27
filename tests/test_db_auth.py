@@ -296,7 +296,7 @@ def test_pg_resolve_uses_nuclear_when_trust_alter_fails():
             if "printenv" in joined:
                 return True, ""
             if "compose ps" in joined or "compose stop" in joined or "compose up" in joined:
-                return True, "dbcid\n" if "ps" in joined else ""
+                return True, "abcdef012345\n" if "ps" in joined else ""
             if "{{.Config.Image}}" in joined:
                 return True, "timescale/timescaledb:latest-pg16\n"
             if "NetworkSettings.Ports" in joined:
@@ -848,7 +848,7 @@ def test_pg_resolve_trust_recovers_stale_password():
                 if a.startswith("PGPASSWORD="):
                     pwd = a.split("=", 1)[1]
             if "compose ps" in joined or "compose up" in joined:
-                return True, "dbcid\n" if "ps" in joined else ""
+                return True, "abcdef012345\n" if "ps" in joined else ""
             if "{{.Config.Image}}" in joined:
                 return True, "postgres:16\n"
             if "NetworkSettings.Ports" in joined:
@@ -913,7 +913,7 @@ def test_pg_resolve_trust_recovery_raises_when_alter_fails():
             argv = list(cmd) if isinstance(cmd, list) else [cmd]
             joined = " ".join(argv)
             if "compose ps" in joined or "compose up" in joined:
-                return True, "dbcid\n" if "ps" in joined else ""
+                return True, "abcdef012345\n" if "ps" in joined else ""
             if "{{.Config.Image}}" in joined:
                 return True, "postgres:16\n"
             if "NetworkSettings.Ports" in joined:
@@ -981,7 +981,7 @@ def test_pg_resolve_trust_no_published_port_heals_via_eth0_scram():
             if "printenv" in joined:
                 return True, ""
             if "compose ps" in joined or "compose up" in joined:
-                return True, "dbcid\n" if "ps" in joined else ""
+                return True, "abcdef012345\n" if "ps" in joined else ""
             if "{{.Config.Image}}" in joined:
                 return True, "timescale/timescaledb:latest-pg16\n"
             if "NetworkSettings.Ports" in joined:
@@ -1053,7 +1053,7 @@ def test_pg_tcp_endpoints_include_container_ip_when_unpublished():
             argv = list(cmd) if isinstance(cmd, list) else [cmd]
             joined = " ".join(argv)
             if "compose ps" in joined:
-                return True, "dbcid\n"
+                return True, "abcdef012345\n"
             if "{{.Config.Image}}" in joined:
                 return True, "postgres:16\n"
             if "NetworkSettings.Ports" in joined:
@@ -1099,7 +1099,7 @@ def test_pg_resolve_accepts_password_verified_over_eth0_scram():
                 if a.startswith("PGPASSWORD="):
                     pwd = a.split("=", 1)[1]
             if "compose ps" in joined or "compose up" in joined:
-                return True, "dbcid\n" if "ps" in joined else ""
+                return True, "abcdef012345\n" if "ps" in joined else ""
             if "{{.Config.Image}}" in joined:
                 return True, "timescale/timescaledb:latest-pg16\n"
             if "NetworkSettings.Ports" in joined:
@@ -1272,7 +1272,7 @@ def test_pg_resolve_recovers_when_local_probes_fail():
             if "printenv" in joined:
                 return True, ""
             if "compose ps" in joined or "compose up" in joined:
-                return True, "dbcid\n" if "ps" in joined else ""
+                return True, "abcdef012345\n" if "ps" in joined else ""
             if "{{.Config.Image}}" in joined:
                 return True, "timescale/timescaledb:latest-pg16\n"
             if "NetworkSettings.Ports" in joined:
@@ -1415,7 +1415,7 @@ def test_pg_resolve_uses_container_init_password():
             if "printenv" in joined:
                 return True, ""
             if "compose ps" in joined or "compose up" in joined:
-                return True, "dbcid\n" if "ps" in joined else ""
+                return True, "abcdef012345\n" if "ps" in joined else ""
             if "{{.Config.Image}}" in joined:
                 return True, "postgres:16\n"
             if "NetworkSettings.Ports" in joined:
@@ -1517,6 +1517,82 @@ def test_ensure_target_auth_ready_syncs_mysql_and_pg():
     print("OK: ensure_target_auth_ready syncs mysql and pg")
 
 
+def test_ensure_target_auth_ready_returns_canonical_password():
+    """Sync uses password= arg; returned admin must not keep a stale probe secret."""
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.db_auth import ensure_target_auth_ready
+    from app.services.migrators.base import BaseMigrator, MigrationJob
+
+    class Dummy(BaseMigrator):
+        async def run(self, params):
+            return {}
+
+    async def _run():
+        job = MigrationJob(job_id="ensure-canonical")
+        migrator = Dummy(job, {})
+        probed = {
+            "db_type": "timescaledb",
+            "user": "postgres",
+            "password": "container-init-stale",
+            "database": "pasarguard",
+            "host": "127.0.0.1",
+            "port": "5432",
+        }
+        with patch(
+            "app.services.db_auth.resolve_live_admin_connection",
+            new_callable=AsyncMock,
+            return_value=probed,
+        ), patch(
+            "app.services.db_auth.sync_postgres_roles_to_app_password",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as sync_pg, patch(
+            "app.services.db_auth.refresh_pgbouncer_if_stale",
+            new_callable=AsyncMock,
+            return_value=True,
+        ):
+            out = await ensure_target_auth_ready(
+                migrator,
+                "timescaledb",
+                env_text="POSTGRES_PASSWORD=install-secret\n",
+                password="install-secret",
+            )
+        assert out["password"] == "install-secret"
+        assert sync_pg.await_args.kwargs.get("password") == "install-secret"
+
+    asyncio.run(_run())
+    print("OK: ensure_target_auth_ready returns canonical password")
+
+
+def test_pick_pg_migration_endpoint_skips_pgbouncer():
+    """Unpublished 5432 + published 6432 must not yield dead 127.0.0.1:5432 remap."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.services import db_auth as mod
+
+    async def _run():
+        mig = MagicMock()
+        endpoints = [
+            ("img", "127.0.0.1", "6432"),
+            ("img", "172.18.0.2", "5432"),
+        ]
+        with patch.object(
+            mod, "_resolve_pg_tcp_endpoints",
+            new_callable=AsyncMock, return_value=endpoints,
+        ), patch(
+            "app.services.pasarguard_ops._tcp_port_open",
+            side_effect=lambda h, p, timeout=2.0: h == "172.18.0.2",
+        ):
+            host, port = await mod._pick_pg_migration_endpoint(mig, "timescaledb")
+        assert (host, port) == ("172.18.0.2", "5432")
+
+    asyncio.run(_run())
+    print("OK: pick_pg_migration_endpoint skips pgbouncer 6432")
+
+
 def test_parse_published_port_prefers_loopback():
     from app.services.db_auth import _parse_published_port
 
@@ -1573,5 +1649,7 @@ if __name__ == "__main__":
     test_pg_resolve_tries_app_db_when_postgres_db_missing()
     test_pg_resolve_uses_container_init_password()
     test_ensure_target_auth_ready_syncs_mysql_and_pg()
+    test_ensure_target_auth_ready_returns_canonical_password()
+    test_pick_pg_migration_endpoint_skips_pgbouncer()
     test_parse_published_port_prefers_loopback()
     print("\nAll db_auth tests passed")

@@ -121,6 +121,23 @@ SQLALCHEMY_DATABASE_URL = "mysql+asyncmy://pasarguard:apppass@127.0.0.1/pasargua
     print("OK: mysql admin uses root")
 
 
+def test_pg_admin_password_override_beats_env():
+    """Install/heal password must win over a stale POSTGRES_PASSWORD in .env."""
+    from app.services.env_migration import get_pasarguard_admin_connection
+
+    text = '''
+POSTGRES_USER = "pasarguard"
+POSTGRES_PASSWORD = "stale-env"
+DB_PASSWORD = "stale-db"
+SQLALCHEMY_DATABASE_URL = "postgresql+asyncpg://pasarguard:stale-env@127.0.0.1:5432/pasarguard"
+'''
+    admin = get_pasarguard_admin_connection(
+        "timescaledb", password_override="install-heal", env_text=text,
+    )
+    assert admin["password"] == "install-heal"
+    print("OK: pg admin password_override beats env")
+
+
 def test_extract_env_summary():
     from app.services.env_migration import extract_env_summary
     text = '''

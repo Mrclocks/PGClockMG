@@ -637,15 +637,24 @@ async def _probe_pg_scram_any_db(
 async def _pick_pg_migration_endpoint(
     migrator, service: str,
 ) -> tuple[str, str]:
-    """Best host:port for host-side asyncpg after SCRAM is proven inside."""
+    """Best host:port for host-side copy/alembic after SCRAM is proven inside.
+
+    Never pick PgBouncer (:6432): ``migration_port`` remaps it to 5432 while
+    leaving host at 127.0.0.1, which is dead when only 6432 is published.
+    Prefer a reachable direct 5432 (published or docker-bridge IP).
+    """
+    from app.services.pasarguard_ops import _tcp_port_open
+
     endpoints = await _resolve_pg_tcp_endpoints(migrator, service)
-    for _img, host, port in endpoints:
-        if host in ("127.0.0.1", "localhost"):
+    direct = [
+        (img, host, port) for img, host, port in endpoints
+        if host and port and str(port) != "6432"
+    ]
+    for _img, host, port in direct:
+        if _tcp_port_open(host, port):
             return host, port
-    if endpoints:
-        return endpoints[0][1], endpoints[0][2]
-    # Last resort — rare (no bridge IP). Callers that need TCP will still fail
-    # loudly later; SCRAM-inside already proved the password.
+    if direct:
+        return direct[0][1], direct[0][2]
     return "127.0.0.1", "5432"
 
 
@@ -1976,6 +1985,9 @@ async def ensure_target_auth_ready(
         or ""
     )
     if not sync_roles or not canonical:
+        if canonical and admin.get("password") != canonical:
+            admin = dict(admin)
+            admin["password"] = canonical
         return admin
 
     if db_type in ("postgresql", "timescaledb"):
@@ -2003,7 +2015,11 @@ async def ensure_target_auth_ready(
             env_text=text,
             db_name=admin.get("database") or target_database_name(text, db_type),
         )
-    return admin
+    # Roles were aligned to ``canonical`` — return that password, not a stale
+    # container-init candidate from resolve_live_admin_connection.
+    out = dict(admin)
+    out["password"] = canonical
+    return out
 
 
 def migration_params_from_connection(
@@ -2428,12 +2444,13 @@ async def refresh_pgbouncer_if_stale(
         timeout=30,
         quiet=True,
     )
-    cid = (out or "").strip().splitlines()
-    if not ok or not cid or not cid[-1].strip():
+    from app.services.pasarguard_ops import extract_docker_container_id
+
+    container = extract_docker_container_id(out or "") if ok else ""
+    if not container:
         migrator.job.log("PgBouncer not running yet — will start with panel stack")
         return False
 
-    container = cid[-1].strip()
     ok2, env_out = await migrator._run_cmd(
         [
             "docker", "inspect", "--format",

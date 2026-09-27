@@ -887,12 +887,15 @@ class PostgresWriter(TableWriter):
         if not isinstance(val, str):
             return val
         s = val.strip()
-        if not s or s.lower() in ("none", "null", "default"):
+        if not s:
             if nullable:
                 return None
             if "none" in labels:
                 return "none"
             return sorted(labels)[0] if labels else None
+        # Match real enum labels FIRST — ProxyHostSecurity/Fingerprint use
+        # literal ``none``; collapsing it to NULL before the label check
+        # corrupted hosts after sqlite→postgresql/timescaledb.
         if s in labels:
             return s
         low = s.lower()
@@ -901,6 +904,12 @@ class PostgresWriter(TableWriter):
         for lbl in labels:
             if lbl.lower() == low:
                 return lbl
+        if low in ("none", "null", "default"):
+            if nullable:
+                return None
+            if "none" in labels:
+                return "none"
+            return sorted(labels)[0] if labels else None
         if nullable:
             return None
         return sorted(labels)[0] if labels else None

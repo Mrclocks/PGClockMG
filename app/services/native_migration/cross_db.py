@@ -540,7 +540,9 @@ async def run_two_phase_migration(
         except RuntimeError:
             raise
         except Exception as e:
-            migrator.job.log(f"Phase1 pre-count note: {e}")
+            raise RuntimeError(
+                f"Phase1 pre-count failed — refusing to wipe target schema: {e}"
+            ) from e
 
         # Phase 2 — empty target at head, then copy head→head
         migrator.job.set_progress(min(94, base + 8), f"Phase 2: create {target_db} schema at head...")
