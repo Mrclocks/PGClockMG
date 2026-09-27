@@ -112,6 +112,8 @@ def save_bundle_slot(
     panel_id: str | None = None,
     source_db: str | None = None,
     marzban_mode: str | None = None,
+    *,
+    allow_large: bool = False,
 ) -> dict:
     err = _validate_slot_file(slot, filename, source_db, panel_id=panel_id)
     if err:
@@ -143,11 +145,14 @@ def save_bundle_slot(
             "size": dest.stat().st_size,
             "path": str(dest),
             "ok": True,
+            "allow_large_upload": bool(allow_large),
         }
 
         if slot == "bundle_zip" or filename.lower().endswith(".zip"):
             try:
-                report = safe_extract_zip_file(dest, sdir / "extracted")
+                report = safe_extract_zip_file(
+                    dest, sdir / "extracted", allow_large=allow_large,
+                )
                 slot_meta["zip_preflight"] = {
                     "files": report.files,
                     "total_uncompressed": report.total_uncompressed,
@@ -207,6 +212,8 @@ def save_bundle_slot(
         manifest["panel_id"] = panel_id
         manifest["source_db"] = source_db
         manifest["marzban_mode"] = marzban_mode
+        if allow_large:
+            manifest["allow_large_upload"] = True
         _save_manifest(bundle_id, manifest)
 
         status = validate_bundle(bundle_id, panel_id, source_db, marzban_mode)
@@ -381,6 +388,11 @@ def get_bundle_status(bundle_id: str) -> dict | None:
 def prepare_bundle_workspace(bundle_id: str) -> Path:
     """Merge all bundle slots into a single work directory for migrators."""
     manifest = _load_manifest(bundle_id)
+    allow_large = bool(manifest.get("allow_large_upload"))
+    for slot_meta in (manifest.get("slots") or {}).values():
+        if isinstance(slot_meta, dict) and slot_meta.get("allow_large_upload"):
+            allow_large = True
+            break
     work = bundle_dir(bundle_id) / "workspace"
     if work.exists():
         shutil.rmtree(work)
@@ -402,7 +414,7 @@ def prepare_bundle_workspace(bundle_id: str) -> Path:
     if slot:
         src = Path(slot["path"])
         if src.suffix.lower() == ".zip":
-            safe_extract_zip_file(src, work / "db_extracted")
+            safe_extract_zip_file(src, work / "db_extracted", allow_large=allow_large)
         else:
             # Preserve panel-specific names (x-ui.db); normalize other sqlite dumps
             lower = src.name.lower()
@@ -427,7 +439,7 @@ def prepare_bundle_workspace(bundle_id: str) -> Path:
         dest = work / folder
         dest.mkdir(parents=True, exist_ok=True)
         if src.suffix.lower() == ".zip":
-            safe_extract_zip_file(src, dest)
+            safe_extract_zip_file(src, dest, allow_large=allow_large)
         else:
             shutil.copytree(src, dest, dirs_exist_ok=True)
 

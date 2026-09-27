@@ -27,7 +27,8 @@ from app.services.upload_bundle import (
 from app.services.upload_requirements import get_upload_requirements
 from app.services.archive_guard import (
     MAX_UPLOAD_BYTES, MAX_OVERRIDE_UPLOAD_BYTES, MAX_ZIP_ENTRY_BYTES, MAX_ZIP_FILES, MAX_ZIP_RATIO,
-    MAX_ZIP_TOTAL_BYTES, allowed_upload_bytes, safe_upload_name,
+    MAX_ZIP_TOTAL_BYTES, MAX_OVERRIDE_ZIP_ENTRY_BYTES, MAX_OVERRIDE_ZIP_TOTAL_BYTES,
+    allowed_upload_bytes, safe_upload_name, zip_entry_limit_bytes, zip_total_limit_bytes,
 )
 from app.services.pg_access import get_panel_access_info
 from app.services.pg_restore import (
@@ -40,7 +41,7 @@ from app.services.auth import (
 )
 from app.config import WEB_PORT
 
-APP_VERSION = "4.6.14"
+APP_VERSION = "4.6.15"
 
 
 @asynccontextmanager
@@ -230,6 +231,10 @@ async def api_info():
             "max_override_upload_bytes": MAX_OVERRIDE_UPLOAD_BYTES,
             "max_zip_entry_bytes": MAX_ZIP_ENTRY_BYTES,
             "max_zip_total_bytes": MAX_ZIP_TOTAL_BYTES,
+            "max_override_zip_entry_bytes": MAX_OVERRIDE_ZIP_ENTRY_BYTES,
+            "max_override_zip_total_bytes": MAX_OVERRIDE_ZIP_TOTAL_BYTES,
+            "effective_large_zip_entry_bytes": zip_entry_limit_bytes(True),
+            "effective_large_zip_total_bytes": zip_total_limit_bytes(True),
             "max_zip_files": MAX_ZIP_FILES,
             "max_zip_ratio": MAX_ZIP_RATIO,
         },
@@ -483,12 +488,13 @@ async def api_upload(
             result = save_bundle_slot(
                 bid, slot or "bundle_zip", tmp_path, filename,
                 panel_id=panel_id, source_db=source_db, marzban_mode=marzban_mode,
+                allow_large=use_large_upload_limit,
             )
             if result.get("error"):
                 raise HTTPException(400, result["error"])
             return result
 
-        result = save_upload(tmp_path, filename)
+        result = save_upload(tmp_path, filename, allow_large=use_large_upload_limit)
         if result.get("error"):
             raise HTTPException(400, result["error"])
         return result

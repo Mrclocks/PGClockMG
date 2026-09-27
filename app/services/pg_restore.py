@@ -901,8 +901,25 @@ def is_auth_failure_text(text: str) -> bool:
     )
 
 
-def _safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
-    _guarded_zip_extract(zf, dest)
+def _zip_allow_large(zip_path: Path) -> bool:
+    """Trusted local backups / staged uploads may exceed the default entry ceiling."""
+    try:
+        from app.config import BACKUP_DIR, UPLOAD_DIR
+
+        resolved = zip_path.resolve()
+        for root in (BACKUP_DIR, UPLOAD_DIR):
+            try:
+                resolved.relative_to(Path(root).resolve())
+                return True
+            except (ValueError, OSError):
+                continue
+    except Exception:
+        pass
+    return False
+
+
+def _safe_extract(zf: zipfile.ZipFile, dest: Path, *, allow_large: bool = False) -> None:
+    _guarded_zip_extract(zf, dest, allow_large=allow_large)
 
 
 def _find_env(root: Path) -> Path | None:
@@ -1252,7 +1269,7 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
     tmp = Path(tempfile.mkdtemp(prefix="pg-backup-analyze-", dir=str(WORK_DIR)))
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
-            _safe_extract(zf, tmp)
+            _safe_extract(zf, tmp, allow_large=_zip_allow_large(zip_path))
         # Search the whole extract. Third-party bots nest .env under opt/pasarguard
         # and the dump at the zip root (or the reverse).
         env_path = _find_env(tmp)
@@ -3980,7 +3997,7 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
     work = Path(tempfile.mkdtemp(prefix="pg-restore-work-", dir=str(UPLOAD_DIR)))
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
-            _safe_extract(zf, work)
+            _safe_extract(zf, work, allow_large=_zip_allow_large(zip_path))
         root = work
         current_env = _read_current_env()
         # Failed sqlite→server converts can leave PASARGUARD_DB_ENGINE=sqlite while

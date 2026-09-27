@@ -1409,7 +1409,7 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
         filename = f"pgclockmg-{_stamp()}.zip"
         out_path = BACKUP_DIR / filename
         _set_progress(job, 72, f"Writing zip {filename}…")
-        with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True) as zf:
             for path in staging.rglob("*"):
                 if path.is_file():
                     zf.write(path, arcname=str(path.relative_to(staging)))

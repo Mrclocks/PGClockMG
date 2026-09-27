@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.6.14`** — heal auth با volumes-from + live pg_hba (رفع SASL واقعی sqlite→Timescale)
+> 🚀 **`v4.6.15`** — آپلود بزرگ واقعاً سقف entry زیپ را هم بالا می‌برد (رفع Zip entry too large)
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
