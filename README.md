@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.6.25`** — حذف timeout= از URL آلِمبیک (رفع TypeError float+str در asyncpg)
+> 🚀 **`v4.6.26`** — ریستور بزرگ دیگر روی ۹۳٪ گیر نمی‌کند: skip-at-head، timeout بلند، بدون rotate وسط DDL
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

@@ -166,6 +166,9 @@ class BaseMigrator(ABC):
                 await asyncio.wait_for(proc.wait(), timeout=5)
             except Exception:
                 pass
+            body = "\n".join(output_lines).rstrip()
+            if body:
+                return False, body + f"\ncommand timed out after {timeout}s — killed"
             return False, "Timeout"
         # stdout EOF does not always mean the process exited (e.g. hung fuser).
         try:
@@ -178,6 +181,9 @@ class BaseMigrator(ABC):
                 pass
             if not quiet:
                 self.job.log("command hung after stdout closed — killed")
+            body = "\n".join(output_lines).rstrip()
+            if body:
+                return False, body + "\ncommand hung after stdout closed — killed"
             return False, "Timeout"
         return proc.returncode == 0, "\n".join(output_lines)
 

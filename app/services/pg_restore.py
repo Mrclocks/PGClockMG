@@ -1587,6 +1587,18 @@ async def _run(
             output_lines.append(text)
             if not quiet and text.strip():
                 job.log(text)
+                # Heartbeat progress while a long alembic revision runs (no new %).
+                if "running upgrade" in text.lower() or "running stamp" in text.lower():
+                    try:
+                        short = text.strip()
+                        if len(short) > 120:
+                            short = short[:117] + "…"
+                        job.set_progress(
+                            max(getattr(job, "progress", 0) or 0, 93),
+                            short,
+                        )
+                    except Exception:
+                        pass
 
     def _kill_tree() -> None:
         try:
@@ -1607,6 +1619,10 @@ async def _run(
             pass
         if not quiet:
             job.log(f"command timed out after {timeout}s — killed")
+        # Keep streamed lines so callers can tell connect-hang vs mid-DDL kill.
+        body = "\n".join(output_lines).rstrip()
+        if body:
+            return False, body + f"\ncommand timed out after {timeout}s — killed"
         return False, "Timeout"
     try:
         await asyncio.wait_for(proc.wait(), timeout=5)
@@ -1618,6 +1634,9 @@ async def _run(
             pass
         if not quiet:
             job.log("command hung after stdout closed — killed")
+        body = "\n".join(output_lines).rstrip()
+        if body:
+            return False, body + "\ncommand hung after stdout closed — killed"
         return False, "Timeout"
     return proc.returncode == 0, "\n".join(output_lines)
 
@@ -3442,9 +3461,9 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
             fa = "ساخت اسکیمای مقصد با alembic شکست خورد (Phase 2)."
             en = "Target schema create via alembic upgrade head failed (Phase 2)."
             causes_fa = [
-                "اول PGClockMG را به v4.6.25+ آپدیت کنید "
-                "(timeout= رشته‌ای از URL حذف + endpoint rotation + ssl=disable)",
-                "نسخه جدید compose DNS / container netns / bridge را درست می‌چرخاند",
+                "اول PGClockMG را به v4.6.26+ آپدیت کنید "
+                "(ریستور پر از داده: skip-at-head / timeout بلند / بدون rotate وسط DDL)",
+                "v4.6.24 با timeout=180s روی CREATE INDEX بکاپ بزرگ kill+retry می‌کرد و ۹۳٪ گیر می‌کرد",
                 "اگر باز هم fail شد، لاگ را برای خطای اسکیما یا auth ببینید — نه فقط وسط Traceback",
             ]
     elif "pasarguard failed to start" in low or "did not reach ready state" in low:
@@ -4716,7 +4735,7 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             try:
                 from app.services.pasarguard_ops import sync_alembic_for_startup
 
-                await sync_alembic_for_startup(mini, final_engine)
+                await sync_alembic_for_startup(mini, final_engine, data_filled=True)
             except Exception as e:
                 low = str(e).lower()
                 if "already at head" in low:
