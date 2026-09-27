@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.14`** — auth heal через volumes-from + live pg_hba (реальный fix SASL sqlite→Timescale)
+> 🚀 **`v4.6.15`** — large-upload override поднимает и лимит zip entry (fix Zip entry too large)
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

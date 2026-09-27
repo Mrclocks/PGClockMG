@@ -441,8 +441,9 @@ def clean_sqlite(path: Path, tables: set[str]) -> FilterStats:
 # --------------------------------------------------------------------------
 
 
-def _safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
-    _guarded_zip_extract(zf, dest)
+def _safe_extract(zf: zipfile.ZipFile, dest: Path, *, allow_large: bool = True) -> None:
+    # Cleanup operates on backups we already store — use the large ceiling.
+    _guarded_zip_extract(zf, dest, allow_large=allow_large)
 
 
 def _find_backup_root(extracted: Path) -> Path:

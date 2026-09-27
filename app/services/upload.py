@@ -10,7 +10,12 @@ from app.services.archive_guard import safe_extract_zip_file, safe_upload_name
 from app.services.backup_analyzer import analyze_upload_directory, get_upload_dir as _dir_for_id
 
 
-def save_upload(src_path: str | Path, filename: str) -> dict:
+def save_upload(
+    src_path: str | Path,
+    filename: str,
+    *,
+    allow_large: bool = False,
+) -> dict:
     cleanup_tmp = False
     cleanup_path: Path | None = None
     if isinstance(src_path, (bytes, bytearray)):
@@ -35,7 +40,9 @@ def save_upload(src_path: str | Path, filename: str) -> dict:
 
         if filename.lower().endswith(".zip"):
             try:
-                zip_meta = safe_extract_zip_file(dest_file, dest_dir / "extracted")
+                zip_meta = safe_extract_zip_file(
+                    dest_file, dest_dir / "extracted", allow_large=allow_large,
+                )
             except ValueError as e:
                 zip_error = str(e)
 
@@ -50,6 +57,7 @@ def save_upload(src_path: str | Path, filename: str) -> dict:
             "size": dest_file.stat().st_size,
             "detected": detected,
             "analysis": analysis,
+            "allow_large_upload": bool(allow_large),
         }
         if zip_meta:
             result["zip_preflight"] = {

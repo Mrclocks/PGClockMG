@@ -13,9 +13,14 @@ from pathlib import Path
 DEFAULT_MAX_UPLOAD_BYTES = 500 * 1024 * 1024
 DEFAULT_MAX_OVERRIDE_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 DEFAULT_MAX_ZIP_FILES = 20_000
-DEFAULT_MAX_ZIP_ENTRY_BYTES = 2 * 1024 * 1024 * 1024
-DEFAULT_MAX_ZIP_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
+# Panel sqlite dumps of several GB are legitimate; zip-bomb still constrained by
+# compression ratio + total uncompressed caps.
+DEFAULT_MAX_ZIP_ENTRY_BYTES = 8 * 1024 * 1024 * 1024
+DEFAULT_MAX_ZIP_TOTAL_BYTES = 16 * 1024 * 1024 * 1024
 DEFAULT_MAX_ZIP_RATIO = 200
+# When the UI "large upload" override is on, raise entry/total further.
+DEFAULT_MAX_OVERRIDE_ZIP_ENTRY_BYTES = 32 * 1024 * 1024 * 1024
+DEFAULT_MAX_OVERRIDE_ZIP_TOTAL_BYTES = 64 * 1024 * 1024 * 1024
 
 
 def _env_int(name: str, default: int) -> int:
@@ -35,6 +40,12 @@ MAX_ZIP_FILES = _env_int("PG_MAX_ZIP_FILES", DEFAULT_MAX_ZIP_FILES)
 MAX_ZIP_ENTRY_BYTES = _env_int("PG_MAX_ZIP_ENTRY_BYTES", DEFAULT_MAX_ZIP_ENTRY_BYTES)
 MAX_ZIP_TOTAL_BYTES = _env_int("PG_MAX_ZIP_TOTAL_BYTES", DEFAULT_MAX_ZIP_TOTAL_BYTES)
 MAX_ZIP_RATIO = _env_int("PG_MAX_ZIP_RATIO", DEFAULT_MAX_ZIP_RATIO)
+MAX_OVERRIDE_ZIP_ENTRY_BYTES = _env_int(
+    "PG_MAX_OVERRIDE_ZIP_ENTRY_BYTES", DEFAULT_MAX_OVERRIDE_ZIP_ENTRY_BYTES,
+)
+MAX_OVERRIDE_ZIP_TOTAL_BYTES = _env_int(
+    "PG_MAX_OVERRIDE_ZIP_TOTAL_BYTES", DEFAULT_MAX_OVERRIDE_ZIP_TOTAL_BYTES,
+)
 
 
 @dataclass(frozen=True)
@@ -79,12 +90,41 @@ def allowed_upload_bytes(allow_override: bool = False) -> int:
     return MAX_UPLOAD_BYTES
 
 
-def preflight_zip(zf: zipfile.ZipFile) -> ZipPreflight:
+def zip_entry_limit_bytes(allow_large: bool = False) -> int:
+    """Per-member uncompressed limit; large-upload override raises the ceiling."""
+    if allow_large:
+        return max(MAX_ZIP_ENTRY_BYTES, MAX_OVERRIDE_ZIP_ENTRY_BYTES)
+    return MAX_ZIP_ENTRY_BYTES
+
+
+def zip_total_limit_bytes(allow_large: bool = False) -> int:
+    if allow_large:
+        return max(MAX_ZIP_TOTAL_BYTES, MAX_OVERRIDE_ZIP_TOTAL_BYTES)
+    return MAX_ZIP_TOTAL_BYTES
+
+
+def _entry_too_large_message(filename: str, size: int, limit: int, *, allow_large: bool) -> str:
+    size_mb = max(1, size // (1024 * 1024))
+    limit_mb = max(1, limit // (1024 * 1024))
+    if allow_large:
+        return (
+            f"Zip entry too large: {filename} ({size_mb} MB > {limit_mb} MB). "
+            f"Raise PG_MAX_OVERRIDE_ZIP_ENTRY_BYTES (or PG_MAX_ZIP_ENTRY_BYTES) on the server."
+        )
+    return (
+        f"Zip entry too large: {filename} ({size_mb} MB > {limit_mb} MB). "
+        f"Enable «large upload» override in the wizard, or raise PG_MAX_ZIP_ENTRY_BYTES."
+    )
+
+
+def preflight_zip(zf: zipfile.ZipFile, *, allow_large: bool = False) -> ZipPreflight:
     infos = zf.infolist()
     total_uncompressed = 0
     total_compressed = 0
     files = 0
     largest_entry = 0
+    entry_limit = zip_entry_limit_bytes(allow_large)
+    total_limit = zip_total_limit_bytes(allow_large)
 
     for info in infos:
         name = info.filename.replace("\\", "/")
@@ -95,12 +135,16 @@ def preflight_zip(zf: zipfile.ZipFile) -> ZipPreflight:
         files += 1
         if files > MAX_ZIP_FILES:
             raise ValueError("Zip contains too many files")
-        if info.file_size > MAX_ZIP_ENTRY_BYTES:
-            raise ValueError(f"Zip entry too large: {info.filename}")
+        if info.file_size > entry_limit:
+            raise ValueError(
+                _entry_too_large_message(
+                    info.filename, info.file_size, entry_limit, allow_large=allow_large,
+                )
+            )
         total_uncompressed += info.file_size
         total_compressed += max(info.compress_size, 0)
         largest_entry = max(largest_entry, info.file_size)
-        if total_uncompressed > MAX_ZIP_TOTAL_BYTES:
+        if total_uncompressed > total_limit:
             raise ValueError("Zip expands beyond the safe extraction limit")
 
     ratio_base = max(total_compressed, 1)
@@ -117,16 +161,28 @@ def preflight_zip(zf: zipfile.ZipFile) -> ZipPreflight:
     )
 
 
-def safe_extract_zip_file(path: str | Path, dest: Path) -> ZipPreflight:
+def safe_extract_zip_file(
+    path: str | Path,
+    dest: Path,
+    *,
+    allow_large: bool = False,
+) -> ZipPreflight:
     try:
         with zipfile.ZipFile(path, "r") as zf:
-            return safe_extract(zf, dest)
+            return safe_extract(zf, dest, allow_large=allow_large)
     except zipfile.BadZipFile as e:
         raise ValueError("Bad zip file") from e
 
 
-def safe_extract(zf: zipfile.ZipFile, dest: Path) -> ZipPreflight:
-    report = preflight_zip(zf)
+def safe_extract(
+    zf: zipfile.ZipFile,
+    dest: Path,
+    *,
+    allow_large: bool = False,
+) -> ZipPreflight:
+    report = preflight_zip(zf, allow_large=allow_large)
+    entry_limit = zip_entry_limit_bytes(allow_large)
+    total_limit = zip_total_limit_bytes(allow_large)
     dest.mkdir(parents=True, exist_ok=True)
     dest_resolved = dest.resolve()
     extracted_total = 0
@@ -152,11 +208,15 @@ def safe_extract(zf: zipfile.ZipFile, dest: Path) -> ZipPreflight:
                     break
                 out.write(chunk)
                 written += len(chunk)
-                if written > MAX_ZIP_ENTRY_BYTES:
-                    raise ValueError(f"Zip entry too large: {info.filename}")
-                if extracted_total + written > MAX_ZIP_TOTAL_BYTES:
+                if written > entry_limit:
+                    raise ValueError(
+                        _entry_too_large_message(
+                            info.filename, written, entry_limit, allow_large=allow_large,
+                        )
+                    )
+                if extracted_total + written > total_limit:
                     raise ValueError("Zip expands beyond the safe extraction limit")
         extracted_total += written
-        if extracted_total > MAX_ZIP_TOTAL_BYTES:
+        if extracted_total > total_limit:
             raise ValueError("Zip expands beyond the safe extraction limit")
     return report
