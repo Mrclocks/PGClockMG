@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.6.27`** — نویز «node controlled by another client» دیگر ریستور را fail نمی‌کند (مثل Telegram)
+> 🚀 **`v4.6.28`** — گیر ۹۷٪ «port 8000» رفع شد: probe روی پورت publish‌شده / داخل کانتینر
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

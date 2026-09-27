@@ -483,6 +483,125 @@ def test_verify_healthy_accepts_node_control_noise_when_port_up():
     print("OK: verify_pasarguard_healthy accepts node-control noise when port is up")
 
 
+def test_panel_port_probe_uses_published_and_in_container():
+    """Host 127.0.0.1:8000 unpublished must not mean panel is down."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    import app.services.pasarguard_ops as ops
+
+    mig = MagicMock()
+    mig.job = MagicMock()
+    mig.job.log = MagicMock()
+    mig.params = {"target_db": "postgresql"}
+
+    async def _run_cmd(cmd, **kwargs):
+        joined = " ".join(str(c) for c in cmd)
+        if "ps" in cmd and "-q" in cmd:
+            return True, "abc123deadbeef"
+        if "NetworkSettings.Ports" in joined:
+            return True, '{"8000/tcp":[{"HostIp":"0.0.0.0","HostPort":"2087"}]}'
+        if "IPAddress" in joined:
+            return True, "172.18.0.5"
+        if "python" in joined or "/dev/tcp" in joined:
+            return True, ""
+        return True, ""
+
+    mig._run_cmd = AsyncMock(side_effect=_run_cmd)
+
+    with (
+        patch.object(ops, "_panel_uvicorn_port", new_callable=AsyncMock, return_value=8000),
+        patch.object(ops, "_tcp_connect_ok", side_effect=lambda host, port, **k: (
+            (host == "127.0.0.1" and int(port) == 2087)
+            or (host == "172.18.0.5" and int(port) == 8000)
+        )),
+        patch.object(ops, "panel_compose_service", return_value="pasarguard"),
+        patch.object(ops, "compose_file_prefix", return_value=[]),
+        patch.object(ops, "extract_docker_container_id", return_value="abc123deadbeef"),
+    ):
+        # First: published 2087 should work even if loopback 8000 fails
+        def _open(host, port, **k):
+            return host == "127.0.0.1" and int(port) == 2087
+
+        with patch.object(ops, "_tcp_connect_ok", side_effect=_open):
+            assert asyncio.run(ops._panel_port_is_listening(mig)) is True
+
+    # In-container fallback when nothing on host
+    async def _run_cmd2(cmd, **kwargs):
+        joined = " ".join(str(c) for c in cmd)
+        if "ps" in cmd and "-q" in cmd:
+            return True, "abc123deadbeef"
+        if "NetworkSettings.Ports" in joined:
+            return True, "{}"
+        if "IPAddress" in joined:
+            return True, ""
+        if "python" in joined:
+            return True, ""
+        return False, ""
+
+    mig2 = MagicMock()
+    mig2.job = MagicMock()
+    mig2.job.log = MagicMock()
+    mig2.params = {"target_db": "postgresql"}
+    mig2._run_cmd = AsyncMock(side_effect=_run_cmd2)
+
+    with (
+        patch.object(ops, "_panel_uvicorn_port", new_callable=AsyncMock, return_value=8000),
+        patch.object(ops, "_tcp_connect_ok", return_value=False),
+        patch.object(ops, "panel_compose_service", return_value="pasarguard"),
+        patch.object(ops, "compose_file_prefix", return_value=[]),
+        patch.object(ops, "extract_docker_container_id", return_value="abc123deadbeef"),
+    ):
+        assert asyncio.run(ops._panel_port_is_listening(mig2)) is True
+    logged = " ".join(str(c) for c in mig2.job.log.call_args_list)
+    assert "inside container" in logged.lower() or "listening inside" in logged.lower()
+    print("OK: panel port probe uses published / in-container")
+
+
+def test_verify_healthy_soft_accepts_startup_when_host_port_unpublished():
+    """97% hang: Application startup complete + running, but host :8000 unpublished."""
+    import app.services.pasarguard_ops as ops
+
+    boot = "pasarguard-1 | INFO:     Application startup complete."
+
+    class _Mig:
+        def __init__(self):
+            self.job = MigrationJob(job_id="port-soft")
+            self.params = {"target_db": "postgresql"}
+
+    mig = _Mig()
+
+    async def _run():
+        with (
+            patch(
+                "app.services.multiworker_stack.detect_multiworker_stack",
+                return_value={
+                    "uvicorn_workers": 1,
+                    "uses_nats": False,
+                    "orchestrate": False,
+                },
+            ),
+            patch.object(ops, "fetch_pasarguard_logs", new_callable=AsyncMock, return_value=boot),
+            patch.object(
+                ops, "fetch_extended_panel_logs", new_callable=AsyncMock, return_value=boot
+            ),
+            patch.object(
+                ops, "_pasarguard_container_state", new_callable=AsyncMock, return_value="running"
+            ),
+            patch.object(
+                ops, "_panel_port_is_listening", new_callable=AsyncMock, return_value=False
+            ),
+            patch.object(ops.asyncio, "sleep", new_callable=AsyncMock),
+        ):
+            await ops.verify_pasarguard_healthy(mig, max_wait=60)
+
+    asyncio.run(_run())
+    blob = "\n".join(mig.job.logs)
+    assert "healthy" in blob.lower()
+    assert "startup complete" in blob.lower() or "host port" in blob.lower()
+    print("OK: verify soft-accepts Application startup complete when host port unpublished")
+
+
 def test_try_heal_nats_imports_read_env_text_from_db_auth():
     """Regression: read_env_text lives in db_auth, not env_migration."""
     import asyncio
@@ -533,5 +652,7 @@ if __name__ == "__main__":
     test_node_control_conflict_is_noise_not_root_cause()
     test_explain_restore_node_control_noise_on_panel_not_up()
     test_verify_healthy_accepts_node_control_noise_when_port_up()
+    test_panel_port_probe_uses_published_and_in_container()
+    test_verify_healthy_soft_accepts_startup_when_host_port_unpublished()
     test_try_heal_nats_imports_read_env_text_from_db_auth()
     print("\nAll multiworker restore tests passed")

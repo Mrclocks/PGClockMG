@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.27`** — node "controlled by another client" log noise no longer fails restore (like Telegram)
+> 🚀 **`v4.6.28`** — fixed 97% hang on port 8000: probe published / in-container panel port
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
