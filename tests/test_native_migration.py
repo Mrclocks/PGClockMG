@@ -28,6 +28,7 @@ def test_build_local_alembic_url():
     assert "pasarguard:secret@127.0.0.1:5432/pasarguard" in url
     assert "ssl=disable" in url
     assert "ssl=false" not in url
+    assert "timeout=20" in url
     print("OK: build_local_alembic_url")
 
 
@@ -161,6 +162,67 @@ def test_resolve_alembic_prefers_compose_network_dns():
     logged = " ".join(str(c) for c in mig.job.log.call_args_list)
     assert "compose network" in logged
     print("OK: alembic prefers compose network DNS")
+
+
+def test_alembic_strategies_prefer_compose_over_open_loopback():
+    """Open 127.0.0.1:5432 must not be tried before compose DNS (hang trap)."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.services import pasarguard_ops as ops
+
+    url = "postgresql+asyncpg://pasarguard:secret@127.0.0.1:5432/pasarguard"
+    mig = MagicMock()
+    mig.params = {
+        "target_db": "timescaledb",
+        "target_db_user": "pasarguard",
+        "target_db_password": "secret",
+        "target_db_name": "pasarguard",
+        "target_db_port": "5432",
+    }
+    mig.job = MagicMock()
+
+    async def _go():
+        with (
+            patch.object(ops, "_tcp_port_open", return_value=True),
+            patch.object(ops, "resolve_db_service", return_value="timescaledb"),
+            patch.object(
+                ops, "_compose_network_name",
+                new_callable=AsyncMock, return_value="pasarguard_default",
+            ),
+            patch.object(
+                ops, "_compose_service_container_id",
+                new_callable=AsyncMock, return_value="abcdef012345",
+            ),
+            patch(
+                "app.services.db_auth._resolve_pg_host_endpoint",
+                new_callable=AsyncMock, return_value=("", "", ""),
+            ),
+            patch(
+                "app.services.db_auth._resolve_pg_container_ip_endpoint",
+                new_callable=AsyncMock, return_value=("", "", ""),
+            ),
+            patch(
+                "app.services.env_migration.silence_compose_pgadmin_warnings",
+                return_value=False,
+            ),
+        ):
+            return await ops._alembic_endpoint_strategies(mig, url)
+
+    strategies = asyncio.run(_go())
+    labels = [s[2] for s in strategies]
+    assert labels[0].startswith("compose-dns:")
+    assert any(l == "host-loopback" for l in labels)
+    assert labels.index("host-loopback") > 0
+    print("OK: compose DNS before host-loopback")
+
+
+def test_alembic_timeout_is_connect_error_for_rotation():
+    from app.services.pasarguard_ops import _is_alembic_connect_auth_error
+
+    assert _is_alembic_connect_auth_error("Timeout")
+    assert _is_alembic_connect_auth_error("command timed out after 180s — killed")
+    print("OK: alembic Timeout rotates endpoints")
 
 
 def test_alembic_strategies_include_container_netns():
@@ -380,6 +442,7 @@ def test_ensure_asyncpg_ssl_disable_not_false():
         assert "ssl=disable" in out
         assert "ssl=false" not in out
         assert "sslmode=false" not in out
+        assert "timeout=20" in out
     assert _is_alembic_url_construction_error(
         "asyncpg.exceptions._base.ClientConfigurationError: "
         "`sslmode` parameter must be one of: disable, allow, prefer, require"
@@ -1608,6 +1671,8 @@ if __name__ == "__main__":
     test_build_local_alembic_url_encodes_special_password()
     test_resolve_reachable_alembic_url_uses_bridge_when_loopback_dead()
     test_resolve_alembic_prefers_compose_network_dns()
+    test_alembic_strategies_prefer_compose_over_open_loopback()
+    test_alembic_timeout_is_connect_error_for_rotation()
     test_alembic_strategies_include_container_netns()
     test_run_pasarguard_alembic_rotates_endpoints_on_auth_fail()
     test_run_alembic_upgrade_head_auth_heals_and_retries()

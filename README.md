@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.6.23`** — ممیزی کامل sqlite→server: auth/password، endpoint بدون PgBouncer، enum none، pre-count سخت
+> 🚀 **`v4.6.24`** — alembic دیگر ۱۰ دقیقه silent hang نمی‌کند: لاگ زنده، timeout، compose اول
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

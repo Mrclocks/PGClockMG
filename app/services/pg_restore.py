@@ -1557,6 +1557,10 @@ async def _run(
     *,
     quiet: bool = False,
 ) -> tuple[bool, str]:
+    """Run argv; stream logs; kill process group on timeout (never leave orphans)."""
+    import os
+    import signal
+
     if not quiet:
         job.log(f"$ {' '.join(cmd)}")
     try:
@@ -1567,15 +1571,55 @@ async def _run(
             stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,
         )
-        out_b, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        out = (out_b or b"").decode("utf-8", errors="replace")
+    except FileNotFoundError:
+        return False, "command not found"
+
+    output_lines: list[str] = []
+
+    async def _drain() -> None:
+        if proc.stdout is None:
+            return
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            text = line.decode("utf-8", errors="replace").rstrip()
+            output_lines.append(text)
+            if not quiet and text.strip():
+                job.log(text)
+
+    def _kill_tree() -> None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    try:
+        await asyncio.wait_for(_drain(), timeout=timeout)
+    except (TimeoutError, asyncio.TimeoutError):
+        _kill_tree()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except Exception:
+            pass
         if not quiet:
-            for line in out.splitlines()[-40:]:
-                if line.strip():
-                    job.log(line)
-        return proc.returncode == 0, out
-    except Exception as e:
-        return False, str(e)
+            job.log(f"command timed out after {timeout}s — killed")
+        return False, "Timeout"
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5)
+    except (TimeoutError, asyncio.TimeoutError):
+        _kill_tree()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=3)
+        except Exception:
+            pass
+        if not quiet:
+            job.log("command hung after stdout closed — killed")
+        return False, "Timeout"
+    return proc.returncode == 0, "\n".join(output_lines)
 
 
 class _RestoreMini:
