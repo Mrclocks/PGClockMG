@@ -664,6 +664,11 @@ class PostgresWriter(TableWriter):
         self._fk_disabled = False
         self._fk_mode: str | None = None  # "replica" | "triggers" | None
         self._trigger_tables: list[str] = []
+        self._batch_buf: list[tuple] = []
+        self._batch_table: str | None = None
+        self._batch_columns: list[str] | None = None
+        self._value_clears: list[dict] = []
+        self._BATCH_FLUSH = 500
 
     def _note(self, msg: str) -> None:
         fn = getattr(self, "_log", None)
@@ -807,6 +812,14 @@ class PostgresWriter(TableWriter):
     def end_bulk_load(self) -> None:
         if not getattr(self, "_bulk_load_active", False):
             return
+        try:
+            self._flush_batch()
+        except Exception as exc:
+            self._note(f"batch flush at end_bulk_load: {exc}")
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
         mode = getattr(self, "_fk_mode", None)
         if mode == "replica":
             self._set_replication_role("origin")
@@ -880,7 +893,24 @@ class PostgresWriter(TableWriter):
             self._types_for(table)
         return self._col_nullable.get(table, {}).get(column, True)
 
-    def _fit_enum(self, udt_name: str, val, nullable: bool):
+    def _note_value_clear(
+        self, table: str, col: str, raw, action: str, *, reason: str,
+    ) -> None:
+        samples = getattr(self, "_value_clears", None)
+        if samples is None:
+            self._value_clears = []
+            samples = self._value_clears
+        if len(samples) >= 40:
+            return
+        samples.append({
+            "table": table,
+            "column": col,
+            "raw": (str(raw)[:80] if raw is not None else None),
+            "action": action,
+            "reason": reason,
+        })
+
+    def _fit_enum(self, udt_name: str, val, nullable: bool, *, table: str = "", col: str = ""):
         labels = self._enum_labels_for(udt_name)
         if val is None:
             return None
@@ -906,13 +936,22 @@ class PostgresWriter(TableWriter):
                 return lbl
         if low in ("none", "null", "default"):
             if nullable:
+                if table and col and s:
+                    self._note_value_clear(table, col, s, "null", reason="enum_none_alias")
                 return None
             if "none" in labels:
                 return "none"
             return sorted(labels)[0] if labels else None
         if nullable:
+            if table and col:
+                self._note_value_clear(table, col, s, "null", reason="unknown_enum")
             return None
-        return sorted(labels)[0] if labels else None
+        fallback = sorted(labels)[0] if labels else None
+        if table and col and fallback is not None and fallback != s:
+            self._note_value_clear(
+                table, col, s, str(fallback), reason="unknown_enum_default",
+            )
+        return fallback
 
     def _coerce_row(self, table: str, columns: list[str], values: tuple) -> tuple:
         from psycopg2.extras import Json
@@ -925,15 +964,28 @@ class PostgresWriter(TableWriter):
         out = []
         for col, val in zip(columns, values):
             kind = types.get(col, "")
+            raw_in = val
             val = convert_value(table, col, val)
             if kind == "boolean":
                 out.append(to_bool(val) if val is not None else None)
             elif kind.startswith("enum:"):
                 udt = kind.split(":", 1)[1]
-                out.append(self._fit_enum(udt, val, self._nullable_for(table, col)))
+                out.append(
+                    self._fit_enum(
+                        udt, val, self._nullable_for(table, col),
+                        table=table, col=col,
+                    )
+                )
             elif kind in ("json", "jsonb"):
                 parsed = coerce_json_value(val)
-                out.append(Json(json.loads(parsed)) if parsed else None)
+                if parsed:
+                    out.append(Json(json.loads(parsed)))
+                else:
+                    if raw_in not in (None, "", b"", [], {}):
+                        self._note_value_clear(
+                            table, col, raw_in, "null", reason="invalid_json",
+                        )
+                    out.append(None)
             elif kind in (
                 "integer", "bigint", "smallint", "numeric", "double precision", "real",
             ) and val is not None and isinstance(val, str) and val.strip().isdigit():
@@ -973,11 +1025,57 @@ class PostgresWriter(TableWriter):
         )
         return [r[0] for r in cur.fetchall()]
 
+    def _flush_batch(self) -> None:
+        buf = getattr(self, "_batch_buf", None) or []
+        if not buf:
+            return
+        table = self._batch_table
+        columns = self._batch_columns
+        self._batch_buf = []
+        self._batch_table = None
+        self._batch_columns = None
+        if not table or not columns:
+            return
+        from psycopg2.extras import execute_batch
+
+        cur = self._conn.cursor()
+        col_list = self._psql.SQL(", ").join(self._psql.Identifier(c) for c in columns)
+        placeholders = self._psql.SQL(", ").join(self._psql.Placeholder() for _ in columns)
+        q = self._psql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
+            self._psql.Identifier(table), col_list, placeholders
+        )
+        execute_batch(cur, q, buf, page_size=min(len(buf), 200))
+
+    # Soft-skip / retry tables need per-row savepoints — batch would hide bad rows.
+    _NO_BATCH_TABLES = frozenset({
+        "users", "user_templates", "hosts", "admins", "inbounds",
+    })
+
     def insert(self, table: str, columns: list[str], values: tuple) -> None:
+        values = self._coerce_row(table, columns, values)
+        # Bulk path: buffer multi-row inserts (savepoint-per-row kills large copies).
+        use_batch = (
+            getattr(self, "_bulk_load_active", False)
+            and table not in self._NO_BATCH_TABLES
+        )
+        if use_batch:
+            if (
+                self._batch_table not in (None, table)
+                or self._batch_columns not in (None, columns)
+            ):
+                self._flush_batch()
+            self._batch_table = table
+            self._batch_columns = list(columns)
+            self._batch_buf.append(values)
+            if len(self._batch_buf) >= getattr(self, "_BATCH_FLUSH", 500):
+                self._flush_batch()
+            return
+        if getattr(self, "_batch_buf", None):
+            self._flush_batch()
+        # Per-row savepoint so soft-skip / enum-retry can continue after a bad row.
         cur = self._conn.cursor()
         cur.execute("SAVEPOINT pgmig_row")
         try:
-            values = self._coerce_row(table, columns, values)
             col_list = self._psql.SQL(", ").join(self._psql.Identifier(c) for c in columns)
             placeholders = self._psql.SQL(", ").join(self._psql.Placeholder() for _ in columns)
             q = self._psql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
@@ -991,6 +1089,17 @@ class PostgresWriter(TableWriter):
             except Exception:
                 pass
             raise
+
+    def commit(self) -> None:
+        try:
+            self._flush_batch()
+        except Exception:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+            raise
+        self._conn.commit()
 
     def reset_sequence(self, table: str) -> None:
         cur = self._conn.cursor()
@@ -1018,15 +1127,13 @@ class PostgresWriter(TableWriter):
         revisions = alembic_revisions_for_stamp(version)
         if not revisions:
             return
+        self._flush_batch()
         cur = self._conn.cursor()
         cur.execute("DELETE FROM alembic_version")
         for rev in revisions:
             cur.execute(
                 "INSERT INTO alembic_version (version_num) VALUES (%s)", (rev,)
             )
-
-    def commit(self) -> None:
-        self._conn.commit()
 
     def row_count(self, table: str) -> int:
         cur = self._conn.cursor()
@@ -1209,6 +1316,15 @@ def _try_insert_row(
         ok3, err3 = _retry_null_columns(writer, table, columns, values, enum_cols)
         if ok3:
             log(f"{table}: copied after clearing invalid enum values")
+            clears = getattr(writer, "_value_clears", None)
+            if clears is not None and len(clears) < 40:
+                clears.append({
+                    "table": table,
+                    "column": ",".join(enum_cols[:6]),
+                    "raw": None,
+                    "action": "null",
+                    "reason": "enum_retry",
+                })
             return True, None
         err = err3 or err
 
@@ -1228,6 +1344,15 @@ def _try_insert_row(
             ok4, err4 = _retry_null_columns(writer, table, columns, values, json_cols)
             if ok4:
                 log(f"{table}: copied after clearing invalid JSON values")
+                clears = getattr(writer, "_value_clears", None)
+                if clears is not None and len(clears) < 40:
+                    clears.append({
+                        "table": table,
+                        "column": ",".join(json_cols[:6]),
+                        "raw": None,
+                        "action": "null",
+                        "reason": "json_retry",
+                    })
                 return True, None
             err = err4 or err
 
@@ -1656,6 +1781,9 @@ def _copy_tables_universal_body(
     report["copied_counts"] = dict(stats)
     report["row_skips"] = row_skips
     report["first_errors"] = dict(table_first_errors)
+    value_clears = list(getattr(writer, "_value_clears", None) or [])
+    if value_clears:
+        report["value_clears"] = value_clears
     if soft_incomplete_tables:
         report["soft_policy_tables"] = sorted(soft_incomplete_tables)
     for item in report.get("incomplete", []):

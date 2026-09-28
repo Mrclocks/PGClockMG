@@ -187,7 +187,7 @@ class MarzbanMigrator(BaseMigrator):
         # Safe no-op on clean dumps; fixes case-dup names + orphan FKs on dirty/large ones.
         orig_target = self.params.get("target_db")
         self.params["target_db"] = "sqlite"
-        await heal_marzban_preboot(self)
+        self._preboot_heal = await heal_marzban_preboot(self)
         self.job.set_progress(50, "Upgrading Marzban schema via PasarGuard panel boot...")
         # Long Marzban→PG alembic chains (bigint id, etc.) need a large health budget.
         self._maybe_relocate_inbound_certs()
@@ -248,7 +248,7 @@ class MarzbanMigrator(BaseMigrator):
             self.job.set_progress(68, "Healing Marzban dump for PasarGuard constraints...")
             from app.services.marzban_preboot_heal import heal_marzban_preboot
 
-            await heal_marzban_preboot(self)
+            self._preboot_heal = await heal_marzban_preboot(self)
             self.job.set_progress(70, "Upgrading Marzban MySQL schema via panel boot...")
             # Large dumps: alembic may spend a long time on "use bigint for id column".
             self._maybe_relocate_inbound_certs()
@@ -270,7 +270,9 @@ class MarzbanMigrator(BaseMigrator):
             upgrade_via_panel=True,
         )
         self._abort_if_copy_gaps()
-        self._abort_if_inbounds_missing_from_stats(getattr(self, "copy_stats", None))
+        stats = getattr(self, "copy_stats", None)
+        self._abort_if_inbounds_missing_from_stats(stats)
+        self._abort_if_core_configs_missing_from_stats(stats)
         await self._finalize_env_after_convert(target_db, install_env_snapshot)
         self.job.set_progress(90, "Starting PasarGuard...")
         self._prepare_xray_for_panel_boot()
@@ -358,6 +360,8 @@ class MarzbanMigrator(BaseMigrator):
 
         self._abort_if_copy_gaps()
         self._abort_if_empty_convert(side if side.exists() else dest, stats)
+        self._abort_if_inbounds_missing_from_stats(stats)
+        self._abort_if_core_configs_missing_from_stats(stats)
         await self._finalize_env_after_convert(target_db, install_env_snapshot)
         self._relocate_sqlite_after_convert()
 
@@ -406,6 +410,17 @@ class MarzbanMigrator(BaseMigrator):
             raise RuntimeError(
                 f"Migration copied users={users} but inbounds=0. "
                 "Panel-boot proxies→inbounds transform likely skipped. Aborting."
+            )
+
+    def _abort_if_core_configs_missing_from_stats(self, stats: dict | None) -> None:
+        """Abort two-phase success when users landed without core_configs."""
+        stats = stats or {}
+        users = int(stats.get("users", 0) or 0)
+        core_configs = int(stats.get("core_configs", 0) or 0)
+        if users > 0 and core_configs <= 0:
+            raise RuntimeError(
+                f"Migration copied users={users} but core_configs=0. "
+                "xray_config.json was missing or XRAY_JSON did not resolve. Aborting."
             )
 
     async def _finalize_env_after_convert(self, target_db: str, install_env_snapshot: str) -> None:
@@ -1074,13 +1089,25 @@ class MarzbanMigrator(BaseMigrator):
         last_err = ""
         for attempt in (1, 2):
             if MARZBAN_DIR.exists():
-                proc = await asyncio.create_subprocess_shell(
-                    f'cd "{MARZBAN_DIR}" && docker compose exec -T mysql '
-                    f'mysqldump -u root -p"{pwd}" -h 127.0.0.1 --databases marzban > "{dump_path}"',
-                )
-                await proc.wait()
-                if proc.returncode not in (0, None) and not dump_path.exists():
-                    last_err = f"mysqldump exit={proc.returncode}"
+                # Password via MYSQL_PWD env — never argv ``-p…`` (process list leak).
+                with open(dump_path, "wb") as out_fh:
+                    proc = await asyncio.create_subprocess_exec(
+                        "docker", "compose", "exec", "-T",
+                        "-e", f"MYSQL_PWD={pwd}",
+                        "mysql", "mysqldump", "-u", "root", "-h", "127.0.0.1",
+                        "--databases", "marzban",
+                        cwd=str(MARZBAN_DIR),
+                        stdout=out_fh,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    _, err_b = await proc.communicate()
+                if proc.returncode not in (0, None) and (
+                    not dump_path.exists() or dump_path.stat().st_size == 0
+                ):
+                    last_err = (
+                        f"mysqldump exit={proc.returncode} "
+                        + (err_b or b"").decode("utf-8", errors="ignore")[-200:]
+                    )
             if dump_path.exists() and dump_path.stat().st_size > 0:
                 break
             if attempt == 1:
@@ -1482,11 +1509,31 @@ class MarzbanMigrator(BaseMigrator):
             "verified_counts": stats,
             "transfer_summary": build_transfer_summary(stats),
         }
+        heal = getattr(self, "_preboot_heal", None) or {}
+        if isinstance(heal, dict) and (
+            int(heal.get("usage_tables_truncated") or 0) > 0
+            or int(heal.get("usage_rows_cleared") or 0) > 0
+        ):
+            out["usage_tables_truncated"] = int(heal.get("usage_tables_truncated") or 0)
+            out["usage_rows_cleared"] = int(heal.get("usage_rows_cleared") or 0)
+            out["preboot_heal"] = {
+                k: int(heal.get(k) or 0)
+                for k in (
+                    "renamed",
+                    "orphans_deleted",
+                    "orphans_nulled",
+                    "usage_tables_truncated",
+                    "usage_rows_cleared",
+                )
+            }
         if self.copy_report:
             out["copy_report"] = self.copy_report
             skips = (self.copy_report or {}).get("row_skips") or {}
             if skips:
                 out["skip_report"] = skips
+            clears = (self.copy_report or {}).get("value_clears") or []
+            if clears:
+                out["value_clears"] = clears
         return out
 
     def _get_panel_url(self) -> str:

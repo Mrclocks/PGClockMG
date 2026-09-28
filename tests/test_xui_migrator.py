@@ -22,6 +22,7 @@ from app.services.migrators.xui import (
     assert_migrated_core_config,
     patch_xui_converter_tag_bug,
     normalize_subscription_mapping,
+    enrich_subscription_mapping_from_clients,
     _subscription_path_only,
     build_redirect_server_config,
     XuiMigrator,
@@ -457,6 +458,44 @@ def test_normalize_subscription_mapping_strips_query():
         assert data["mappings"]["u2"]["old_subscription_url"] == "/sub/zz"
         assert data["mappings"]["u2"]["new_subscription_url"] == "/sub/other"
         assert _subscription_path_only("/sub/a?name=a") == "/sub/a"
+
+
+def test_enrich_mapping_uses_v3_user_id_token():
+    """Redirect new URLs must be PasarGuard v3+user_id tokens (not username hash)."""
+    from base64 import b64decode
+
+    with tempfile.TemporaryDirectory() as tmp:
+        td = Path(tmp)
+        mapping = td / "m.json"
+        mapping.write_text(json.dumps({"mappings": {}}), encoding="utf-8")
+
+        xui = td / "x-ui.db"
+        conn = sqlite3.connect(xui)
+        conn.execute("CREATE TABLE clients (email TEXT, sub_id TEXT)")
+        conn.execute("INSERT INTO clients VALUES ('alice@x', 'oldsub1')")
+        conn.commit()
+        conn.close()
+
+        pg = td / "pg.db"
+        conn = sqlite3.connect(pg)
+        conn.execute("CREATE TABLE jwt (secret_key TEXT)")
+        conn.execute("INSERT INTO jwt VALUES ('test-secret-key')")
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT)")
+        conn.execute("INSERT INTO users VALUES (42, 'alice@x')")
+        conn.commit()
+        conn.close()
+
+        out = enrich_subscription_mapping_from_clients(mapping, xui, pg, xui_path="sub")
+        assert out.get("added") == 1
+        data = json.loads(mapping.read_text(encoding="utf-8"))
+        entry = data["mappings"]["alice@x"]
+        assert entry["old_subscription_url"] == "/sub/oldsub1"
+        token = entry["new_subscription_url"].removeprefix("/sub/")
+        assert "." in token, token
+        payload_b64, _sig = token.split(".", 1)
+        pad = "=" * (-len(payload_b64) % 4)
+        payload = b64decode(payload_b64 + pad, altchars=b"-_").decode("utf-8")
+        assert payload.startswith("v3,42,"), payload
 
 
 def test_build_redirect_config_sets_domain_and_port():
@@ -954,6 +993,7 @@ if __name__ == "__main__":
     test_run_does_not_copy2_directory()
     test_run_uses_bundled_schema_not_mysql_start()
     test_normalize_subscription_mapping_strips_query()
+    test_enrich_mapping_uses_v3_user_id_token()
     test_build_redirect_config_sets_domain_and_port()
     test_install_redirect_uses_native_pg_redirect()
     test_install_redirect_http_when_xui_had_no_sub_tls()

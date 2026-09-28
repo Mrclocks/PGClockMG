@@ -1512,6 +1512,14 @@ function showRestoreDone(result) {
         `<p class="warn-line">${typeof statusIcon === 'function' ? statusIcon('warn') : '⚠️'}<span>${t('restore.skippedUsersNote')}: ${skipParts.join(', ')}</span></p>`,
       );
     }
+    const usageCleared = Number(result?.usage_rows_cleared || 0);
+    if (usageCleared > 0 || Number(result?.usage_tables_truncated || 0) > 0) {
+      const note = String(t('restore.usageTruncatedNote') || '')
+        .replace('{rows}', usageCleared.toLocaleString());
+      tips.push(
+        `<p class="info-note">${typeof statusIcon === 'function' ? statusIcon('warn') : '⚠️'}<span>${note}</span></p>`,
+      );
+    }
     tipsEl.innerHTML = tips.join('');
     tipsEl.classList.remove('hidden');
   }

@@ -1299,24 +1299,25 @@ def enrich_subscription_mapping_from_clients(
                 sub = (row["sub_id"] or "").strip()
                 if email and sub:
                     email_to_sub.setdefault(email, sub)
-        for row in xui.execute("SELECT settings FROM inbounds"):
-            try:
-                settings = json.loads(row["settings"] or "{}")
-            except json.JSONDecodeError:
-                continue
-            for client in (settings.get("clients") or []) if isinstance(settings, dict) else []:
-                if not isinstance(client, dict):
+        if "inbounds" in tables:
+            for row in xui.execute("SELECT settings FROM inbounds"):
+                try:
+                    settings = json.loads(row["settings"] or "{}")
+                except json.JSONDecodeError:
                     continue
-                email = (client.get("email") or "").strip()
-                sub = (
-                    client.get("subId")
-                    or client.get("sub_id")
-                    or client.get("sub_token")
-                    or ""
-                )
-                sub = str(sub).strip()
-                if email and sub:
-                    email_to_sub.setdefault(email, sub)
+                for client in (settings.get("clients") or []) if isinstance(settings, dict) else []:
+                    if not isinstance(client, dict):
+                        continue
+                    email = (client.get("email") or "").strip()
+                    sub = (
+                        client.get("subId")
+                        or client.get("sub_id")
+                        or client.get("sub_token")
+                        or ""
+                    )
+                    sub = str(sub).strip()
+                    if email and sub:
+                        email_to_sub.setdefault(email, sub)
     finally:
         xui.close()
 
@@ -1332,24 +1333,33 @@ def enrich_subscription_mapping_from_clients(
     if not jwt_secret:
         return {"added": 0, "reason": "no-jwt"}
 
-    # Same algorithm as PasarGuard/migrations generate_subscription_url_mapping.py
+    # Same v3 token as PasarGuard / Hiddify import: HMAC over ``v3,{user_id},{ts}``.
     from base64 import b64encode
     from hashlib import sha256
     from math import ceil
+    import hmac
     import time
 
-    def _pg_token(username: str) -> str:
-        data = f"{username},{ceil(time.time())}"
+    def _pg_token(user_id: int) -> str:
+        data = "v3," + str(int(user_id)) + "," + str(ceil(time.time()))
         data_b64 = (
             b64encode(data.encode("utf-8"), altchars=b"-_")
             .decode("utf-8")
             .rstrip("=")
         )
-        sign = b64encode(
-            sha256((data_b64 + jwt_secret).encode("utf-8")).digest(),
-            altchars=b"-_",
-        ).decode("utf-8")[:10]
-        return data_b64 + sign
+        signature = (
+            b64encode(
+                hmac.new(
+                    jwt_secret.encode("utf-8"),
+                    data_b64.encode("utf-8"),
+                    sha256,
+                ).digest(),
+                altchars=b"-_",
+            )
+            .decode("utf-8")
+            .rstrip("=")
+        )
+        return data_b64 + "." + signature
 
     sub_path = (xui_path or "sub").strip().strip("/") or "sub"
     added = 0
@@ -1360,10 +1370,11 @@ def enrich_subscription_mapping_from_clients(
         sub_id = email_to_sub.get(email)
         if not sub_id:
             continue
+        uid = int(row["id"])
         mappings[email] = {
-            "user_id": int(row["id"]),
+            "user_id": uid,
             "old_subscription_url": f"/{sub_path}/{sub_id}",
-            "new_subscription_url": f"/sub/{_pg_token(email)}",
+            "new_subscription_url": f"/sub/{_pg_token(uid)}",
         }
         added += 1
 

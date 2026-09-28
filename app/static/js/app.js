@@ -1738,6 +1738,12 @@ async function showSuccess(result) {
     if (result?.nodes_disabled) {
       tips.push(`<p class="info-note">${t('step6.nodesDisabledNote')}</p>`);
     }
+    const usageCleared = Number(result?.usage_rows_cleared || 0);
+    if (usageCleared > 0 || Number(result?.usage_tables_truncated || 0) > 0) {
+      const note = String(t('step6.usageTruncatedNote') || '')
+        .replace('{rows}', usageCleared.toLocaleString());
+      tips.push(`<p class="info-note">${statusIcon('warn')}<span>${note}</span></p>`);
+    }
     tipsEl.innerHTML = tips.join('');
     tipsEl.classList.remove('hidden');
   }

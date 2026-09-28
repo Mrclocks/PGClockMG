@@ -644,6 +644,7 @@ def test_postgres_fit_enum_keeps_none_label():
     }
     w._col_types = {}
     w._col_nullable = {}
+    w._value_clears = []
 
     def _labels(name):
         return w._enum_cache.get(name.lower(), [])
@@ -652,8 +653,48 @@ def test_postgres_fit_enum_keeps_none_label():
     assert w._fit_enum("proxyhostsecurity", "none", True) == "none"
     assert w._fit_enum("proxyhostfingerprint", "none", True) == "none"
     assert w._fit_enum("proxyhostsecurity", "tls", True) == "tls"
-    assert w._fit_enum("proxyhostsecurity", "bogus", True) is None
+    assert w._fit_enum("proxyhostsecurity", "bogus", True, table="hosts", col="security") is None
+    assert any(s.get("reason") == "unknown_enum" for s in w._value_clears)
     print("OK: postgres _fit_enum keeps none label")
+
+
+def test_postgres_value_clears_and_batch_skip_soft_tables():
+    """Unknown enums/JSON are sampled; soft-skip tables stay off the batch path."""
+    from app.services.native_migration.adapters import PostgresWriter
+
+    w = PostgresWriter.__new__(PostgresWriter)
+    w._batch_buf = []
+    w._batch_table = None
+    w._batch_columns = None
+    w._BATCH_FLUSH = 500
+    w._bulk_load_active = True
+    w._value_clears = []
+    w._enum_cache = {"proxyhostsecurity": ["tls", "none"]}
+    w._col_types = {
+        "hosts": {"security": "enum:proxyhostsecurity", "host": "json"},
+        "node_user_usages": {"id": "integer"},
+    }
+    w._col_nullable = {
+        "hosts": {"security": True, "host": True},
+        "node_user_usages": {"id": True},
+    }
+    w._enum_labels_for = lambda name: w._enum_cache.get(name.lower(), [])  # type: ignore
+    w._types_for = lambda table: w._col_types.get(table, {})  # type: ignore
+    w._nullable_for = lambda table, col: w._col_nullable.get(table, {}).get(col, True)  # type: ignore
+    w._psql = type("P", (), {})()
+    w._log = None
+    w._conn = None
+
+    assert "users" in PostgresWriter._NO_BATCH_TABLES
+    assert "hosts" in PostgresWriter._NO_BATCH_TABLES
+    assert "node_user_usages" not in PostgresWriter._NO_BATCH_TABLES
+
+    row = w._coerce_row("hosts", ["security", "host"], ("bogus", "{not-json"))
+    assert row == (None, None)
+    reasons = {s["reason"] for s in w._value_clears}
+    assert "unknown_enum" in reasons
+    assert "invalid_json" in reasons
+    print("OK: postgres value_clears + batch soft-table skip")
 
 
 def test_rewrite_sqlalchemy_host_port_never_touches_sqlite():
@@ -1876,6 +1917,7 @@ if __name__ == "__main__":
     test_ensure_asyncpg_ssl_disable_not_false()
     test_ensure_asyncpg_strips_string_timeout_query()
     test_postgres_fit_enum_keeps_none_label()
+    test_postgres_value_clears_and_batch_skip_soft_tables()
     test_rewrite_sqlalchemy_host_port_never_touches_sqlite()
     test_alembic_strategies_sqlite_ignores_timescaledb_target()
     test_extract_docker_container_id_skips_pgadmin_warning()

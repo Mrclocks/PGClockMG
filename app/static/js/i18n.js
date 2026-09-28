@@ -178,6 +178,7 @@ const I18N = {
       skipBadUserRowsHint: 'If some users cannot be copied (bad FK/data), skip them and finish restore/Change-DB. A report is shown at the end. Still fails if no users transfer. Recommended on.',
       skippedUsersNote: 'Some broken user rows were skipped',
       nodesDisabledNote: 'Nodes were left disabled as requested. Enable them from the panel.',
+      usageTruncatedNote: 'Heavy traffic-history tables were cleared before restore ({rows} rows) so migration could finish. The panel rebuilds usage from live traffic.',
       cleanup: {
         title: 'Slim down this backup (optional)',
         desc: 'Traffic history is usually most of a backup and makes the restore far slower. You can leave it out — the panel rebuilds it from live traffic.',
@@ -324,6 +325,7 @@ const I18N = {
       successChanged: 'Data migrated. Inform users about new subscription links.',
       disableOldPanelTip: 'To sign in to the new panel safely, temporarily disable your previous panel. After you verify the new panel and all data has transferred, remove the old panel.',
       nodesDisabledNote: 'Nodes were left disabled as requested. Enable them from the panel.',
+      usageTruncatedNote: 'Heavy traffic-history tables were cleared before migration ({rows} rows) so it could finish. The panel rebuilds usage from live traffic.',
       xuiOldSubPortWarn: 'You cannot use your previous subscription port in configs.',
       redirectInstalled: 'Redirect server (pg-redirect) installed',
       certbotOk: 'TLS certificate issued and installed under PasarGuard certs/',
@@ -620,6 +622,7 @@ const I18N = {
       skipBadUserRows: 'رد کردن کاربران خراب و ادامه',
       skipBadUserRowsHint: 'اگر بعضی کاربران به‌خاطر داده/FK خراب منتقل نشوند، رد می‌شوند و ریستور / Change-DB تمام می‌شود. در انتها گزارش نشان داده می‌شود. اگر هیچ کاربری منتقل نشود باز هم متوقف می‌شود. روشن توصیه می‌شود.',
       skippedUsersNote: 'برخی ردیف‌های خراب کاربران رد شدند',
+      usageTruncatedNote: 'جدول‌های سنگین تاریخچه ترافیک قبل از ریستور پاک شدند ({rows} ردیف) تا انتقال تمام شود. پنل از ترافیک زنده دوباره می‌سازد.',
       cleanup: {
         title: 'سبک کردن این بکاپ (اختیاری)',
         desc: 'تاریخچه ترافیک معمولاً بیشترِ حجم بکاپ است و ریستور را خیلی کند می‌کند. می‌توانید نیاورید — پنل دوباره از ترافیک زنده می‌سازدش.',
@@ -767,6 +770,7 @@ const I18N = {
       successChanged: 'داده‌ها منتقل شد. لینک‌های جدید را به کاربران اطلاع دهید.',
       disableOldPanelTip: 'برای ورود به پنل جدید بهتر است پنل قبلی خود را موقتاً غیرفعال کنید و بعد از تست پنل جدید و انتقال کامل اطلاعات، آن را حذف کنید.',
       nodesDisabledNote: 'نودها طبق درخواست غیرفعال ماندند. از پنل فعالشان کنید.',
+      usageTruncatedNote: 'جدول‌های سنگین تاریخچه ترافیک قبل از مهاجرت پاک شدند ({rows} ردیف) تا انتقال تمام شود. پنل از ترافیک زنده دوباره می‌سازد.',
       xuiOldSubPortWarn: 'از پورت ساب قبلی خود نمی‌توانید در کانفیگ‌ها استفاده کنید.',
       redirectInstalled: 'سرور ریدایرکت (pg-redirect) نصب شد',
       certbotOk: 'سرتیفیکیت TLS صادر و در مسیر certs پاسارگارد نصب شد',
@@ -1063,6 +1067,7 @@ const I18N = {
       skipBadUserRows: 'Пропускать битых пользователей и продолжать',
       skipBadUserRowsHint: 'Если часть пользователей не копируется (битые FK/данные), они пропускаются и restore/Change-DB завершается. В конце показывается отчёт. Если не перенесён ни один пользователь — всё равно ошибка. Рекомендуется включить.',
       skippedUsersNote: 'Некоторые битые строки пользователей были пропущены',
+      usageTruncatedNote: 'Тяжёлые таблицы истории трафика очищены перед восстановлением ({rows} строк), чтобы миграция завершилась. Панель заполнит usage из живого трафика.',
       cleanup: {
         title: 'Уменьшить этот бэкап (необязательно)',
         desc: 'История трафика обычно занимает бóльшую часть бэкапа и сильно замедляет восстановление. Её можно не переносить — панель наполнит её заново из живого трафика.',
@@ -1210,6 +1215,7 @@ const I18N = {
       successChanged: 'Данные перенесены. Сообщите пользователям о новых ссылках.',
       disableOldPanelTip: 'Для входа в новую панель лучше временно отключить предыдущую. После проверки новой панели и полного переноса данных удалите старую.',
       nodesDisabledNote: 'Узлы оставлены отключёнными по запросу. Включите их из панели.',
+      usageTruncatedNote: 'Тяжёлые таблицы истории трафика очищены перед миграцией ({rows} строк), чтобы она завершилась. Панель заполнит usage из живого трафика.',
       xuiOldSubPortWarn: 'Порт старой подписки нельзя использовать в конфигах.',
       redirectInstalled: 'Redirect-сервер (pg-redirect) установлен',
       certbotOk: 'TLS-сертификат выпущен и установлен в certs PasarGuard',

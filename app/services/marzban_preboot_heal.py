@@ -512,6 +512,18 @@ def _mysql_column_nullable(cur, database: str, table: str, column: str) -> bool:
     return str(row[0] or "").upper() == "YES"
 
 
+def _postgres_column_nullable(cur, table: str, column: str) -> bool:
+    cur.execute(
+        "SELECT is_nullable FROM information_schema.columns "
+        "WHERE table_schema='public' AND table_name=%s AND column_name=%s LIMIT 1",
+        (table, column),
+    )
+    row = cur.fetchone()
+    if not row:
+        return True
+    return str(row[0] or "").upper() == "YES"
+
+
 def cleanup_orphans_mysql_conn(
     *,
     host: str,
@@ -764,8 +776,12 @@ def cleanup_orphans_postgres_conn(
                 )
                 if not cur.fetchone():
                     continue
-                cur.execute(orphan_null_sql(child, child_col, parent, parent_col))
-                nulled += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+                if _postgres_column_nullable(cur, child, child_col):
+                    cur.execute(orphan_null_sql(child, child_col, parent, parent_col))
+                    nulled += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+                else:
+                    cur.execute(orphan_delete_sql(child, child_col, parent, parent_col))
+                    deleted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
         conn.commit()
     return deleted, nulled
 

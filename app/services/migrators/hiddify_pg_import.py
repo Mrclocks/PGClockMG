@@ -87,12 +87,12 @@ async def find_user_by_uuid(db, uid: UUID, uuid_index=None):
 
     try:
         rows = await db.execute(
-            select(User).options(selectinload(User.groups)).limit(5000)
+            select(User).options(selectinload(User.groups))
         )
         users = list(rows.unique().scalars().all())
     except Exception:
         try:
-            rows = await db.execute(select(User).limit(5000))
+            rows = await db.execute(select(User))
             users = list(rows.scalars().all())
         except Exception:
             return None
@@ -129,7 +129,7 @@ async def build_uuid_index(db):
 
     index = {}
     try:
-        rows = await db.execute(select(User).limit(10000))
+        rows = await db.execute(select(User))
         users = list(rows.scalars().all())
     except Exception:
         return index
