@@ -509,6 +509,8 @@ def test_explain_auth_mariadb_target_from_timescale():
     assert "MYSQL" in blob or "MariaDB" in blob or "mariadb" in blob.lower()
     assert "PgBouncer" not in blob
     assert "POSTGRES_PASSWORD" not in blob
+    assert "SASL" not in (info.get("en") or "")
+    assert "رمز نصب" in blob or "MYSQL" in blob
     print("OK: timescale→mariadb auth tips are MySQL-aware")
 
 
