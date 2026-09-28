@@ -1095,25 +1095,22 @@ class PostgresWriter(TableWriter):
             return
         use_copy = len(buf) >= int(getattr(self, "_COPY_MIN", 64) or 64)
         if use_copy:
+            cur = self._conn.cursor()
+            # SAVEPOINT — never rollback the whole txn (that would drop earlier
+            # successful flushes still uncommitted in this bulk load).
             try:
+                cur.execute("SAVEPOINT pgmig_copy")
                 self._flush_batch_copy(table, columns, buf)
+                cur.execute("RELEASE SAVEPOINT pgmig_copy")
                 return
             except Exception as exc:
                 self._note(f"COPY FROM {table} failed ({exc}); falling back to execute_batch")
                 try:
-                    self._conn.rollback()
+                    cur.execute("ROLLBACK TO SAVEPOINT pgmig_copy")
                 except Exception:
                     pass
-                # Re-enter bulk FK mode after rollback when possible.
                 try:
-                    if getattr(self, "_bulk_load_active", False):
-                        mode = getattr(self, "_fk_mode", None)
-                        if mode == "replica":
-                            self._set_replication_role("replica")
-                        elif mode == "triggers":
-                            tables = list(getattr(self, "_trigger_tables", []) or [])
-                            if tables:
-                                self._disable_table_triggers(tables)
+                    cur.execute("RELEASE SAVEPOINT pgmig_copy")
                 except Exception:
                     pass
         self._flush_batch_insert(table, columns, buf)

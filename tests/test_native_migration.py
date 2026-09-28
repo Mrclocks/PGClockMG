@@ -700,6 +700,7 @@ def test_postgres_value_clears_and_batch_skip_soft_tables():
 def test_postgres_copy_cell_and_flush_prefers_copy():
     """Large bulk buffers use COPY FROM STDIN (with execute_batch fallback)."""
     from app.services.native_migration.adapters import PostgresWriter
+    from psycopg2 import sql as psql
 
     assert PostgresWriter._copy_cell(None) == "\\N"
     assert PostgresWriter._copy_cell(True) == "t"
@@ -709,20 +710,30 @@ def test_postgres_copy_cell_and_flush_prefers_copy():
         def __init__(self):
             self.copy_sql = None
             self.copy_data = None
+            self.stmts = []
+            self._fail_copy = False
+            self.batch_q = None
+            self.batch_rows = None
+
+        def execute(self, q, params=None):
+            self.stmts.append(str(q))
 
         def copy_expert(self, sql, stream):
+            if self._fail_copy:
+                raise RuntimeError("copy boom")
             self.copy_sql = sql
             self.copy_data = stream.read()
 
     class _Conn:
         def __init__(self):
             self.cur = _Cur()
+            self.rolled_back = False
 
         def cursor(self):
             return self.cur
 
         def rollback(self):
-            pass
+            self.rolled_back = True
 
     w = PostgresWriter.__new__(PostgresWriter)
     w._batch_buf = [(i, f"u{i}") for i in range(80)]
@@ -731,12 +742,59 @@ def test_postgres_copy_cell_and_flush_prefers_copy():
     w._COPY_MIN = 64
     w._conn = _Conn()
     w._log = None
-    w._psql = type("P", (), {})()
+    w._psql = psql
     w._flush_batch()
     assert w._conn.cur.copy_sql and 'COPY "node_user_usages"' in w._conn.cur.copy_sql
     assert w._conn.cur.copy_data.count("\n") == 80
     assert w._batch_buf == []
+    assert any("SAVEPOINT pgmig_copy" in s for s in w._conn.cur.stmts)
+    assert not w._conn.rolled_back
+
+    # Fallback must use SAVEPOINT rollback — never whole-txn rollback.
+    from unittest.mock import patch
+
+    w2 = PostgresWriter.__new__(PostgresWriter)
+    w2._batch_buf = [(i, f"u{i}") for i in range(80)]
+    w2._batch_table = "node_user_usages"
+    w2._batch_columns = ["id", "name"]
+    w2._COPY_MIN = 64
+    w2._conn = _Conn()
+    w2._conn.cur._fail_copy = True
+    w2._log = None
+    w2._psql = psql
+    notes = []
+    w2._note = notes.append  # type: ignore[method-assign]
+    with patch("psycopg2.extras.execute_batch") as eb:
+        w2._flush_batch()
+        assert eb.called
+    assert any("ROLLBACK TO SAVEPOINT pgmig_copy" in s for s in w2._conn.cur.stmts)
+    assert not w2._conn.rolled_back
+    assert any("falling back to execute_batch" in n for n in notes)
     print("OK: postgres COPY FROM path for large batch")
+
+
+def test_change_db_assert_convert_counts_rejects_partial_empty():
+    """Change-DB must fail when source had hosts/users but dest landed empty."""
+    from app.services.migrators.base import MigrationJob
+    from app.services.migrators.pasarguard_db import PasarguardDbMigrator
+
+    m = PasarguardDbMigrator(MigrationJob(job_id="cdb"), {"target_db": "postgresql"})
+    m.copy_stats = {"users": 10, "admins": 1, "hosts": 0, "inbounds": 2, "nodes": 1, "groups": 1}
+    m.copy_report = {
+        "source_counts": {
+            "users": 10, "admins": 1, "hosts": 5, "inbounds": 2, "nodes": 1, "groups": 1,
+        },
+        "has_gaps": False,
+    }
+    try:
+        m._assert_convert_counts("sqlite", "postgresql")
+        raise AssertionError("expected empty hosts abort")
+    except RuntimeError as e:
+        assert "hosts" in str(e)
+    # Healthy path
+    m.copy_stats["hosts"] = 5
+    m._assert_convert_counts("sqlite", "postgresql")
+    print("OK: change-db assert_convert_counts rejects partial empty")
 
 
 def test_rewrite_sqlalchemy_host_port_never_touches_sqlite():
@@ -1961,6 +2019,7 @@ if __name__ == "__main__":
     test_postgres_fit_enum_keeps_none_label()
     test_postgres_value_clears_and_batch_skip_soft_tables()
     test_postgres_copy_cell_and_flush_prefers_copy()
+    test_change_db_assert_convert_counts_rejects_partial_empty()
     test_rewrite_sqlalchemy_host_port_never_touches_sqlite()
     test_alembic_strategies_sqlite_ignores_timescaledb_target()
     test_extract_docker_container_id_skips_pgadmin_warning()

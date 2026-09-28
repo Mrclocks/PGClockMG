@@ -120,8 +120,7 @@ class PasarguardDbMigrator(BaseMigrator):
         stats = getattr(self, "copy_stats", None) or {}
         report = getattr(self, "copy_report", None) or {}
         critical = ("users", "admins", "hosts", "inbounds", "nodes", "groups")
-        missing = [t for t in critical if isinstance(stats.get(t), int) and stats[t] <= 0]
-        # If we never got stats, still honor gap report.
+        # Gap report from copy (partial critical tables).
         if report.get("has_gaps"):
             crit = report.get("critical_incomplete") or report.get("incomplete") or []
             raise RuntimeError(
@@ -130,9 +129,17 @@ class PasarguardDbMigrator(BaseMigrator):
                     f"{i.get('table')} {i.get('copied')}/{i.get('source')}" for i in crit
                 )
             )
-        if missing and any(isinstance(stats.get(t), int) and stats[t] > 0 for t in critical):
-            # Some tables OK but listed critical empty — only fail if ALL critical empty
-            pass
+        src = report.get("source_counts") or {}
+        # Source had rows but dest landed empty for a critical table.
+        emptied = [
+            t for t in critical
+            if int(src.get(t, 0) or 0) > 0 and int(stats.get(t, 0) or 0) <= 0
+        ]
+        if emptied:
+            raise RuntimeError(
+                f"Change-DB {source_db}→{target_db} left critical tables empty "
+                f"while source had data: {', '.join(emptied)} — refusing SUCCESS"
+            )
         if stats and all(
             (not isinstance(stats.get(t), int)) or stats.get(t, 0) <= 0 for t in critical
         ):
