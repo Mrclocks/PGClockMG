@@ -2836,7 +2836,15 @@ a.btn-panel-enter:focus {
 html[dir="rtl"] #certbotPrereqWarn ul {
   padding: 0 1.2rem 0 0;
 }
-#certbotPrereqWarn li { margin-bottom: 2px; }
+.warning-card:empty,
+#finalWarnings:empty,
+#certbotPrereqWarn:empty {
+  display: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: none !important;
+}
+
 
 /* ── Restore: options — iOS toggle switch ──────────────────────── */
 .restore-options {
