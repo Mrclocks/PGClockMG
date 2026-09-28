@@ -75,6 +75,32 @@ def install_server_password(env_text: str | None, db_type: str) -> str:
     return ""
 
 
+def resolve_engine_password(
+    db_type: str | None,
+    *env_texts: str | None,
+    extras: list[str] | tuple[str, ...] | None = None,
+) -> str:
+    """Single password resolver for restore/migrate (engine-accurate order).
+
+    PG/TS: POSTGRES_PASSWORD → compose → DB_PASSWORD → URL
+    MySQL/Maria: MYSQL_ROOT → MYSQL_PASSWORD → compose → DB_PASSWORD → URL
+    Earlier env texts win over later ones; ``extras`` are tried last.
+    """
+    eng = (db_type or "").lower()
+    ordered: list[str] = []
+    for text in env_texts:
+        if not text:
+            continue
+        if eng in ("postgresql", "timescaledb"):
+            ordered.extend(postgres_password_candidates(text))
+        elif eng in ("mysql", "mariadb"):
+            ordered.extend(mysql_password_candidates(text))
+    if extras:
+        ordered.extend(str(x) for x in extras if x)
+    uniq = _unique_strings(*ordered)
+    return uniq[0] if uniq else ""
+
+
 def install_auth_env_for_convert(
     *,
     backup_db: str,
@@ -2502,6 +2528,43 @@ async def refresh_pgbouncer_if_stale(
         raise RuntimeError(f"PgBouncer recreate failed:\n{(out3 or '')[-800:]}")
     await asyncio.sleep(4)
     migrator.job.log("PgBouncer recreated with finalized credentials")
+
+    # Prove :6432 accepts the new password (stale SCRAM cache otherwise looks "OK").
+    probed = False
+    for host, port in (("127.0.0.1", "6432"), ("localhost", "6432")):
+        try:
+            from app.services.pasarguard_ops import resolve_pasarguard_image
+
+            img = resolve_pasarguard_image()
+            # Prefer timescale/postgres client image if panel image has no psql.
+            for probe_img in (
+                "postgres:17-alpine",
+                "timescale/timescaledb:latest-pg17",
+                img,
+            ):
+                if await _probe_pg_via_host_tcp(
+                    migrator,
+                    image=probe_img,
+                    host=host,
+                    port=port,
+                    user=user,
+                    password=password,
+                    database=database,
+                ):
+                    probed = True
+                    migrator.job.log(
+                        f"PgBouncer TCP auth OK on {host}:{port} as {user}"
+                    )
+                    break
+            if probed:
+                break
+        except Exception as exc:
+            migrator.job.log(f"PgBouncer probe note: {exc}")
+    if not probed:
+        migrator.job.log(
+            "PgBouncer recreated but TCP :6432 auth not confirmed yet — "
+            "panel start will re-check; if auth fails, wizard force-aligns again"
+        )
     return True
 
 

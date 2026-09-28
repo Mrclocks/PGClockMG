@@ -344,8 +344,10 @@
             </details>
             <div class="actions">
               <button type="button" class="btn btn-back" id="btnRestoreErrorBack" onclick="backFromRestore()"></button>
-              <button type="button" class="btn btn-primary" id="btnRestoreRetry" onclick="resetRestoreForm()"></button>
+              <button type="button" class="btn btn-secondary" id="btnRestoreRetry" onclick="resetRestoreForm()"></button>
+              <button type="button" class="btn btn-primary" id="btnRestoreRetryHeal" onclick="retryRestoreStrongerHeal()"></button>
             </div>
+            <p id="restoreRetryHealHint" class="info-note"></p>
           </div>
         </div>
 
@@ -356,6 +358,10 @@
             </div>
             <h2 id="restoreDoneTitle"></h2>
             <p id="restoreDoneMsg"></p>
+            <div id="restoreTransferSection" class="transfer-summary hidden">
+              <h3 id="restoreTransferTitle" class="transfer-summary-title"></h3>
+              <div id="restoreTransferGrid" class="transfer-summary-grid"></div>
+            </div>
             <div id="restorePostSuccessTips" class="warnings-box post-success-tips hidden" role="status"></div>
             <p id="restoreNodesDisabledNote" class="info-note hidden"></p>
             <p id="restorePanelUrl" class="panel-url-line hidden" dir="ltr"></p>
@@ -614,6 +620,10 @@
           </div>
           <h2></h2>
           <p id="resultMessage"></p>
+          <div id="migrateTransferSection" class="transfer-summary hidden">
+            <h3 id="migrateTransferTitle" class="transfer-summary-title"></h3>
+            <div id="migrateTransferGrid" class="transfer-summary-grid"></div>
+          </div>
           <div id="resultPostSuccessTips" class="warnings-box post-success-tips hidden" role="status"></div>
           <a class="btn btn-panel-enter btn-lg" id="panelLink" href="#" target="_blank" rel="noopener">
             <svg class="social-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true"><path d="M10 17l5-5-5-5"/><path d="M15 12H4"/><path d="M20 19V5a2 2 0 0 0-2-2h-3"/></svg>

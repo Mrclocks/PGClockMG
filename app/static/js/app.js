@@ -1553,7 +1553,25 @@ async function pollStatus(jobId) {
       if (data.status === 'error' || data.result?.error) {
         clearInterval(interval);
         state._migratePollInterval = null;
-        void showError(data.result?.error || data.message, data.logs.join('\n'));
+        const explain = data.result?.error_explain;
+        const lang = state.lang || 'fa';
+        const msg = explain
+          ? ((lang === 'fa' ? explain.fa : lang === 'ru' ? explain.ru : explain.en)
+            || explain.fa || explain.en || data.message)
+          : (data.result?.error || data.message);
+        const causes = explain
+          ? (lang === 'fa' ? explain.causes_fa : lang === 'ru' ? (explain.causes_ru || explain.causes_en) : explain.causes_en)
+            || explain.causes_fa || []
+          : [];
+        const causeText = causes.length
+          ? `\n\n${causes.map((c) => `• ${c}`).join('\n')}`
+          : '';
+        const tech = explain?.detail || '';
+        const errLogs = (data.logs || [])
+          .filter((l) => /error|fail|denied|fatal|panic/i.test(String(l)))
+          .slice(-40)
+          .join('\n');
+        void showError(`${msg}${causeText}`, tech || errLogs);
       }
     } catch (e) { /* retry */ }
   }, 1500);
@@ -1698,11 +1716,46 @@ async function showSuccess(result) {
   }
   document.getElementById('resultMessage').textContent = t(`step6.${msgKey}`);
 
+  if (typeof renderTransferSummaryGrid === 'function') {
+    const enriched = { ...(result || {}) };
+    if (!enriched.transfer_summary && enriched.users_migrated != null) {
+      enriched.transfer_summary = [
+        { table: 'users', count: Number(enriched.users_migrated) || 0 },
+      ];
+    }
+    renderTransferSummaryGrid(
+      document.getElementById('migrateTransferGrid'),
+      document.getElementById('migrateTransferTitle'),
+      document.getElementById('migrateTransferSection'),
+      enriched,
+      'step6.transferTitle',
+    );
+  }
+
   const tipsEl = document.getElementById('resultPostSuccessTips');
   if (tipsEl) {
     const tips = [`<p class="warn-line">${statusIcon('warn')}<span>${t('step6.disableOldPanelTip')}</span></p>`];
     if (result?.nodes_disabled) {
       tips.push(`<p class="info-note">${t('step6.nodesDisabledNote')}</p>`);
+    }
+    const usageCleared = Number(result?.usage_rows_cleared || 0);
+    if (usageCleared > 0 || Number(result?.usage_tables_truncated || 0) > 0) {
+      const note = String(t('step6.usageTruncatedNote') || '')
+        .replace('{rows}', usageCleared.toLocaleString());
+      tips.push(`<p class="info-note">${statusIcon('warn')}<span>${note}</span></p>`);
+    }
+    const clears = result?.value_clears || result?.copy_report?.value_clears || [];
+    if (Array.isArray(clears) && clears.length) {
+      tips.push(`<p class="info-note">${statusIcon('warn')}<span>${t('step6.valueClearsNote')}: ${clears.length}</span></p>`);
+    }
+    if (state.selectedPanel?.id === 'hiddify' || result?.scope === 'users_redirect_only') {
+      tips.push(`<p class="info-note">${statusIcon('warn')}<span>${t('step6.hiddifyScopeNote')}</span></p>`);
+      const derived = Number(result?.trojan_password_derived_count || 0);
+      if (derived > 0) {
+        tips.push(
+          `<p class="info-note">${statusIcon('warn')}<span>${String(t('step6.hiddifyTrojanDerived') || '').replace('{count}', String(derived))}</span></p>`,
+        );
+      }
     }
     tipsEl.innerHTML = tips.join('');
     tipsEl.classList.remove('hidden');
@@ -1715,6 +1768,14 @@ async function showSuccess(result) {
     const schemaLabel = modern ? t('step6.xuiSchemaModern') : t('step6.xuiSchemaLegacy');
     details += `<p class="status-inline">${statusIcon('ok')} <span>${schemaLabel}</span></p>`;
     details += `<p class="warn-line">${statusIcon('warn')}<span>${t('step6.xuiOldSubPortWarn')}</span></p>`;
+    details += `<p class="warn-line">${statusIcon('warn')}<span>${t('step6.xuiTlsStripNote')}</span></p>`;
+    const seeded = Number(result?.hosts_seeded || 0);
+    if (seeded > 0) {
+      details += `<p class="status-inline">${statusIcon('ok')} <span>${String(t('step6.xuiHostsSeeded') || '').replace('{count}', String(seeded))}</span></p>`;
+    }
+    if (result?.admin_skipped_reason === 'no-xui-admin-password') {
+      details += `<p class="warn-line">${statusIcon('warn')}<span>${t('step6.xuiAdminSkipped')}</span></p>`;
+    }
   }
   const warnings = result?.warnings;
   if (warnings) {
@@ -1737,9 +1798,6 @@ async function showSuccess(result) {
         + lines.map(x => `<li>${x}</li>`).join('')
         + '</ul>';
     }
-  }
-  if (result?.users_migrated) {
-    details += `<p>${result.users_migrated} / ${result.users_total} users</p>`;
   }
   document.getElementById('resultDetails').innerHTML = details;
   renderOwnerGuideBox(result);

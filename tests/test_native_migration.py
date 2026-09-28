@@ -48,6 +48,40 @@ def test_build_local_alembic_url_encodes_special_password():
     print("OK: alembic URL encodes special password chars")
 
 
+def test_app_and_env_urls_quote_special_password():
+    from app.services.db_credentials import build_app_sqlalchemy_url
+    from app.services.env_migration import (
+        build_db_migration_target_url,
+        build_sqlalchemy_url_for_target,
+    )
+
+    params = {
+        "target_db": "mysql",
+        "target_db_user": "u@ser",
+        "target_db_password": "p@ss:word/x",
+        "target_db_name": "pasarguard",
+        "target_db_host": "127.0.0.1",
+        "target_db_port": "3306",
+    }
+    app = build_app_sqlalchemy_url(params)
+    assert "u%40ser" in app
+    assert "p%40ss%3Aword%2Fx" in app
+
+    env = (
+        'DB_USER="u@ser"\n'
+        'DB_PASSWORD="p@ss:word/x"\n'
+        'MYSQL_ROOT_PASSWORD="p@ss:word/x"\n'
+        'DB_NAME="pasarguard"\n'
+    )
+    target = build_sqlalchemy_url_for_target("mysql", env_text=env)
+    assert "u%40ser" in target
+    assert "p%40ss%3Aword%2Fx" in target
+    mig = build_db_migration_target_url("mysql", env_text=env)
+    assert "u%40ser" in mig
+    assert "p%40ss%3Aword%2Fx" in mig
+    print("OK: app/env/migration URLs quote special password chars")
+
+
 def test_resolve_reachable_alembic_url_uses_bridge_when_loopback_dead():
     """Unpublished 5432 must not leave alembic stuck on 127.0.0.1."""
     import asyncio
@@ -610,6 +644,7 @@ def test_postgres_fit_enum_keeps_none_label():
     }
     w._col_types = {}
     w._col_nullable = {}
+    w._value_clears = []
 
     def _labels(name):
         return w._enum_cache.get(name.lower(), [])
@@ -618,8 +653,148 @@ def test_postgres_fit_enum_keeps_none_label():
     assert w._fit_enum("proxyhostsecurity", "none", True) == "none"
     assert w._fit_enum("proxyhostfingerprint", "none", True) == "none"
     assert w._fit_enum("proxyhostsecurity", "tls", True) == "tls"
-    assert w._fit_enum("proxyhostsecurity", "bogus", True) is None
+    assert w._fit_enum("proxyhostsecurity", "bogus", True, table="hosts", col="security") is None
+    assert any(s.get("reason") == "unknown_enum" for s in w._value_clears)
     print("OK: postgres _fit_enum keeps none label")
+
+
+def test_postgres_value_clears_and_batch_skip_soft_tables():
+    """Unknown enums/JSON are sampled; soft-skip tables stay off the batch path."""
+    from app.services.native_migration.adapters import PostgresWriter
+
+    w = PostgresWriter.__new__(PostgresWriter)
+    w._batch_buf = []
+    w._batch_table = None
+    w._batch_columns = None
+    w._BATCH_FLUSH = 500
+    w._bulk_load_active = True
+    w._value_clears = []
+    w._enum_cache = {"proxyhostsecurity": ["tls", "none"]}
+    w._col_types = {
+        "hosts": {"security": "enum:proxyhostsecurity", "host": "json"},
+        "node_user_usages": {"id": "integer"},
+    }
+    w._col_nullable = {
+        "hosts": {"security": True, "host": True},
+        "node_user_usages": {"id": True},
+    }
+    w._enum_labels_for = lambda name: w._enum_cache.get(name.lower(), [])  # type: ignore
+    w._types_for = lambda table: w._col_types.get(table, {})  # type: ignore
+    w._nullable_for = lambda table, col: w._col_nullable.get(table, {}).get(col, True)  # type: ignore
+    w._psql = type("P", (), {})()
+    w._log = None
+    w._conn = None
+
+    assert "users" in PostgresWriter._NO_BATCH_TABLES
+    assert "hosts" in PostgresWriter._NO_BATCH_TABLES
+    assert "node_user_usages" not in PostgresWriter._NO_BATCH_TABLES
+
+    row = w._coerce_row("hosts", ["security", "host"], ("bogus", "{not-json"))
+    assert row == (None, None)
+    reasons = {s["reason"] for s in w._value_clears}
+    assert "unknown_enum" in reasons
+    assert "invalid_json" in reasons
+    print("OK: postgres value_clears + batch soft-table skip")
+
+
+def test_postgres_copy_cell_and_flush_prefers_copy():
+    """Large bulk buffers use COPY FROM STDIN (with execute_batch fallback)."""
+    from app.services.native_migration.adapters import PostgresWriter
+    from psycopg2 import sql as psql
+
+    assert PostgresWriter._copy_cell(None) == "\\N"
+    assert PostgresWriter._copy_cell(True) == "t"
+    assert PostgresWriter._copy_cell("a\tb") == "a\\tb"
+
+    class _Cur:
+        def __init__(self):
+            self.copy_sql = None
+            self.copy_data = None
+            self.stmts = []
+            self._fail_copy = False
+            self.batch_q = None
+            self.batch_rows = None
+
+        def execute(self, q, params=None):
+            self.stmts.append(str(q))
+
+        def copy_expert(self, sql, stream):
+            if self._fail_copy:
+                raise RuntimeError("copy boom")
+            self.copy_sql = sql
+            self.copy_data = stream.read()
+
+    class _Conn:
+        def __init__(self):
+            self.cur = _Cur()
+            self.rolled_back = False
+
+        def cursor(self):
+            return self.cur
+
+        def rollback(self):
+            self.rolled_back = True
+
+    w = PostgresWriter.__new__(PostgresWriter)
+    w._batch_buf = [(i, f"u{i}") for i in range(80)]
+    w._batch_table = "node_user_usages"
+    w._batch_columns = ["id", "name"]
+    w._COPY_MIN = 64
+    w._conn = _Conn()
+    w._log = None
+    w._psql = psql
+    w._flush_batch()
+    assert w._conn.cur.copy_sql and 'COPY "node_user_usages"' in w._conn.cur.copy_sql
+    assert w._conn.cur.copy_data.count("\n") == 80
+    assert w._batch_buf == []
+    assert any("SAVEPOINT pgmig_copy" in s for s in w._conn.cur.stmts)
+    assert not w._conn.rolled_back
+
+    # Fallback must use SAVEPOINT rollback — never whole-txn rollback.
+    from unittest.mock import patch
+
+    w2 = PostgresWriter.__new__(PostgresWriter)
+    w2._batch_buf = [(i, f"u{i}") for i in range(80)]
+    w2._batch_table = "node_user_usages"
+    w2._batch_columns = ["id", "name"]
+    w2._COPY_MIN = 64
+    w2._conn = _Conn()
+    w2._conn.cur._fail_copy = True
+    w2._log = None
+    w2._psql = psql
+    notes = []
+    w2._note = notes.append  # type: ignore[method-assign]
+    with patch("psycopg2.extras.execute_batch") as eb:
+        w2._flush_batch()
+        assert eb.called
+    assert any("ROLLBACK TO SAVEPOINT pgmig_copy" in s for s in w2._conn.cur.stmts)
+    assert not w2._conn.rolled_back
+    assert any("falling back to execute_batch" in n for n in notes)
+    print("OK: postgres COPY FROM path for large batch")
+
+
+def test_change_db_assert_convert_counts_rejects_partial_empty():
+    """Change-DB must fail when source had hosts/users but dest landed empty."""
+    from app.services.migrators.base import MigrationJob
+    from app.services.migrators.pasarguard_db import PasarguardDbMigrator
+
+    m = PasarguardDbMigrator(MigrationJob(job_id="cdb"), {"target_db": "postgresql"})
+    m.copy_stats = {"users": 10, "admins": 1, "hosts": 0, "inbounds": 2, "nodes": 1, "groups": 1}
+    m.copy_report = {
+        "source_counts": {
+            "users": 10, "admins": 1, "hosts": 5, "inbounds": 2, "nodes": 1, "groups": 1,
+        },
+        "has_gaps": False,
+    }
+    try:
+        m._assert_convert_counts("sqlite", "postgresql")
+        raise AssertionError("expected empty hosts abort")
+    except RuntimeError as e:
+        assert "hosts" in str(e)
+    # Healthy path
+    m.copy_stats["hosts"] = 5
+    m._assert_convert_counts("sqlite", "postgresql")
+    print("OK: change-db assert_convert_counts rejects partial empty")
 
 
 def test_rewrite_sqlalchemy_host_port_never_touches_sqlite():
@@ -866,6 +1041,19 @@ def test_users_status_not_bool():
     assert normalize_user_status("onhold") == "on_hold"
     assert normalize_user_status("ACTIVE") == "active"
     print("OK: users_status_not_bool")
+
+
+def test_to_bool_and_normalize_mysql_bit():
+    from app.services.native_migration.copy_core import to_bool, normalize_raw_value
+
+    assert to_bool(b"\x00") is False
+    assert to_bool(b"\x01") is True
+    assert to_bool(memoryview(b"\x01")) is True
+    assert to_bool("0") is False
+    assert to_bool("true") is True
+    assert normalize_raw_value(b"\x00") == 0
+    assert normalize_raw_value(b"\x01") == 1
+    print("OK: to_bool / MySQL BIT(1)")
 
 
 def test_hosts_json_and_column_plan():
@@ -1829,6 +2017,9 @@ if __name__ == "__main__":
     test_ensure_asyncpg_ssl_disable_not_false()
     test_ensure_asyncpg_strips_string_timeout_query()
     test_postgres_fit_enum_keeps_none_label()
+    test_postgres_value_clears_and_batch_skip_soft_tables()
+    test_postgres_copy_cell_and_flush_prefers_copy()
+    test_change_db_assert_convert_counts_rejects_partial_empty()
     test_rewrite_sqlalchemy_host_port_never_touches_sqlite()
     test_alembic_strategies_sqlite_ignores_timescaledb_target()
     test_extract_docker_container_id_skips_pgadmin_warning()
@@ -1839,6 +2030,7 @@ if __name__ == "__main__":
     test_convert_bool_values()
     test_hosts_address_sanitizes_array_and_invisible_junk()
     test_users_status_not_bool()
+    test_to_bool_and_normalize_mysql_bit()
     test_hosts_json_and_column_plan()
     test_hosts_marzban_none_enums_copy()
     test_hosts_inbound_id_resolves_to_tag()

@@ -20,8 +20,8 @@ class PasarguardDbMigrator(BaseMigrator):
         target_db = params["target_db"]
         upload_path = params.get("upload_path")
         if "skip_bad_user_rows" not in params:
-            params["skip_bad_user_rows"] = True
-            self.params["skip_bad_user_rows"] = True
+            params["skip_bad_user_rows"] = False
+            self.params["skip_bad_user_rows"] = False
 
         self.job.set_progress(5, "Checking PasarGuard installation...")
 
@@ -46,29 +46,27 @@ class PasarguardDbMigrator(BaseMigrator):
             self.job.set_progress(30, f"Two-phase cross-DB: {source_db} → {target_db}...")
             await self._ensure_target_database_stack(target_db)
             await run_cross_db_migration(self, str(source_path), source_db, target_db)
-            report = getattr(self, "copy_report", None) or {}
-            if report.get("has_gaps"):
-                crit = report.get("critical_incomplete") or report.get("incomplete") or []
-                raise RuntimeError(
-                    "Migration incomplete — critical tables were not fully copied:\n"
-                    + ", ".join(
-                        f"{i.get('table')} {i.get('copied')}/{i.get('source')}" for i in crit
-                    )
-                )
+            self._assert_convert_counts(source_db, target_db)
         elif source_db == target_db and source_db == "sqlite":
             self.job.set_progress(40, "Replacing SQLite database...")
             dest = PASARGUARD_DATA / "db.sqlite3"
             PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, dest)
         elif source_db == target_db:
-            from app.services.db_migration import run_db_migration
-            self.job.set_progress(40, f"Refreshing {source_db} database...")
-            await run_db_migration(self, str(source_path), source_db, target_db)
+            # Native same-engine refresh (stage → wipe → copy). Avoids external
+            # TOOLS_DIR/db-migrations which drifted from wizard heals.
+            self.job.set_progress(40, f"Refreshing {source_db} database (native)...")
+            await self._ensure_target_database_stack(target_db)
+            await run_cross_db_migration(
+                self, str(source_path), source_db, target_db,
+                allow_same_engine=True,
+            )
+            self._assert_convert_counts(source_db, target_db)
 
         self.job.set_progress(75, "Updating PasarGuard .env...")
         await self._update_pasarguard_env(target_db, install_env_snapshot)
 
-        if source_db != target_db and target_db != "sqlite":
+        if target_db != "sqlite" and (source_db == "sqlite" or source_db != target_db):
             self._relocate_sqlite()
 
         self.job.set_progress(90, "Starting PasarGuard...")
@@ -76,11 +74,14 @@ class PasarguardDbMigrator(BaseMigrator):
 
         stats = getattr(self, "copy_stats", None) or {}
         self.job.set_progress(100, "Database migration completed")
+        from app.services.pg_restore import build_transfer_summary
         out = {
             "panel_url": self._get_panel_url(),
             "subscription_mode": "native",
             "method": f"{source_db} → {target_db}",
             "copy_stats": stats,
+            "verified_counts": stats,
+            "transfer_summary": build_transfer_summary(stats),
         }
         if self.copy_report:
             out["copy_report"] = self.copy_report
@@ -103,10 +104,49 @@ class PasarguardDbMigrator(BaseMigrator):
             return
         svc = resolve_db_service(target_db)
         if svc:
-            self.job.log(f"Starting {svc} container...")
-            await docker_compose_up(self, [svc])
+            services = [svc]
+            if target_db in ("postgresql", "timescaledb"):
+                from app.services.multiworker_stack import compose_has_service
+
+                if compose_has_service("pgbouncer"):
+                    services.append("pgbouncer")
+            self.job.log(f"Starting {' + '.join(services)}...")
+            await docker_compose_up(self, services)
             import asyncio
             await asyncio.sleep(8)
+
+    def _assert_convert_counts(self, source_db: str, target_db: str) -> None:
+        """Hard-fail Change-DB when critical tables copied as empty/partial."""
+        stats = getattr(self, "copy_stats", None) or {}
+        report = getattr(self, "copy_report", None) or {}
+        critical = ("users", "admins", "hosts", "inbounds", "nodes", "groups")
+        # Gap report from copy (partial critical tables).
+        if report.get("has_gaps"):
+            crit = report.get("critical_incomplete") or report.get("incomplete") or []
+            raise RuntimeError(
+                f"Change-DB {source_db}→{target_db} incomplete — critical tables:\n"
+                + ", ".join(
+                    f"{i.get('table')} {i.get('copied')}/{i.get('source')}" for i in crit
+                )
+            )
+        src = report.get("source_counts") or {}
+        # Source had rows but dest landed empty for a critical table.
+        emptied = [
+            t for t in critical
+            if int(src.get(t, 0) or 0) > 0 and int(stats.get(t, 0) or 0) <= 0
+        ]
+        if emptied:
+            raise RuntimeError(
+                f"Change-DB {source_db}→{target_db} left critical tables empty "
+                f"while source had data: {', '.join(emptied)} — refusing SUCCESS"
+            )
+        if stats and all(
+            (not isinstance(stats.get(t), int)) or stats.get(t, 0) <= 0 for t in critical
+        ):
+            raise RuntimeError(
+                f"Change-DB {source_db}→{target_db} produced 0 rows in "
+                f"users/admins/hosts/inbounds/nodes/groups — refusing SUCCESS"
+            )
 
     def _relocate_sqlite(self) -> None:
         sqlite_path = PASARGUARD_DATA / "db.sqlite3"

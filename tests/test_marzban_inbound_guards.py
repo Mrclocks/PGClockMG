@@ -141,6 +141,17 @@ def test_abort_if_inbounds_missing_from_stats():
     m._abort_if_inbounds_missing_from_stats({"users": 5, "inbounds": 2})
 
 
+def test_abort_if_core_configs_missing_from_stats():
+    m = _migrator()
+    try:
+        m._abort_if_core_configs_missing_from_stats({"users": 5, "core_configs": 0})
+        raise AssertionError("expected core_configs abort")
+    except RuntimeError as e:
+        assert "core_configs=0" in str(e)
+    m._abort_if_core_configs_missing_from_stats({"users": 5, "core_configs": 1})
+    m._abort_if_core_configs_missing_from_stats({"users": 0, "core_configs": 0})
+
+
 def test_live_mysql_sets_extra_data_dir_and_merges_env():
     """Live MySQL must copy Marzban data dir assets (previously left None)."""
 
@@ -330,6 +341,8 @@ if __name__ == "__main__":
     print("OK: convert abort")
     test_abort_if_inbounds_missing_from_stats()
     print("OK: stats abort")
+    test_abort_if_core_configs_missing_from_stats()
+    print("OK: core_configs stats abort")
     test_live_mysql_sets_extra_data_dir_and_merges_env()
     test_mysql_same_family_calls_post_boot_assert()
     test_copy_assets_pins_xray_json_and_skips_empty_certs()

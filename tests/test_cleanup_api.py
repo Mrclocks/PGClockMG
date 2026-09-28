@@ -165,8 +165,10 @@ def test_existing_restore_contract_unchanged(client):
         "accept_experimental",
         "disable_nodes_after_restore",
         "skip_bad_user_rows",
+        "stronger_heal",
     }, fields
     assert PasarguardRestoreRequest.model_fields["skip_bad_user_rows"].default is True
+    assert PasarguardRestoreRequest.model_fields["stronger_heal"].default is False
     print("OK: restore request contract includes skip_bad_user_rows default True")
 
 

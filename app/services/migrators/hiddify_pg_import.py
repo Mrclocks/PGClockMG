@@ -87,12 +87,12 @@ async def find_user_by_uuid(db, uid: UUID, uuid_index=None):
 
     try:
         rows = await db.execute(
-            select(User).options(selectinload(User.groups)).limit(5000)
+            select(User).options(selectinload(User.groups))
         )
         users = list(rows.unique().scalars().all())
     except Exception:
         try:
-            rows = await db.execute(select(User).limit(5000))
+            rows = await db.execute(select(User))
             users = list(rows.scalars().all())
         except Exception:
             return None
@@ -129,7 +129,7 @@ async def build_uuid_index(db):
 
     index = {}
     try:
-        rows = await db.execute(select(User).limit(10000))
+        rows = await db.execute(select(User))
         users = list(rows.scalars().all())
     except Exception:
         return index
@@ -347,12 +347,16 @@ async def main():
                     errors.append({"username": username, "error": f"exists but token failed: {e}"})
                 continue
 
-            want_disabled = (row.get("status") or "").strip() == "disabled"
-            raw_status = (row.get("status") or "active").strip()
+            raw_status = (row.get("status") or "active").strip().lower()
+            want_disabled = raw_status == "disabled"
+            want_expired = raw_status == "expired"
             create_status = "on_hold" if raw_status == "on_hold" and not want_disabled else "active"
 
-            trojan_pw = uuid_s.replace("-", "")[:22]
-            if len(trojan_pw) < 22:
+            # Prefer password from Hiddify export; else derive from UUID (documented).
+            export_pw = (row.get("trojan_password") or row.get("password") or "").strip()
+            trojan_from_export = bool(export_pw)
+            trojan_pw = export_pw[:128] if trojan_from_export else uuid_s.replace("-", "")[:22]
+            if not trojan_from_export and len(trojan_pw) < 22:
                 trojan_pw = (trojan_pw + "hiddify-migrate-pass00")[:22]
 
             try:
@@ -409,9 +413,12 @@ async def main():
 
             try:
                 user = await create_user(db, new_user, groups=list(groups), admin=owner)
-                if want_disabled:
+                if want_disabled or want_expired:
                     try:
-                        user.status = UserStatus.disabled
+                        target = UserStatus.disabled
+                        if want_expired:
+                            target = getattr(UserStatus, "expired", None) or UserStatus.disabled
+                        user.status = target
                         await db.commit()
                     except Exception:
                         try:
@@ -435,6 +442,7 @@ async def main():
                     "user_id": int(user.id),
                     "subscription_url": f"/sub/{token}",
                     "reused": False,
+                    "trojan_password_from_export": trojan_from_export,
                 })
                 uuid_index[str(uid).lower()] = user
             except Exception as e:
@@ -444,6 +452,10 @@ async def main():
                     pass
                 errors.append({"username": username, "error": str(e)[:300]})
 
+    derived_trojan = sum(
+        1 for c in created
+        if not c.get("reused") and not c.get("trojan_password_from_export")
+    )
     write_result({
         "ok": True,
         "group": group_name,
@@ -453,6 +465,7 @@ async def main():
         "skipped": skipped,
         "created_count": len([c for c in created if not c.get("reused")]),
         "mapped_count": len(created),
+        "trojan_password_derived_count": derived_trojan,
     })
 
 

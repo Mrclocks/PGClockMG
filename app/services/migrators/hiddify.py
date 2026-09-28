@@ -175,6 +175,20 @@ class HiddifyMigrator(BaseMigrator):
             warn_en.append(f"{len(errors)} users failed to import — see logs.")
             warn_fa.append(f"{len(errors)} کاربر وارد نشد — لاگ را ببینید.")
             warn_ru.append(f"{len(errors)} пользователей не импортированы.")
+        derived_trojan = int(import_result.get("trojan_password_derived_count") or 0)
+        if derived_trojan > 0:
+            warn_en.append(
+                f"Trojan passwords for {derived_trojan} user(s) were derived from UUID "
+                "(export had no password field). Clients using Trojan may need the new password."
+            )
+            warn_fa.append(
+                f"رمز Trojan برای {derived_trojan} کاربر از UUID ساخته شد "
+                "(در export فیلد password نبود). کلاینت‌های Trojan ممکن است رمز جدید بخواهند."
+            )
+            warn_ru.append(
+                f"Пароли Trojan для {derived_trojan} польз. взяты из UUID "
+                "(в export не было password). Клиентам Trojan может понадобиться новый пароль."
+            )
         if not redirect_installed and install_redirect:
             detail = (redirect_error or "").strip()
             if len(detail) > 280:
@@ -216,6 +230,8 @@ class HiddifyMigrator(BaseMigrator):
                 )
 
         self.job.set_progress(100, f"مهاجرت Hiddify انجام شد — {len(created)} کاربر")
+        from app.services.pg_restore import build_transfer_summary
+
         return {
             "panel_url": self._get_panel_url(),
             "subscription_mode": "redirect",
@@ -233,6 +249,9 @@ class HiddifyMigrator(BaseMigrator):
             "users_migrated": len(created),
             "users_total": len(users),
             "users_failed": len(errors),
+            "trojan_password_derived_count": derived_trojan,
+            "scope": "users_redirect_only",
+            "transfer_summary": build_transfer_summary({"users": len(created)}),
             "group": group_name,
             "proxy_path_client": client_path,
             "summary": summary,

@@ -698,8 +698,10 @@ def build_db_migration_target_url(
     env_text: str | None = None,
 ) -> str:
     """Build connection URL for official db-migrations tool (pymysql/asyncpg)."""
+    from urllib.parse import quote_plus
+
     conn = get_pasarguard_target_connection(target_db, password, env_text)
-    pwd = conn.get("password") or "password"
+    pwd = quote_plus(conn.get("password") or "password")
     if target_db == "sqlite":
         path = conn.get("sqlite_path") or (PASARGUARD_DATA / "db.sqlite3").as_posix()
         path_s = str(path)
@@ -708,12 +710,12 @@ def build_db_migration_target_url(
             return f"sqlite:///{path_s}"
         return f"sqlite:///{path_s}"
     if target_db in ("mysql", "mariadb"):
-        user = conn.get("user") or "root"
+        user = quote_plus(conn.get("user") or "root")
         host = conn.get("host") or "127.0.0.1"
         port = _direct_db_port(target_db, conn)
         db = conn.get("database") or "pasarguard"
         return f"mysql+pymysql://{user}:{pwd}@{host}:{port}/{db}"
-    user = conn.get("user") or "postgres"
+    user = quote_plus(conn.get("user") or "postgres")
     host = conn.get("host") or "127.0.0.1"
     port = _direct_db_port(target_db, conn)
     db = conn.get("database") or "pasarguard"
@@ -726,20 +728,22 @@ def build_sqlalchemy_url_for_target(
     env_text: str | None = None,
 ) -> str:
     """Build SQLALCHEMY_DATABASE_URL line for PasarGuard .env (async drivers)."""
+    from urllib.parse import quote_plus
+
     conn = get_pasarguard_target_connection(target_db, password_override, env_text)
-    pwd = conn.get("password") or "password"
+    pwd = quote_plus(conn.get("password") or "password")
     if target_db == "sqlite":
         path = conn.get("sqlite_path") or "/var/lib/pasarguard/db.sqlite3"
         # Absolute Unix path → exactly four slashes after scheme (never //var authority)
         path = "/" + str(path).lstrip("/")
         return f"sqlite+aiosqlite:///{path}"
     if target_db in ("mysql", "mariadb"):
-        user = conn.get("user") or "root"
+        user = quote_plus(conn.get("user") or "root")
         host = conn.get("host") or "127.0.0.1"
         port = _app_db_port(target_db, conn)
         db = conn.get("database") or "pasarguard"
         return f"mysql+asyncmy://{user}:{pwd}@{host}:{port}/{db}"
-    user = conn.get("user") or "postgres"
+    user = quote_plus(conn.get("user") or "postgres")
     host = conn.get("host") or "127.0.0.1"
     port = _app_db_port(target_db, conn)
     db = conn.get("database") or "pasarguard"

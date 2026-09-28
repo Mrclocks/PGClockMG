@@ -1598,6 +1598,52 @@ a.btn-panel-enter:focus {
   text-align: right;
 }
 
+.transfer-summary {
+  margin: 20px auto 8px;
+  max-width: 520px;
+  text-align: start;
+}
+
+.transfer-summary-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin: 0 0 12px;
+  color: var(--text);
+}
+
+.transfer-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.transfer-summary-card {
+  padding: 12px 14px;
+  background: color-mix(in srgb, var(--success) 10%, var(--bg-elevated));
+  border: 1px solid color-mix(in srgb, var(--success) 32%, var(--border-soft));
+  border-radius: var(--radius-sm);
+  text-align: start;
+}
+
+.transfer-summary-card .tsc-name {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.transfer-summary-card .tsc-count {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--success);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+[dir="rtl"] .transfer-summary,
+[dir="rtl"] .transfer-summary-card {
+  text-align: right;
+}
+
 .incomplete-transfer-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));

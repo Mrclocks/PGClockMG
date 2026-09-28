@@ -97,6 +97,11 @@ def test_hard_fail_asserts_still_raise():
     except RuntimeError as e:
         assert "inbounds=0" in str(e)
     try:
+        m._abort_if_core_configs_missing_from_stats({"users": 5, "core_configs": 0})
+        raise AssertionError("expected hard-fail for users without core_configs")
+    except RuntimeError as e:
+        assert "core_configs=0" in str(e)
+    try:
         m._assert_pasarguard_shape_ready(
             {"users": 3, "hosts": 1, "inbounds": 0, "core_configs": 0},
             tables_present={"users", "hosts", "inbounds", "core_configs"},
@@ -106,6 +111,43 @@ def test_hard_fail_asserts_still_raise():
     except RuntimeError as e:
         assert "inbounds empty" in str(e)
     print("OK: hard-fail completeness asserts intact")
+
+
+def test_result_surfaces_usage_truncate_and_value_clears():
+    from unittest.mock import patch
+
+    from app.services.migrators.base import MigrationJob
+    from app.services.migrators.marzban import MarzbanMigrator
+
+    m = MarzbanMigrator(MigrationJob(job_id="result"), {})
+    m.copy_stats = {"users": 2, "inbounds": 1, "core_configs": 1}
+    m.copy_report = {
+        "value_clears": [{"table": "hosts", "column": "security", "reason": "unknown_enum"}],
+        "row_skips": {},
+    }
+    m._preboot_heal = {
+        "renamed": 0,
+        "orphans_deleted": 1,
+        "orphans_nulled": 0,
+        "usage_tables_truncated": 2,
+        "usage_rows_cleared": 90000,
+    }
+    with (
+        patch(
+            "app.services.migrators.marzban.get_panel_access_info",
+            return_value={"login_url": "http://x", "port": "8000"},
+        ),
+        patch(
+            "app.services.migrators.marzban.PASARGUARD_ENV",
+            Path("/nonexistent-env-for-test"),
+        ),
+    ):
+        out = m._result("fresh", "sqlite")
+    assert out["usage_tables_truncated"] == 2
+    assert out["usage_rows_cleared"] == 90000
+    assert out["preboot_heal"]["orphans_deleted"] == 1
+    assert out["value_clears"][0]["reason"] == "unknown_enum"
+    print("OK: result surfaces usage truncate + value clears")
 
 
 def test_safe_start_with_heal_retries_once(monkeypatch=None):
@@ -149,5 +191,6 @@ if __name__ == "__main__":
     test_normalize_templates_rename_and_merge()
     test_transient_infra_classification()
     test_hard_fail_asserts_still_raise()
+    test_result_surfaces_usage_truncate_and_value_clears()
     test_safe_start_with_heal_retries_once()
     print("All marzban migrate heal tests passed")

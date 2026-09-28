@@ -20,8 +20,10 @@ from app.services.migrators.xui import (
     assert_xui_source_has_data,
     assert_migrated_pg_has_data,
     assert_migrated_core_config,
+    ensure_sudo_admin_from_xui,
     patch_xui_converter_tag_bug,
     normalize_subscription_mapping,
+    enrich_subscription_mapping_from_clients,
     _subscription_path_only,
     build_redirect_server_config,
     XuiMigrator,
@@ -459,6 +461,44 @@ def test_normalize_subscription_mapping_strips_query():
         assert _subscription_path_only("/sub/a?name=a") == "/sub/a"
 
 
+def test_enrich_mapping_uses_v3_user_id_token():
+    """Redirect new URLs must be PasarGuard v3+user_id tokens (not username hash)."""
+    from base64 import b64decode
+
+    with tempfile.TemporaryDirectory() as tmp:
+        td = Path(tmp)
+        mapping = td / "m.json"
+        mapping.write_text(json.dumps({"mappings": {}}), encoding="utf-8")
+
+        xui = td / "x-ui.db"
+        conn = sqlite3.connect(xui)
+        conn.execute("CREATE TABLE clients (email TEXT, sub_id TEXT)")
+        conn.execute("INSERT INTO clients VALUES ('alice@x', 'oldsub1')")
+        conn.commit()
+        conn.close()
+
+        pg = td / "pg.db"
+        conn = sqlite3.connect(pg)
+        conn.execute("CREATE TABLE jwt (secret_key TEXT)")
+        conn.execute("INSERT INTO jwt VALUES ('test-secret-key')")
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT)")
+        conn.execute("INSERT INTO users VALUES (42, 'alice@x')")
+        conn.commit()
+        conn.close()
+
+        out = enrich_subscription_mapping_from_clients(mapping, xui, pg, xui_path="sub")
+        assert out.get("added") == 1
+        data = json.loads(mapping.read_text(encoding="utf-8"))
+        entry = data["mappings"]["alice@x"]
+        assert entry["old_subscription_url"] == "/sub/oldsub1"
+        token = entry["new_subscription_url"].removeprefix("/sub/")
+        assert "." in token, token
+        payload_b64, _sig = token.split(".", 1)
+        pad = "=" * (-len(payload_b64) % 4)
+        payload = b64decode(payload_b64 + pad, altchars=b"-_").decode("utf-8")
+        assert payload.startswith("v3,42,"), payload
+
+
 def test_build_redirect_config_sets_domain_and_port():
     cfg = build_redirect_server_config(
         listen_port=2096,
@@ -869,6 +909,48 @@ def test_patch_xui_converter_tag_bug_moves_assignment():
         assert patch_xui_converter_tag_bug(tool) is False
 
 
+def test_ensure_sudo_admin_skips_without_xui_password():
+    """Never invent the known default bcrypt for ``password``."""
+    with tempfile.TemporaryDirectory() as tmp:
+        td = Path(tmp)
+        pg = td / "pg.db"
+        xui = td / "xui.db"
+        conn = sqlite3.connect(pg)
+        conn.execute(
+            "CREATE TABLE admins (id INTEGER PRIMARY KEY, username TEXT, hashed_password TEXT)"
+        )
+        conn.commit()
+        conn.close()
+        conn = sqlite3.connect(xui)
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, password TEXT)")
+        conn.execute("INSERT INTO users VALUES (1, 'admin', '')")
+        conn.commit()
+        conn.close()
+        out = ensure_sudo_admin_from_xui(pg, xui)
+        assert out.get("created") is False
+        assert out.get("reason") == "no-xui-admin-password"
+        conn = sqlite3.connect(pg)
+        n = conn.execute("SELECT COUNT(*) FROM admins").fetchone()[0]
+        conn.close()
+        assert n == 0
+
+
+def test_abort_if_post_convert_gaps():
+    job = MigrationJob(job_id="gaps")
+    m = XuiMigrator(job, {"target_db": "postgresql"})
+    try:
+        m._abort_if_post_convert_gaps({"users": 3, "inbounds": 0, "core_configs": 1})
+        raise AssertionError("expected inbounds abort")
+    except RuntimeError as e:
+        assert "inbounds=0" in str(e)
+    try:
+        m._abort_if_post_convert_gaps({"users": 3, "inbounds": 1, "core_configs": 0})
+        raise AssertionError("expected core_configs abort")
+    except RuntimeError as e:
+        assert "core_configs=0" in str(e)
+    m._abort_if_post_convert_gaps({"users": 3, "inbounds": 1, "core_configs": 1})
+
+
 def test_assert_migrated_core_config_rejects_empty():
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "db.sqlite3"
@@ -954,6 +1036,7 @@ if __name__ == "__main__":
     test_run_does_not_copy2_directory()
     test_run_uses_bundled_schema_not_mysql_start()
     test_normalize_subscription_mapping_strips_query()
+    test_enrich_mapping_uses_v3_user_id_token()
     test_build_redirect_config_sets_domain_and_port()
     test_install_redirect_uses_native_pg_redirect()
     test_install_redirect_http_when_xui_had_no_sub_tls()
@@ -965,6 +1048,8 @@ if __name__ == "__main__":
     test_convert_landed_sqlite_for_all_server_engines()
     test_convert_landed_sqlite_pg_diverged_secrets_align()
     test_patch_xui_converter_tag_bug_moves_assignment()
+    test_ensure_sudo_admin_skips_without_xui_password()
+    test_abort_if_post_convert_gaps()
     test_assert_migrated_core_config_rejects_empty()
     test_run_cmd_shell_string_uses_subprocess_shell()
     print("\nAll x-ui migrator tests passed.")

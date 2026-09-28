@@ -72,10 +72,11 @@ def test_panel_enabled_partial_redirect():
     assert panel.coming_soon is False
     assert panel.support_level == "partial"
     assert panel.subscription_mode == "redirect"
-    # Box copy: group + redirect flow
+    # Box copy: users + redirect only (inbounds/admins excluded)
     assert "hiddify-test" in panel.description["en"]
-    assert "ریدایرکت" in panel.description["fa"] or "redirect" in panel.description["en"].lower()
-    assert "3x-ui" in panel.description["en"].lower() or "3x-ui" in panel.description["fa"].lower()
+    assert "redirect" in panel.description["en"].lower()
+    assert "NOT migrated" in panel.description["en"] or "inbounds" in panel.description["en"].lower()
+    assert "ریدایرکت" in panel.description["fa"]
 
 
 def test_upload_requirements_accept_json():
@@ -136,6 +137,31 @@ def test_normalize_users_unique_and_valid(fixture_data):
         # PasarGuard username charset
         assert all(c.isalnum() or c in "-_@." for c in u["username"])
         assert "--" not in u["username"] and ".." not in u["username"]
+
+
+def test_normalize_preserves_explicit_trojan_password():
+    users = normalize_hiddify_users([
+        {
+            "name": "alice",
+            "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "enable": True,
+            "usage_limit_GB": 1,
+            "package_days": 30,
+            "mode": "no_reset",
+            "trojan_password": "secret-from-export",
+        },
+        {
+            "name": "bob",
+            "uuid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "enable": True,
+            "usage_limit_GB": 1,
+            "package_days": 30,
+            "mode": "no_reset",
+        },
+    ])
+    by_name = {u["username"]: u for u in users}
+    assert by_name["alice"]["trojan_password"] == "secret-from-export"
+    assert by_name["bob"]["trojan_password"] is None
 
 
 def test_sanitize_username_edge_cases():
@@ -397,6 +423,8 @@ def test_import_script_is_valid_python_and_hardened():
         "datetime.fromtimestamp",
         "find_user_by_uuid",
         "build_uuid_index",
+        "trojan_password_derived_count",
+        "trojan_password_from_export",
     ):
         assert needle in imp.IMPORT_SCRIPT, needle
 
@@ -411,7 +439,7 @@ def test_normalized_users_ready_for_pasarguard_create(real_data):
     users, _paths = parse_users_from_backup(real_data)
     assert len(users) == 237
     statuses = {u["status"] for u in users}
-    assert statuses <= {"active", "on_hold", "disabled"}
+    assert statuses <= {"active", "on_hold", "disabled", "expired"}
     for u in users:
         assert isinstance(u["data_limit"], int)
         assert u["username"] and u["uuid"]

@@ -138,6 +138,7 @@ INSERT INTO `groups` (id) VALUES (1);
 
 def test_soft_family_pg_timescale():
     assert soft_db_family("postgresql", "timescaledb")
+    assert soft_db_family("timescaledb", "postgresql")
     assert not soft_db_family("sqlite", "timescaledb")
     print("OK: soft family")
 

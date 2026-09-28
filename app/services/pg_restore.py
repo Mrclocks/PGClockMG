@@ -60,12 +60,37 @@ def get_running_restore_job() -> MigrationJob | None:
     return None
 
 
+TRANSFER_SUMMARY_TABLES = (
+    "users", "admins", "nodes", "hosts", "inbounds", "groups", "core_configs",
+)
+
+
+def build_transfer_summary(counts: dict | None) -> list[dict]:
+    """Ordered non-zero table counts for the success UI."""
+    if not isinstance(counts, dict):
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for table in TRANSFER_SUMMARY_TABLES:
+        n = counts.get(table)
+        if isinstance(n, int) and n >= 0:
+            out.append({"table": table, "count": n})
+            seen.add(table)
+    for table, n in counts.items():
+        if table in seen or not isinstance(n, int) or n < 0:
+            continue
+        if table.startswith("_"):
+            continue
+        out.append({"table": table, "count": n})
+    return out
+
+
 def soft_db_family(a: str | None, b: str | None) -> bool:
     """True when engines are interchangeable for *native* restore (no convert).
 
     - mysql ↔ mariadb: same wire protocol / dump style
-    - postgresql → timescaledb: plain PG dumps restore into Timescale fine
-    - timescaledb → postgresql: NOT soft — Timescale dumps need convert/strip
+    - postgresql ↔ timescaledb: native restore; Timescale DDL stripped when
+      landing on plain PostgreSQL (see strip_for_plain_pg in _restore_postgres)
     """
     if not a or not b:
         return False
@@ -73,8 +98,7 @@ def soft_db_family(a: str | None, b: str | None) -> bool:
         return True
     if {a, b} <= {"mysql", "mariadb"}:
         return True
-    # Plain PostgreSQL backup can land on Timescale (superset of PG)
-    if a == "postgresql" and b == "timescaledb":
+    if {a, b} <= {"postgresql", "timescaledb"}:
         return True
     return False
 
@@ -216,22 +240,57 @@ def _ts_extension_line_dropped(ln: str, strip_all: bool) -> bool:
     return False
 
 
-def filter_timescaledb_extension_sql_file(
-    src: Path, dest: Path, *, strip_all: bool = False,
-) -> Path:
-    """Stream `src` into `dest`, dropping the same lines as the in-memory filter."""
-    with open(src, "r", encoding="utf-8", errors="ignore") as fh, \
-            open(dest, "w", encoding="utf-8") as out:
-        if not strip_all:
-            out.write(TIMESCALEDB_CATALOG_SEED_CLEAR_SQL.rstrip())
-            out.write("\n")
+def iter_filtered_timescaledb_sql_lines(
+    src: Path, *, strip_all: bool = False,
+):
+    """Yield filtered dump lines (no second on-disk twin)."""
+    if not strip_all:
+        yield TIMESCALEDB_CATALOG_SEED_CLEAR_SQL.rstrip() + "\n"
+    with open(src, "r", encoding="utf-8", errors="ignore") as fh:
         for raw in fh:
             ln = raw.rstrip("\n").rstrip("\r")
             if _ts_extension_line_dropped(ln, strip_all):
                 continue
-            out.write(ln)
-            out.write("\n")
+            yield ln + "\n"
+
+
+def filter_timescaledb_extension_sql_file(
+    src: Path, dest: Path, *, strip_all: bool = False,
+) -> Path:
+    """Stream `src` into `dest`, dropping the same lines as the in-memory filter."""
+    with open(dest, "w", encoding="utf-8") as out:
+        for chunk in iter_filtered_timescaledb_sql_lines(src, strip_all=strip_all):
+            out.write(chunk)
     return dest
+
+
+def assert_disk_for_dump_work(
+    dump_path: Path | None,
+    *,
+    twin: bool = False,
+    label: str = "dump import",
+) -> None:
+    """Fail early when free disk cannot hold dump work (+ optional filter twin)."""
+    if not dump_path or not Path(dump_path).exists():
+        return
+    try:
+        size = Path(dump_path).stat().st_size
+    except OSError:
+        return
+    need = size * (2 if twin else 1) + (512 * 1024 * 1024)  # +512MiB margin
+    free = disk_free_bytes("/var/lib")
+    if free < 0:
+        free = disk_free_bytes(Path(dump_path).parent)
+    if free < 0:
+        return
+    if free < need:
+        need_mib = need // (1024 * 1024)
+        free_mib = free // (1024 * 1024)
+        raise RuntimeError(
+            f"Not enough free disk for {label} "
+            f"({free_mib} MiB free; need ≥{need_mib} MiB including "
+            f"{'filter twin + ' if twin else ''}margin). Free space and retry."
+        )
 
 
 def filter_globals_sql(sql: str) -> str:
@@ -1323,20 +1382,7 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
                 if isinstance(v, int) and v > 0 and (k not in table_counts or table_counts.get(k, 0) < v):
                     table_counts[k] = v
         installed = is_pasarguard_installed()
-        # Auto-heal stale sqlite stamp left by a failed convert so analyze/UI
-        # report the real installed engine (compose) and the next restore converts.
-        if installed and PASARGUARD_ENV.exists():
-            try:
-                live = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
-                healed, healed_to = heal_stale_sqlite_engine_env(live)
-                if healed_to and healed != live:
-                    shutil.copy2(
-                        PASARGUARD_ENV,
-                        PASARGUARD_ENV.with_suffix(".env.bak-before-heal"),
-                    )
-                    PASARGUARD_ENV.write_text(healed, encoding="utf-8")
-            except OSError:
-                pass
+        # Do not mutate live .env during analyze (GET). Restore heals stale stamps on start.
         installed_db = get_pasarguard_db_type() if installed else None
 
         warnings: list[dict] = []
@@ -1507,13 +1553,15 @@ async def start_pasarguard_restore(params: dict) -> MigrationJob:
     backup_db = analysis.get("backup_db")
     if target_db and target_db not in SUPPORTED_RESTORE_DBS:
         raise ValueError(f"Unsupported target database: {target_db}")
+    stronger = bool(params.get("stronger_heal"))
     params = {
         **params,
         "target_db": target_db or backup_db,
         # Auto-convert when backup engine ≠ installed engine (no UI confirmation)
         "accept_experimental": True,
         # Soft-skip broken user rows on convert so one bad row does not abort Change-DB.
-        "skip_bad_user_rows": bool(params.get("skip_bad_user_rows", True)),
+        "skip_bad_user_rows": True if stronger else bool(params.get("skip_bad_user_rows", True)),
+        "stronger_heal": stronger,
     }
 
     ensure_panel_idle()
@@ -1547,6 +1595,63 @@ async def _run_restore(job: MigrationJob, params: dict, analysis: dict) -> None:
         job.log(f"ERROR: {explain.get('detail') or e}")
         job.log(traceback.format_exc())
         job.result = {"error": str(e), "error_explain": explain}
+
+
+# Large mysqldump / pg_dump imports can run for hours on busy panels.
+DUMP_IMPORT_TIMEOUT_SEC = 4 * 3600
+DUMP_IMPORT_HEARTBEAT_SEC = 60
+
+
+async def _communicate_with_timeout(
+    job: MigrationJob,
+    proc: asyncio.subprocess.Process,
+    *,
+    timeout: int = DUMP_IMPORT_TIMEOUT_SEC,
+    heartbeat_sec: int = DUMP_IMPORT_HEARTBEAT_SEC,
+    label: str = "dump import",
+    stdin_data: bytes | None = None,
+) -> tuple[int, str]:
+    """Wait for subprocess with heartbeat logs; kill on timeout."""
+    import os
+    import signal
+    import time
+
+    started = time.monotonic()
+
+    async def _wait() -> tuple[bytes, bytes | None]:
+        return await proc.communicate(input=stdin_data)
+
+    task = asyncio.create_task(_wait())
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=heartbeat_sec)
+            if done:
+                out_b, _err = task.result()
+                return int(proc.returncode or 0), (out_b or b"").decode(
+                    "utf-8", errors="replace"
+                )
+            elapsed = int(time.monotonic() - started)
+            if elapsed >= timeout:
+                break
+            job.log(f"{label} still running… {elapsed}s / {timeout}s")
+        # Timed out
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        try:
+            await asyncio.wait_for(task, timeout=5)
+        except Exception:
+            pass
+        job.log(f"{label} timed out after {timeout}s — killed")
+        return -1, f"{label} timed out after {timeout}s — killed"
+    except Exception:
+        if not task.done():
+            task.cancel()
+        raise
 
 
 async def _run(
@@ -1892,6 +1997,32 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
     await _compose(job, "stop", *stop_svcs, timeout=120)
     data_dir = Path("/var/lib/postgresql/pasarguard")
     if wipe_data and data_dir.exists():
+        # Best-effort logical snapshot before irreversible volume wipe so a
+        # failed restore after align can still point operators at a dump.
+        try:
+            from app.config import BACKUP_DIR
+            from datetime import datetime, timezone
+
+            BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            snap = BACKUP_DIR / f"ts-prewipe-{getattr(job, 'job_id', 'job')}-{stamp}.tgz"
+            # Tar the data dir while container is stopped (files consistent enough).
+            proc = await asyncio.create_subprocess_exec(
+                "tar", "-czf", str(snap), "-C", str(data_dir.parent), data_dir.name,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out_b, _ = await proc.communicate()
+            if proc.returncode == 0 and snap.exists() and snap.stat().st_size > 64:
+                job.log(f"Pre-wipe Timescale volume snapshot → {snap}")
+                job._ts_prewipe_snapshot = str(snap)
+            else:
+                job.log(
+                    "Pre-wipe Timescale snapshot skipped: "
+                    + ((out_b or b"")[-200:]).decode("utf-8", errors="ignore")
+                )
+        except Exception as snap_exc:
+            job.log(f"Pre-wipe Timescale snapshot note: {snap_exc}")
         job.log(f"Resetting DB data directory {data_dir} for version alignment")
         shutil.rmtree(data_dir, ignore_errors=True)
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -2095,6 +2226,40 @@ def disk_free_bytes(path: str | Path) -> int:
 
 # Docker image pulls for Timescale layers routinely need multiple GB free.
 _TS_PULL_MIN_FREE_BYTES = 3 * 1024 * 1024 * 1024
+
+
+def assert_convert_prerequisites(
+    *,
+    backup_db: str,
+    target_db: str,
+    install_pwd: str,
+    env_text: str | None = None,
+) -> None:
+    """Fail fast before sqlite→server / cross-DB convert with actionable tips."""
+    if target_db == "sqlite":
+        return
+    if not (install_pwd or "").strip():
+        if (backup_db or "").lower() == "sqlite":
+            raise RuntimeError(
+                f"Cannot convert sqlite → {target_db}: install database password "
+                "is missing (POSTGRES_PASSWORD / MYSQL_ROOT_PASSWORD / DB_PASSWORD). "
+                "Set the install secret in /opt/pasarguard/.env and retry — "
+                "sqlite backups have no server password."
+            )
+        raise RuntimeError(
+            f"Cannot convert {backup_db} → {target_db}: no install/target "
+            "database password resolved. Align .env secrets with the live container."
+        )
+    # Soft hint only — container start happens next; empty URL is a common footgun.
+    if env_text and target_db in ("postgresql", "timescaledb"):
+        from app.services.env_migration import read_env_var as _rev
+
+        url = (_rev(env_text, "SQLALCHEMY_DATABASE_URL") or "").lower()
+        if url and "sqlite" in url:
+            raise RuntimeError(
+                f"Install .env still points SQLALCHEMY_DATABASE_URL at sqlite while "
+                f"converting to {target_db}. Fix the install URL/engine before convert."
+            )
 
 
 def atomic_write_text(path: Path, content: str) -> None:
@@ -3019,6 +3184,12 @@ async def _maybe_cross_db_after_restore(
             or install_server_password(install_env_snapshot, target_db)
             or ""
         )
+        assert_convert_prerequisites(
+            backup_db=backup_db,
+            target_db=target_db,
+            install_pwd=install_pwd,
+            env_text=env_text or install_env_snapshot,
+        )
         if backup_db == "sqlite":
             job.log(
                 f"Source is sqlite (no DB password) — authenticating {target_db} "
@@ -3106,9 +3277,12 @@ async def _maybe_cross_db_after_restore(
             }
 
         mig_params["_auto_db_credentials"] = True
-        # Restore convert must not soft-skip incomplete users/templates —
+        # Restore convert normally must not soft-skip incomplete users/templates —
         # partial copy after DROP SCHEMA leaves an empty/broken panel.
-        mig_params["skip_bad_user_rows"] = False
+        # stronger_heal (explicit retry) allows skip-bad + aggressive usage shrink.
+        stronger = bool(params.get("stronger_heal"))
+        mig_params["skip_bad_user_rows"] = bool(stronger)
+        mig_params["stronger_heal"] = stronger
         mini = _Mini(job, mig_params)
         try:
             await run_cross_db_migration(mini, path, backup_db, target_db)
@@ -3121,8 +3295,8 @@ async def _maybe_cross_db_after_restore(
             ):
                 raise
             job.log(
-                "Convert hit DB auth/SASL failure — auto-healing credentials "
-                "and retrying convert once..."
+                "Convert hit database authentication failure — auto-healing "
+                "credentials and retrying convert once..."
             )
             mig_params["_auth_healed_once"] = True
             heal_env = install_auth_env_for_convert(
@@ -3171,7 +3345,8 @@ async def _maybe_cross_db_after_restore(
             mig_params = migration_params_from_connection(backup_db, target_db, admin)
             mig_params["_auto_db_credentials"] = True
             mig_params["_auth_healed_once"] = True
-            mig_params["skip_bad_user_rows"] = False
+            mig_params["skip_bad_user_rows"] = bool(stronger)
+            mig_params["stronger_heal"] = stronger
             mini = _Mini(job, mig_params)
             await run_cross_db_migration(mini, path, backup_db, target_db)
         stats = getattr(mini, "copy_stats", None) or {}
@@ -3251,22 +3426,34 @@ def _rollback_env_after_failed_convert(
 
 
 def explain_restore_error(exc: Exception, backup_db: str | None = None, target_db: str | None = None) -> dict:
-    """Human-readable multilingual restore/convert error."""
+    """Human-readable multilingual restore/convert error (engine-accurate causes only)."""
     raw = str(exc) or exc.__class__.__name__
     low = raw.lower()
     fa = "ریستور یا تبدیل دیتابیس ناموفق بود."
     en = "Restore or database conversion failed."
     ru = "Восстановление или конвертация БД не удалась."
     causes_fa: list[str] = []
+    causes_en: list[str] = []
+
+    def _causes(fa_list: list[str], en_list: list[str] | None = None) -> None:
+        nonlocal causes_fa, causes_en
+        causes_fa = fa_list
+        causes_en = en_list or fa_list
 
     if "missing 1 required positional argument" in low or "source_path" in low:
         fa = "خطای داخلی تبدیل دیتابیس (پارامتر مسیر منبع)."
         en = "Internal DB conversion error (source path)."
-        causes_fa = ["نسخه ویزارد قدیمی بود — آپدیت کنید و دوباره ریستور کنید."]
+        _causes(
+            ["ویزارد را به آخرین نسخه آپدیت کنید و دوباره ریستور کنید."],
+            ["Update the wizard to the latest version and retry restore."],
+        )
     elif "unsupported cross-db" in low:
         fa = f"تبدیل {backup_db} به {target_db} پشتیبانی نمی‌شود."
         en = f"Conversion {backup_db} → {target_db} is not supported."
-        causes_fa = ["این ترکیب موتور دیتابیس قابل تبدیل خودکار نیست."]
+        _causes(
+            ["این ترکیب موتور دیتابیس قابل تبدیل خودکار نیست."],
+            ["This database engine combination cannot be auto-converted."],
+        )
     elif is_auth_failure_text(raw) or ("password" in low and "auth" in low) or "authentication failed" in low:
         tgt = (target_db or "").lower()
         bak = (backup_db or "").lower()
@@ -3278,107 +3465,161 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
             or (not tgt and ("mysql" in low or "mariadb" in low))
         )
         if mysqlish:
-            # MySQL/MariaDB never uses SASL — keep the title engine-accurate.
-            fa = "احراز هویت MySQL/MariaDB شکست خورد (رمز اشتباه / Access denied)."
-            en = "MySQL/MariaDB authentication failed (wrong password / Access denied)."
+            fa = "احراز هویت MySQL/MariaDB شکست خورد (Access denied)."
+            en = "MySQL/MariaDB authentication failed (Access denied)."
+            ru = "Ошибка аутентификации MySQL/MariaDB (Access denied)."
             if bak == "sqlite":
-                causes_fa = [
-                    "بکاپ sqlite پسورد ندارد — ویزارد فقط از رمز نصب MySQL/MariaDB استفاده می‌کند",
-                    "رمز MYSQL_ROOT_PASSWORD / DB_PASSWORD در .env نصب باید با کانتینر زنده یکی باشد",
-                    "کانتینر MariaDB ممکن است فقط باینری mariadb داشته باشد — ویزارد هر دو کلاینت را امتحان می‌کند",
-                ]
-            elif bak in ("postgresql", "timescaledb"):
-                causes_fa = [
-                    f"بکاپ={bak} → نصب={tgt or 'mysql/mariadb'}: رمز نصب MySQL/MariaDB را نگه دارید",
-                    "رمز MYSQL_ROOT_PASSWORD / DB_PASSWORD در .env نصب با رمز واقعی کانتینر یکی نیست",
-                    "بعد از تبدیل از Timescale/Postgres، ویزارد از رمز نصب (نه رمز بکاپ Postgres) استفاده می‌کند",
-                ]
+                _causes(
+                    [
+                        "بکاپ sqlite رمز ندارد — ویزارد فقط از رمز نصب MySQL/MariaDB استفاده می‌کند",
+                        "MYSQL_ROOT_PASSWORD / DB_PASSWORD نصب باید با کانتینر یکی باشد (ویزارد heal می‌کند)",
+                    ],
+                    [
+                        "SQLite backups have no DB password — wizard uses install MySQL/MariaDB secrets only",
+                        "Install MYSQL_ROOT_PASSWORD / DB_PASSWORD must match the live container (wizard auto-heals)",
+                    ],
+                )
             elif bak in ("mysql", "mariadb"):
-                # Same-engine / soft-family: connection must use LIVE install secrets.
-                causes_fa = [
-                    "رمز MYSQL_ROOT_PASSWORD / DB_PASSWORD در .env نصب با رمز واقعی کانتینر MySQL/MariaDB یکی نیست",
-                    "ویزارد قبل از ایمپورت، رمز نصب را خودکار روی کانتینر heal می‌کند (skip-grant در صورت قفل بودن root)",
-                    "گزینه‌های قبل از ریستور (غیرفعال‌کردن نودها / رد کاربران خراب / سبک‌کردن بکاپ) حفظ می‌شوند",
-                ]
+                _causes(
+                    [
+                        "رمز نصب با volume کانتینر یکی نبود — ویزارد pre-heal و در صورت نیاز skip-grant می‌زند",
+                        "اگر باز هم خطا بود، MYSQL_ROOT_PASSWORD را در .env نصب با رمز واقعی کانتینر یکی کنید",
+                    ],
+                    [
+                        "Install password did not match the container volume — wizard pre-heals (skip-grant if needed)",
+                        "If it still fails, align MYSQL_ROOT_PASSWORD in the install .env with the live container",
+                    ],
+                )
             else:
-                causes_fa = [
-                    "رمز MYSQL_ROOT_PASSWORD / DB_PASSWORD در .env نصب با رمز واقعی کانتینر MySQL/MariaDB یکی نیست",
-                    "کانتینر MariaDB ممکن است فقط باینری mariadb داشته باشد — ویزارد هر دو کلاینت را امتحان می‌کند",
-                    "ویزارد ابتدا رمز نصب را برای ورود امتحان می‌کند و در قفل‌شدن root، skip-grant recovery می‌زند",
-                ]
+                _causes(
+                    [
+                        "برای تبدیل به MySQL/MariaDB فقط رمز نصب مقصد استفاده می‌شود (نه رمز بکاپ مبدأ)",
+                        "MYSQL_ROOT_PASSWORD / DB_PASSWORD نصب را با کانتینر هم‌تراز کنید و دوباره تلاش کنید",
+                    ],
+                    [
+                        "Cross-DB into MySQL/MariaDB uses the install target password only (not the source backup secret)",
+                        "Align install MYSQL_ROOT_PASSWORD / DB_PASSWORD with the container and retry",
+                    ],
+                )
         elif tgt in ("postgresql", "timescaledb") or (
             bak in ("postgresql", "timescaledb") and tgt not in ("mysql", "mariadb")
         ):
-            fa = "احراز هویت دیتابیس شکست خورد (پسورد/SASL)."
-            en = "Database authentication failed (password/SASL)."
+            fa = "احراز هویت PostgreSQL/TimescaleDB شکست خورد."
+            en = "PostgreSQL/TimescaleDB authentication failed."
+            ru = "Ошибка аутентификации PostgreSQL/TimescaleDB."
             if bak == "sqlite":
-                causes_fa = [
-                    "اول PGClockMG را به آخرین نسخه آپدیت کنید (هدر UI باید v4.6.14+ باشد)",
-                    "بکاپ sqlite پسورد ندارد — ویزارد فقط رمز نصب Timescale را خودکار روی کانتینر می‌نشاند",
-                    "اگر پورت 5432 پابلیش نیست، ویزارد از SCRAM داخل کانتینر (eth0) رمز را اثبات و heal می‌کند",
-                ]
+                _causes(
+                    [
+                        "بکاپ sqlite رمز ندارد — ویزارد رمز نصب Timescale/Postgres را روی کانتینر heal می‌کند",
+                        "اگر PgBouncer روشن است، بعد از heal باید recreate شود (ویزارد انجام می‌دهد)",
+                    ],
+                    [
+                        "SQLite backups have no password — wizard heals install Timescale/Postgres roles on the container",
+                        "With PgBouncer enabled, it must be recreated after role heal (wizard does this)",
+                    ],
+                )
             else:
-                causes_fa = [
-                    "رمز POSTGRES_PASSWORD در .env با رمز واقعی کانتینر TimescaleDB/PostgreSQL یکی نیست",
-                    "PgBouncer کش قدیمی دارد — ویزارد نقش‌ها را هم‌تراز و pgbouncer را ریستارت می‌کند",
-                    "بعد از ریستور postgres، globals.sql ممکن است نقش‌ها را با رمز بکاپ برگرداند",
-                ]
+                _causes(
+                    [
+                        "POSTGRES_PASSWORD نصب/بکاپ با نقش‌های زنده یکی نیست",
+                        "PgBouncer ممکن است کش قدیمی داشته باشد — ویزارد نقش‌ها را هم‌تراز و سرویس را recreate می‌کند",
+                    ],
+                    [
+                        "Install/backup POSTGRES_PASSWORD does not match live roles",
+                        "PgBouncer may hold a stale auth cache — wizard realigns roles and recreates it",
+                    ],
+                )
         else:
-            fa = "احراز هویت دیتابیس شکست خورد (پسورد/SASL)."
-            en = "Database authentication failed (password/SASL)."
-            causes_fa = [
-                "رمز دیتابیس در .env با رمز واقعی کانتینر یکی نیست",
-                "بعد از ریستور/تبدیل، نقش‌ها ممکن است با رمز دیگری هم‌خوان شده باشند",
-                "لاگ کامل کانتینر دیتابیس را برای جزئیات auth ببینید",
-            ]
+            fa = "احراز هویت دیتابیس شکست خورد."
+            en = "Database authentication failed."
+            _causes(
+                ["رمز دیتابیس در .env با کانتینر یکی نیست — ویزارد تلاش به heal می‌کند"],
+                ["Database password in .env does not match the container — wizard attempts auto-heal"],
+            )
     elif "character varying(32)" in low or "stringdatarighttruncation" in low:
         fa = "خطای ثبت نسخه alembic بعد از کپی داده (نسخه نامعتبر)."
         en = "Alembic version stamp failed after data copy (invalid revision string)."
-        causes_fa = [
-            "خروجی docker compose با نسخه alembic قاطی شده بود — در v2.3.5+ اصلاح شد",
-            "اسکیمای target قبلاً با alembic upgrade head ساخته شده و دیگر نیاز به stamp دستی نیست",
-        ]
+        _causes(
+            [
+                "خروجی docker compose با نسخه alembic قاطی شده بود — در v2.3.5+ اصلاح شد",
+                "اسکیمای target قبلاً با alembic upgrade head ساخته شده و دیگر نیاز به stamp دستی نیست",
+            ],
+            [
+                "docker compose output was mixed into the alembic revision — fixed in v2.3.5+",
+                "Target schema is already created via alembic upgrade head; manual stamp is not needed",
+            ],
+        )
     elif "no space left" in low or "enospc" in low or "errno 28" in low:
         fa = "فضای دیسک سرور پر است (دانلود ایمیج Timescale یا نوشتن فایل شکست خورد)."
         en = "Server disk is full (Timescale image pull or file write failed)."
         ru = "На диске сервера закончилось место (pull образа Timescale / запись файла)."
-        causes_fa = [
-            "لاگ docker: no space left on device — ایمیج Timescale چند گیگابایت فضا می‌خواهد",
-            "دیسک را آزاد کنید (docker image prune / لاگ‌ها) و دوباره ریستور کنید",
-            "ویزارد جدید بدون pull، حالت restoring را اضطراری خاموش می‌کند تا پنل بالا بیاید",
-        ]
+        _causes(
+            [
+                "لاگ docker: no space left on device — ایمیج Timescale چند گیگابایت فضا می‌خواهد",
+                "دیسک را آزاد کنید (docker image prune / لاگ‌ها) و دوباره ریستور کنید",
+                "ویزارد جدید بدون pull، حالت restoring را اضطراری خاموش می‌کند تا پنل بالا بیاید",
+            ],
+            [
+                "Docker log: no space left on device — Timescale images need several GB free",
+                "Free disk (docker image prune / logs) and retry restore",
+                "Newer wizard clears Timescale restoring mode even when pull fails so the panel can start",
+            ],
+        )
     elif "empty compose file" in low:
         fa = "فایل docker-compose.yml خالی یا خراب شده است."
         en = "docker-compose.yml is empty or unusable."
         ru = "Файл docker-compose.yml пуст или повреждён."
-        causes_fa = [
-            "پر شدن دیسک هنگام تغییر تگ ایمیج ممکن است compose را خراب کند — از .yml.pgclockmg.bak برگردانید",
-            "ویزارد جدید compose را atomic می‌نویسد و در ENOSPC برمی‌گرداند",
-        ]
+        _causes(
+            [
+                "پر شدن دیسک هنگام تغییر تگ ایمیج ممکن است compose را خراب کند — از .yml.pgclockmg.bak برگردانید",
+                "ویزارد جدید compose را atomic می‌نویسد و در ENOSPC برمی‌گرداند",
+            ],
+            [
+                "Disk full while rewriting the image tag can corrupt compose — restore from .yml.pgclockmg.bak",
+                "Newer wizard writes compose atomically and rolls back on ENOSPC",
+            ],
+        )
     elif "catalog version mismatch" in low and "timescale" in low:
         fa = "نسخه کاتالوگ TimescaleDB بکاپ با ایمیج در حال اجرا یکی نیست (post_restore)."
         en = "TimescaleDB catalog version in the dump does not match the running image (post_restore)."
         ru = "Версия каталога TimescaleDB в дампе не совпадает с образом (post_restore)."
-        causes_fa = [
-            "بکاپ multi ممکن است متادیتای 2.27 و 2.28 داشته باشد — ایمیج باید با کاتالوگ دامپ هم‌تراز شود",
-            "ویزارد ایمیج را بدون پاک کردن دیتا هم‌تراز می‌کند و دوباره post_restore می‌زند",
-            "اگر باز هم خطا بود، نسخه timescaledb در docker-compose.yml را با نسخه بکاپ یکی کنید",
-        ]
+        _causes(
+            [
+                "بکاپ multi ممکن است متادیتای 2.27 و 2.28 داشته باشد — ایمیج باید با کاتالوگ دامپ هم‌تراز شود",
+                "ویزارد ایمیج را بدون پاک کردن دیتا هم‌تراز می‌کند و دوباره post_restore می‌زند",
+                "اگر باز هم پیام خطا بود، نسخه timescaledb در docker-compose.yml را با نسخه بکاپ یکی کنید",
+            ],
+            [
+                "Multi backups may mix 2.27/2.28 catalog metadata — image must match the dump catalog",
+                "Wizard realigns the image without wiping data and retries post_restore",
+                "If it still fails, pin timescaledb in docker-compose.yml to the backup version",
+            ],
+        )
     elif "restoring=on" in low or "timescaledb_post_restore" in low or (
         "timescaledb.restoring" in low and "still on" in low
     ):
         fa = "TimescaleDB در حالت ریستور گیر کرده و post_restore موفق نشد."
         en = "TimescaleDB is stuck in restore mode and post_restore failed."
         ru = "TimescaleDB застрял в режиме restore и post_restore не удался."
-        causes_fa = [
-            "نقش واقعی سوپریوزر کانتینر معمولاً POSTGRES_USER / DB_USER است — نقش postgres ممکن است اصلاً وجود نداشته باشد",
-            "گاهی timescaledb_post_restore به‌خاطر catalog version mismatch خطا می‌دهد — ویزارد ایمیج را هم‌تراز و در نهایت GUC را اضطراری خاموش می‌کند",
-            "اگر دوباره خطا شد، لاگ را برای catalog version mismatch / Tried roles / Database: ببینید",
-        ]
+        _causes(
+            [
+                "نقش واقعی سوپریوزر کانتینر معمولاً POSTGRES_USER / DB_USER است — نقش postgres ممکن است اصلاً وجود نداشته باشد",
+                "گاهی timescaledb_post_restore به‌خاطر catalog version mismatch خطا می‌دهد — ویزارد ایمیج را هم‌تراز و در نهایت GUC را اضطراری خاموش می‌کند",
+                "اگر دوباره خطا شد، لاگ را برای catalog version mismatch / Tried roles / Database: ببینید",
+            ],
+            [
+                "Container superuser is usually POSTGRES_USER / DB_USER — role postgres may not exist",
+                "post_restore can fail on catalog mismatch — wizard realigns the image then force-clears the GUC",
+                "If it persists, check logs for catalog version mismatch / Tried roles / Database:",
+            ],
+        )
     elif "timescale" in low and "version" in low:
         fa = "نسخه TimescaleDB بکاپ با سرور هم‌خوان نیست."
         en = "TimescaleDB version mismatch between backup and server."
-        causes_fa = ["ویزارد معمولاً ایمیج را هم‌تراز می‌کند — دوباره تلاش کنید یا لاگ کامل را ببینید."]
+        _causes(
+            ["ویزارد معمولاً ایمیج را هم‌تراز می‌کند — دوباره تلاش کنید یا لاگ کامل را ببینید."],
+            ["Wizard usually realigns the image — retry or inspect the full log."],
+        )
     elif is_ts_catalog_mismatch_error(raw) or (
         "schema_name" in low and "chunk" in low and "does not exist" in low
     ):
@@ -3393,17 +3634,31 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
                 f"the installed extension is older."
             )
             ru = f"Каталог бэкапа требует TimescaleDB {needs_ver} или новее — установленная версия старее."
-            causes_fa = [
-                f"نسخه TimescaleDB سرور از بکاپ قدیمی‌تر است — ایمیج باید روی {pin} پین شود",
-                "ویزارد جدید این حالت را قبل از ریستور تشخیص می‌دهد و ایمیج را هم‌تراز می‌کند — آپدیت کنید و دوباره ریستور کنید",
-                f"دستی: در docker-compose.yml ایمیج timescaledb را روی {pin}-pgXX بگذارید، volume را پاک کنید و ریستور را تکرار کنید",
-            ]
+            _causes(
+                [
+                    f"نسخه TimescaleDB سرور از بکاپ قدیمی‌تر است — ایمیج باید روی {pin} پین شود",
+                    "ویزارد جدید این حالت را قبل از ریستور تشخیص می‌دهد و ایمیج را هم‌تراز می‌کند — آپدیت کنید و دوباره ریستور کنید",
+                    f"دستی: در docker-compose.yml ایمیج timescaledb را روی {pin}-pgXX بگذارید، volume را پاک کنید و ریستور را تکرار کنید",
+                ],
+                [
+                    f"Server TimescaleDB is older than the backup — pin the image to {pin}",
+                    "Newer wizard detects this before restore and realigns the image — update and retry",
+                    f"Manual: set timescaledb image to {pin}-pgXX in docker-compose.yml, wipe volume, restore again",
+                ],
+            )
         else:
-            causes_fa = [
-                f"از TimescaleDB 2.29 ستون schema_name از جدول chunk حذف شده — بکاپ‌های قدیمی نیاز به ایمیج {TS_LAST_SCHEMA_NAME_CHUNK} دارند",
-                "ویزارد در نسخه جدید اثر انگشت دامپ را تشخیص می‌دهد و ایمیج را قبل از ریستور هم‌تراز می‌کند — آپدیت کنید و دوباره ریستور کنید",
-                "اگر هنوز خطا می‌دهد، در docker-compose.yml ایمیج timescaledb را دستی روی 2.28.3-pgXX بگذارید و volume را پاک کنید",
-            ]
+            _causes(
+                [
+                    f"از TimescaleDB 2.29 ستون schema_name از جدول chunk حذف شده — بکاپ‌های قدیمی نیاز به ایمیج {TS_LAST_SCHEMA_NAME_CHUNK} دارند",
+                    "ویزارد در نسخه جدید اثر انگشت دامپ را تشخیص می‌دهد و ایمیج را قبل از ریستور هم‌تراز می‌کند — آپدیت کنید و دوباره ریستور کنید",
+                    "اگر هنوز خطا می‌دهد، در docker-compose.yml ایمیج timescaledb را دستی روی 2.28.3-pgXX بگذارید و volume را پاک کنید",
+                ],
+                [
+                    f"TimescaleDB 2.29 dropped chunk.schema_name — older dumps need image {TS_LAST_SCHEMA_NAME_CHUNK}",
+                    "Newer wizard fingerprints the dump and realigns the image before restore — update and retry",
+                    "If it still fails, pin timescaledb to 2.28.3-pgXX in docker-compose.yml and wipe the volume",
+                ],
+            )
     elif (
         "certificate files were not restored" in low
         or "certs restore failed" in low
@@ -3411,60 +3666,109 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
     ):
         fa = "گواهی SSL بکاپ به /var/lib/pasarguard/certs منتقل نشد یا در .env مپ نشد."
         en = "Backup SSL certs were not restored/mapped under /var/lib/pasarguard/certs."
-        causes_fa = [
-            "پوشه certs باید داخل زیپ بکاپ باشد (نه فقط مسیر در .env)",
-            "در v2.4.0+ certs به /var/lib/pasarguard/certs کپی و UVICORN_SSL_* روی همان مسیر مپ می‌شود",
-            "اگر بکاپ بدون certs گرفته شده، دوباره با certs بکاپ بگیرید یا پنل را بدون SSL نصب کنید",
-        ]
+        _causes(
+            [
+                "پوشه certs باید داخل زیپ بکاپ باشد (نه فقط مسیر در .env)",
+                "در v2.4.0+ certs به /var/lib/pasarguard/certs کپی و UVICORN_SSL_* روی همان مسیر مپ می‌شود",
+                "اگر بکاپ بدون certs گرفته شده، دوباره با certs بکاپ بگیرید یا پنل را بدون SSL نصب کنید",
+            ],
+            [
+                "The backup zip must include the certs folder (not only paths in .env)",
+                "v2.4.0+ copies certs to /var/lib/pasarguard/certs and maps UVICORN_SSL_* there",
+                "If the backup has no certs, re-backup with certs or install the panel without SSL",
+            ],
+        )
     elif "dict can not be used as parameter" in low or "dict cannot be used as parameter" in low:
         fa = "مقدار JSON از Postgres به‌صورت dict به MariaDB/MySQL پاس شد."
         en = "PostgreSQL JSON/JSONB dict was passed raw to MySQL/MariaDB (invalid bind param)."
-        causes_fa = [
-            "ستون‌های permissions / proxy_settings / config باید قبل از insert به JSON string تبدیل شوند",
-            "در v2.8.10+ همه dict/list برای MySQL serialize می‌شوند — آپدیت و دوباره ریستور کنید",
-        ]
+        _causes(
+            [
+                "ستون‌های permissions / proxy_settings / config باید قبل از insert به JSON string تبدیل شوند",
+                "در v2.8.10+ همه dict/list برای MySQL serialize می‌شوند — آپدیت و دوباره ریستور کنید",
+            ],
+            [
+                "permissions / proxy_settings / config columns must be JSON strings before insert",
+                "v2.8.10+ serializes all dict/list values for MySQL — update and retry",
+            ],
+        )
     elif "incorrect datetime value" in low or "1292" in low:
         fa = "فرمت تاریخ/زمان Postgres با ستون DATETIME در MySQL/MariaDB سازگار نبود."
         en = "PostgreSQL timestamptz value is incompatible with MySQL/MariaDB DATETIME."
-        causes_fa = [
-            "مقادیر با پسوند +00:00 باید بدون timezone نوشته شوند — در v2.8.9+ اصلاح شد",
-            "آپدیت ویزارد و دوباره ریستور/تبدیل کنید",
-        ]
+        _causes(
+            [
+                "مقادیر با پسوند +00:00 باید بدون timezone نوشته شوند — در v2.8.9+ اصلاح شد",
+                "آپدیت ویزارد و دوباره ریستور/تبدیل کنید",
+            ],
+            [
+                "Values with +00:00 must be written without timezone — fixed in v2.8.9+",
+                "Update the wizard and retry restore/convert",
+            ],
+        )
     elif "migration incomplete" in low:
         fa = "بخشی از داده‌ها کپی نشد (کاربر/هاست/گروه/نود ناقص)."
         en = "Incomplete data copy (users/hosts/groups/nodes)."
-        causes_fa = [
-            "تبدیل باید ۱۰۰٪ باشد — در v2.3.9+ کپی ناقص fail می‌شود",
-            "لاگ Row skip را برای جدول مشکل‌دار ببینید",
-        ]
+        _causes(
+            [
+                "تبدیل باید ۱۰۰٪ باشد — در v2.3.9+ کپی ناقص fail می‌شود",
+                "لاگ Row skip را برای جدول مشکل‌دار ببینید",
+            ],
+            [
+                "Convert must be 100% — incomplete copies fail since v2.3.9+",
+                "Check Row skip logs for the failing table",
+            ],
+        )
     elif "restore verification failed" in low or "data incomplete" in low or "panel database is empty" in low:
         fa = "داده به موتور مقصد منتقل نشده (موفقیت کاذب قطع شد)."
         en = "Data was not transferred into the target database (false success blocked)."
-        causes_fa = [
-            "دامپ خالی/ناموفق بود یا بعد از ریستور حجم Timescale پاک شده بود — در v2.5.0 wipe بعد از ریستور حذف شد",
-            "verify اجباری: اگر بکاپ کاربر/هاست دارد، پنل خالی دیگر SUCCESS نمی‌شود",
-            "لاگ Verified / expected counts را ببینید",
-        ]
+        _causes(
+            [
+                "دامپ خالی/ناموفق بود یا بعد از ریستور حجم Timescale پاک شده بود — در v2.5.0 wipe بعد از ریستور حذف شد",
+                "verify اجباری: اگر بکاپ کاربر/هاست دارد، پنل خالی دیگر SUCCESS نمی‌شود",
+                "لاگ Verified / expected counts را ببینید",
+            ],
+            [
+                "Dump was empty/failed or Timescale volume was wiped after restore — post-restore wipe removed in v2.5.0",
+                "Hard verify: backups with users/hosts never report SUCCESS on an empty panel",
+                "Check Verified / expected counts in the log",
+            ],
+        )
     elif "pasarguard container is not running" in low:
         fa = "کانتینر PasarGuard بالا نیامد (ری‌استارت یا کرش)."
         en = "PasarGuard container is not running (crash/restart loop)."
-        causes_fa = [
-            "بعد از تبدیل، .env هنوز URL اشتباه (مثلاً sqlite) داشت — در v2.3.8+ از .env نصب حفظ می‌شود",
-            "multi-worker: NATS باید قبل از پنل بالا باشد و NATS_URL باید nats://nats:4222 باشد نه localhost",
-            "SSL نامعتبر یا خطای اتصال به PostgreSQL/PgBouncer — لاگ واقعی ValueError/asyncpg را ببینید",
-            "روی سرور: docker compose -f /opt/pasarguard/docker-compose.yml logs pasarguard --tail 80",
-        ]
+        _causes(
+            [
+                "بعد از تبدیل، .env هنوز URL اشتباه (مثلاً sqlite) داشت — در v2.3.8+ از .env نصب حفظ می‌شود",
+                "multi-worker: NATS باید قبل از پنل بالا باشد و NATS_URL باید nats://nats:4222 باشد نه localhost",
+                "SSL نامعتبر یا خطای اتصال به PostgreSQL/PgBouncer — لاگ واقعی ValueError/asyncpg را ببینید",
+                "روی سرور: docker compose -f /opt/pasarguard/docker-compose.yml logs pasarguard --tail 80",
+            ],
+            [
+                "After convert, .env still had a wrong URL (e.g. sqlite) — install .env is preserved since v2.3.8+",
+                "multi-worker: NATS must be up before the panel; NATS_URL must be nats://nats:4222 (not localhost)",
+                "Invalid SSL or PostgreSQL/PgBouncer connect errors — check real ValueError/asyncpg logs",
+                "On server: docker compose -f /opt/pasarguard/docker-compose.yml logs pasarguard --tail 80",
+            ],
+        )
     elif "application startup failed" in low:
         fa = "پنل بعد از ریستور در مرحله startup کرش کرد (Application startup failed)."
         en = "Panel crashed during application startup after restore."
         ru = "Панель упала на этапе application startup после restore."
-        causes_fa = [
-            "ویزارد v4.4.4+ قبل از boot پسورد DB را sync و PgBouncer/NATS را آماده می‌کند",
-            "multi-worker: NATS باید قبل از پنل بالا باشد و NATS_URL=nats://nats:4222",
-            "Timescale/PostgreSQL: mismatch پسورد .env با DB یا PgBouncer stale cache",
-            "SSL: فایل cert/key در /var/lib/pasarguard/certs موجود باشد",
-            "روی سرور: docker compose logs pasarguard --tail 200",
-        ]
+        _causes(
+            [
+                "ویزارد v4.4.4+ قبل از boot پسورد DB را sync و PgBouncer/NATS را آماده می‌کند",
+                "multi-worker: NATS باید قبل از پنل بالا باشد و NATS_URL=nats://nats:4222",
+                "Timescale/PostgreSQL: mismatch پسورد .env با DB یا PgBouncer stale cache",
+                "SSL: فایل cert/key در /var/lib/pasarguard/certs موجود باشد",
+                "روی سرور: docker compose logs pasarguard --tail 200",
+            ],
+            [
+                "Wizard v4.4.4+ syncs DB password and prepares PgBouncer/NATS before boot",
+                "multi-worker: NATS must be up first with NATS_URL=nats://nats:4222",
+                "Timescale/PostgreSQL: .env password mismatch or stale PgBouncer cache",
+                "SSL: cert/key must exist under /var/lib/pasarguard/certs",
+                "On server: docker compose logs pasarguard --tail 200",
+            ],
+        )
     elif "nats is required" in low or (
         "nats" in low and "multi-worker" in low
     ) or (
@@ -3472,11 +3776,18 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
     ):
         fa = "پنل multi-worker بدون NATS سالم بالا نیامد."
         en = "Multi-worker panel failed because NATS was not ready or NATS_URL was wrong."
-        causes_fa = [
-            "UVICORN_WORKERS>1 نیاز به NATS_ENABLED=1 و سرویس nats در compose دارد",
-            "NATS_URL داخل کانتینر باید nats://nats:4222 باشد — localhost کار نمی‌کند",
-            "ویزارد جدید NATS را قبل از پنل بالا می‌آورد؛ اگر باز خطا بود node-worker/scheduler را هم چک کنید",
-        ]
+        _causes(
+            [
+                "UVICORN_WORKERS>1 نیاز به NATS_ENABLED=1 و سرویس nats در compose دارد",
+                "NATS_URL داخل کانتینر باید nats://nats:4222 باشد — localhost کار نمی‌کند",
+                "ویزارد جدید NATS را قبل از پنل بالا می‌آورد؛ اگر باز خطا بود node-worker/scheduler را هم چک کنید",
+            ],
+            [
+                "UVICORN_WORKERS>1 needs NATS_ENABLED=1 and a nats service in compose",
+                "In-container NATS_URL must be nats://nats:4222 — localhost will not work",
+                "Newer wizard starts NATS before the panel; also check node-worker/scheduler if it still fails",
+            ],
+        )
     elif (
         "failed alembic upgrade head" in low
         or "failed to sync alembic" in low
@@ -3495,12 +3806,20 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         if phase1:
             fa = "آپدیت اسکیمای میانی SQLite با alembic شکست خورد (Phase 1)."
             en = "Intermediate SQLite schema upgrade via alembic failed (Phase 1)."
-            causes_fa = [
-                "اول PGClockMG را به v4.6.21+ آپدیت کنید "
-                "(URL اسکیوالایت دیگر با host/port پستگرس خراب نمی‌شود)",
-                "Compose warning (مثل PGADMIN_EMAIL) دیگر به‌عنوان container id استفاده نمی‌شود",
-                "اگر باز هم fail شد، لاگ ArgumentError / Invalid SQLite URL را ببینید",
-            ]
+            _causes(
+                [
+                    "اول PGClockMG را به v4.6.21+ آپدیت کنید "
+                    "(URL اسکیوالایت دیگر با host/port پستگرس خراب نمی‌شود)",
+                    "Compose warning (مثل PGADMIN_EMAIL) دیگر به‌عنوان container id استفاده نمی‌شود",
+                    "اگر باز هم fail شد، لاگ ArgumentError / Invalid SQLite URL را ببینید",
+                ],
+                [
+                    "Update PGClockMG to v4.6.21+ "
+                    "(SQLite URL is no longer corrupted with Postgres host/port)",
+                    "Compose warnings (e.g. PGADMIN_EMAIL) are no longer treated as container ids",
+                    "If it still fails, check ArgumentError / Invalid SQLite URL in the log",
+                ],
+            )
         elif (
             "unsupported operand" in low
             and "float" in low
@@ -3508,30 +3827,54 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         ) or ("typeerror" in low and "timeout" in low):
             fa = "اتصال alembic به Timescale به‌خاطر timeout رشته‌ای در URL شکست خورد."
             en = "Alembic→Timescale connect crashed: string timeout= in SQLAlchemy URL."
-            causes_fa = [
-                "اول PGClockMG را به v4.6.25+ آپدیت کنید "
-                "(timeout= از URL آلِمبیک حذف شد — asyncpg فقط float می‌پذیرد)",
-                "v4.6.24 به‌اشتباه timeout=20 را به‌صورت str در URL می‌گذاشت",
-                "hang همچنان با timeout بیرونی docker محدود می‌شود",
-            ]
+            _causes(
+                [
+                    "اول PGClockMG را به v4.6.25+ آپدیت کنید "
+                    "(timeout= از URL آلِمبیک حذف شد — asyncpg فقط float می‌پذیرد)",
+                    "v4.6.24 به‌اشتباه timeout=20 را به‌صورت str در URL می‌گذاشت",
+                    "hang همچنان با timeout بیرونی docker محدود می‌شود",
+                ],
+                [
+                    "Update PGClockMG to v4.6.25+ "
+                    "(timeout= removed from alembic URL — asyncpg accepts float only)",
+                    "v4.6.24 incorrectly put timeout=20 as a string in the URL",
+                    "Hangs are still bounded by the outer docker timeout",
+                ],
+            )
         elif "sslmode" in low or ("clientconfigurationerror" in low and "ssl" in low):
             fa = "ساخت اسکیمای مقصد با alembic شکست خورد (Phase 2)."
             en = "Target schema create via alembic upgrade head failed (Phase 2)."
-            causes_fa = [
-                "اول PGClockMG را به v4.6.22+ آپدیت کنید "
-                "(ssl=false دیگر به asyncpg پاس داده نمی‌شود — ssl=disable)",
-                "نسخهٔ قبلی URL را با ssl=false می‌ساخت و asyncpg آن را رد می‌کرد",
-                "اگر باز هم fail شد، لاگ auth/HBA را ببینید",
-            ]
+            _causes(
+                [
+                    "اول PGClockMG را به v4.6.22+ آپدیت کنید "
+                    "(ssl=false دیگر به asyncpg پاس داده نمی‌شود — ssl=disable)",
+                    "نسخهٔ قبلی URL را با ssl=false می‌ساخت و asyncpg آن را رد می‌کرد",
+                    "اگر باز هم fail شد، لاگ auth/HBA را ببینید",
+                ],
+                [
+                    "Update PGClockMG to v4.6.22+ "
+                    "(ssl=false is no longer passed to asyncpg — use ssl=disable)",
+                    "Older builds built URLs with ssl=false which asyncpg rejects",
+                    "If it still fails, check auth/HBA logs",
+                ],
+            )
         else:
             fa = "ساخت اسکیمای مقصد با alembic شکست خورد (Phase 2)."
             en = "Target schema create via alembic upgrade head failed (Phase 2)."
-            causes_fa = [
-                "اول PGClockMG را به v4.6.26+ آپدیت کنید "
-                "(ریستور پر از داده: skip-at-head / timeout بلند / بدون rotate وسط DDL)",
-                "v4.6.24 با timeout=180s روی CREATE INDEX بکاپ بزرگ kill+retry می‌کرد و ۹۳٪ گیر می‌کرد",
-                "اگر باز هم fail شد، لاگ را برای خطای اسکیما یا auth ببینید — نه فقط وسط Traceback",
-            ]
+            _causes(
+                [
+                    "اول PGClockMG را به v4.6.26+ آپدیت کنید "
+                    "(ریستور پر از داده: skip-at-head / timeout بلند / بدون rotate وسط DDL)",
+                    "v4.6.24 با timeout=180s روی CREATE INDEX بکاپ بزرگ kill+retry می‌کرد و ۹۳٪ گیر می‌کرد",
+                    "اگر باز هم fail شد، لاگ را برای خطای اسکیما یا auth ببینید — نه فقط وسط Traceback",
+                ],
+                [
+                    "Update PGClockMG to v4.6.26+ "
+                    "(large restores: skip-at-head / longer timeout / no rotate mid-DDL)",
+                    "v4.6.24 killed+retried CREATE INDEX at 180s on large backups and hung near 93%",
+                    "If it still fails, look for schema/auth errors — not only mid-Traceback noise",
+                ],
+            )
     elif "pasarguard failed to start" in low or "did not reach ready state" in low:
         fa = "پنل PasarGuard بعد از ریستور بالا نیامد."
         en = "PasarGuard panel did not start after restore."
@@ -3543,11 +3886,18 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         ):
             fa = "پنل بالا آمد ولی لاگ نود (controlled by another client) به‌اشتباه به‌عنوان خطای ریستور نشان داده شد."
             en = "Panel was up; node 'controlled by another client' log noise was mistaken for a restore failure."
-            causes_fa = [
-                "اول PGClockMG را به v4.6.27+ آپدیت کنید — این نویز دیگر ریستور را fail نمی‌کند",
-                "نود هنوز توسط پنل/کلاینت دیگری کنترل می‌شود (اینستنس قبلی / سرور دیگر / session باز)",
-                "پنل HTTP معمولاً سالم است؛ فقط یک کنترلر برای هر نود نگه دارید",
-            ]
+            _causes(
+                [
+                    "اول PGClockMG را به v4.6.27+ آپدیت کنید — این نویز دیگر ریستور را fail نمی‌کند",
+                    "نود هنوز توسط پنل/کلاینت دیگری کنترل می‌شود (اینستنس قبلی / سرور دیگر / session باز)",
+                    "پنل HTTP معمولاً سالم است؛ فقط یک کنترلر برای هر نود نگه دارید",
+                ],
+                [
+                    "Update PGClockMG to v4.6.27+ — this log noise no longer fails restore",
+                    "The node is still controlled by another panel/client (old instance / other server / open session)",
+                    "Panel HTTP is usually healthy; keep a single controller per node",
+                ],
+            )
         elif (
             "telegramconflicterror" in low
             or "getupdates" in low
@@ -3556,11 +3906,18 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         ):
             fa = "پنل بالا آمد ولی لاگ تلگرام (Conflict) به‌اشتباه به‌عنوان خطای ریستور نشان داده شد."
             en = "Panel was up; TelegramConflictError log noise was mistaken for a restore failure."
-            causes_fa = [
-                "اول PGClockMG را به v4.6.17+ آپدیت کنید — این نویز دیگر ریستور را fail نمی‌کند",
-                "چند instance همزمان با یک bot token getUpdates می‌زنند (سرور دیگر / webhook / چند worker)",
-                "پنل HTTP معمولاً سالم است؛ فقط ربات تلگرام را یک‌جا نگه دارید",
-            ]
+            _causes(
+                [
+                    "اول PGClockMG را به v4.6.17+ آپدیت کنید — این نویز دیگر ریستور را fail نمی‌کند",
+                    "چند instance همزمان با یک bot token getUpdates می‌زنند (سرور دیگر / webhook / چند worker)",
+                    "پنل HTTP معمولاً سالم است؛ فقط ربات تلگرام را یک‌جا نگه دارید",
+                ],
+                [
+                    "Update PGClockMG to v4.6.17+ — this log noise no longer fails restore",
+                    "Multiple instances poll getUpdates with the same bot token (other server / webhook / workers)",
+                    "Panel HTTP is usually healthy; keep the Telegram bot in one place only",
+                ],
+            )
         elif (
             "panel port" in low
             or "not accepting connections" in low
@@ -3569,19 +3926,35 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         ):
             fa = "پنل بالا آمد ولی health روی پورت host گیر کرد (مثلاً compose روی 2087:8000)."
             en = "Panel was up; health hung probing host UVICORN_PORT (e.g. compose 2087:8000)."
-            causes_fa = [
-                "اول PGClockMG را به v4.6.28+ آپدیت کنید — probe روی پورت publish‌شده / داخل کانتینر",
-                "v4.6.27 فقط 127.0.0.1:UVICORN_PORT را چک می‌کرد و وقتی map فرق داشت ۹۷٪ گیر می‌کرد",
-                "Application startup complete در لاگ یعنی پنل داخل compose بالاست",
-            ]
+            _causes(
+                [
+                    "اول PGClockMG را به v4.6.28+ آپدیت کنید — probe روی پورت publish‌شده / داخل کانتینر",
+                    "v4.6.27 فقط 127.0.0.1:UVICORN_PORT را چک می‌کرد و وقتی map فرق داشت ۹۷٪ گیر می‌کرد",
+                    "Application startup complete در لاگ یعنی پنل داخل compose بالاست",
+                ],
+                [
+                    "Update PGClockMG to v4.6.28+ — probe published / in-container ports",
+                    "v4.6.27 only checked 127.0.0.1:UVICORN_PORT and hung near 97% when the map differed",
+                    "Application startup complete in logs means the panel is up inside compose",
+                ],
+            )
         else:
-            causes_fa = [
-                "لاگ pasarguard/panel را ببینید (نه فقط اسپم Telegram / node-control)",
-                "multi-worker: NATS_URL و بالا بودن nats را چک کنید",
-                "ممکن است SSL یا SQLALCHEMY_DATABASE_URL اشتباه باشد",
-                "گیر ۹۷٪ روی port 8000: به v4.6.28+ آپدیت کنید",
-                "اگر فقط TelegramConflict یا node controlled by another client می‌بینید، به v4.6.27+ آپدیت کنید",
-            ]
+            _causes(
+                [
+                    "لاگ pasarguard/panel را ببینید (نه فقط اسپم Telegram / node-control)",
+                    "multi-worker: NATS_URL و بالا بودن nats را چک کنید",
+                    "ممکن است SSL یا SQLALCHEMY_DATABASE_URL اشتباه باشد",
+                    "گیر ۹۷٪ روی port 8000: به v4.6.28+ آپدیت کنید",
+                    "اگر فقط TelegramConflict یا node controlled by another client می‌بینید، به v4.6.27+ آپدیت کنید",
+                ],
+                [
+                    "Check pasarguard/panel logs (not only Telegram / node-control spam)",
+                    "multi-worker: verify NATS_URL and that nats is up",
+                    "SSL or SQLALCHEMY_DATABASE_URL may be wrong",
+                    "Stuck at 97% on port 8000: update to v4.6.28+",
+                    "If you only see TelegramConflict or node controlled-by-another-client, update to v4.6.27+",
+                ],
+            )
     elif (
         "appears stuck on the same revision" in low
         or "exceeded maximum wait" in low
@@ -3590,11 +3963,18 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
     ):
         fa = "Alembic روی revision سنگین گیر کرد (مثلاً refactor sub_updated_at)."
         en = "Alembic hung on a heavy revision (e.g. refactor sub_updated_at)."
-        causes_fa = [
-            "اول PGClockMG را به v4.6.29+ آپدیت کنید — e422 با bulk SQL خودکار heal می‌شود",
-            "v4.6.28 روی ORM ردیف‌به‌ردیف users گیر می‌کرد و به batch_alter نمی‌رسید",
-            "بعد از آپدیت همان مهاجرت/ریستور را دوباره بزنید",
-        ]
+        _causes(
+            [
+                "اول PGClockMG را به v4.6.29+ آپدیت کنید — e422 با bulk SQL خودکار heal می‌شود",
+                "v4.6.28 روی ORM ردیف‌به‌ردیف users گیر می‌کرد و به batch_alter نمی‌رسید",
+                "بعد از آپدیت همان مهاجرت/ریستور را دوباره بزنید",
+            ],
+            [
+                "Update PGClockMG to v4.6.29+ — e422 is auto-healed with bulk SQL",
+                "v4.6.28 hung on row-by-row ORM users updates before batch_alter",
+                "After updating, retry the same migrate/restore",
+            ],
+        )
     elif (
         "violates foreign key" in low
         or "foreign key constraint" in low
@@ -3604,40 +3984,77 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         fa = "دامپ بکاپ ردیف یتیم دارد (ارجاع به کاربر/نود حذف‌شده)."
         en = "Backup dump has orphan rows (references to deleted users/nodes)."
         ru = "В дампе есть осиротевшие строки (ссылки на удалённых пользователей/ноды)."
-        causes_fa = [
-            "مثلاً notification_reminders به user_idای اشاره می‌کند که در users نیست",
-            "ویزارد جدید این ردیف‌های یتیم را هنگام ریستور حذف می‌کند — دوباره تلاش کنید",
-            "دادهٔ اصلی کاربران/نودها دست‌نخورده می‌ماند؛ فقط یادآورها/لاگ‌های یتیم پاک می‌شوند",
-        ]
+        _causes(
+            [
+                "مثلاً notification_reminders به user_idای اشاره می‌کند که در users نیست",
+                "ویزارد جدید این ردیف‌های یتیم را هنگام ریستور حذف می‌کند — دوباره تلاش کنید",
+                "دادهٔ اصلی کاربران/نودها دست‌نخورده می‌ماند؛ فقط یادآورها/لاگ‌های یتیم پاک می‌شوند",
+            ],
+            [
+                "e.g. notification_reminders references a user_id missing from users",
+                "Newer wizard deletes these orphan rows during restore — retry",
+                "Core users/nodes stay intact; only orphan reminders/logs are removed",
+            ],
+        )
     elif "cannot stage" in low and ("timescaledb" in low or "postgresql" in low):
         fa = "دامپ Timescale/PostgreSQL برای تبدیل استیج نشد (سرویس مبدأ روی سرور نیست)."
         en = "Could not stage Timescale/PostgreSQL dump for conversion (source engine not running)."
-        causes_fa = [
-            "وقتی مقصد MySQL/MariaDB است، ویزارد باید دامپ را در کانتینر موقت Timescale لود کند",
-            "در v2.6.3+ استیج موقت برای timescaledb→mysql اضافه شد — آپدیت کنید و دوباره ریستور کنید",
-            "دسترسی Docker برای pull ایمیج timescale/timescaledb لازم است",
-        ]
+        _causes(
+            [
+                "وقتی مقصد MySQL/MariaDB است، ویزارد باید دامپ را در کانتینر موقت Timescale لود کند",
+                "در v2.6.3+ استیج موقت برای timescaledb→mysql اضافه شد — آپدیت کنید و دوباره ریستور کنید",
+                "دسترسی Docker برای pull ایمیج timescale/timescaledb لازم است",
+            ],
+            [
+                "When targeting MySQL/MariaDB, the wizard must load the dump into a temporary Timescale container",
+                "v2.6.3+ added ephemeral staging for timescaledb→mysql — update and retry",
+                "Docker access is required to pull timescale/timescaledb",
+            ],
+        )
     elif "no such file" in low or "missing" in low or "not found" in low:
         fa = "فایل دامپ یا دیتابیس منبع پیدا نشد."
         en = "Source dump/database file was not found."
-        causes_fa = ["بکاپ ناقص است", "مسیر /var/lib/pasarguard یا دامپ zip خراب است"]
+        _causes(
+            ["بکاپ ناقص است", "مسیر /var/lib/pasarguard یا دامپ zip خراب است"],
+            ["Backup is incomplete", "/var/lib/pasarguard path or the zip dump is corrupt"],
+        )
     elif "docker" in low or "compose" in low:
         fa = "مشکل در Docker / docker compose هنگام ریستور."
         en = "Docker / compose problem during restore."
-        causes_fa = ["سرویس Docker بالا نیست", "کانتینر دیتابیس استارت نمی‌شود"]
+        _causes(
+            ["سرویس Docker بالا نیست", "کانتینر دیتابیس استارت نمی‌شود"],
+            ["Docker service is not running", "Database container fails to start"],
+        )
     else:
-        causes_fa = ["جزئیات فنی در لاگ آمده است", f"پیام: {raw[:240]}"]
+        _causes(
+            ["جزئیات فنی در لاگ آمده است", f"پیام: {raw[:240]}"],
+            ["Technical details are in the log", f"Message: {raw[:240]}"],
+        )
 
     if backup_db and target_db and backup_db != target_db:
         fa += f" (بکاپ={backup_db} → نصب={target_db})"
         en += f" (backup={backup_db} → installed={target_db})"
 
+    if not causes_en and causes_fa:
+        causes_en = list(causes_fa)
+    # Prefer engine-accurate summary in detail when auth tips already explain it —
+    # avoid surfacing bare SASL/SCRAM strings as the "technical" line.
+    detail = raw
+    if causes_fa and (
+        "sasl" in low
+        or "scram" in low
+        or "authentication failed" in low
+        or "access denied" in low
+    ):
+        detail = f"{en}\n{raw[:400]}"
     return {
         "en": en,
         "fa": fa,
         "ru": ru,
         "causes_fa": causes_fa,
-        "detail": raw,
+        "causes_en": causes_en,
+        "causes_ru": causes_en,
+        "detail": detail,
     }
 
 
@@ -3874,6 +4291,7 @@ async def _recover_hosts_if_missing(
     from app.services.marzban_preboot_heal import (
         orphan_casefold_match_sql,
         orphan_repoint_sql,
+        ORPHAN_CASEFOLD_SPECS,
         ORPHAN_REPOINT_SPECS,
     )
 
@@ -3965,11 +4383,12 @@ async def _recover_hosts_if_missing(
 
     # Append inbound_tag heal (belt-and-suspenders)
     heal_bits: list[str] = []
-    for child, child_col, parent, parent_col in ORPHAN_REPOINT_SPECS:
+    for child, child_col, parent, parent_col in (*ORPHAN_CASEFOLD_SPECS, *ORPHAN_REPOINT_SPECS):
         if child != "hosts":
             continue
         heal_bits.append(orphan_casefold_match_sql(child, child_col, parent, parent_col) + ";")
-        heal_bits.append(orphan_repoint_sql(child, child_col, parent, parent_col) + ";")
+        if (child, child_col, parent, parent_col) in ORPHAN_REPOINT_SPECS:
+            heal_bits.append(orphan_repoint_sql(child, child_col, parent, parent_col) + ";")
     if heal_bits:
         sql = sql.rstrip() + "\n" + "\n".join(heal_bits) + "\n"
 
@@ -4267,10 +4686,14 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
     job.set_progress(5, "Extracting backup...")
     # Honor wizard options chosen before restore starts.
     disable_nodes = bool(params.get("disable_nodes_after_restore"))
-    skip_bad = bool(params.get("skip_bad_user_rows", True))
+    stronger_heal = bool(params.get("stronger_heal"))
+    # Stronger heal retry always skips bad user rows.
+    skip_bad = True if stronger_heal else bool(params.get("skip_bad_user_rows", True))
+    params["skip_bad_user_rows"] = skip_bad
+    params["stronger_heal"] = stronger_heal
     job.log(
         f"Restore options: disable_nodes_after_restore={disable_nodes}, "
-        f"skip_bad_user_rows={skip_bad} "
+        f"skip_bad_user_rows={skip_bad}, stronger_heal={stronger_heal} "
         f"(passwords/versions heal automatically)"
     )
     work = Path(tempfile.mkdtemp(prefix="pg-restore-work-", dir=str(UPLOAD_DIR)))
@@ -4479,10 +4902,11 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                     job, root, restore_into or backup_db, current_env, backup_env,
                     dump=dump_path,
                 )
-                # Same-engine: force MySQL roles to backup password (written into .env next).
-                # Auth into the live container uses install secrets first (pre-heal left them
-                # matching), then applies the backup password for the final .env.
-                sync_pass = bak_db_pass or bak_mysql_root or ""
+                # One secret for root+app: backup preferred, else install.
+                sync_pass = (
+                    bak_mysql_root or bak_db_pass
+                    or cur_mysql_root or cur_db_pass or ""
+                )
                 svc = await _detect_db_container(job, restore_into or installed_db or backup_db)
                 if svc and sync_pass:
                     await _sync_mysql_passwords(
@@ -4515,8 +4939,8 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                     dump=dump_path,
                 )
                 svc = await _detect_db_container(job, restore_into or installed_db or backup_db)
-                # Same-engine: sync roles to BACKUP password (globals.sql restores old secrets)
-                sync_pass = bak_pg_pass or bak_db_pass or ""
+                # Backup preferred (globals may restore old roles); else install.
+                sync_pass = bak_pg_pass or bak_db_pass or cur_pg_pass or cur_db_pass or ""
                 if svc and sync_pass:
                     await _sync_pg_role_passwords(
                         job, svc, sync_pass,
@@ -4568,27 +4992,48 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         else:
             # Same / soft-family engine: put OLD (backup) DB password into the new .env
             # so panel auth matches roles restored from the dump.
-            same_pass = bak_db_pass or bak_pg_pass or bak_mysql_root or ""
-            same_root = bak_mysql_root or same_pass or ""
-            same_pg = bak_pg_pass or bak_db_pass or same_pass or ""
+            family_eng = (target_db or backup_db or "").lower()
+            if family_eng in ("mysql", "mariadb"):
+                # One secret for root + app after sync — prefer backup, else install.
+                same_pass = (
+                    bak_mysql_root or bak_db_pass
+                    or cur_mysql_root or cur_db_pass or ""
+                )
+                same_root = same_pass
+                same_pg = ""
+            elif family_eng in ("postgresql", "timescaledb"):
+                same_pass = (
+                    bak_pg_pass or bak_db_pass
+                    or cur_pg_pass or cur_db_pass or ""
+                )
+                same_root = ""
+                same_pg = same_pass
+            else:
+                same_pass = bak_db_pass or bak_pg_pass or bak_mysql_root or ""
+                same_root = bak_mysql_root or same_pass or ""
+                same_pg = bak_pg_pass or bak_db_pass or same_pass or ""
             if not same_pass and (backup_db or "") != "sqlite" and (target_db or "") != "sqlite":
                 raise RuntimeError(
-                    "Same-engine restore needs a database password in the backup .env "
-                    "(DB_PASSWORD / POSTGRES_PASSWORD / MYSQL_ROOT_PASSWORD)."
+                    "Same-engine restore needs a database password in the backup or "
+                    "install .env (DB_PASSWORD / POSTGRES_PASSWORD / MYSQL_ROOT_PASSWORD)."
                 )
+            used_install_fallback = not bool(
+                bak_db_pass or bak_pg_pass or bak_mysql_root
+            )
             preserve = {
                 "DB_PASSWORD": same_pass,
                 "DB_USER": bak_user or cur_user,
                 "DB_NAME": bak_name or cur_name,
             }
-            family_eng = (target_db or backup_db or "").lower()
             if family_eng in ("mysql", "mariadb"):
                 preserve["MYSQL_ROOT_PASSWORD"] = same_root
             elif family_eng in ("postgresql", "timescaledb"):
                 preserve["POSTGRES_PASSWORD"] = same_pg
             job.log(
-                "Same-engine restore: writing backup DB password into live .env "
-                "(avoids auth mismatch when dump/globals restored old roles)"
+                "Same-engine restore: writing "
+                + ("install" if used_install_fallback else "backup")
+                + " DB password into live .env "
+                "(keeps panel auth aligned with restored roles)"
             )
             # Keep install URL host/port layout but swap password to backup secret
             if cur_url and same_pass:
@@ -4970,6 +5415,7 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         access["copy_stats"] = copy_stats or verified
         access["copy_report"] = copy_report
         access["verified_counts"] = verified
+        access["transfer_summary"] = build_transfer_summary(verified or copy_stats)
         return access
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -5305,17 +5751,18 @@ async def _restore_mysql(
                 deleted += 1
         # Subscription hosts: retarget inbound_tag — never DELETE (hosts:0/N verify).
         from app.services.marzban_preboot_heal import (
+            ORPHAN_CASEFOLD_SPECS,
             ORPHAN_REPOINT_SPECS,
             orphan_casefold_match_sql,
             orphan_null_sql,
             orphan_repoint_sql,
         )
 
-        for child, child_col, parent, parent_col in ORPHAN_REPOINT_SPECS:
-            for sql in (
-                orphan_casefold_match_sql(child, child_col, parent, parent_col) + ";",
-                orphan_repoint_sql(child, child_col, parent, parent_col) + ";",
-            ):
+        for child, child_col, parent, parent_col in (*ORPHAN_CASEFOLD_SPECS, *ORPHAN_REPOINT_SPECS):
+            sqls = [orphan_casefold_match_sql(child, child_col, parent, parent_col) + ";"]
+            if (child, child_col, parent, parent_col) in ORPHAN_REPOINT_SPECS:
+                sqls.append(orphan_repoint_sql(child, child_col, parent, parent_col) + ";")
+            for sql in sqls:
                 cmd = [
                     "docker", "compose", "exec", "-T",
                     "-e", f"MYSQL_PWD={pwd}", svc, mysql_cmd, "-u", user, target_db,
@@ -5386,10 +5833,12 @@ async def _restore_mysql(
                         stdin=dump_fh,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.STDOUT,
+                        start_new_session=True,
                     )
-                    out_b, _ = await proc.communicate()
-                out = (out_b or b"").decode("utf-8", errors="replace")
-                if proc.returncode == 0:
+                    rc, out = await _communicate_with_timeout(
+                        job, proc, label=f"MySQL restore ({mysql_cmd} as {user})",
+                    )
+                if rc == 0:
                     job.log("MySQL/MariaDB dump restored")
                     try:
                         await _heal_mysql_orphans_after_restore(
@@ -5486,12 +5935,16 @@ async def _restore_postgres(
     job.log(f"PostgreSQL restore into service `{svc}` (engine={db_type})")
     await _compose_up_services(job, svc, "pgbouncer", timeout=180)
 
-    password = (
-        read_env_var(current_env, "DB_PASSWORD")
-        or read_env_var(current_env, "POSTGRES_PASSWORD")
-        or read_env_var(backup_env, "DB_PASSWORD")
-        or read_env_var(backup_env, "POSTGRES_PASSWORD")
-        or ""
+    from app.services.db_auth import (
+        build_postgres_auth_attempts,
+        force_align_postgres_password,
+        postgres_password_candidates,
+        resolve_engine_password,
+    )
+
+    # Install first (live container), then backup — matches resolve_engine_password.
+    password = resolve_engine_password(
+        db_type, current_env, backup_env,
     )
     user = (
         read_env_var(current_env, "DB_USER")
@@ -5514,8 +5967,6 @@ async def _restore_postgres(
     # Collect all candidate passwords and pick whichever the live container accepts.
     # After a fresh wipe the container initialises with POSTGRES_PASSWORD from compose env;
     # that value may differ from DB_PASSWORD. Also try container POSTGRES_* and socket trust.
-    from app.services.db_auth import build_postgres_auth_attempts, postgres_password_candidates
-
     container_env = await _read_pg_container_init_env(job, svc)
     password_candidates = list(dict.fromkeys(filter(None, [
         password,
@@ -5542,6 +5993,7 @@ async def _restore_postgres(
     effective_password = password
     effective_user = user
     pg_ready = False
+    saw_trust_only = False
     for auth_user, auth_pwd in auth_attempts:
         # Readiness helper requires a password string; for trust attempts use ""
         # and also try a direct socket SELECT without PGPASSWORD below.
@@ -5563,6 +6015,7 @@ async def _restore_postgres(
                     or next((p for p in password_candidates if p), "")
                 )
                 pg_ready = True
+                saw_trust_only = True
                 job.log(f"PostgreSQL ready via local trust as {auth_user}")
                 break
             continue
@@ -5583,6 +6036,41 @@ async def _restore_postgres(
     # Use the verified credentials for the rest of this restore session
     password = effective_password
     user = effective_user
+
+    # MySQL-style pre-heal: when only local trust works (or install secret must
+    # win), force-align roles BEFORE dump import so SCRAM/PgBouncer match.
+    if saw_trust_only and password:
+        job.log(
+            "Pre-healing PostgreSQL roles to install/resolved password "
+            "before dump import (trust-only readiness)..."
+        )
+        try:
+            class _Mini:
+                def __init__(self, j):
+                    self.job = j
+
+                async def _run_cmd(self, cmd, cwd=None, timeout=600, *, quiet: bool = False):
+                    return await _run(self.job, cmd, cwd=cwd, timeout=timeout, quiet=quiet)
+
+            healed = await force_align_postgres_password(
+                _Mini(job),
+                svc,
+                current_env or backup_env or "",
+                password=password,
+                admin_users=[
+                    u for u in (
+                        user,
+                        "postgres",
+                        container_env.get("POSTGRES_USER") or "",
+                    ) if u
+                ],
+            )
+            if healed:
+                job.log("PostgreSQL pre-heal OK — dump import will use aligned password")
+            else:
+                job.log("PostgreSQL pre-heal could not confirm — continuing with probed auth")
+        except Exception as heal_exc:
+            job.log(f"PostgreSQL pre-heal note: {heal_exc}")
 
     async def psql(
         sql: str,
@@ -5605,17 +6093,23 @@ async def _restore_postgres(
                     stdin=sql_fh,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
+                    start_new_session=True,
                 )
-                out_b, _ = await proc.communicate()
-            return proc.returncode == 0, (out_b or b"").decode("utf-8", errors="replace")
+                rc, out = await _communicate_with_timeout(
+                    job, proc, label=f"psql import → {db}",
+                )
+            return rc == 0, out
         proc = await asyncio.create_subprocess_exec(
             *cmd, "-c", sql,
             cwd=str(PASARGUARD_DIR),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
         )
-        out_b, _ = await proc.communicate()
-        return proc.returncode == 0, (out_b or b"").decode("utf-8", errors="replace")
+        rc, out = await _communicate_with_timeout(
+            job, proc, timeout=600, heartbeat_sec=120, label=f"psql -c → {db}",
+        )
+        return rc == 0, out
 
     async def verify_app_tables(dbn: str) -> tuple[bool, str]:
         """After tolerant dump import, require core PasarGuard tables to exist."""
@@ -5692,9 +6186,12 @@ async def _restore_postgres(
                     stdin=sql_fh,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
+                    start_new_session=True,
                 )
-                out_b, _ = await proc.communicate()
-            return proc.returncode == 0, (out_b or b"").decode("utf-8", errors="replace")
+                rc, out = await _communicate_with_timeout(
+                    job, proc, label=f"PostgreSQL dump import → {dbn}",
+                )
+            return rc == 0, out
 
         async def _role_is_superuser(pg_user: str, pg_password: str) -> bool:
             cmd = [
@@ -6016,6 +6513,11 @@ async def _restore_postgres(
             dump_wants_ts = (has_ts == "1") or backup_has_ts
             filtered: Path | None = None
             restore_file = dump_path
+            assert_disk_for_dump_work(
+                dump_path,
+                twin=bool(dump_wants_ts),
+                label=f"PostgreSQL restore {dbn}",
+            )
 
             if use_timescale and dump_wants_ts:
                 ok_ext, out_ext = await psql(

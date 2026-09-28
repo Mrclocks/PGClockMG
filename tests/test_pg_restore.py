@@ -43,9 +43,9 @@ from app.services.pg_restore import (
 def test_soft_db_family_matrix():
     assert soft_db_family("mysql", "mariadb")
     assert soft_db_family("mariadb", "mysql")
-    # Plain PG → Timescale is soft; Timescale → plain PG needs convert
+    # PG ↔ Timescale soft (TS→PG strips extension DDL during native restore)
     assert soft_db_family("postgresql", "timescaledb")
-    assert not soft_db_family("timescaledb", "postgresql")
+    assert soft_db_family("timescaledb", "postgresql")
     assert soft_db_family("sqlite", "sqlite")
     assert soft_db_family("timescaledb", "timescaledb")
     assert soft_db_family("postgresql", "postgresql")
@@ -54,6 +54,43 @@ def test_soft_db_family_matrix():
     assert not soft_db_family("postgresql", "mysql")
     assert not soft_db_family(None, "mysql")
     print("OK: soft_db_family matrix")
+
+
+def test_assert_convert_prerequisites_sqlite_needs_install_secret():
+    from app.services.pg_restore import assert_convert_prerequisites
+
+    try:
+        assert_convert_prerequisites(
+            backup_db="sqlite", target_db="timescaledb", install_pwd="",
+        )
+        raised = False
+    except RuntimeError as e:
+        raised = True
+        assert "password" in str(e).lower() or "POSTGRES" in str(e)
+        assert "sqlite" in str(e).lower()
+    assert raised
+    assert_convert_prerequisites(
+        backup_db="sqlite", target_db="timescaledb", install_pwd="secret",
+    )
+    print("OK: convert prerequisites require install secret for sqlite→server")
+
+
+def test_iter_filtered_timescaledb_strips_extension_lines():
+    import tempfile
+    from app.services.pg_restore import iter_filtered_timescaledb_sql_lines
+
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "d.sql"
+        src.write_text(
+            "CREATE EXTENSION timescaledb;\n"
+            "CREATE TABLE users (id int);\n"
+            "SELECT timescaledb_pre_restore();\n",
+            encoding="utf-8",
+        )
+        body = "".join(iter_filtered_timescaledb_sql_lines(src, strip_all=True))
+        assert "CREATE TABLE users" in body
+        assert "CREATE EXTENSION timescaledb" not in body
+    print("OK: iter_filtered_timescaledb_sql_lines")
 
 
 def test_ts_to_ts_syncs_alembic_before_panel():
@@ -964,12 +1001,29 @@ def test_explain_mysql_to_mysql_access_denied_no_sasl_or_timescale():
     en = info.get("en") or ""
     fa = info.get("fa") or ""
     blob = "\n".join(info.get("causes_fa") or [])
+    blob_en = "\n".join(info.get("causes_en") or [])
     assert "SASL" not in en and "SASL" not in fa
     assert "Access denied" in en or "MySQL" in en
     assert "Timescale" not in blob and "Postgres" not in blob and "POSTGRES" not in blob
     assert "MYSQL_ROOT_PASSWORD" in blob or "رمز نصب" in blob
     assert "heal" in blob.lower() or "خودکار" in blob or "skip-grant" in blob.lower()
+    assert info.get("causes_en")
+    assert "SASL" not in blob_en and "Timescale" not in blob_en
+    assert "MySQL" in blob_en or "install" in blob_en.lower() or "heal" in blob_en.lower()
     print("OK: mysql→mysql auth explain has no SASL/Timescale")
+
+
+def test_build_transfer_summary_orders_known_tables():
+    from app.services.pg_restore import build_transfer_summary
+
+    summary = build_transfer_summary(
+        {"hosts": 3, "users": 10, "_meta": 1, "admins": 2, "custom": 5}
+    )
+    tables = [x["table"] for x in summary]
+    assert tables[:3] == ["users", "admins", "hosts"]
+    assert "custom" in tables
+    assert "_meta" not in tables
+    print("OK: build_transfer_summary order")
 
 
 def test_build_mysql_restore_auth_attempts_prefers_install_password():
@@ -1530,6 +1584,8 @@ def test_discover_ignores_xui_sqlite():
 
 if __name__ == "__main__":
     test_soft_db_family_matrix()
+    test_assert_convert_prerequisites_sqlite_needs_install_secret()
+    test_iter_filtered_timescaledb_strips_extension_lines()
     test_ts_to_ts_syncs_alembic_before_panel()
     test_ensure_timescaledb_forces_post_restore_when_on()
     test_ensure_timescaledb_hard_fails_when_still_on()
@@ -1566,6 +1622,7 @@ if __name__ == "__main__":
     test_collect_backup_ts_from_compose_and_catalog()
     test_is_auth_failure_text()
     test_explain_mysql_to_mysql_access_denied_no_sasl_or_timescale()
+    test_build_transfer_summary_orders_known_tables()
     test_build_mysql_restore_auth_attempts_prefers_install_password()
     test_sql_literal_escapes_quotes()
     test_merge_env_preserves_password()

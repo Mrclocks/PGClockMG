@@ -22,7 +22,7 @@
 #
 set -eo pipefail
 
-readonly SCRIPT_VERSION="4.7.0"
+readonly SCRIPT_VERSION="4.8.0"
 readonly INSTALL_DIR="${PG_MIGRATOR_INSTALL_DIR:-/opt/pg-migrator}"
 readonly BACKUP_INSTALL_DIR="${PG_BACKUP_INSTALL_DIR:-/opt/pg-backup}"
 readonly SERVICE_NAME="pg-migrator"
@@ -825,11 +825,30 @@ copy_app_files() {
 
 clone_migration_tools() {
   info "Fetching PasarGuard official migration tools..."
-  [[ -d "${TOOLS_DIR}/db-migrations" ]] || git clone --depth 1 https://github.com/PasarGuard/db-migrations.git "${TOOLS_DIR}/db-migrations" 2>/dev/null || warn "db-migrations clone failed"
-  [[ -d "${TOOLS_DIR}/migrations" ]] || git clone --depth 1 https://github.com/PasarGuard/migrations.git "${TOOLS_DIR}/migrations" 2>/dev/null || warn "migrations clone failed"
+  # Pin SHAs so x-ui converter / schema do not float under us between installs.
+  local DB_MIGRATIONS_REF="${PG_DB_MIGRATIONS_REF:-78bebcd2f651b5f54cf32e20228a585a1c6fd04f}"
+  local MIGRATIONS_REF="${PG_MIGRATIONS_REF:-b78b9f63e59484c5eaa63663d699cb7b7f8c2dfe}"
+  if [[ ! -d "${TOOLS_DIR}/db-migrations/.git" ]]; then
+    git clone https://github.com/PasarGuard/db-migrations.git "${TOOLS_DIR}/db-migrations" 2>/dev/null \
+      || warn "db-migrations clone failed"
+  fi
+  if [[ -d "${TOOLS_DIR}/db-migrations/.git" ]]; then
+    (cd "${TOOLS_DIR}/db-migrations" && git fetch --depth 1 origin "${DB_MIGRATIONS_REF}" 2>/dev/null \
+      && git checkout --force --detach "${DB_MIGRATIONS_REF}" 2>/dev/null) \
+      || warn "db-migrations pin ${DB_MIGRATIONS_REF} failed"
+  fi
+  if [[ ! -d "${TOOLS_DIR}/migrations/.git" ]]; then
+    git clone https://github.com/PasarGuard/migrations.git "${TOOLS_DIR}/migrations" 2>/dev/null \
+      || warn "migrations clone failed"
+  fi
+  if [[ -d "${TOOLS_DIR}/migrations/.git" ]]; then
+    (cd "${TOOLS_DIR}/migrations" && git fetch --depth 1 origin "${MIGRATIONS_REF}" 2>/dev/null \
+      && git checkout --force --detach "${MIGRATIONS_REF}" 2>/dev/null) \
+      || warn "migrations pin ${MIGRATIONS_REF} failed"
+  fi
   [[ -d "${TOOLS_DIR}/db-migrations" ]] && command -v uv >/dev/null 2>&1 && (cd "${TOOLS_DIR}/db-migrations" && uv sync 2>/dev/null) || true
   [[ -d "${TOOLS_DIR}/migrations/x-ui" ]] && command -v uv >/dev/null 2>&1 && (cd "${TOOLS_DIR}/migrations/x-ui" && uv sync 2>/dev/null) || true
-  ok "Migration tools ready"
+  ok "Migration tools ready (migrations@${MIGRATIONS_REF:0:8})"
 }
 
 setup_python_env() {

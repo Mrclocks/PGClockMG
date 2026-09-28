@@ -48,6 +48,19 @@ def test_install_server_password_from_url_only():
     print("OK: install_server_password from URL only")
 
 
+def test_resolve_engine_password_prefers_install_over_backup():
+    from app.services.db_auth import resolve_engine_password
+
+    install = 'POSTGRES_PASSWORD="install-pg"\nDB_PASSWORD="install-app"\n'
+    backup = 'POSTGRES_PASSWORD="backup-pg"\nDB_PASSWORD="backup-app"\n'
+    assert resolve_engine_password("timescaledb", install, backup) == "install-pg"
+    assert resolve_engine_password("postgresql", backup) == "backup-pg"
+    mysql_install = 'MYSQL_ROOT_PASSWORD="root-sec"\nDB_PASSWORD="app-sec"\n'
+    assert resolve_engine_password("mysql", mysql_install, "") == "root-sec"
+    assert resolve_engine_password("sqlite", install) == ""
+    print("OK: resolve_engine_password order")
+
+
 def test_install_auth_env_for_sqlite_source_ignores_live_merge():
     from app.services.db_auth import install_auth_env_for_convert, install_server_password
 
@@ -86,11 +99,15 @@ def test_explain_auth_sqlite_to_timescale_mentions_no_backup_password():
         "timescaledb",
     )
     joined = " ".join(info.get("causes_fa") or [])
+    joined_en = " ".join(info.get("causes_en") or [])
     assert "sqlite" in joined.lower()
     assert "پسورد ندارد" in joined or "رمز نصب" in joined
     assert "globals.sql" not in joined
     assert "بکاپ=sqlite" in info["fa"]
-    assert "4.6.14" in joined or "SCRAM" in joined or "eth0" in joined.lower()
+    assert "heal" in joined.lower() or "PgBouncer" in joined or "pgbouncer" in joined.lower()
+    assert "SASL" not in joined and "SCRAM" not in joined
+    assert info.get("causes_en")
+    assert "password" in joined_en.lower() or "heal" in joined_en.lower()
     print("OK: sqlite→timescale auth tips ignore backup password")
 
 

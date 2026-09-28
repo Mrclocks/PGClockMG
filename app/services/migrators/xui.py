@@ -911,7 +911,12 @@ def _host_overlay_from_stream(stream: dict) -> dict:
 
 
 def ensure_sudo_admin_from_xui(pg_db: Path, xui_db: Path) -> dict:
-    """Create sudo admin #1 from x-ui panel user when PG admins table is empty."""
+    """Create sudo admin #1 from x-ui panel user when PG admins table is empty.
+
+    Never invents a known default password (old ``"password"`` bcrypt hash).
+    If x-ui has no usable admin hash, skip creation — operator creates Owner
+    via ``pasarguard cli``.
+    """
     pg_path = Path(pg_db)
     xui_path = Path(xui_db)
     conn = sqlite3.connect(str(pg_path))
@@ -922,8 +927,8 @@ def ensure_sudo_admin_from_xui(pg_db: Path, xui_db: Path) -> dict:
         if int(conn.execute("SELECT COUNT(*) FROM admins").fetchone()[0]) > 0:
             return {"created": False, "reason": "already-present"}
 
-        username = "admin"
-        hashed = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"  # "password"
+        username = ""
+        hashed = ""
         xui = sqlite3.connect(f"file:{xui_path.as_posix()}?mode=ro", uri=True)
         try:
             xui_tables = _xui_table_names(xui)
@@ -936,6 +941,13 @@ def ensure_sudo_admin_from_xui(pg_db: Path, xui_db: Path) -> dict:
                     hashed = str(row[1])[:128]
         finally:
             xui.close()
+
+        if not username or not hashed:
+            return {
+                "created": False,
+                "reason": "no-xui-admin-password",
+                "hint": "Create PasarGuard owner with: pasarguard cli admin create",
+            }
 
         cols = [r[1] for r in conn.execute("PRAGMA table_info(admins)")]
         now = "1970-01-01 00:00:00"
@@ -1299,24 +1311,25 @@ def enrich_subscription_mapping_from_clients(
                 sub = (row["sub_id"] or "").strip()
                 if email and sub:
                     email_to_sub.setdefault(email, sub)
-        for row in xui.execute("SELECT settings FROM inbounds"):
-            try:
-                settings = json.loads(row["settings"] or "{}")
-            except json.JSONDecodeError:
-                continue
-            for client in (settings.get("clients") or []) if isinstance(settings, dict) else []:
-                if not isinstance(client, dict):
+        if "inbounds" in tables:
+            for row in xui.execute("SELECT settings FROM inbounds"):
+                try:
+                    settings = json.loads(row["settings"] or "{}")
+                except json.JSONDecodeError:
                     continue
-                email = (client.get("email") or "").strip()
-                sub = (
-                    client.get("subId")
-                    or client.get("sub_id")
-                    or client.get("sub_token")
-                    or ""
-                )
-                sub = str(sub).strip()
-                if email and sub:
-                    email_to_sub.setdefault(email, sub)
+                for client in (settings.get("clients") or []) if isinstance(settings, dict) else []:
+                    if not isinstance(client, dict):
+                        continue
+                    email = (client.get("email") or "").strip()
+                    sub = (
+                        client.get("subId")
+                        or client.get("sub_id")
+                        or client.get("sub_token")
+                        or ""
+                    )
+                    sub = str(sub).strip()
+                    if email and sub:
+                        email_to_sub.setdefault(email, sub)
     finally:
         xui.close()
 
@@ -1332,24 +1345,33 @@ def enrich_subscription_mapping_from_clients(
     if not jwt_secret:
         return {"added": 0, "reason": "no-jwt"}
 
-    # Same algorithm as PasarGuard/migrations generate_subscription_url_mapping.py
+    # Same v3 token as PasarGuard / Hiddify import: HMAC over ``v3,{user_id},{ts}``.
     from base64 import b64encode
     from hashlib import sha256
     from math import ceil
+    import hmac
     import time
 
-    def _pg_token(username: str) -> str:
-        data = f"{username},{ceil(time.time())}"
+    def _pg_token(user_id: int) -> str:
+        data = "v3," + str(int(user_id)) + "," + str(ceil(time.time()))
         data_b64 = (
             b64encode(data.encode("utf-8"), altchars=b"-_")
             .decode("utf-8")
             .rstrip("=")
         )
-        sign = b64encode(
-            sha256((data_b64 + jwt_secret).encode("utf-8")).digest(),
-            altchars=b"-_",
-        ).decode("utf-8")[:10]
-        return data_b64 + sign
+        signature = (
+            b64encode(
+                hmac.new(
+                    jwt_secret.encode("utf-8"),
+                    data_b64.encode("utf-8"),
+                    sha256,
+                ).digest(),
+                altchars=b"-_",
+            )
+            .decode("utf-8")
+            .rstrip("=")
+        )
+        return data_b64 + "." + signature
 
     sub_path = (xui_path or "sub").strip().strip("/") or "sub"
     added = 0
@@ -1360,10 +1382,11 @@ def enrich_subscription_mapping_from_clients(
         sub_id = email_to_sub.get(email)
         if not sub_id:
             continue
+        uid = int(row["id"])
         mappings[email] = {
-            "user_id": int(row["id"]),
+            "user_id": uid,
             "old_subscription_url": f"/{sub_path}/{sub_id}",
-            "new_subscription_url": f"/sub/{_pg_token(email)}",
+            "new_subscription_url": f"/sub/{_pg_token(uid)}",
         }
         added += 1
 
@@ -1952,6 +1975,7 @@ class XuiMigrator(BaseMigrator):
 
         guide_domains = list(certbot_info.get("domains") or [])
         from app.services.subscription_prefix import manual_cert_guide
+        from app.services.pg_restore import build_transfer_summary
 
         return {
             "panel_url": self._get_panel_url(),
@@ -1964,10 +1988,27 @@ class XuiMigrator(BaseMigrator):
             "target_db": target_db,
             "mapping_file": str(mapping_file) if mapping_file.exists() else None,
             "source_counts": src_counts,
-            "migrated_counts": out_counts,
+            "migrated_counts": (
+                getattr(self, "copy_stats", None)
+                or (out_counts if isinstance(out_counts, dict) else {})
+                or {}
+            ),
+            "verified_counts": (
+                getattr(self, "copy_stats", None)
+                or (out_counts if isinstance(out_counts, dict) else {})
+                or {}
+            ),
+            "transfer_summary": build_transfer_summary(
+                getattr(self, "copy_stats", None)
+                or (out_counts if isinstance(out_counts, dict) else {})
+                or {}
+            ),
             "xui_schema": schema_info.get("schema"),
             "xui_schema_modern": bool(schema_info.get("modern")),
             "admin_username": admin_info.get("username") if admin_info.get("created") else None,
+            "admin_skipped_reason": (
+                None if admin_info.get("created") else admin_info.get("reason")
+            ),
             "hosts_seeded": int(hosts_info.get("seeded") or 0),
             "certbot_attempted": bool(certbot_info.get("attempted")),
             "certbot_ok": bool(certbot_info.get("ok")),
@@ -2204,6 +2245,23 @@ class XuiMigrator(BaseMigrator):
         )
         return False, err or "pg-redirect install failed"
 
+    def _abort_if_post_convert_gaps(self, stats: dict | None) -> None:
+        """Refuse success when convert to server DB dropped inbounds/core_configs."""
+        stats = stats or {}
+        users = int(stats.get("users", 0) or 0)
+        inbounds = int(stats.get("inbounds", 0) or 0)
+        core_configs = int(stats.get("core_configs", 0) or 0)
+        if users > 0 and inbounds <= 0:
+            raise RuntimeError(
+                f"3x-ui convert copied users={users} but inbounds=0. "
+                "Aborting so the panel is not left without proxies."
+            )
+        if users > 0 and core_configs <= 0:
+            raise RuntimeError(
+                f"3x-ui convert copied users={users} but core_configs=0. "
+                "Aborting so the panel is not left without xray core config."
+            )
+
     async def _convert_landed_sqlite_to_target(
         self,
         land_db: Path,
@@ -2235,6 +2293,7 @@ class XuiMigrator(BaseMigrator):
             self.job.log(f"Credential pre-check note: {e}")
 
         await run_cross_db_migration(self, str(land_db), "sqlite", target_db)
+        self._abort_if_post_convert_gaps(getattr(self, "copy_stats", None))
 
         target_db = normalize_target_db(target_db)
         app_user = (

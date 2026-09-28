@@ -235,6 +235,7 @@ async def _exercise_mysql_same_or_two_phase(source_db: str, target_db: str) -> d
             patch.object(m, "_abort_if_copy_gaps", MagicMock()),
             patch.object(m, "_assert_target_pasarguard_ready", AsyncMock()),
             patch.object(m, "_abort_if_inbounds_missing_from_stats", MagicMock()),
+            patch.object(m, "_abort_if_core_configs_missing_from_stats", MagicMock()),
             patch.object(m, "_prepare_xray_for_panel_boot", MagicMock()),
             patch(
                 "app.services.native_migration.cross_db._heal_staging_alembic_if_unknown",

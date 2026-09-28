@@ -626,6 +626,8 @@ function applyPhaseI18n() {
   set('restoreErrorDetailToggle', 'restore.errorDetail');
   set('btnRestoreErrorBack', 'restore.back');
   set('btnRestoreRetry', 'restore.retry');
+  set('btnRestoreRetryHeal', 'restore.retryStrongerHeal');
+  set('restoreRetryHealHint', 'restore.retryStrongerHealHint');
   set('btnRestoreRunningBack', 'restore.hideProgress');
   set('btnStep5Back', 'step5.hideProgress');
   set('restoreConvertNoteText', 'restore.autoConvertNote');
@@ -1006,6 +1008,18 @@ function resetRestoreForm() {
   applyPhaseI18n();
 }
 
+async function retryRestoreStrongerHeal() {
+  // Same upload_id / analysis — re-run restore with stronger heal options.
+  if (!state.restoreUploadId || !state.restoreAnalysis?.ok) {
+    resetRestoreForm();
+    return;
+  }
+  const skip = document.getElementById('chkRestoreSkipBadUserRows');
+  if (skip) skip.checked = true;
+  state._restoreStrongerHeal = true;
+  await startRestore();
+}
+
 const DB_DISPLAY_NAMES = {
   timescaledb: 'TimescaleDB',
   postgresql: 'PostgreSQL',
@@ -1296,6 +1310,16 @@ async function applyCleanupBeforeRestore(term) {
   }
 }
 
+function restoreStageLabel(progress, message) {
+  const pct = Number(progress) || 0;
+  const msg = String(message || '').toLowerCase();
+  if (/convert|→|cross/.test(msg) || pct >= 80 && pct < 92) return t('restore.stageConvert');
+  if (/heal|auth|password|schema/.test(msg) || pct >= 60 && pct < 80) return t('restore.stageHeal');
+  if (/start|boot|panel/.test(msg) || pct >= 92) return t('restore.stageStart');
+  if (/extract|unzip|analy/.test(msg) || pct < 15) return t('restore.stageExtract');
+  return t('restore.stageImport');
+}
+
 async function startRestore() {
   if (!state.restoreUploadId || !state.restoreAnalysis?.ok) {
     const el = document.getElementById('restoreBlock');
@@ -1322,7 +1346,11 @@ async function startRestore() {
   if (term) term.textContent = '';
 
   const disableNodes = document.getElementById('chkDisableNodes')?.checked || false;
-  const skipBadUserRows = document.getElementById('chkRestoreSkipBadUserRows')?.checked ?? true;
+  const strongerHeal = !!state._restoreStrongerHeal;
+  state._restoreStrongerHeal = false;
+  const skipBadUserRows = strongerHeal
+    ? true
+    : (document.getElementById('chkRestoreSkipBadUserRows')?.checked ?? true);
   const uploadId = await applyCleanupBeforeRestore(term);
 
   try {
@@ -1338,6 +1366,7 @@ async function startRestore() {
         accept_experimental: true,
         disable_nodes_after_restore: disableNodes,
         skip_bad_user_rows: skipBadUserRows,
+        stronger_heal: strongerHeal,
       }),
     });
     const data = await res.json();
@@ -1363,7 +1392,11 @@ async function pollRestore(jobId) {
       const res = await fetch(`/api/pasarguard/restore/${jobId}?since=${cursor.lastLen}`);
       const job = await res.json();
       applyUiProgress(fill, text, job.progress || 0, '_restoreUiProgress');
-      if (status) status.textContent = job.message || t('restore.restoring');
+      if (status) {
+        const stage = restoreStageLabel(job.progress, job.message);
+        const msg = job.message || t('restore.restoring');
+        status.textContent = stage ? `${stage} — ${msg}` : msg;
+      }
       appendJobLogs(term, job.logs, cursor, job);
 
       if (job.status === 'success') {
@@ -1400,9 +1433,13 @@ function showRestoreError(explain, logs) {
   if (msgEl) msgEl.textContent = msg;
 
   const causesBox = document.getElementById('restoreErrorCauses');
-  const causes = explain.causes_fa || [];
+  const causes = (
+    lang === 'fa' ? (explain.causes_fa || [])
+      : lang === 'ru' ? (explain.causes_ru || explain.causes_en || explain.causes_fa || [])
+        : (explain.causes_en || explain.causes_fa || [])
+  );
   if (causesBox) {
-    if (causes.length && (lang === 'fa' || !explain.causes_en)) {
+    if (causes.length) {
       causesBox.innerHTML = `<h4>${escapeHtml(t('restore.causesTitle'))}</h4><ul>${
         causes.map(c => `<li>${escapeHtml(c)}</li>`).join('')
       }</ul>`;
@@ -1415,9 +1452,43 @@ function showRestoreError(explain, logs) {
 
   const detail = document.getElementById('restoreErrorDetail');
   if (detail) {
-    const lines = Array.isArray(logs) ? logs.join('\n') : (explain.detail || '');
-    detail.textContent = lines || explain.detail || '';
+    // Prefer structured detail; avoid dumping entire noisy job logs as "the error".
+    const tech = (explain.detail || '').trim();
+    const tail = Array.isArray(logs)
+      ? logs.filter((l) => /error|fail|denied|fatal|panic/i.test(String(l))).slice(-40).join('\n')
+      : '';
+    detail.textContent = tech || tail || '';
   }
+}
+
+function renderTransferSummaryGrid(gridEl, titleEl, sectionEl, result, titleKey) {
+  if (!gridEl || !sectionEl) return;
+  const summary = Array.isArray(result?.transfer_summary) && result.transfer_summary.length
+    ? result.transfer_summary
+    : Object.entries(result?.verified_counts || result?.copy_stats || {})
+      .filter(([, n]) => typeof n === 'number' && n >= 0)
+      .map(([table, count]) => ({ table, count }));
+  const prefer = ['users', 'admins', 'nodes', 'hosts', 'inbounds', 'groups', 'core_configs'];
+  summary.sort((a, b) => {
+    const ia = prefer.indexOf(a.table);
+    const ib = prefer.indexOf(b.table);
+    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+  });
+  if (!summary.length) {
+    sectionEl.classList.add('hidden');
+    gridEl.innerHTML = '';
+    return;
+  }
+  if (titleEl) titleEl.textContent = t(titleKey);
+  const labelFn = typeof transferTableLabel === 'function'
+    ? transferTableLabel
+    : (id) => id;
+  gridEl.innerHTML = summary.map((item) => `
+    <div class="transfer-summary-card">
+      <div class="tsc-name">${escapeHtml(labelFn(item.table))}</div>
+      <div class="tsc-count">${Number(item.count).toLocaleString()}</div>
+    </div>`).join('');
+  sectionEl.classList.remove('hidden');
 }
 
 function showRestoreDone(result) {
@@ -1450,6 +1521,13 @@ function showRestoreDone(result) {
       : '';
     msg.textContent = `${t('restore.doneTitle') || ''}${convert}`.trim();
   }
+  renderTransferSummaryGrid(
+    document.getElementById('restoreTransferGrid'),
+    document.getElementById('restoreTransferTitle'),
+    document.getElementById('restoreTransferSection'),
+    result || access,
+    'restore.transferTitle',
+  );
   const tipsEl = document.getElementById('restorePostSuccessTips');
   if (tipsEl) {
     const tips = [
@@ -1465,6 +1543,20 @@ function showRestoreDone(result) {
     if (skipParts.length) {
       tips.push(
         `<p class="warn-line">${typeof statusIcon === 'function' ? statusIcon('warn') : '⚠️'}<span>${t('restore.skippedUsersNote')}: ${skipParts.join(', ')}</span></p>`,
+      );
+    }
+    const usageCleared = Number(result?.usage_rows_cleared || 0);
+    if (usageCleared > 0 || Number(result?.usage_tables_truncated || 0) > 0) {
+      const note = String(t('restore.usageTruncatedNote') || '')
+        .replace('{rows}', usageCleared.toLocaleString());
+      tips.push(
+        `<p class="info-note">${typeof statusIcon === 'function' ? statusIcon('warn') : '⚠️'}<span>${note}</span></p>`,
+      );
+    }
+    const clears = result?.value_clears || result?.copy_report?.value_clears || [];
+    if (Array.isArray(clears) && clears.length) {
+      tips.push(
+        `<p class="info-note">${typeof statusIcon === 'function' ? statusIcon('warn') : '⚠️'}<span>${t('restore.valueClearsNote')}: ${clears.length}</span></p>`,
       );
     }
     tipsEl.innerHTML = tips.join('');
@@ -1495,6 +1587,7 @@ window.continueAfterPgReady = continueAfterPgReady;
 window.backFromRestore = backFromRestore;
 window.choosePath = choosePath;
 window.startRestore = startRestore;
+window.retryRestoreStrongerHeal = retryRestoreStrongerHeal;
 window.applyUiProgress = applyUiProgress;
 window.resetUiProgress = resetUiProgress;
 window.resetRestoreForm = resetRestoreForm;
