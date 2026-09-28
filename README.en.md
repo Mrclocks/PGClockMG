@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.30`** — 3x-ui migrate: redirect domain/port + optional Certbot (fail-soft)
+> 🚀 **`v4.7.0`** — 3x-ui migrate: redirect domain/port + optional Certbot (fail-soft)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
