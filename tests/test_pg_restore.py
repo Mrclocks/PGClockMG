@@ -36,6 +36,7 @@ from app.services.pg_restore import (
     analyze_pasarguard_backup,
     explain_restore_error,
     discover_backup_artifacts,
+    build_mysql_restore_auth_attempts,
 )
 
 
@@ -953,6 +954,70 @@ def test_is_auth_failure_text():
     print("OK: auth failure detection")
 
 
+def test_explain_mysql_to_mysql_access_denied_no_sasl_or_timescale():
+    """Regression: MySQL→MySQL 1045 must not surface SASL/Timescale tips."""
+    exc = RuntimeError(
+        "MySQL restore failed after password attempts:\n"
+        "ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: YES)"
+    )
+    info = explain_restore_error(exc, "mysql", "mysql")
+    en = info.get("en") or ""
+    fa = info.get("fa") or ""
+    blob = "\n".join(info.get("causes_fa") or [])
+    assert "SASL" not in en and "SASL" not in fa
+    assert "Access denied" in en or "MySQL" in en
+    assert "Timescale" not in blob and "Postgres" not in blob and "POSTGRES" not in blob
+    assert "MYSQL_ROOT_PASSWORD" in blob or "رمز نصب" in blob
+    assert "heal" in blob.lower() or "خودکار" in blob or "skip-grant" in blob.lower()
+    print("OK: mysql→mysql auth explain has no SASL/Timescale")
+
+
+def test_build_mysql_restore_auth_attempts_prefers_install_password():
+    """Live container auth must try install MYSQL_ROOT_PASSWORD before backup secrets."""
+    install = (
+        'MYSQL_ROOT_PASSWORD="install-root"\n'
+        'DB_PASSWORD="install-app"\n'
+        'DB_USER="pasarguard"\n'
+        'DB_NAME="pasarguard"\n'
+    )
+    backup = (
+        'MYSQL_ROOT_PASSWORD="backup-root"\n'
+        'DB_PASSWORD="backup-app"\n'
+        'DB_USER="pasarguard"\n'
+        'DB_NAME="pasarguard"\n'
+    )
+    attempts, db_name, heal = build_mysql_restore_auth_attempts(install, backup)
+    assert db_name == "pasarguard"
+    assert heal == "install-root"
+    assert attempts, "expected non-empty auth matrix"
+    # First root attempt must use install secret (live container).
+    first_root = next(a for a in attempts if a[0] == "root")
+    assert first_root[1] == "install-root"
+    pwds_in_order = []
+    for user, pwd, _db in attempts:
+        if user == "root" and pwd not in pwds_in_order:
+            pwds_in_order.append(pwd)
+    assert pwds_in_order[0] == "install-root"
+    assert "backup-root" in pwds_in_order
+    assert pwds_in_order.index("install-root") < pwds_in_order.index("backup-root")
+
+    # Container init secret is preferred after install, before backup.
+    attempts2, _n2, heal2 = build_mysql_restore_auth_attempts(
+        install,
+        backup,
+        container_env={"MYSQL_ROOT_PASSWORD": "container-root"},
+    )
+    assert heal2 == "install-root"
+    root_pwds = []
+    for user, pwd, _db in attempts2:
+        if user == "root" and pwd not in root_pwds:
+            root_pwds.append(pwd)
+    assert root_pwds[0] == "install-root"
+    assert "container-root" in root_pwds
+    assert root_pwds.index("container-root") < root_pwds.index("backup-root")
+    print("OK: mysql restore auth prefers install password")
+
+
 def test_sql_literal_escapes_quotes():
     assert _sql_literal("a'b") == "'a''b'"
     print("OK: sql literal")
@@ -1500,6 +1565,8 @@ if __name__ == "__main__":
     test_explain_orphan_fk_notification_reminders()
     test_collect_backup_ts_from_compose_and_catalog()
     test_is_auth_failure_text()
+    test_explain_mysql_to_mysql_access_denied_no_sasl_or_timescale()
+    test_build_mysql_restore_auth_attempts_prefers_install_password()
     test_sql_literal_escapes_quotes()
     test_merge_env_preserves_password()
     test_parse_manifest_ts_versions()

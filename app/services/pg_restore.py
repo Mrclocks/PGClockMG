@@ -2157,6 +2157,57 @@ async def _read_pg_container_init_env(
     return out
 
 
+async def _read_mysql_container_init_env(
+    job: MigrationJob,
+    svc: str,
+) -> dict[str, str]:
+    """Read MYSQL_*/MARIADB_* from the running DB container (init source of truth)."""
+    out: dict[str, str] = {}
+    keys = (
+        "MYSQL_ROOT_PASSWORD", "MYSQL_PASSWORD", "MYSQL_USER", "MYSQL_DATABASE",
+        "MARIADB_ROOT_PASSWORD", "MARIADB_PASSWORD", "MARIADB_USER", "MARIADB_DATABASE",
+        "DB_USER", "DB_PASSWORD", "DB_NAME",
+    )
+    for key in keys:
+        ok, raw = await _run(
+            job,
+            _compose_argv("exec", "-T", svc, "printenv", key),
+            cwd=str(PASARGUARD_DIR),
+            timeout=15,
+            quiet=True,
+        )
+        if not ok:
+            continue
+        val = (raw or "").strip().splitlines()
+        if val and val[-1].strip():
+            out[key] = val[-1].strip()
+    return out
+
+
+async def _resolve_mysql_client_bins(
+    job: MigrationJob,
+    svc: str,
+    db_type: str,
+) -> list[str]:
+    """Prefer client binaries that actually exist in the live container."""
+    preferred = _mysql_client_bins(db_type, svc)
+    available: list[str] = []
+    for bin_name in preferred:
+        ok, _out = await _run(
+            job,
+            _compose_argv(
+                "exec", "-T", svc, "sh", "-c",
+                f"command -v {bin_name} >/dev/null 2>&1",
+            ),
+            cwd=str(PASARGUARD_DIR),
+            timeout=15,
+            quiet=True,
+        )
+        if ok:
+            available.append(bin_name)
+    return available or preferred
+
+
 def _psql_exec_succeeded(ok: bool, out: str) -> bool:
     """Treat connection success with FATAL/ERROR lines as failure."""
     if not ok:
@@ -3217,22 +3268,19 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         en = f"Conversion {backup_db} → {target_db} is not supported."
         causes_fa = ["این ترکیب موتور دیتابیس قابل تبدیل خودکار نیست."]
     elif is_auth_failure_text(raw) or ("password" in low and "auth" in low) or "authentication failed" in low:
-        fa = "احراز هویت دیتابیس شکست خورد (پسورد/SASL)."
-        en = "Database authentication failed (password/SASL)."
         tgt = (target_db or "").lower()
         bak = (backup_db or "").lower()
         mysqlish = (
             tgt in ("mysql", "mariadb")
             or "mysql/mariadb authentication" in low
+            or "mysql restore failed" in low
             or "access denied for user" in low
             or (not tgt and ("mysql" in low or "mariadb" in low))
         )
         if mysqlish:
-            causes_fa = [
-                "رمز MYSQL_ROOT_PASSWORD / DB_PASSWORD در .env نصب با رمز واقعی کانتینر MySQL/MariaDB یکی نیست",
-                "کانتینر MariaDB ممکن است فقط باینری mariadb داشته باشد — ویزارد هر دو کلاینت را امتحان می‌کند",
-                "بعد از تبدیل از Timescale، ویزارد باید از رمز نصب (نه رمز Postgres بکاپ) استفاده کند",
-            ]
+            # MySQL/MariaDB never uses SASL — keep the title engine-accurate.
+            fa = "احراز هویت MySQL/MariaDB شکست خورد (رمز اشتباه / Access denied)."
+            en = "MySQL/MariaDB authentication failed (wrong password / Access denied)."
             if bak == "sqlite":
                 causes_fa = [
                     "بکاپ sqlite پسورد ندارد — ویزارد فقط از رمز نصب MySQL/MariaDB استفاده می‌کند",
@@ -3240,13 +3288,29 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
                     "کانتینر MariaDB ممکن است فقط باینری mariadb داشته باشد — ویزارد هر دو کلاینت را امتحان می‌کند",
                 ]
             elif bak in ("postgresql", "timescaledb"):
-                causes_fa.insert(
-                    0,
+                causes_fa = [
                     f"بکاپ={bak} → نصب={tgt or 'mysql/mariadb'}: رمز نصب MySQL/MariaDB را نگه دارید",
-                )
+                    "رمز MYSQL_ROOT_PASSWORD / DB_PASSWORD در .env نصب با رمز واقعی کانتینر یکی نیست",
+                    "بعد از تبدیل از Timescale/Postgres، ویزارد از رمز نصب (نه رمز بکاپ Postgres) استفاده می‌کند",
+                ]
+            elif bak in ("mysql", "mariadb"):
+                # Same-engine / soft-family: connection must use LIVE install secrets.
+                causes_fa = [
+                    "رمز MYSQL_ROOT_PASSWORD / DB_PASSWORD در .env نصب با رمز واقعی کانتینر MySQL/MariaDB یکی نیست",
+                    "ویزارد قبل از ایمپورت، رمز نصب را خودکار روی کانتینر heal می‌کند (skip-grant در صورت قفل بودن root)",
+                    "گزینه‌های قبل از ریستور (غیرفعال‌کردن نودها / رد کاربران خراب / سبک‌کردن بکاپ) حفظ می‌شوند",
+                ]
+            else:
+                causes_fa = [
+                    "رمز MYSQL_ROOT_PASSWORD / DB_PASSWORD در .env نصب با رمز واقعی کانتینر MySQL/MariaDB یکی نیست",
+                    "کانتینر MariaDB ممکن است فقط باینری mariadb داشته باشد — ویزارد هر دو کلاینت را امتحان می‌کند",
+                    "ویزارد ابتدا رمز نصب را برای ورود امتحان می‌کند و در قفل‌شدن root، skip-grant recovery می‌زند",
+                ]
         elif tgt in ("postgresql", "timescaledb") or (
             bak in ("postgresql", "timescaledb") and tgt not in ("mysql", "mariadb")
         ):
+            fa = "احراز هویت دیتابیس شکست خورد (پسورد/SASL)."
+            en = "Database authentication failed (password/SASL)."
             if bak == "sqlite":
                 causes_fa = [
                     "اول PGClockMG را به آخرین نسخه آپدیت کنید (هدر UI باید v4.6.14+ باشد)",
@@ -3260,6 +3324,8 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
                     "بعد از ریستور postgres، globals.sql ممکن است نقش‌ها را با رمز بکاپ برگرداند",
                 ]
         else:
+            fa = "احراز هویت دیتابیس شکست خورد (پسورد/SASL)."
+            en = "Database authentication failed (password/SASL)."
             causes_fa = [
                 "رمز دیتابیس در .env با رمز واقعی کانتینر یکی نیست",
                 "بعد از ریستور/تبدیل، نقش‌ها ممکن است با رمز دیگری هم‌خوان شده باشند",
@@ -4199,6 +4265,14 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             zip_path = zips[0] if zips else zip_path
 
     job.set_progress(5, "Extracting backup...")
+    # Honor wizard options chosen before restore starts.
+    disable_nodes = bool(params.get("disable_nodes_after_restore"))
+    skip_bad = bool(params.get("skip_bad_user_rows", True))
+    job.log(
+        f"Restore options: disable_nodes_after_restore={disable_nodes}, "
+        f"skip_bad_user_rows={skip_bad} "
+        f"(passwords/versions heal automatically)"
+    )
     work = Path(tempfile.mkdtemp(prefix="pg-restore-work-", dir=str(UPLOAD_DIR)))
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
@@ -4405,7 +4479,9 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                     job, root, restore_into or backup_db, current_env, backup_env,
                     dump=dump_path,
                 )
-                # Same-engine: force MySQL roles to backup password (written into .env next)
+                # Same-engine: force MySQL roles to backup password (written into .env next).
+                # Auth into the live container uses install secrets first (pre-heal left them
+                # matching), then applies the backup password for the final .env.
                 sync_pass = bak_db_pass or bak_mysql_root or ""
                 svc = await _detect_db_container(job, restore_into or installed_db or backup_db)
                 if svc and sync_pass:
@@ -4416,8 +4492,8 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                         db_name=bak_name or cur_name or "pasarguard",
                         auth_passwords=[
                             p for p in (
-                                bak_mysql_root, bak_db_pass,
                                 cur_mysql_root, cur_db_pass,
+                                bak_mysql_root, bak_db_pass,
                             ) if p
                         ],
                     )
@@ -4999,6 +5075,97 @@ async def _restore_sqlite(job: MigrationJob, root: Path) -> None:
     job.log(f"SQLite restored from {src.name} → {dest}")
 
 
+def build_mysql_restore_auth_attempts(
+    current_env: str,
+    backup_env: str,
+    *,
+    extra_passwords: list[str] | tuple[str, ...] | None = None,
+    container_env: dict[str, str] | None = None,
+) -> tuple[list[tuple[str, str, str | None]], str, str]:
+    """Auth attempts for piping a dump into the *live* MySQL/MariaDB container.
+
+    Connection credentials must match the running container. Preference order:
+    install .env → container init env → backup .env → extras.
+    Returns ``(attempts, db_name, heal_password)`` where heal_password is the
+    install/canonical secret used for automatic skip-grant realignment.
+    """
+    from app.services.db_auth import mysql_admin_users, mysql_password_candidates
+
+    def _uniq(values: list[str]) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for v in values:
+            if not v or v in seen:
+                continue
+            seen.add(v)
+            out.append(v)
+        return out
+
+    cenv = container_env or {}
+    db_name = (
+        read_env_var(current_env, "DB_NAME")
+        or read_env_var(current_env, "MYSQL_DATABASE")
+        or cenv.get("MYSQL_DATABASE")
+        or cenv.get("MARIADB_DATABASE")
+        or cenv.get("DB_NAME")
+        or read_env_var(backup_env, "DB_NAME")
+        or read_env_var(backup_env, "MYSQL_DATABASE")
+        or "pasarguard"
+    )
+    install_pwds = mysql_password_candidates(current_env)
+    container_pwds = _uniq([
+        cenv.get("MYSQL_ROOT_PASSWORD") or "",
+        cenv.get("MARIADB_ROOT_PASSWORD") or "",
+        cenv.get("MYSQL_PASSWORD") or "",
+        cenv.get("MARIADB_PASSWORD") or "",
+        cenv.get("DB_PASSWORD") or "",
+    ])
+    backup_pwds = mysql_password_candidates(backup_env)
+    extra = [p for p in (extra_passwords or []) if p]
+    # Live container first, then container init, then backup, then extras.
+    passwords = _uniq([*install_pwds, *container_pwds, *backup_pwds, *extra])
+    users = _uniq(
+        [
+            "root",
+            *mysql_admin_users(current_env),
+            cenv.get("MYSQL_USER") or "",
+            cenv.get("MARIADB_USER") or "",
+            *mysql_admin_users(backup_env),
+            read_env_var(current_env, "DB_USER") or "",
+            read_env_var(backup_env, "DB_USER") or "",
+        ]
+    )
+    attempts: list[tuple[str, str, str | None]] = []
+    seen: set[tuple[str, str, str | None]] = set()
+
+    def _add(user: str, pwd: str, db: str | None) -> None:
+        key = (user, pwd, db)
+        if key in seen:
+            return
+        seen.add(key)
+        attempts.append(key)
+
+    # Prefer root@install — that is what docker-entrypoint initialized.
+    for pwd in passwords:
+        _add("root", pwd, None)
+        _add("root", pwd, db_name)
+    for user in users:
+        if user == "root":
+            continue
+        for pwd in passwords:
+            _add(user, pwd, db_name)
+            _add(user, pwd, None)
+
+    heal_password = (
+        (install_pwds[0] if install_pwds else "")
+        or (container_pwds[0] if container_pwds else "")
+        or (backup_pwds[0] if backup_pwds else "")
+        or (passwords[0] if passwords else "")
+    )
+    return attempts, db_name, heal_password
+
+
+
 async def _restore_mysql(
     job: MigrationJob,
     root: Path,
@@ -5014,30 +5181,66 @@ async def _restore_mysql(
     if not svc:
         raise RuntimeError("MySQL/MariaDB container not found")
 
-    # Prefer backup secrets for dump restore (roles inside dump match backup passwords),
-    # then fall back to live install credentials.
-    root_pw = (
-        read_env_var(backup_env, "MYSQL_ROOT_PASSWORD")
-        or read_env_var(current_env, "MYSQL_ROOT_PASSWORD")
-    )
-    db_user = (
-        read_env_var(backup_env, "DB_USER")
-        or read_env_var(current_env, "DB_USER")
-        or "root"
-    )
-    db_pass = (
-        read_env_var(backup_env, "DB_PASSWORD")
-        or read_env_var(current_env, "DB_PASSWORD")
-    )
-    db_name = (
-        read_env_var(backup_env, "DB_NAME")
-        or read_env_var(current_env, "DB_NAME")
-        or "pasarguard"
-    )
-    client_bins = _mysql_client_bins(db_type, svc)
-
     await _compose(job, "up", "-d", svc, timeout=180)
     await asyncio.sleep(5)
+
+    container_env = await _read_mysql_container_init_env(job, svc)
+    attempts, db_name, heal_password = build_mysql_restore_auth_attempts(
+        current_env,
+        backup_env,
+        container_env=container_env,
+    )
+    app_user = (
+        read_env_var(current_env, "DB_USER")
+        or read_env_var(current_env, "MYSQL_USER")
+        or container_env.get("MYSQL_USER")
+        or container_env.get("MARIADB_USER")
+        or read_env_var(backup_env, "DB_USER")
+        or read_env_var(backup_env, "MYSQL_USER")
+        or "pasarguard"
+    )
+    client_bins = await _resolve_mysql_client_bins(job, svc, db_type)
+    job.log(
+        f"MySQL restore auth matrix: {len(attempts)} attempt(s), "
+        f"db={db_name}, clients={','.join(client_bins)}, "
+        f"auto-heal target=install secret"
+    )
+
+    # Proactive auth heal: align live volume to install password BEFORE import so
+    # the user never hits ERROR 1045 when .env drifted from the container.
+    if heal_password:
+        auth_pwds = list(dict.fromkeys(
+            p for (_u, p, _d) in attempts if p
+        ))
+        job.log(
+            "Pre-healing MySQL root/app passwords to install secret "
+            "(automatic — no manual password entry)..."
+        )
+        healed = await _sync_mysql_passwords(
+            job,
+            svc,
+            heal_password,
+            user=app_user,
+            db_type=db_type,
+            db_name=db_name,
+            auth_passwords=auth_pwds,
+            allow_skip_grant_recovery=True,
+        )
+        if healed:
+            job.log("MySQL pre-heal OK — dump import will use install password")
+            # Put healed credential first so import succeeds on attempt #1.
+            priority = [
+                ("root", heal_password, None),
+                ("root", heal_password, db_name),
+                (app_user, heal_password, db_name),
+            ]
+            seen_att = set(priority)
+            attempts = priority + [a for a in attempts if a not in seen_att]
+        else:
+            job.log(
+                "MySQL pre-heal could not confirm yet — will try full password "
+                "matrix then skip-grant recovery if Access denied"
+            )
 
     # Strip mysqldump GTID/SQL_LOG_BIN preamble (MySQL 8 → MariaDB / non-SUPER).
     # Does not rename schemas — PasarGuard restore only.
@@ -5057,22 +5260,9 @@ async def _restore_mysql(
         job.log(f"Dump sanitize skipped ({exc}) — importing original dump")
         import_dump = dump
 
-    attempts = []
-    if root_pw:
-        attempts.append(("root", root_pw, None))
-    if db_user and db_pass:
-        attempts.append((db_user, db_pass, db_name))
-        attempts.append((db_user, db_pass, None))
-    # also try install passwords if different from backup
-    c_root = read_env_var(current_env, "MYSQL_ROOT_PASSWORD")
-    c_pass = read_env_var(current_env, "DB_PASSWORD")
-    if c_root and c_root != root_pw:
-        attempts.append(("root", c_root, None))
-    if c_pass and c_pass != db_pass:
-        attempts.append((db_user, c_pass, db_name))
-
     last_err = ""
     best_err = ""
+    saw_access_denied = False
     from app.services.marzban_preboot_heal import (
         orphan_delete_sql,
         ORPHAN_DELETE_SPECS,
@@ -5172,65 +5362,105 @@ async def _restore_mysql(
         else:
             job.log("Orphan FK heal after MySQL dump import: no matching child tables")
 
-    for user, pwd, db in attempts:
-        for mysql_cmd in client_bins:
-            cmd = [
-                "docker", "compose", "exec", "-T",
-                "-e", f"MYSQL_PWD={pwd}", svc, mysql_cmd, "-u", user,
-            ]
-            if db:
-                cmd.append(db)
-            job.log(f"Trying MySQL restore as {user}" + (f"/{db}" if db else "") + f" ({mysql_cmd})")
-            with open(pipe_dump, "rb") as dump_fh:
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    cwd=str(PASARGUARD_DIR),
-                    stdin=dump_fh,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
+    async def _try_import_attempts(
+        attempt_list: list[tuple[str, str, str | None]],
+    ) -> bool:
+        nonlocal last_err, best_err, saw_access_denied
+        for user, pwd, db in attempt_list:
+            for mysql_cmd in client_bins:
+                cmd = [
+                    "docker", "compose", "exec", "-T",
+                    "-e", f"MYSQL_PWD={pwd}", svc, mysql_cmd, "-u", user,
+                ]
+                if db:
+                    cmd.append(db)
+                job.log(
+                    f"Trying MySQL restore as {user}"
+                    + (f"/{db}" if db else "")
+                    + f" ({mysql_cmd})"
                 )
-                out_b, _ = await proc.communicate()
-            out = (out_b or b"").decode("utf-8", errors="replace")
-            if proc.returncode == 0:
-                job.log("MySQL/MariaDB dump restored")
-                try:
-                    await _heal_mysql_orphans_after_restore(
-                        mysql_cmd=mysql_cmd, user=user, pwd=pwd, db=db,
+                with open(pipe_dump, "rb") as dump_fh:
+                    proc = await asyncio.create_subprocess_exec(
+                        *cmd,
+                        cwd=str(PASARGUARD_DIR),
+                        stdin=dump_fh,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT,
                     )
-                except Exception as heal_exc:
-                    job.log(f"MySQL orphan FK heal note: {heal_exc}")
-                try:
-                    if sanitized.exists() and sanitized.resolve() != dump.resolve():
-                        sanitized.unlink()
-                except OSError:
-                    pass
-                try:
-                    if wrapped_dump.exists():
-                        wrapped_dump.unlink()
-                except OSError:
-                    pass
-                return
-            last_err = out[-1500:]
-            job.log(f"Attempt failed: {last_err[:300]}")
-            # Prefer real SQL errors over "mysql binary missing" noise for the final raise.
-            low = out.lower()
-            if "error " in low or "access denied" in low:
-                best_err = last_err
-            elif not best_err:
-                best_err = last_err
+                    out_b, _ = await proc.communicate()
+                out = (out_b or b"").decode("utf-8", errors="replace")
+                if proc.returncode == 0:
+                    job.log("MySQL/MariaDB dump restored")
+                    try:
+                        await _heal_mysql_orphans_after_restore(
+                            mysql_cmd=mysql_cmd, user=user, pwd=pwd, db=db,
+                        )
+                    except Exception as heal_exc:
+                        job.log(f"MySQL orphan FK heal note: {heal_exc}")
+                    return True
+                last_err = out[-1500:]
+                job.log(f"Attempt failed: {last_err[:300]}")
+                low = out.lower()
+                if "access denied" in low or "error 1045" in low:
+                    saw_access_denied = True
+                    best_err = last_err
+                elif "error " in low:
+                    best_err = last_err
+                elif not best_err:
+                    best_err = last_err
+        return False
+
     try:
-        if sanitized.exists() and sanitized.resolve() != dump.resolve():
-            sanitized.unlink()
-    except OSError:
-        pass
-    try:
-        if wrapped_dump.exists():
-            wrapped_dump.unlink()
-    except OSError:
-        pass
+        if await _try_import_attempts(attempts):
+            return
+
+        # Root locked out / .env drifted from the volume — heal then retry once.
+        if saw_access_denied and heal_password:
+            from app.services.db_auth import recover_mysql_passwords_via_skip_grants
+
+            async def _run_list(cmd, cwd=None, timeout=600):
+                return await _run(job, cmd, cwd=cwd, timeout=timeout)
+
+            recovered = await recover_mysql_passwords_via_skip_grants(
+                _run_list,
+                service=svc,
+                password=heal_password,
+                app_user=app_user,
+                db_type=db_type,
+                db_name=db_name,
+                compose_cwd=str(PASARGUARD_DIR),
+                log=job.log,
+            )
+            if recovered:
+                job.log(
+                    "MySQL skip-grant recovery applied — retrying dump import "
+                    "with healed install password..."
+                )
+                await _compose(job, "up", "-d", svc, timeout=180)
+                await asyncio.sleep(3)
+                retry = [
+                    ("root", heal_password, None),
+                    ("root", heal_password, db_name),
+                    (app_user, heal_password, db_name),
+                ]
+                if await _try_import_attempts(retry):
+                    return
+    finally:
+        try:
+            if sanitized.exists() and sanitized.resolve() != dump.resolve():
+                sanitized.unlink()
+        except OSError:
+            pass
+        try:
+            if wrapped_dump.exists():
+                wrapped_dump.unlink()
+        except OSError:
+            pass
+
     raise RuntimeError(
         f"MySQL restore failed after password attempts:\n{best_err or last_err}"
     )
+
 
 
 async def _restore_postgres(
