@@ -276,6 +276,20 @@ const I18N = {
       h2: 'Review & Confirm',
       desc: 'Check the summary before starting.',
       redirect: 'Install redirect server to keep old subscription links working (recommended)',
+      redirectHint: 'Old /sub links stay on the previous port and redirect to PasarGuard.',
+      redirectDestTitle: 'Redirect destination (PasarGuard public URL)',
+      redirectDomain: 'Subscription domain',
+      redirectDomainPh: 'sub.example.com',
+      redirectPort: 'PasarGuard port',
+      panelDomain: 'Panel domain (optional)',
+      panelDomainPh: 'Leave empty if same as subscription domain',
+      redirectDefaultHint: 'Default is filled automatically. Leave as-is unless you use a custom domain.',
+      enableCertbot: 'Issue TLS certificate with Certbot (optional)',
+      enableCertbotHint: 'If panel and subscription domains differ, a multi-domain (SAN) cert is requested. Failure only warns — migration continues.',
+      certbotPrereqTitle: 'Before Certbot',
+      certbotPrereqDns: 'Point DNS A/AAAA for every listed domain to this server.',
+      certbotPrereqPort: 'Port 80 must be free on this server during issuance.',
+      certbotPrereqFailSoft: 'If issuance fails, migration still finishes; you will get a manual cert guide at the end.',
       optimizeTitle: 'Optimization options',
       skipBadUserRows: 'Skip broken users and continue',
       skipBadUserRowsHint: 'If some users cannot be copied (bad FK/data), skip them and finish the job (migrate / restore / Change-DB). A report is shown at the end. Still fails if no users transfer. Recommended on.',
@@ -311,6 +325,9 @@ const I18N = {
       nodesDisabledNote: 'Nodes were left disabled as requested. Enable them from the panel.',
       xuiOldSubPortWarn: 'You cannot use your previous subscription port in configs.',
       redirectInstalled: 'Redirect server (pg-redirect) installed',
+      certbotOk: 'TLS certificate issued and installed under PasarGuard certs/',
+      certbotFailed: 'Certbot did not issue a certificate (migration still succeeded).',
+      certbotManualTitle: 'Manual certificate guide',
       redirectVerifyTitle: 'Verify redirect server',
       redirectVerifyHint: 'Run these on the server to confirm old /sub links redirect correctly:',
       redirectVerifyCopyAll: 'Copy all',
@@ -700,6 +717,20 @@ const I18N = {
       h2: 'تأیید نهایی',
       desc: 'خلاصه را بررسی کنید.',
       redirect: 'نصب redirect برای حفظ لینک‌های قدیمی اشتراک (توصیه‌شده)',
+      redirectHint: 'لینک‌های قدیمی /sub روی پورت قبلی می‌مانند و به PasarGuard ریدایرکت می‌شوند.',
+      redirectDestTitle: 'مقصد ریدایرکت (آدرس عمومی PasarGuard)',
+      redirectDomain: 'دامنه اشتراک',
+      redirectDomainPh: 'sub.example.com',
+      redirectPort: 'پورت PasarGuard',
+      panelDomain: 'دامنه پنل (اختیاری)',
+      panelDomainPh: 'اگر با دامنه اشتراک یکی است خالی بگذارید',
+      redirectDefaultHint: 'مقدار پیش‌فرض خودکار پر شده؛ فقط اگر دامنه سفارشی دارید عوض کنید.',
+      enableCertbot: 'دریافت سرتیفیکیت با Certbot (اختیاری)',
+      enableCertbotHint: 'اگر دامنه پنل و ساب فرق داشته باشند، سرت multi-domain (SAN) گرفته می‌شود. خطا فقط هشدار است — مهاجرت ادامه می‌یابد.',
+      certbotPrereqTitle: 'قبل از Certbot',
+      certbotPrereqDns: 'رکورد DNS (A/AAAA) همه دامنه‌های بالا را به این سرور بزنید.',
+      certbotPrereqPort: 'پورت ۸۰ هنگام صدور باید آزاد باشد.',
+      certbotPrereqFailSoft: 'اگر صدور شکست بخورد مهاجرت تمام می‌شود؛ در انتها راهنمای دستی سرت می‌آید.',
       optimizeTitle: 'گزینه‌های بهینه‌سازی',
       skipBadUserRows: 'رد کردن کاربران خراب و ادامه',
       skipBadUserRowsHint: 'اگر بعضی کاربران به‌خاطر داده/FK خراب منتقل نشوند، رد می‌شوند و کار تمام می‌شود (مهاجرت / ریستور / Change-DB). در انتها گزارش نشان داده می‌شود. اگر هیچ کاربری منتقل نشود باز هم متوقف می‌شود. روشن توصیه می‌شود.',
@@ -735,6 +766,9 @@ const I18N = {
       nodesDisabledNote: 'نودها طبق درخواست غیرفعال ماندند. از پنل فعالشان کنید.',
       xuiOldSubPortWarn: 'از پورت ساب قبلی خود نمی‌توانید در کانفیگ‌ها استفاده کنید.',
       redirectInstalled: 'سرور ریدایرکت (pg-redirect) نصب شد',
+      certbotOk: 'سرتیفیکیت TLS صادر و در مسیر certs پاسارگارد نصب شد',
+      certbotFailed: 'Certbot سرت صادر نکرد (مهاجرت موفق بود).',
+      certbotManualTitle: 'راهنمای دریافت دستی سرتیفیکیت',
       redirectVerifyTitle: 'بررسی سرور ریدایرکت',
       redirectVerifyHint: 'این دستورات را روی سرور بزنید تا مطمئن شوید لینک‌های قدیمی /sub درست ریدایرکت می‌شوند:',
       redirectVerifyCopyAll: 'کپی همه',
@@ -1124,6 +1158,20 @@ const I18N = {
       h2: 'Подтверждение',
       desc: 'Проверьте сводку.',
       redirect: 'Установить redirect для старых ссылок подписки (рекомендуется)',
+      redirectHint: 'Старые /sub остаются на прежнем порту и редиректят на PasarGuard.',
+      redirectDestTitle: 'Куда редиректить (публичный URL PasarGuard)',
+      redirectDomain: 'Домен подписки',
+      redirectDomainPh: 'sub.example.com',
+      redirectPort: 'Порт PasarGuard',
+      panelDomain: 'Домен панели (опционально)',
+      panelDomainPh: 'Оставьте пустым, если совпадает с доменом подписки',
+      redirectDefaultHint: 'Значение по умолчанию подставлено автоматически. Меняйте только для своего домена.',
+      enableCertbot: 'Выпустить TLS через Certbot (опционально)',
+      enableCertbotHint: 'Если домен панели и подписки разные — запрашивается multi-domain (SAN). Ошибка только предупреждение, миграция продолжается.',
+      certbotPrereqTitle: 'Перед Certbot',
+      certbotPrereqDns: 'Направьте DNS A/AAAA всех указанных доменов на этот сервер.',
+      certbotPrereqPort: 'Порт 80 должен быть свободен во время выпуска.',
+      certbotPrereqFailSoft: 'Если выпуск не удался, миграция всё равно завершится; в конце будет ручная инструкция.',
       optimizeTitle: 'Опции оптимизации',
       skipBadUserRows: 'Пропускать битых пользователей и продолжать',
       skipBadUserRowsHint: 'Если часть пользователей не копируется (битые FK/данные), они пропускаются и задание завершается (миграция / restore / Change-DB). В конце показывается отчёт. Если не перенесён ни один пользователь — всё равно ошибка. Рекомендуется включить.',
@@ -1159,6 +1207,9 @@ const I18N = {
       nodesDisabledNote: 'Узлы оставлены отключёнными по запросу. Включите их из панели.',
       xuiOldSubPortWarn: 'Порт старой подписки нельзя использовать в конфигах.',
       redirectInstalled: 'Redirect-сервер (pg-redirect) установлен',
+      certbotOk: 'TLS-сертификат выпущен и установлен в certs PasarGuard',
+      certbotFailed: 'Certbot не выпустил сертификат (миграция успешна).',
+      certbotManualTitle: 'Ручная инструкция по сертификату',
       redirectVerifyTitle: 'Проверка redirect-сервера',
       redirectVerifyHint: 'Выполните на сервере, чтобы убедиться что старые /sub ссылки редиректят:',
       redirectVerifyCopyAll: 'Копировать всё',
@@ -1394,7 +1445,29 @@ function applyI18n() {
     const el = document.querySelector(sel);
     if (el) el.textContent = t(k);
   }
-  document.querySelector('#redirectOption span') && (document.querySelector('#redirectOption span').textContent = t('step4.redirect'));
+  const redirLbl = document.getElementById('installRedirectLabel');
+  const redirHint = document.getElementById('installRedirectHint');
+  if (redirLbl) redirLbl.textContent = t('step4.redirect');
+  if (redirHint) redirHint.textContent = t('step4.redirectHint');
+  const destTitle = document.getElementById('redirectDestTitle');
+  if (destTitle) destTitle.textContent = t('step4.redirectDestTitle');
+  const rdLab = document.getElementById('redirectDomainLabel');
+  const rpLab = document.getElementById('redirectPortLabel');
+  const pdLab = document.getElementById('panelDomainLabel');
+  if (rdLab) rdLab.textContent = t('step4.redirectDomain');
+  if (rpLab) rpLab.textContent = t('step4.redirectPort');
+  if (pdLab) pdLab.textContent = t('step4.panelDomain');
+  const rdIn = document.getElementById('redirectDomain');
+  const pdIn = document.getElementById('panelDomain');
+  if (rdIn) rdIn.placeholder = t('step4.redirectDomainPh');
+  if (pdIn) pdIn.placeholder = t('step4.panelDomainPh');
+  const defHint = document.getElementById('redirectDefaultHint');
+  if (defHint) defHint.textContent = t('step4.redirectDefaultHint');
+  const cbLbl = document.getElementById('enableCertbotLabel');
+  const cbHint = document.getElementById('enableCertbotHint');
+  if (cbLbl) cbLbl.textContent = t('step4.enableCertbot');
+  if (cbHint) cbHint.textContent = t('step4.enableCertbotHint');
+  if (typeof syncRedirectFormUi === 'function') syncRedirectFormUi();
   const migrateOptTitle = document.getElementById('migrateOptimizeTitle');
   const relocateLbl = document.getElementById('chkRelocateInboundCertsLabel');
   const relocateHint = document.getElementById('chkRelocateInboundCertsHint');

@@ -2813,6 +2813,31 @@ a.btn-panel-enter:focus {
 }
 .db-info-row strong { color: var(--text); font-weight: 600; }
 
+/* Redirect destination form (3x-ui / Hiddify) */
+.redirect-advanced {
+  margin-top: 4px;
+  padding-top: 4px;
+}
+.redirect-field-row {
+  margin-top: 6px;
+}
+#redirectOption .toggle-row + .toggle-row {
+  margin-top: 10px;
+}
+#certbotPrereqWarn {
+  padding: 10px 12px;
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+#certbotPrereqWarn ul {
+  margin: 6px 0 0;
+  padding: 0 0 0 1.2rem;
+}
+html[dir="rtl"] #certbotPrereqWarn ul {
+  padding: 0 1.2rem 0 0;
+}
+#certbotPrereqWarn li { margin-bottom: 2px; }
+
 /* ── Restore: options — iOS toggle switch ──────────────────────── */
 .restore-options {
   margin-top: 14px;

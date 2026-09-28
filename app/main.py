@@ -42,7 +42,7 @@ from app.services.auth import (
 )
 from app.config import WEB_PORT
 
-APP_VERSION = "4.6.29"
+APP_VERSION = "4.6.30"
 
 
 @asynccontextmanager
@@ -407,6 +407,14 @@ async def api_panels():
 @app.get("/api/system-check")
 async def api_system_check():
     return get_system_status()
+
+
+@app.get("/api/redirect-defaults")
+async def api_redirect_defaults():
+    """Defaults for 3x-ui / Hiddify redirect destination form."""
+    from app.services.subscription_prefix import default_redirect_fields
+
+    return default_redirect_fields()
 
 
 @app.get("/api/prerequisites/{panel_id}")

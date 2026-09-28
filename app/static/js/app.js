@@ -1001,7 +1001,8 @@ async function validateMigrationRequest() {
 function buildMigrationBody() {
   const src = readDbCredentials('source');
   const tgt = readDbCredentials('target');
-  return {
+  const installRedirect = document.getElementById('installRedirect')?.checked ?? true;
+  const body = {
     source_panel: state.selectedPanel?.id,
     source_db: state.sourceDb,
     target_db: state.targetDb,
@@ -1009,13 +1010,90 @@ function buildMigrationBody() {
     ...tgt,
     upload_id: state.uploadId,
     upload_bundle_id: state.uploadBundleId,
-    install_redirect: document.getElementById('installRedirect')?.checked ?? true,
+    install_redirect: installRedirect,
     relocate_inbound_certs: document.getElementById('chkRelocateInboundCerts')?.checked ?? false,
     skip_bad_user_rows: document.getElementById('chkSkipBadUserRows')?.checked ?? true,
     disable_nodes_after_migrate: document.getElementById('chkMigrateDisableNodes')?.checked ?? true,
     marzban_mode: 'fresh',
   };
+  if (installRedirect && (state.selectedPanel?.id === '3x-ui' || state.selectedPanel?.id === 'hiddify')) {
+    const domain = document.getElementById('redirectDomain')?.value?.trim() || '';
+    const portRaw = document.getElementById('redirectPort')?.value?.trim();
+    const panelDomain = document.getElementById('panelDomain')?.value?.trim() || '';
+    const port = portRaw ? parseInt(portRaw, 10) : null;
+    body.redirect_domain = domain || null;
+    body.redirect_port = Number.isFinite(port) ? port : null;
+    body.redirect_scheme = 'https';
+    body.panel_domain = panelDomain || null;
+    body.enable_certbot = document.getElementById('enableCertbot')?.checked ?? false;
+  }
+  return body;
 }
+
+function syncRedirectFormUi() {
+  const box = document.getElementById('redirectOption');
+  const adv = document.getElementById('redirectAdvanced');
+  const on = document.getElementById('installRedirect')?.checked ?? true;
+  const panelOk = state.selectedPanel?.id === '3x-ui' || state.selectedPanel?.id === 'hiddify';
+  if (box) box.classList.toggle('hidden', !panelOk);
+  if (adv) adv.classList.toggle('hidden', !on || !panelOk);
+  const warn = document.getElementById('certbotPrereqWarn');
+  const certOn = document.getElementById('enableCertbot')?.checked ?? false;
+  if (warn) {
+    if (certOn && on && panelOk) {
+      warn.classList.remove('hidden');
+      warn.innerHTML = `
+        <h4>${t('step4.certbotPrereqTitle')}</h4>
+        <ul>
+          <li>${t('step4.certbotPrereqDns')}</li>
+          <li>${t('step4.certbotPrereqPort')}</li>
+          <li>${t('step4.certbotPrereqFailSoft')}</li>
+        </ul>`;
+    } else {
+      warn.classList.add('hidden');
+      warn.innerHTML = '';
+    }
+  }
+}
+
+async function loadRedirectDefaults() {
+  const domainEl = document.getElementById('redirectDomain');
+  const portEl = document.getElementById('redirectPort');
+  if (!domainEl || !portEl) return;
+  // Keep user edits if they already typed something this session.
+  if (domainEl.dataset.userEdited === '1' || portEl.dataset.userEdited === '1') {
+    syncRedirectFormUi();
+    return;
+  }
+  try {
+    const res = await fetch('/api/redirect-defaults');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (domainEl && !domainEl.value) domainEl.value = data.domain || '';
+    if (portEl && !portEl.value) portEl.value = String(data.port || 8000);
+    const hint = document.getElementById('redirectDefaultHint');
+    if (hint && data.base) {
+      hint.textContent = `${t('step4.redirectDefaultHint')} (${data.base})`;
+    }
+  } catch (_) {
+    if (portEl && !portEl.value) portEl.value = '8000';
+  }
+  syncRedirectFormUi();
+}
+
+function bindRedirectFormOnce() {
+  if (state._redirectFormBound) return;
+  state._redirectFormBound = true;
+  const install = document.getElementById('installRedirect');
+  const cert = document.getElementById('enableCertbot');
+  const domainEl = document.getElementById('redirectDomain');
+  const portEl = document.getElementById('redirectPort');
+  install?.addEventListener('change', () => syncRedirectFormUi());
+  cert?.addEventListener('change', () => syncRedirectFormUi());
+  domainEl?.addEventListener('input', () => { domainEl.dataset.userEdited = '1'; });
+  portEl?.addEventListener('input', () => { portEl.dataset.userEdited = '1'; });
+}
+
 
 function renderPanels() {
   const grid = document.getElementById('panelGrid');
@@ -1274,6 +1352,8 @@ function renderSummary() {
     'hidden',
     panel.id !== '3x-ui' && panel.id !== 'hiddify',
   );
+  bindRedirectFormOnce();
+  loadRedirectDefaults();
 
   const optBox = document.getElementById('migrateOptimizeOptions');
   const isMarzban = panel.id === 'marzban';
@@ -1300,6 +1380,11 @@ function renderSummary() {
     if (skipHint) skipHint.textContent = s4.skipBadUserRowsHint || '';
     if (disLbl) disLbl.textContent = s4.disableNodes || '';
     if (disHint) disHint.textContent = s4.disableNodesHint || '';
+    const redirLbl = document.getElementById('installRedirectLabel');
+    const redirHint = document.getElementById('installRedirectHint');
+    if (redirLbl) redirLbl.textContent = s4.redirect || '';
+    if (redirHint) redirHint.textContent = s4.redirectHint || '';
+    syncRedirectFormUi();
   }
 
   const warnEl = document.getElementById('finalWarnings');
@@ -1640,6 +1725,18 @@ async function showSuccess(result) {
   }
   if (result?.redirect_installed) {
     details += `<p class="status-inline">${statusIcon('ok')} <span>${t('step6.redirectInstalled')}</span></p>`;
+  }
+  if (result?.certbot_ok) {
+    details += `<p class="status-inline">${statusIcon('ok')} <span>${t('step6.certbotOk')}</span></p>`;
+  } else if (result?.certbot_attempted) {
+    details += `<p class="warn-line">${statusIcon('warn')}<span>${t('step6.certbotFailed')}</span></p>`;
+    const guide = result?.certbot_manual_guide;
+    const lines = tr(guide, state.lang);
+    if (Array.isArray(lines) && lines.length) {
+      details += `<h4 class="post-migrate-title">${t('step6.certbotManualTitle')}</h4><ul>`
+        + lines.map(x => `<li>${x}</li>`).join('')
+        + '</ul>';
+    }
   }
   if (result?.users_migrated) {
     details += `<p>${result.users_migrated} / ${result.users_total} users</p>`;

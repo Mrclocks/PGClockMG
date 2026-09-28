@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.6.29`** — گیر alembic روی `refactor sub updated at` رفع شد (bulk SQL heal)
+> 🚀 **`v4.6.30`** — مهاجرت 3x-ui: دامنه/پورت ریدایرکت + Certbot اختیاری (fail-soft)
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

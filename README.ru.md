@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.29`** — зависание alembic на `refactor sub updated at` исправлено (bulk SQL heal)
+> 🚀 **`v4.6.30`** — миграция 3x-ui: домен/порт redirect + опциональный Certbot (fail-soft)
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

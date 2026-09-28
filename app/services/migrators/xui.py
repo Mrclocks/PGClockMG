@@ -1878,34 +1878,37 @@ class XuiMigrator(BaseMigrator):
                 land_db, target_db, install_env_snapshot,
             )
 
+        # Public subscription base (wizard fields → .env + settings). Fail-soft.
+        pub = self._apply_redirect_public_base(params, land_db, target_db)
+        redirect_domain = pub["base"]
+        certbot_info = pub.get("certbot") or {}
+
         self.job.set_progress(92, "راه‌اندازی مجدد PasarGuard...")
         await self._start_panel(target_db)
 
         redirect_installed = False
         redirect_port = xui_listen["port"]
-        redirect_domain = (
-            (params.get("redirect_domain") or "").strip()
-            or pasarguard_subscription_base_url(
-                PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
-                if PASARGUARD_ENV.exists()
-                else install_env_snapshot
-            )
-        )
         redirect_error = ""
         if install_redirect and mapping_file.exists():
             self.job.set_progress(96, "نصب سرور ریدایرکت لینک‌های قدیمی...")
+            # Do NOT copy 3x-ui subscription-only certs into PasarGuard certs/.
+            # Listen TLS uses PasarGuard/multi-domain cert (or self-signed) instead.
             redirect_installed, redirect_error = await self._install_redirect_server(
                 mapping_file,
                 listen_port=redirect_port,
                 redirect_domain=redirect_domain,
-                ssl_cert=xui_listen.get("cert_path") or xui_listen.get("cert") or "",
-                ssl_key=xui_listen.get("key_path") or xui_listen.get("key") or "",
+                ssl_cert="",
+                ssl_key="",
                 ssl_wanted=bool(xui_listen.get("ssl_wanted")),
                 work_dir=work_dir,
             )
 
         self.job.set_progress(100, "3x-ui migration complete!")
-        redir_scheme = "https" if xui_listen.get("ssl_wanted") else "http"
+        redir_scheme = "https" if (
+            certbot_info.get("ok")
+            or (redirect_domain or "").lower().startswith("https://")
+            or xui_listen.get("ssl_wanted")
+        ) else "http"
         redirect_path = (xui_listen.get("path") or "sub").strip().strip("/") or "sub"
         warn_en: list[str] = []
         warn_fa: list[str] = []
@@ -1927,6 +1930,28 @@ class XuiMigrator(BaseMigrator):
                 "pg-redirect не установился — старые /sub не работают (пользователи уже перенесены). "
                 + (f"Причина: {detail}" if detail else "Часто порт занят или нет python3/systemd."),
             )
+        if certbot_info.get("attempted") and not certbot_info.get("ok"):
+            err = (certbot_info.get("error") or "").strip()
+            if len(err) > 200:
+                err = "…" + err[-200:]
+            warn_en.append(
+                "Certbot did not issue a certificate — set a multi-domain cert manually "
+                "under /var/lib/pasarguard/certs/. "
+                + (f"Detail: {err}" if err else ""),
+            )
+            warn_fa.append(
+                "Certbot سرت صادر نکرد — سرت multi-domain را دستی در "
+                "/var/lib/pasarguard/certs/ بگذارید. "
+                + (f"جزئیات: {err}" if err else ""),
+            )
+            warn_ru.append(
+                "Certbot не выпустил сертификат — положите multi-domain cert вручную в "
+                "/var/lib/pasarguard/certs/. "
+                + (f"Детали: {err}" if err else ""),
+            )
+
+        guide_domains = list(certbot_info.get("domains") or [])
+        from app.services.subscription_prefix import manual_cert_guide
 
         return {
             "panel_url": self._get_panel_url(),
@@ -1944,12 +1969,121 @@ class XuiMigrator(BaseMigrator):
             "xui_schema_modern": bool(schema_info.get("modern")),
             "admin_username": admin_info.get("username") if admin_info.get("created") else None,
             "hosts_seeded": int(hosts_info.get("seeded") or 0),
+            "certbot_attempted": bool(certbot_info.get("attempted")),
+            "certbot_ok": bool(certbot_info.get("ok")),
+            "certbot_manual_guide": {
+                "en": manual_cert_guide(guide_domains, lang="en"),
+                "fa": manual_cert_guide(guide_domains, lang="fa"),
+                "ru": manual_cert_guide(guide_domains, lang="ru"),
+            } if (certbot_info.get("attempted") and not certbot_info.get("ok")) else None,
             "warnings": {
                 "en": warn_en,
                 "fa": warn_fa,
                 "ru": warn_ru,
             },
         }
+
+    def _apply_redirect_public_base(
+        self,
+        params: dict,
+        land_db: Path,
+        target_db: str,
+    ) -> dict:
+        """Write wizard domain/port to .env + settings; optional Certbot (fail-soft)."""
+        from app.services.subscription_prefix import (
+            apply_subscription_prefix_server_db,
+            apply_subscription_prefix_sqlite,
+            default_redirect_fields,
+            normalize_public_base,
+            try_certbot_issue,
+            write_ssl_env_paths,
+            write_subscription_prefix_env,
+        )
+
+        defaults = default_redirect_fields(
+            PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
+            if PASARGUARD_ENV.exists()
+            else ""
+        )
+        base = normalize_public_base(
+            params.get("redirect_domain"),
+            params.get("redirect_port"),
+            params.get("redirect_scheme") or defaults.get("scheme") or "https",
+            fallback=defaults.get("base") or pasarguard_subscription_base_url(),
+        )
+        if not base:
+            base = defaults.get("base") or pasarguard_subscription_base_url()
+
+        env_ok = write_subscription_prefix_env(base)
+        self.job.log(
+            f"Subscription public base → {base} "
+            f"(.env {'updated' if env_ok else 'unchanged'})"
+        )
+
+        sqlite_ok = apply_subscription_prefix_sqlite(land_db, base)
+        if sqlite_ok:
+            self.job.log("PasarGuard settings.subscription.url_prefix updated (sqlite)")
+        if target_db != "sqlite":
+            try:
+                from app.services.db_credentials import get_target_connection
+
+                conn = get_target_connection(params) or {}
+                if apply_subscription_prefix_server_db(target_db, conn, base):
+                    self.job.log(
+                        f"PasarGuard settings.subscription.url_prefix updated ({target_db})"
+                    )
+            except Exception as e:
+                self.job.log(f"settings url_prefix note ({target_db}): {e}")
+
+        certbot: dict = {
+            "attempted": False,
+            "ok": False,
+            "domains": [],
+            "error": "",
+        }
+        if params.get("enable_certbot"):
+            from urllib.parse import urlparse as _urlparse
+
+            sub_host = _urlparse(base).hostname or defaults.get("domain") or ""
+            panel_host = (params.get("panel_domain") or "").strip()
+            if panel_host.startswith("http://") or panel_host.startswith("https://"):
+                panel_host = _urlparse(panel_host).hostname or ""
+            panel_host = (panel_host or "").split(":")[0].strip().lower().rstrip(".")
+            domains = [h for h in (sub_host, panel_host) if h]
+            # unique preserve order
+            seen: set[str] = set()
+            uniq: list[str] = []
+            for h in domains:
+                if h not in seen:
+                    seen.add(h)
+                    uniq.append(h)
+            self.job.log(
+                "Certbot requested for: "
+                + (", ".join(uniq) if uniq else "(none)")
+            )
+            certbot["attempted"] = True
+            certbot["domains"] = uniq
+            try:
+                result = try_certbot_issue(uniq, work_dir=BACKUP_DIR / "certbot-work")
+                certbot["ok"] = bool(result.get("ok"))
+                certbot["error"] = result.get("error") or ""
+                certbot["domains"] = list(result.get("domains") or uniq)
+                if result.get("ok") and result.get("cert") and result.get("key"):
+                    write_ssl_env_paths(Path(result["cert"]), Path(result["key"]))
+                    self.job.log(
+                        f"Certbot OK — installed at {result['cert']}"
+                    )
+                else:
+                    self.job.log(
+                        "Certbot soft-fail — migration continues. "
+                        f"{(result.get('error') or '')[:240]}"
+                    )
+            except Exception as e:
+                certbot["ok"] = False
+                certbot["error"] = str(e)
+                self.job.log(f"Certbot soft-fail — migration continues ({e})")
+
+        return {"base": base, "certbot": certbot}
 
     async def _install_redirect_server(
         self,
@@ -1976,6 +2110,7 @@ class XuiMigrator(BaseMigrator):
             pg_redirect_is_active,
             resolve_redirect_tls,
         )
+
 
         mapping = Path(mapping_file)
         if not mapping.is_file():
