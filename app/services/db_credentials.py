@@ -113,19 +113,21 @@ def build_migration_url(params: dict) -> str:
 
 def build_app_sqlalchemy_url(params: dict) -> str:
     """SQLALCHEMY_DATABASE_URL for PasarGuard .env from user-provided target credentials."""
+    from urllib.parse import quote_plus
+
     target_db = params["target_db"]
     conn = get_target_connection(params)
-    pwd = conn.get("password") or ""
+    pwd = quote_plus(conn.get("password") or "")
     if target_db == "sqlite":
         path = conn.get("sqlite_path") or (PASARGUARD_DATA / "db.sqlite3").as_posix()
         return f"sqlite+aiosqlite:///{path}"
     if target_db in ("mysql", "mariadb"):
-        user = conn.get("user") or "root"
+        user = quote_plus(conn.get("user") or "root")
         host = conn.get("host") or "127.0.0.1"
         port = conn.get("port") or _DEFAULT_PORTS[target_db]
         db = conn.get("database") or "pasarguard"
         return f"mysql+asyncmy://{user}:{pwd}@{host}:{port}/{db}"
-    user = conn.get("user") or "postgres"
+    user = quote_plus(conn.get("user") or "postgres")
     host = conn.get("host") or "127.0.0.1"
     port = conn.get("port") or _DEFAULT_PORTS.get(target_db, "5432")
     db = conn.get("database") or "pasarguard"

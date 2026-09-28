@@ -48,6 +48,40 @@ def test_build_local_alembic_url_encodes_special_password():
     print("OK: alembic URL encodes special password chars")
 
 
+def test_app_and_env_urls_quote_special_password():
+    from app.services.db_credentials import build_app_sqlalchemy_url
+    from app.services.env_migration import (
+        build_db_migration_target_url,
+        build_sqlalchemy_url_for_target,
+    )
+
+    params = {
+        "target_db": "mysql",
+        "target_db_user": "u@ser",
+        "target_db_password": "p@ss:word/x",
+        "target_db_name": "pasarguard",
+        "target_db_host": "127.0.0.1",
+        "target_db_port": "3306",
+    }
+    app = build_app_sqlalchemy_url(params)
+    assert "u%40ser" in app
+    assert "p%40ss%3Aword%2Fx" in app
+
+    env = (
+        'DB_USER="u@ser"\n'
+        'DB_PASSWORD="p@ss:word/x"\n'
+        'MYSQL_ROOT_PASSWORD="p@ss:word/x"\n'
+        'DB_NAME="pasarguard"\n'
+    )
+    target = build_sqlalchemy_url_for_target("mysql", env_text=env)
+    assert "u%40ser" in target
+    assert "p%40ss%3Aword%2Fx" in target
+    mig = build_db_migration_target_url("mysql", env_text=env)
+    assert "u%40ser" in mig
+    assert "p%40ss%3Aword%2Fx" in mig
+    print("OK: app/env/migration URLs quote special password chars")
+
+
 def test_resolve_reachable_alembic_url_uses_bridge_when_loopback_dead():
     """Unpublished 5432 must not leave alembic stuck on 127.0.0.1."""
     import asyncio

@@ -95,6 +95,82 @@ async def _flush_pg_type_caches(migrator, target_db: str) -> None:
         await _wait_db_service(migrator, target_db, service)
 
 
+async def _snapshot_target_before_wipe(migrator, target_db: str) -> Path | None:
+    """Logical dump of live target before Phase2 DROP — enables rollback on failure."""
+    import asyncio
+    from datetime import datetime, timezone
+
+    if target_db == "sqlite":
+        return None
+    conn = get_target_connection(migrator.params)
+    service = resolve_db_service(target_db)
+    if not service:
+        return None
+    user = conn.get("user") or (
+        "postgres" if target_db in ("postgresql", "timescaledb") else "root"
+    )
+    pwd = conn.get("password") or ""
+    db = conn.get("database") or "pasarguard"
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    job_id = getattr(getattr(migrator, "job", None), "job_id", "job") or "job"
+    out_path = BACKUP_DIR / f"phase2-prewipe-{job_id}-{stamp}.sql"
+    cwd = str(PASARGUARD_DIR)
+    try:
+        if target_db in ("postgresql", "timescaledb"):
+            safe_db = "".join(c for c in db if c.isalnum() or c == "_")
+            if safe_db != db:
+                return None
+            cmd = [
+                "docker", "compose", "exec", "-T",
+                "-e", f"PGPASSWORD={pwd}",
+                service, "pg_dump", "-U", user, "-d", safe_db,
+                "--no-owner", "--no-acl",
+            ]
+        else:
+            from app.services.pasarguard_ops import mysql_client_bins
+
+            safe_db = "".join(c for c in db if c.isalnum() or c == "_")
+            if safe_db != db:
+                return None
+            bins = mysql_client_bins(target_db, service)
+            dump_bin = "mysqldump"
+            for b in bins:
+                if "dump" in b:
+                    dump_bin = b
+                    break
+            else:
+                dump_bin = "mysqldump" if target_db == "mysql" else "mariadb-dump"
+            cmd = [
+                "docker", "compose", "exec", "-T",
+                "-e", f"MYSQL_PWD={pwd}",
+                service, dump_bin, "-u", user, "--single-transaction",
+                "--routines", "--triggers", safe_db,
+            ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out_b, err_b = await proc.communicate()
+        if proc.returncode != 0 or not out_b or len(out_b) < 64:
+            migrator.job.log(
+                "Phase2 pre-wipe snapshot skipped/failed: "
+                + ((err_b or out_b or b"")[-300:]).decode("utf-8", errors="ignore")
+            )
+            return None
+        out_path.write_bytes(out_b)
+        migrator.job.log(
+            f"Phase2 pre-wipe snapshot saved ({len(out_b)} bytes) → {out_path}"
+        )
+        migrator._phase2_prewipe_snapshot = str(out_path)
+        return out_path
+    except Exception as exc:
+        migrator.job.log(f"Phase2 pre-wipe snapshot note: {exc}")
+        return None
+
+
 async def _reset_target_schema(migrator, target_db: str) -> None:
     """Wipe target so alembic upgrade head creates a clean head schema.
 
@@ -128,6 +204,8 @@ async def _reset_target_schema(migrator, target_db: str) -> None:
     pwd = conn.get("password") or ""
     db = conn.get("database") or "pasarguard"
     cwd = str(PASARGUARD_DIR)
+    # Snapshot live target BEFORE irreversible DROP — rollback path on Phase2 fail.
+    await _snapshot_target_before_wipe(migrator, target_db)
     migrator.job.log(f"Resetting target schema on {service}/{db}...")
 
     last_out = ""
@@ -463,6 +541,7 @@ async def run_two_phase_migration(
     target_db: str,
     *,
     upgrade_via_panel: bool = False,
+    allow_same_engine: bool = False,
 ) -> dict[str, int]:
     """Migrate any supported source → any supported target via head→head copy."""
     source_db = normalize_target_db(source_db)
@@ -471,7 +550,12 @@ async def run_two_phase_migration(
     if strategy == "unsupported":
         raise RuntimeError(f"Unsupported cross-DB migration: {source_db} → {target_db}")
     if strategy == "same_db":
-        raise RuntimeError("same_db should not use two-phase migrator")
+        if not allow_same_engine:
+            raise RuntimeError("same_db should not use two-phase migrator")
+        migrator.job.log(
+            f"Same-engine native refresh {source_db}: stage dump → wipe → copy "
+            "(no external db-migrations)"
+        )
 
     migrator.job.log(f"Two-phase migration: {source_db} → {target_db}")
     await _stop_panel(migrator)
@@ -547,55 +631,63 @@ async def run_two_phase_migration(
         # Phase 2 — empty target at head, then copy head→head
         migrator.job.set_progress(min(94, base + 8), f"Phase 2: create {target_db} schema at head...")
         await _prepare_target_for_migration(migrator, target_db)
-        await _reset_target_schema(migrator, target_db)
-        if target_db in ("postgresql", "timescaledb"):
-            from app.services.db_auth import sync_postgres_roles_to_app_password
-
-            await sync_postgres_roles_to_app_password(
-                migrator, target_db, get_target_connection(migrator.params),
-            )
-        elif target_db in ("mysql", "mariadb"):
-            from app.services.db_auth import sync_mysql_roles_to_password
-
-            await sync_mysql_roles_to_password(
-                migrator,
-                target_db,
-                get_target_connection(migrator.params),
-            )
-        await run_alembic_upgrade_head(
-            migrator,
-            url_override=build_local_alembic_url(migrator.params),
-            heal_db=target_db,
-        )
-
-        migrator.job.set_progress(min(97, base + 12), f"Phase 2: copy {inter_db} → {target_db}...")
-        stats = await copy_database_universal(
-            migrator,
-            inter_path,
-            inter_db,
-            target_db,
-            "head",
-            staging_conn=staging_conn,
-            fail_hard=True,
-            stamp_alembic=False,
-        )
-        # Pin alembic_version to head so panel does not re-run old migrations over data
         try:
-            from app.services.pasarguard_ops import get_alembic_head_revision, set_target_alembic_version
+            await _reset_target_schema(migrator, target_db)
+            if target_db in ("postgresql", "timescaledb"):
+                from app.services.db_auth import sync_postgres_roles_to_app_password
 
-            head = await get_alembic_head_revision(migrator)
-            if not head:
-                raise RuntimeError("Could not resolve alembic head revision after data copy")
-            if not await set_target_alembic_version(migrator, target_db, head):
-                raise RuntimeError(
-                    f"Failed to pin alembic_version to head ({head}) after data copy"
+                await sync_postgres_roles_to_app_password(
+                    migrator, target_db, get_target_connection(migrator.params),
                 )
-            migrator.job.log(f"Pinned alembic_version to head ({head}) after data copy")
+            elif target_db in ("mysql", "mariadb"):
+                from app.services.db_auth import sync_mysql_roles_to_password
+
+                await sync_mysql_roles_to_password(
+                    migrator,
+                    target_db,
+                    get_target_connection(migrator.params),
+                )
+            await run_alembic_upgrade_head(
+                migrator,
+                url_override=build_local_alembic_url(migrator.params),
+                heal_db=target_db,
+            )
+
+            migrator.job.set_progress(min(97, base + 12), f"Phase 2: copy {inter_db} → {target_db}...")
+            stats = await copy_database_universal(
+                migrator,
+                inter_path,
+                inter_db,
+                target_db,
+                "head",
+                staging_conn=staging_conn,
+                fail_hard=True,
+                stamp_alembic=False,
+            )
+            # Pin alembic_version to head so panel does not re-run old migrations over data
+            try:
+                from app.services.pasarguard_ops import get_alembic_head_revision, set_target_alembic_version
+
+                head = await get_alembic_head_revision(migrator)
+                if not head:
+                    raise RuntimeError("Could not resolve alembic head revision after data copy")
+                if not await set_target_alembic_version(migrator, target_db, head):
+                    raise RuntimeError(
+                        f"Failed to pin alembic_version to head ({head}) after data copy"
+                    )
+                migrator.job.log(f"Pinned alembic_version to head ({head}) after data copy")
+            except Exception as e:
+                raise RuntimeError(
+                    f"Alembic pin after convert failed — aborting to avoid panel re-migrating "
+                    f"over copied data: {e}"
+                ) from e
         except Exception as e:
-            raise RuntimeError(
-                f"Alembic pin after convert failed — aborting to avoid panel re-migrating "
-                f"over copied data: {e}"
-            ) from e
+            snap = getattr(migrator, "_phase2_prewipe_snapshot", None)
+            if snap:
+                raise RuntimeError(
+                    f"{e}\n\nPre-wipe snapshot available for manual recovery: {snap}"
+                ) from e
+            raise
         migrator.job.log(
             f"Two-phase done: users={stats.get('users', 0)} admins={stats.get('admins', 0)} "
             f"hosts={stats.get('hosts', 0)} groups={stats.get('groups', 0)} nodes={stats.get('nodes', 0)}"
@@ -618,11 +710,13 @@ async def run_cross_db_migration(
     target_db: str,
     *,
     upgrade_via_panel: bool = False,
+    allow_same_engine: bool = False,
 ) -> None:
     """Public entry — always uses two-phase engine."""
     await run_two_phase_migration(
         migrator, source_path, source_db, target_db,
         upgrade_via_panel=upgrade_via_panel,
+        allow_same_engine=allow_same_engine,
     )
 
 

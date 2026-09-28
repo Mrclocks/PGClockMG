@@ -61,9 +61,23 @@ class PasarguardDbMigrator(BaseMigrator):
             PASARGUARD_DATA.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, dest)
         elif source_db == target_db:
-            from app.services.db_migration import run_db_migration
-            self.job.set_progress(40, f"Refreshing {source_db} database...")
-            await run_db_migration(self, str(source_path), source_db, target_db)
+            # Native same-engine refresh (stage → wipe → copy). Avoids external
+            # TOOLS_DIR/db-migrations which drifted from wizard heals.
+            self.job.set_progress(40, f"Refreshing {source_db} database (native)...")
+            await self._ensure_target_database_stack(target_db)
+            await run_cross_db_migration(
+                self, str(source_path), source_db, target_db,
+                allow_same_engine=True,
+            )
+            report = getattr(self, "copy_report", None) or {}
+            if report.get("has_gaps"):
+                crit = report.get("critical_incomplete") or report.get("incomplete") or []
+                raise RuntimeError(
+                    "Same-engine refresh incomplete — critical tables not fully copied:\n"
+                    + ", ".join(
+                        f"{i.get('table')} {i.get('copied')}/{i.get('source')}" for i in crit
+                    )
+                )
 
         self.job.set_progress(75, "Updating PasarGuard .env...")
         await self._update_pasarguard_env(target_db, install_env_snapshot)

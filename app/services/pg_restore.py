@@ -1960,6 +1960,32 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
     await _compose(job, "stop", *stop_svcs, timeout=120)
     data_dir = Path("/var/lib/postgresql/pasarguard")
     if wipe_data and data_dir.exists():
+        # Best-effort logical snapshot before irreversible volume wipe so a
+        # failed restore after align can still point operators at a dump.
+        try:
+            from app.config import BACKUP_DIR
+            from datetime import datetime, timezone
+
+            BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            snap = BACKUP_DIR / f"ts-prewipe-{getattr(job, 'job_id', 'job')}-{stamp}.tgz"
+            # Tar the data dir while container is stopped (files consistent enough).
+            proc = await asyncio.create_subprocess_exec(
+                "tar", "-czf", str(snap), "-C", str(data_dir.parent), data_dir.name,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out_b, _ = await proc.communicate()
+            if proc.returncode == 0 and snap.exists() and snap.stat().st_size > 64:
+                job.log(f"Pre-wipe Timescale volume snapshot → {snap}")
+                job._ts_prewipe_snapshot = str(snap)
+            else:
+                job.log(
+                    "Pre-wipe Timescale snapshot skipped: "
+                    + ((out_b or b"")[-200:]).decode("utf-8", errors="ignore")
+                )
+        except Exception as snap_exc:
+            job.log(f"Pre-wipe Timescale snapshot note: {snap_exc}")
         job.log(f"Resetting DB data directory {data_dir} for version alignment")
         shutil.rmtree(data_dir, ignore_errors=True)
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -5814,13 +5840,16 @@ async def _restore_postgres(
     job.log(f"PostgreSQL restore into service `{svc}` (engine={db_type})")
     await _compose_up_services(job, svc, "pgbouncer", timeout=180)
 
-    # Prefer POSTGRES_PASSWORD (matches postgres_password_candidates / role sync).
-    password = (
-        read_env_var(current_env, "POSTGRES_PASSWORD")
-        or read_env_var(current_env, "DB_PASSWORD")
-        or read_env_var(backup_env, "POSTGRES_PASSWORD")
-        or read_env_var(backup_env, "DB_PASSWORD")
-        or ""
+    from app.services.db_auth import (
+        build_postgres_auth_attempts,
+        force_align_postgres_password,
+        postgres_password_candidates,
+        resolve_engine_password,
+    )
+
+    # Install first (live container), then backup — matches resolve_engine_password.
+    password = resolve_engine_password(
+        db_type, current_env, backup_env,
     )
     user = (
         read_env_var(current_env, "DB_USER")
@@ -5843,8 +5872,6 @@ async def _restore_postgres(
     # Collect all candidate passwords and pick whichever the live container accepts.
     # After a fresh wipe the container initialises with POSTGRES_PASSWORD from compose env;
     # that value may differ from DB_PASSWORD. Also try container POSTGRES_* and socket trust.
-    from app.services.db_auth import build_postgres_auth_attempts, postgres_password_candidates
-
     container_env = await _read_pg_container_init_env(job, svc)
     password_candidates = list(dict.fromkeys(filter(None, [
         password,
@@ -5871,6 +5898,7 @@ async def _restore_postgres(
     effective_password = password
     effective_user = user
     pg_ready = False
+    saw_trust_only = False
     for auth_user, auth_pwd in auth_attempts:
         # Readiness helper requires a password string; for trust attempts use ""
         # and also try a direct socket SELECT without PGPASSWORD below.
@@ -5892,6 +5920,7 @@ async def _restore_postgres(
                     or next((p for p in password_candidates if p), "")
                 )
                 pg_ready = True
+                saw_trust_only = True
                 job.log(f"PostgreSQL ready via local trust as {auth_user}")
                 break
             continue
@@ -5912,6 +5941,41 @@ async def _restore_postgres(
     # Use the verified credentials for the rest of this restore session
     password = effective_password
     user = effective_user
+
+    # MySQL-style pre-heal: when only local trust works (or install secret must
+    # win), force-align roles BEFORE dump import so SCRAM/PgBouncer match.
+    if saw_trust_only and password:
+        job.log(
+            "Pre-healing PostgreSQL roles to install/resolved password "
+            "before dump import (trust-only readiness)..."
+        )
+        try:
+            class _Mini:
+                def __init__(self, j):
+                    self.job = j
+
+                async def _run_cmd(self, cmd, cwd=None, timeout=600, *, quiet: bool = False):
+                    return await _run(self.job, cmd, cwd=cwd, timeout=timeout, quiet=quiet)
+
+            healed = await force_align_postgres_password(
+                _Mini(job),
+                svc,
+                current_env or backup_env or "",
+                password=password,
+                admin_users=[
+                    u for u in (
+                        user,
+                        "postgres",
+                        container_env.get("POSTGRES_USER") or "",
+                    ) if u
+                ],
+            )
+            if healed:
+                job.log("PostgreSQL pre-heal OK — dump import will use aligned password")
+            else:
+                job.log("PostgreSQL pre-heal could not confirm — continuing with probed auth")
+        except Exception as heal_exc:
+            job.log(f"PostgreSQL pre-heal note: {heal_exc}")
 
     async def psql(
         sql: str,

@@ -48,6 +48,19 @@ def test_install_server_password_from_url_only():
     print("OK: install_server_password from URL only")
 
 
+def test_resolve_engine_password_prefers_install_over_backup():
+    from app.services.db_auth import resolve_engine_password
+
+    install = 'POSTGRES_PASSWORD="install-pg"\nDB_PASSWORD="install-app"\n'
+    backup = 'POSTGRES_PASSWORD="backup-pg"\nDB_PASSWORD="backup-app"\n'
+    assert resolve_engine_password("timescaledb", install, backup) == "install-pg"
+    assert resolve_engine_password("postgresql", backup) == "backup-pg"
+    mysql_install = 'MYSQL_ROOT_PASSWORD="root-sec"\nDB_PASSWORD="app-sec"\n'
+    assert resolve_engine_password("mysql", mysql_install, "") == "root-sec"
+    assert resolve_engine_password("sqlite", install) == ""
+    print("OK: resolve_engine_password order")
+
+
 def test_install_auth_env_for_sqlite_source_ignores_live_merge():
     from app.services.db_auth import install_auth_env_for_convert, install_server_password
 
