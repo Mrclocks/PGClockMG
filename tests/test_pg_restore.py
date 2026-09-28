@@ -56,6 +56,43 @@ def test_soft_db_family_matrix():
     print("OK: soft_db_family matrix")
 
 
+def test_assert_convert_prerequisites_sqlite_needs_install_secret():
+    from app.services.pg_restore import assert_convert_prerequisites
+
+    try:
+        assert_convert_prerequisites(
+            backup_db="sqlite", target_db="timescaledb", install_pwd="",
+        )
+        raised = False
+    except RuntimeError as e:
+        raised = True
+        assert "password" in str(e).lower() or "POSTGRES" in str(e)
+        assert "sqlite" in str(e).lower()
+    assert raised
+    assert_convert_prerequisites(
+        backup_db="sqlite", target_db="timescaledb", install_pwd="secret",
+    )
+    print("OK: convert prerequisites require install secret for sqlite→server")
+
+
+def test_iter_filtered_timescaledb_strips_extension_lines():
+    import tempfile
+    from app.services.pg_restore import iter_filtered_timescaledb_sql_lines
+
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "d.sql"
+        src.write_text(
+            "CREATE EXTENSION timescaledb;\n"
+            "CREATE TABLE users (id int);\n"
+            "SELECT timescaledb_pre_restore();\n",
+            encoding="utf-8",
+        )
+        body = "".join(iter_filtered_timescaledb_sql_lines(src, strip_all=True))
+        assert "CREATE TABLE users" in body
+        assert "CREATE EXTENSION timescaledb" not in body
+    print("OK: iter_filtered_timescaledb_sql_lines")
+
+
 def test_ts_to_ts_syncs_alembic_before_panel():
     from app.services.pg_restore import should_sync_alembic_before_panel_boot
 
@@ -1547,6 +1584,8 @@ def test_discover_ignores_xui_sqlite():
 
 if __name__ == "__main__":
     test_soft_db_family_matrix()
+    test_assert_convert_prerequisites_sqlite_needs_install_secret()
+    test_iter_filtered_timescaledb_strips_extension_lines()
     test_ts_to_ts_syncs_alembic_before_panel()
     test_ensure_timescaledb_forces_post_restore_when_on()
     test_ensure_timescaledb_hard_fails_when_still_on()

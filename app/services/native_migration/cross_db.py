@@ -365,16 +365,18 @@ async def _phase1_land_intermediate(
         )
         return source_path, source_db, staging_conn
 
-    # Live non-sqlite source (credentials from wizard) — do not heal/stamp live.
+    # Live non-sqlite source (credentials from wizard) — never run alembic on
+    # the live customer DB (stamps/heals must stay on staging / sqlite only).
     conn = get_source_connection(migrator.params)
-    if skip_alembic:
+    migrator.job.log(
+        "Phase1: live source — host alembic skipped "
+        "(will not mutate live alembic_version; use staging dump or panel-boot)"
+    )
+    if not skip_alembic:
         migrator.job.log(
-            "Phase1: live source + panel-boot — host alembic skipped "
-            "(will not mutate live alembic_version)"
+            "Phase1 note: skip_alembic=False ignored for live non-sqlite source "
+            "(alembic on live source is banned)"
         )
-        return source_path, source_db, None
-    url = build_alembic_url_from_conn(source_db, conn)
-    await run_alembic_upgrade_head(migrator, url_override=url, heal_db=source_db)
     return source_path, source_db, None
 
 async def _prepare_target_for_migration(migrator, target_db: str) -> None:

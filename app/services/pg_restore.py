@@ -240,22 +240,57 @@ def _ts_extension_line_dropped(ln: str, strip_all: bool) -> bool:
     return False
 
 
-def filter_timescaledb_extension_sql_file(
-    src: Path, dest: Path, *, strip_all: bool = False,
-) -> Path:
-    """Stream `src` into `dest`, dropping the same lines as the in-memory filter."""
-    with open(src, "r", encoding="utf-8", errors="ignore") as fh, \
-            open(dest, "w", encoding="utf-8") as out:
-        if not strip_all:
-            out.write(TIMESCALEDB_CATALOG_SEED_CLEAR_SQL.rstrip())
-            out.write("\n")
+def iter_filtered_timescaledb_sql_lines(
+    src: Path, *, strip_all: bool = False,
+):
+    """Yield filtered dump lines (no second on-disk twin)."""
+    if not strip_all:
+        yield TIMESCALEDB_CATALOG_SEED_CLEAR_SQL.rstrip() + "\n"
+    with open(src, "r", encoding="utf-8", errors="ignore") as fh:
         for raw in fh:
             ln = raw.rstrip("\n").rstrip("\r")
             if _ts_extension_line_dropped(ln, strip_all):
                 continue
-            out.write(ln)
-            out.write("\n")
+            yield ln + "\n"
+
+
+def filter_timescaledb_extension_sql_file(
+    src: Path, dest: Path, *, strip_all: bool = False,
+) -> Path:
+    """Stream `src` into `dest`, dropping the same lines as the in-memory filter."""
+    with open(dest, "w", encoding="utf-8") as out:
+        for chunk in iter_filtered_timescaledb_sql_lines(src, strip_all=strip_all):
+            out.write(chunk)
     return dest
+
+
+def assert_disk_for_dump_work(
+    dump_path: Path | None,
+    *,
+    twin: bool = False,
+    label: str = "dump import",
+) -> None:
+    """Fail early when free disk cannot hold dump work (+ optional filter twin)."""
+    if not dump_path or not Path(dump_path).exists():
+        return
+    try:
+        size = Path(dump_path).stat().st_size
+    except OSError:
+        return
+    need = size * (2 if twin else 1) + (512 * 1024 * 1024)  # +512MiB margin
+    free = disk_free_bytes("/var/lib")
+    if free < 0:
+        free = disk_free_bytes(Path(dump_path).parent)
+    if free < 0:
+        return
+    if free < need:
+        need_mib = need // (1024 * 1024)
+        free_mib = free // (1024 * 1024)
+        raise RuntimeError(
+            f"Not enough free disk for {label} "
+            f"({free_mib} MiB free; need ≥{need_mib} MiB including "
+            f"{'filter twin + ' if twin else ''}margin). Free space and retry."
+        )
 
 
 def filter_globals_sql(sql: str) -> str:
@@ -2191,6 +2226,40 @@ def disk_free_bytes(path: str | Path) -> int:
 _TS_PULL_MIN_FREE_BYTES = 3 * 1024 * 1024 * 1024
 
 
+def assert_convert_prerequisites(
+    *,
+    backup_db: str,
+    target_db: str,
+    install_pwd: str,
+    env_text: str | None = None,
+) -> None:
+    """Fail fast before sqlite→server / cross-DB convert with actionable tips."""
+    if target_db == "sqlite":
+        return
+    if not (install_pwd or "").strip():
+        if (backup_db or "").lower() == "sqlite":
+            raise RuntimeError(
+                f"Cannot convert sqlite → {target_db}: install database password "
+                "is missing (POSTGRES_PASSWORD / MYSQL_ROOT_PASSWORD / DB_PASSWORD). "
+                "Set the install secret in /opt/pasarguard/.env and retry — "
+                "sqlite backups have no server password."
+            )
+        raise RuntimeError(
+            f"Cannot convert {backup_db} → {target_db}: no install/target "
+            "database password resolved. Align .env secrets with the live container."
+        )
+    # Soft hint only — container start happens next; empty URL is a common footgun.
+    if env_text and target_db in ("postgresql", "timescaledb"):
+        from app.services.env_migration import read_env_var as _rev
+
+        url = (_rev(env_text, "SQLALCHEMY_DATABASE_URL") or "").lower()
+        if url and "sqlite" in url:
+            raise RuntimeError(
+                f"Install .env still points SQLALCHEMY_DATABASE_URL at sqlite while "
+                f"converting to {target_db}. Fix the install URL/engine before convert."
+            )
+
+
 def atomic_write_text(path: Path, content: str) -> None:
     """Write file atomically so a full disk never leaves an empty compose/env."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -3113,6 +3182,12 @@ async def _maybe_cross_db_after_restore(
             or install_server_password(install_env_snapshot, target_db)
             or ""
         )
+        assert_convert_prerequisites(
+            backup_db=backup_db,
+            target_db=target_db,
+            install_pwd=install_pwd,
+            env_text=env_text or install_env_snapshot,
+        )
         if backup_db == "sqlite":
             job.log(
                 f"Source is sqlite (no DB password) — authenticating {target_db} "
@@ -3215,8 +3290,8 @@ async def _maybe_cross_db_after_restore(
             ):
                 raise
             job.log(
-                "Convert hit DB auth/SASL failure — auto-healing credentials "
-                "and retrying convert once..."
+                "Convert hit database authentication failure — auto-healing "
+                "credentials and retrying convert once..."
             )
             mig_params["_auth_healed_once"] = True
             heal_env = install_auth_env_for_convert(
@@ -3956,6 +4031,16 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
 
     if not causes_en and causes_fa:
         causes_en = list(causes_fa)
+    # Prefer engine-accurate summary in detail when auth tips already explain it —
+    # avoid surfacing bare SASL/SCRAM strings as the "technical" line.
+    detail = raw
+    if causes_fa and (
+        "sasl" in low
+        or "scram" in low
+        or "authentication failed" in low
+        or "access denied" in low
+    ):
+        detail = f"{en}\n{raw[:400]}"
     return {
         "en": en,
         "fa": fa,
@@ -3963,7 +4048,7 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         "causes_fa": causes_fa,
         "causes_en": causes_en,
         "causes_ru": causes_en,
-        "detail": raw,
+        "detail": detail,
     }
 
 
@@ -6418,6 +6503,11 @@ async def _restore_postgres(
             dump_wants_ts = (has_ts == "1") or backup_has_ts
             filtered: Path | None = None
             restore_file = dump_path
+            assert_disk_for_dump_work(
+                dump_path,
+                twin=bool(dump_wants_ts),
+                label=f"PostgreSQL restore {dbn}",
+            )
 
             if use_timescale and dump_wants_ts:
                 ok_ext, out_ext = await psql(

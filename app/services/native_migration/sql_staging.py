@@ -362,12 +362,12 @@ async def _import_via_compose_service(
     except Exception:
         pass
     use_ts = source_db == "timescaledb" or "timescaledb" in head.lower()
-    filtered: Path | None = None
-    import_path = dump_path
+    import_path: Path | None = dump_path
     if use_ts:
         from app.services.pg_restore import (
             TIMESCALEDB_CATALOG_SEED_CLEAR_SQL,
-            filter_timescaledb_extension_sql_file,
+            assert_disk_for_dump_work,
+            iter_filtered_timescaledb_sql_lines,
         )
 
         for sql in (
@@ -382,29 +382,53 @@ async def _import_via_compose_service(
                 cwd=cwd,
             )
             await p.wait()
-        filtered = dump_path.with_suffix(dump_path.suffix + ".staging-filtered")
-        # Stream filter — never load multi-GB dumps into RAM.
-        filter_timescaledb_extension_sql_file(dump_path, filtered, strip_all=False)
-        import_path = filtered
+        # Stream filtered SQL into psql — avoid writing a second multi-GB twin.
 
-    # Prefer stdin so host paths outside compose mounts still work
-    with open(import_path, "rb") as fh:
+        assert_disk_for_dump_work(dump_path, twin=False, label="Timescale staging import")
         proc = await asyncio.create_subprocess_exec(
             "docker", "compose", "exec", "-T",
             "-e", f"PGPASSWORD={pwd}",
             service,
             "psql", "-U", user, "-d", staging_db, "-v", "ON_ERROR_STOP=0",
             cwd=cwd,
-            stdin=fh,
+            stdin=asyncio.subprocess.PIPE,
         )
-        await proc.wait()
-    if filtered and filtered.exists():
+        assert proc.stdin is not None
         try:
-            filtered.unlink()
-        except OSError:
-            pass
-    if proc.returncode != 0:
-        raise RuntimeError(f"SQL staging failed (db={staging_db})")
+            for chunk in iter_filtered_timescaledb_sql_lines(dump_path, strip_all=False):
+                proc.stdin.write(chunk.encode("utf-8", errors="ignore"))
+                await proc.stdin.drain()
+            proc.stdin.close()
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            raise
+        await proc.wait()
+        if proc.returncode != 0:
+            raise RuntimeError(f"SQL staging failed (db={staging_db})")
+        import_path = None  # already imported via stream
+    else:
+        import_path = dump_path
+
+    if import_path is not None:
+        from app.services.pg_restore import assert_disk_for_dump_work
+
+        assert_disk_for_dump_work(Path(import_path), twin=False, label="SQL staging import")
+        # Prefer stdin so host paths outside compose mounts still work
+        with open(import_path, "rb") as fh:
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "compose", "exec", "-T",
+                "-e", f"PGPASSWORD={pwd}",
+                service,
+                "psql", "-U", user, "-d", staging_db, "-v", "ON_ERROR_STOP=0",
+                cwd=cwd,
+                stdin=fh,
+            )
+            await proc.wait()
+        if proc.returncode != 0:
+            raise RuntimeError(f"SQL staging failed (db={staging_db})")
 
     # ON_ERROR_STOP=0 can exit 0 with an empty/broken import — verify tables landed.
     verify = await asyncio.create_subprocess_exec(
