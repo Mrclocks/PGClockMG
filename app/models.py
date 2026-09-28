@@ -42,6 +42,14 @@ class MigrationRequest(BaseModel):
     upload_id: Optional[str] = None
     upload_bundle_id: Optional[str] = None
     install_redirect: bool = True
+    # Public base for old→new subscription redirects (3x-ui / Hiddify).
+    # Empty → auto default from PasarGuard .env / certs / IP.
+    redirect_domain: Optional[str] = None
+    redirect_port: Optional[int] = None
+    redirect_scheme: Optional[str] = None
+    # Optional second hostname for Certbot SAN (panel domain ≠ sub domain).
+    panel_domain: Optional[str] = None
+    enable_certbot: bool = False
     relocate_inbound_certs: bool = False
     skip_bad_user_rows: bool = True
     disable_nodes_after_migrate: bool = True

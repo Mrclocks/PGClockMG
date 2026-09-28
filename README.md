@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.6.31`** — ریستور MySQL→MySQL خودکار (heal رمز نصب + بدون پیام اشتباه SASL/Timescale)
+> 🚀 **`v4.7.0`** — مهاجرت 3x-ui: دامنه/پورت ریدایرکت + Certbot اختیاری (fail-soft)
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">

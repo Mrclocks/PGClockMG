@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.31`** — автоматический MySQL→MySQL restore (heal пароля установки; без ложного SASL/Timescale)
+> 🚀 **`v4.7.0`** — миграция 3x-ui: домен/порт redirect + опциональный Certbot (fail-soft)
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

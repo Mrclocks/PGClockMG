@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.31`** — automatic MySQL→MySQL restore (install-password heal; no false SASL/Timescale tip)
+> 🚀 **`v4.7.0`** — 3x-ui migrate: redirect domain/port + optional Certbot (fail-soft)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

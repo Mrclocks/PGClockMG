@@ -510,11 +510,44 @@
         <h2></h2>
         <p class="desc"></p>
         <div class="summary-card" id="migrationSummary"></div>
-        <div id="redirectOption" class="option-card hidden">
-          <label class="checkbox-label">
-            <input type="checkbox" id="installRedirect" checked>
-            <span></span>
-          </label>
+        <div id="redirectOption" class="restore-options hidden">
+          <div class="toggle-row">
+            <label class="ios-toggle" for="installRedirect">
+              <input type="checkbox" id="installRedirect" role="switch" checked>
+              <span class="ios-toggle-track"><span class="ios-toggle-thumb"></span></span>
+            </label>
+            <div class="toggle-text">
+              <span class="toggle-label" id="installRedirectLabel"></span>
+              <span class="toggle-hint" id="installRedirectHint"></span>
+            </div>
+          </div>
+          <div id="redirectAdvanced" class="redirect-advanced">
+            <p class="desc-sm" id="redirectDestTitle" style="margin:12px 0 8px"></p>
+            <div class="pwd-field-row redirect-field-row">
+              <label class="pwd-field-label" id="redirectDomainLabel" for="redirectDomain"></label>
+              <input class="pwd-field-input" type="text" id="redirectDomain" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="pwd-field-row redirect-field-row">
+              <label class="pwd-field-label" id="redirectPortLabel" for="redirectPort"></label>
+              <input class="pwd-field-input" type="number" id="redirectPort" min="1" max="65535" step="1">
+            </div>
+            <div class="pwd-field-row redirect-field-row">
+              <label class="pwd-field-label" id="panelDomainLabel" for="panelDomain"></label>
+              <input class="pwd-field-input" type="text" id="panelDomain" autocomplete="off" spellcheck="false">
+            </div>
+            <p class="toggle-hint" id="redirectDefaultHint" style="margin:8px 0 0"></p>
+            <div class="toggle-row" style="margin-top:12px">
+              <label class="ios-toggle" for="enableCertbot">
+                <input type="checkbox" id="enableCertbot" role="switch">
+                <span class="ios-toggle-track"><span class="ios-toggle-thumb"></span></span>
+              </label>
+              <div class="toggle-text">
+                <span class="toggle-label" id="enableCertbotLabel"></span>
+                <span class="toggle-hint" id="enableCertbotHint"></span>
+              </div>
+            </div>
+            <div id="certbotPrereqWarn" class="warning-card hidden" style="margin-top:10px"></div>
+          </div>
         </div>
         <div id="migrateOptimizeOptions" class="restore-options hidden">
           <p class="desc-sm" id="migrateOptimizeTitle" style="margin:0 0 10px"></p>
