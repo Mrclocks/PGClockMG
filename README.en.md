@@ -1,4 +1,4 @@
-> 🚀 **`v4.6.29`** — fixed alembic hang on `refactor sub updated at` (bulk SQL heal)
+> 🚀 **`v4.6.31`** — automatic MySQL→MySQL restore (install-password heal; no false SASL/Timescale tip)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
