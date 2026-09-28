@@ -968,7 +968,7 @@ def test_explain_mysql_to_mysql_access_denied_no_sasl_or_timescale():
     assert "Access denied" in en or "MySQL" in en
     assert "Timescale" not in blob and "Postgres" not in blob and "POSTGRES" not in blob
     assert "MYSQL_ROOT_PASSWORD" in blob or "رمز نصب" in blob
-    assert "skip-grant" in blob.lower() or "نصب" in blob
+    assert "heal" in blob.lower() or "خودکار" in blob or "skip-grant" in blob.lower()
     print("OK: mysql→mysql auth explain has no SASL/Timescale")
 
 
@@ -1000,6 +1000,21 @@ def test_build_mysql_restore_auth_attempts_prefers_install_password():
     assert pwds_in_order[0] == "install-root"
     assert "backup-root" in pwds_in_order
     assert pwds_in_order.index("install-root") < pwds_in_order.index("backup-root")
+
+    # Container init secret is preferred after install, before backup.
+    attempts2, _n2, heal2 = build_mysql_restore_auth_attempts(
+        install,
+        backup,
+        container_env={"MYSQL_ROOT_PASSWORD": "container-root"},
+    )
+    assert heal2 == "install-root"
+    root_pwds = []
+    for user, pwd, _db in attempts2:
+        if user == "root" and pwd not in root_pwds:
+            root_pwds.append(pwd)
+    assert root_pwds[0] == "install-root"
+    assert "container-root" in root_pwds
+    assert root_pwds.index("container-root") < root_pwds.index("backup-root")
     print("OK: mysql restore auth prefers install password")
 
 
