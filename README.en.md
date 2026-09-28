@@ -1,4 +1,4 @@
-> 🚀 **`v4.7.0`** — 3x-ui migrate: redirect domain/port + optional Certbot (fail-soft)
+> 🚀 **`v4.8.0`** — restore/migrate harden: accurate errors, auto-heal, transfer summary, solid Change-DB
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

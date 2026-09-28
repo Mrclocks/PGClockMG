@@ -1,4 +1,4 @@
-> 🚀 **`v4.7.0`** — миграция 3x-ui: домен/порт redirect + опциональный Certbot (fail-soft)
+> 🚀 **`v4.8.0`** — harden restore/migrate: точные ошибки, auto-heal, сводка переноса, жёсткий Change-DB
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
