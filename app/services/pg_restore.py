@@ -3432,51 +3432,87 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
     elif "character varying(32)" in low or "stringdatarighttruncation" in low:
         fa = "خطای ثبت نسخه alembic بعد از کپی داده (نسخه نامعتبر)."
         en = "Alembic version stamp failed after data copy (invalid revision string)."
-        causes_fa = [
-            "خروجی docker compose با نسخه alembic قاطی شده بود — در v2.3.5+ اصلاح شد",
-            "اسکیمای target قبلاً با alembic upgrade head ساخته شده و دیگر نیاز به stamp دستی نیست",
-        ]
+        _causes(
+            [
+                "خروجی docker compose با نسخه alembic قاطی شده بود — در v2.3.5+ اصلاح شد",
+                "اسکیمای target قبلاً با alembic upgrade head ساخته شده و دیگر نیاز به stamp دستی نیست",
+            ],
+            [
+                "docker compose output was mixed into the alembic revision — fixed in v2.3.5+",
+                "Target schema is already created via alembic upgrade head; manual stamp is not needed",
+            ],
+        )
     elif "no space left" in low or "enospc" in low or "errno 28" in low:
         fa = "فضای دیسک سرور پر است (دانلود ایمیج Timescale یا نوشتن فایل شکست خورد)."
         en = "Server disk is full (Timescale image pull or file write failed)."
         ru = "На диске сервера закончилось место (pull образа Timescale / запись файла)."
-        causes_fa = [
-            "لاگ docker: no space left on device — ایمیج Timescale چند گیگابایت فضا می‌خواهد",
-            "دیسک را آزاد کنید (docker image prune / لاگ‌ها) و دوباره ریستور کنید",
-            "ویزارد جدید بدون pull، حالت restoring را اضطراری خاموش می‌کند تا پنل بالا بیاید",
-        ]
+        _causes(
+            [
+                "لاگ docker: no space left on device — ایمیج Timescale چند گیگابایت فضا می‌خواهد",
+                "دیسک را آزاد کنید (docker image prune / لاگ‌ها) و دوباره ریستور کنید",
+                "ویزارد جدید بدون pull، حالت restoring را اضطراری خاموش می‌کند تا پنل بالا بیاید",
+            ],
+            [
+                "Docker log: no space left on device — Timescale images need several GB free",
+                "Free disk (docker image prune / logs) and retry restore",
+                "Newer wizard clears Timescale restoring mode even when pull fails so the panel can start",
+            ],
+        )
     elif "empty compose file" in low:
         fa = "فایل docker-compose.yml خالی یا خراب شده است."
         en = "docker-compose.yml is empty or unusable."
         ru = "Файл docker-compose.yml пуст или повреждён."
-        causes_fa = [
-            "پر شدن دیسک هنگام تغییر تگ ایمیج ممکن است compose را خراب کند — از .yml.pgclockmg.bak برگردانید",
-            "ویزارد جدید compose را atomic می‌نویسد و در ENOSPC برمی‌گرداند",
-        ]
+        _causes(
+            [
+                "پر شدن دیسک هنگام تغییر تگ ایمیج ممکن است compose را خراب کند — از .yml.pgclockmg.bak برگردانید",
+                "ویزارد جدید compose را atomic می‌نویسد و در ENOSPC برمی‌گرداند",
+            ],
+            [
+                "Disk full while rewriting the image tag can corrupt compose — restore from .yml.pgclockmg.bak",
+                "Newer wizard writes compose atomically and rolls back on ENOSPC",
+            ],
+        )
     elif "catalog version mismatch" in low and "timescale" in low:
         fa = "نسخه کاتالوگ TimescaleDB بکاپ با ایمیج در حال اجرا یکی نیست (post_restore)."
         en = "TimescaleDB catalog version in the dump does not match the running image (post_restore)."
         ru = "Версия каталога TimescaleDB в дампе не совпадает с образом (post_restore)."
-        causes_fa = [
-            "بکاپ multi ممکن است متادیتای 2.27 و 2.28 داشته باشد — ایمیج باید با کاتالوگ دامپ هم‌تراز شود",
-            "ویزارد ایمیج را بدون پاک کردن دیتا هم‌تراز می‌کند و دوباره post_restore می‌زند",
-            "اگر باز هم خطا بود، نسخه timescaledb در docker-compose.yml را با نسخه بکاپ یکی کنید",
-        ]
+        _causes(
+            [
+                "بکاپ multi ممکن است متادیتای 2.27 و 2.28 داشته باشد — ایمیج باید با کاتالوگ دامپ هم‌تراز شود",
+                "ویزارد ایمیج را بدون پاک کردن دیتا هم‌تراز می‌کند و دوباره post_restore می‌زند",
+                "اگر باز هم پیام خطا بود، نسخه timescaledb در docker-compose.yml را با نسخه بکاپ یکی کنید",
+            ],
+            [
+                "Multi backups may mix 2.27/2.28 catalog metadata — image must match the dump catalog",
+                "Wizard realigns the image without wiping data and retries post_restore",
+                "If it still fails, pin timescaledb in docker-compose.yml to the backup version",
+            ],
+        )
     elif "restoring=on" in low or "timescaledb_post_restore" in low or (
         "timescaledb.restoring" in low and "still on" in low
     ):
         fa = "TimescaleDB در حالت ریستور گیر کرده و post_restore موفق نشد."
         en = "TimescaleDB is stuck in restore mode and post_restore failed."
         ru = "TimescaleDB застрял в режиме restore и post_restore не удался."
-        causes_fa = [
-            "نقش واقعی سوپریوزر کانتینر معمولاً POSTGRES_USER / DB_USER است — نقش postgres ممکن است اصلاً وجود نداشته باشد",
-            "گاهی timescaledb_post_restore به‌خاطر catalog version mismatch خطا می‌دهد — ویزارد ایمیج را هم‌تراز و در نهایت GUC را اضطراری خاموش می‌کند",
-            "اگر دوباره خطا شد، لاگ را برای catalog version mismatch / Tried roles / Database: ببینید",
-        ]
+        _causes(
+            [
+                "نقش واقعی سوپریوزر کانتینر معمولاً POSTGRES_USER / DB_USER است — نقش postgres ممکن است اصلاً وجود نداشته باشد",
+                "گاهی timescaledb_post_restore به‌خاطر catalog version mismatch خطا می‌دهد — ویزارد ایمیج را هم‌تراز و در نهایت GUC را اضطراری خاموش می‌کند",
+                "اگر دوباره خطا شد، لاگ را برای catalog version mismatch / Tried roles / Database: ببینید",
+            ],
+            [
+                "Container superuser is usually POSTGRES_USER / DB_USER — role postgres may not exist",
+                "post_restore can fail on catalog mismatch — wizard realigns the image then force-clears the GUC",
+                "If it persists, check logs for catalog version mismatch / Tried roles / Database:",
+            ],
+        )
     elif "timescale" in low and "version" in low:
         fa = "نسخه TimescaleDB بکاپ با سرور هم‌خوان نیست."
         en = "TimescaleDB version mismatch between backup and server."
-        causes_fa = ["ویزارد معمولاً ایمیج را هم‌تراز می‌کند — دوباره تلاش کنید یا لاگ کامل را ببینید."]
+        _causes(
+            ["ویزارد معمولاً ایمیج را هم‌تراز می‌کند — دوباره تلاش کنید یا لاگ کامل را ببینید."],
+            ["Wizard usually realigns the image — retry or inspect the full log."],
+        )
     elif is_ts_catalog_mismatch_error(raw) or (
         "schema_name" in low and "chunk" in low and "does not exist" in low
     ):
@@ -3491,17 +3527,31 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
                 f"the installed extension is older."
             )
             ru = f"Каталог бэкапа требует TimescaleDB {needs_ver} или новее — установленная версия старее."
-            causes_fa = [
-                f"نسخه TimescaleDB سرور از بکاپ قدیمی‌تر است — ایمیج باید روی {pin} پین شود",
-                "ویزارد جدید این حالت را قبل از ریستور تشخیص می‌دهد و ایمیج را هم‌تراز می‌کند — آپدیت کنید و دوباره ریستور کنید",
-                f"دستی: در docker-compose.yml ایمیج timescaledb را روی {pin}-pgXX بگذارید، volume را پاک کنید و ریستور را تکرار کنید",
-            ]
+            _causes(
+                [
+                    f"نسخه TimescaleDB سرور از بکاپ قدیمی‌تر است — ایمیج باید روی {pin} پین شود",
+                    "ویزارد جدید این حالت را قبل از ریستور تشخیص می‌دهد و ایمیج را هم‌تراز می‌کند — آپدیت کنید و دوباره ریستور کنید",
+                    f"دستی: در docker-compose.yml ایمیج timescaledb را روی {pin}-pgXX بگذارید، volume را پاک کنید و ریستور را تکرار کنید",
+                ],
+                [
+                    f"Server TimescaleDB is older than the backup — pin the image to {pin}",
+                    "Newer wizard detects this before restore and realigns the image — update and retry",
+                    f"Manual: set timescaledb image to {pin}-pgXX in docker-compose.yml, wipe volume, restore again",
+                ],
+            )
         else:
-            causes_fa = [
-                f"از TimescaleDB 2.29 ستون schema_name از جدول chunk حذف شده — بکاپ‌های قدیمی نیاز به ایمیج {TS_LAST_SCHEMA_NAME_CHUNK} دارند",
-                "ویزارد در نسخه جدید اثر انگشت دامپ را تشخیص می‌دهد و ایمیج را قبل از ریستور هم‌تراز می‌کند — آپدیت کنید و دوباره ریستور کنید",
-                "اگر هنوز خطا می‌دهد، در docker-compose.yml ایمیج timescaledb را دستی روی 2.28.3-pgXX بگذارید و volume را پاک کنید",
-            ]
+            _causes(
+                [
+                    f"از TimescaleDB 2.29 ستون schema_name از جدول chunk حذف شده — بکاپ‌های قدیمی نیاز به ایمیج {TS_LAST_SCHEMA_NAME_CHUNK} دارند",
+                    "ویزارد در نسخه جدید اثر انگشت دامپ را تشخیص می‌دهد و ایمیج را قبل از ریستور هم‌تراز می‌کند — آپدیت کنید و دوباره ریستور کنید",
+                    "اگر هنوز خطا می‌دهد، در docker-compose.yml ایمیج timescaledb را دستی روی 2.28.3-pgXX بگذارید و volume را پاک کنید",
+                ],
+                [
+                    f"TimescaleDB 2.29 dropped chunk.schema_name — older dumps need image {TS_LAST_SCHEMA_NAME_CHUNK}",
+                    "Newer wizard fingerprints the dump and realigns the image before restore — update and retry",
+                    "If it still fails, pin timescaledb to 2.28.3-pgXX in docker-compose.yml and wipe the volume",
+                ],
+            )
     elif (
         "certificate files were not restored" in low
         or "certs restore failed" in low
@@ -3509,60 +3559,109 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
     ):
         fa = "گواهی SSL بکاپ به /var/lib/pasarguard/certs منتقل نشد یا در .env مپ نشد."
         en = "Backup SSL certs were not restored/mapped under /var/lib/pasarguard/certs."
-        causes_fa = [
-            "پوشه certs باید داخل زیپ بکاپ باشد (نه فقط مسیر در .env)",
-            "در v2.4.0+ certs به /var/lib/pasarguard/certs کپی و UVICORN_SSL_* روی همان مسیر مپ می‌شود",
-            "اگر بکاپ بدون certs گرفته شده، دوباره با certs بکاپ بگیرید یا پنل را بدون SSL نصب کنید",
-        ]
+        _causes(
+            [
+                "پوشه certs باید داخل زیپ بکاپ باشد (نه فقط مسیر در .env)",
+                "در v2.4.0+ certs به /var/lib/pasarguard/certs کپی و UVICORN_SSL_* روی همان مسیر مپ می‌شود",
+                "اگر بکاپ بدون certs گرفته شده، دوباره با certs بکاپ بگیرید یا پنل را بدون SSL نصب کنید",
+            ],
+            [
+                "The backup zip must include the certs folder (not only paths in .env)",
+                "v2.4.0+ copies certs to /var/lib/pasarguard/certs and maps UVICORN_SSL_* there",
+                "If the backup has no certs, re-backup with certs or install the panel without SSL",
+            ],
+        )
     elif "dict can not be used as parameter" in low or "dict cannot be used as parameter" in low:
         fa = "مقدار JSON از Postgres به‌صورت dict به MariaDB/MySQL پاس شد."
         en = "PostgreSQL JSON/JSONB dict was passed raw to MySQL/MariaDB (invalid bind param)."
-        causes_fa = [
-            "ستون‌های permissions / proxy_settings / config باید قبل از insert به JSON string تبدیل شوند",
-            "در v2.8.10+ همه dict/list برای MySQL serialize می‌شوند — آپدیت و دوباره ریستور کنید",
-        ]
+        _causes(
+            [
+                "ستون‌های permissions / proxy_settings / config باید قبل از insert به JSON string تبدیل شوند",
+                "در v2.8.10+ همه dict/list برای MySQL serialize می‌شوند — آپدیت و دوباره ریستور کنید",
+            ],
+            [
+                "permissions / proxy_settings / config columns must be JSON strings before insert",
+                "v2.8.10+ serializes all dict/list values for MySQL — update and retry",
+            ],
+        )
     elif "incorrect datetime value" in low or "1292" in low:
         fa = "فرمت تاریخ/زمان Postgres با ستون DATETIME در MySQL/MariaDB سازگار نبود."
         en = "PostgreSQL timestamptz value is incompatible with MySQL/MariaDB DATETIME."
-        causes_fa = [
-            "مقادیر با پسوند +00:00 باید بدون timezone نوشته شوند — در v2.8.9+ اصلاح شد",
-            "آپدیت ویزارد و دوباره ریستور/تبدیل کنید",
-        ]
+        _causes(
+            [
+                "مقادیر با پسوند +00:00 باید بدون timezone نوشته شوند — در v2.8.9+ اصلاح شد",
+                "آپدیت ویزارد و دوباره ریستور/تبدیل کنید",
+            ],
+            [
+                "Values with +00:00 must be written without timezone — fixed in v2.8.9+",
+                "Update the wizard and retry restore/convert",
+            ],
+        )
     elif "migration incomplete" in low:
         fa = "بخشی از داده‌ها کپی نشد (کاربر/هاست/گروه/نود ناقص)."
         en = "Incomplete data copy (users/hosts/groups/nodes)."
-        causes_fa = [
-            "تبدیل باید ۱۰۰٪ باشد — در v2.3.9+ کپی ناقص fail می‌شود",
-            "لاگ Row skip را برای جدول مشکل‌دار ببینید",
-        ]
+        _causes(
+            [
+                "تبدیل باید ۱۰۰٪ باشد — در v2.3.9+ کپی ناقص fail می‌شود",
+                "لاگ Row skip را برای جدول مشکل‌دار ببینید",
+            ],
+            [
+                "Convert must be 100% — incomplete copies fail since v2.3.9+",
+                "Check Row skip logs for the failing table",
+            ],
+        )
     elif "restore verification failed" in low or "data incomplete" in low or "panel database is empty" in low:
         fa = "داده به موتور مقصد منتقل نشده (موفقیت کاذب قطع شد)."
         en = "Data was not transferred into the target database (false success blocked)."
-        causes_fa = [
-            "دامپ خالی/ناموفق بود یا بعد از ریستور حجم Timescale پاک شده بود — در v2.5.0 wipe بعد از ریستور حذف شد",
-            "verify اجباری: اگر بکاپ کاربر/هاست دارد، پنل خالی دیگر SUCCESS نمی‌شود",
-            "لاگ Verified / expected counts را ببینید",
-        ]
+        _causes(
+            [
+                "دامپ خالی/ناموفق بود یا بعد از ریستور حجم Timescale پاک شده بود — در v2.5.0 wipe بعد از ریستور حذف شد",
+                "verify اجباری: اگر بکاپ کاربر/هاست دارد، پنل خالی دیگر SUCCESS نمی‌شود",
+                "لاگ Verified / expected counts را ببینید",
+            ],
+            [
+                "Dump was empty/failed or Timescale volume was wiped after restore — post-restore wipe removed in v2.5.0",
+                "Hard verify: backups with users/hosts never report SUCCESS on an empty panel",
+                "Check Verified / expected counts in the log",
+            ],
+        )
     elif "pasarguard container is not running" in low:
         fa = "کانتینر PasarGuard بالا نیامد (ری‌استارت یا کرش)."
         en = "PasarGuard container is not running (crash/restart loop)."
-        causes_fa = [
-            "بعد از تبدیل، .env هنوز URL اشتباه (مثلاً sqlite) داشت — در v2.3.8+ از .env نصب حفظ می‌شود",
-            "multi-worker: NATS باید قبل از پنل بالا باشد و NATS_URL باید nats://nats:4222 باشد نه localhost",
-            "SSL نامعتبر یا خطای اتصال به PostgreSQL/PgBouncer — لاگ واقعی ValueError/asyncpg را ببینید",
-            "روی سرور: docker compose -f /opt/pasarguard/docker-compose.yml logs pasarguard --tail 80",
-        ]
+        _causes(
+            [
+                "بعد از تبدیل، .env هنوز URL اشتباه (مثلاً sqlite) داشت — در v2.3.8+ از .env نصب حفظ می‌شود",
+                "multi-worker: NATS باید قبل از پنل بالا باشد و NATS_URL باید nats://nats:4222 باشد نه localhost",
+                "SSL نامعتبر یا خطای اتصال به PostgreSQL/PgBouncer — لاگ واقعی ValueError/asyncpg را ببینید",
+                "روی سرور: docker compose -f /opt/pasarguard/docker-compose.yml logs pasarguard --tail 80",
+            ],
+            [
+                "After convert, .env still had a wrong URL (e.g. sqlite) — install .env is preserved since v2.3.8+",
+                "multi-worker: NATS must be up before the panel; NATS_URL must be nats://nats:4222 (not localhost)",
+                "Invalid SSL or PostgreSQL/PgBouncer connect errors — check real ValueError/asyncpg logs",
+                "On server: docker compose -f /opt/pasarguard/docker-compose.yml logs pasarguard --tail 80",
+            ],
+        )
     elif "application startup failed" in low:
         fa = "پنل بعد از ریستور در مرحله startup کرش کرد (Application startup failed)."
         en = "Panel crashed during application startup after restore."
         ru = "Панель упала на этапе application startup после restore."
-        causes_fa = [
-            "ویزارد v4.4.4+ قبل از boot پسورد DB را sync و PgBouncer/NATS را آماده می‌کند",
-            "multi-worker: NATS باید قبل از پنل بالا باشد و NATS_URL=nats://nats:4222",
-            "Timescale/PostgreSQL: mismatch پسورد .env با DB یا PgBouncer stale cache",
-            "SSL: فایل cert/key در /var/lib/pasarguard/certs موجود باشد",
-            "روی سرور: docker compose logs pasarguard --tail 200",
-        ]
+        _causes(
+            [
+                "ویزارد v4.4.4+ قبل از boot پسورد DB را sync و PgBouncer/NATS را آماده می‌کند",
+                "multi-worker: NATS باید قبل از پنل بالا باشد و NATS_URL=nats://nats:4222",
+                "Timescale/PostgreSQL: mismatch پسورد .env با DB یا PgBouncer stale cache",
+                "SSL: فایل cert/key در /var/lib/pasarguard/certs موجود باشد",
+                "روی سرور: docker compose logs pasarguard --tail 200",
+            ],
+            [
+                "Wizard v4.4.4+ syncs DB password and prepares PgBouncer/NATS before boot",
+                "multi-worker: NATS must be up first with NATS_URL=nats://nats:4222",
+                "Timescale/PostgreSQL: .env password mismatch or stale PgBouncer cache",
+                "SSL: cert/key must exist under /var/lib/pasarguard/certs",
+                "On server: docker compose logs pasarguard --tail 200",
+            ],
+        )
     elif "nats is required" in low or (
         "nats" in low and "multi-worker" in low
     ) or (
@@ -3570,11 +3669,18 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
     ):
         fa = "پنل multi-worker بدون NATS سالم بالا نیامد."
         en = "Multi-worker panel failed because NATS was not ready or NATS_URL was wrong."
-        causes_fa = [
-            "UVICORN_WORKERS>1 نیاز به NATS_ENABLED=1 و سرویس nats در compose دارد",
-            "NATS_URL داخل کانتینر باید nats://nats:4222 باشد — localhost کار نمی‌کند",
-            "ویزارد جدید NATS را قبل از پنل بالا می‌آورد؛ اگر باز خطا بود node-worker/scheduler را هم چک کنید",
-        ]
+        _causes(
+            [
+                "UVICORN_WORKERS>1 نیاز به NATS_ENABLED=1 و سرویس nats در compose دارد",
+                "NATS_URL داخل کانتینر باید nats://nats:4222 باشد — localhost کار نمی‌کند",
+                "ویزارد جدید NATS را قبل از پنل بالا می‌آورد؛ اگر باز خطا بود node-worker/scheduler را هم چک کنید",
+            ],
+            [
+                "UVICORN_WORKERS>1 needs NATS_ENABLED=1 and a nats service in compose",
+                "In-container NATS_URL must be nats://nats:4222 — localhost will not work",
+                "Newer wizard starts NATS before the panel; also check node-worker/scheduler if it still fails",
+            ],
+        )
     elif (
         "failed alembic upgrade head" in low
         or "failed to sync alembic" in low
@@ -3593,12 +3699,20 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         if phase1:
             fa = "آپدیت اسکیمای میانی SQLite با alembic شکست خورد (Phase 1)."
             en = "Intermediate SQLite schema upgrade via alembic failed (Phase 1)."
-            causes_fa = [
-                "اول PGClockMG را به v4.6.21+ آپدیت کنید "
-                "(URL اسکیوالایت دیگر با host/port پستگرس خراب نمی‌شود)",
-                "Compose warning (مثل PGADMIN_EMAIL) دیگر به‌عنوان container id استفاده نمی‌شود",
-                "اگر باز هم fail شد، لاگ ArgumentError / Invalid SQLite URL را ببینید",
-            ]
+            _causes(
+                [
+                    "اول PGClockMG را به v4.6.21+ آپدیت کنید "
+                    "(URL اسکیوالایت دیگر با host/port پستگرس خراب نمی‌شود)",
+                    "Compose warning (مثل PGADMIN_EMAIL) دیگر به‌عنوان container id استفاده نمی‌شود",
+                    "اگر باز هم fail شد، لاگ ArgumentError / Invalid SQLite URL را ببینید",
+                ],
+                [
+                    "Update PGClockMG to v4.6.21+ "
+                    "(SQLite URL is no longer corrupted with Postgres host/port)",
+                    "Compose warnings (e.g. PGADMIN_EMAIL) are no longer treated as container ids",
+                    "If it still fails, check ArgumentError / Invalid SQLite URL in the log",
+                ],
+            )
         elif (
             "unsupported operand" in low
             and "float" in low
@@ -3606,30 +3720,54 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         ) or ("typeerror" in low and "timeout" in low):
             fa = "اتصال alembic به Timescale به‌خاطر timeout رشته‌ای در URL شکست خورد."
             en = "Alembic→Timescale connect crashed: string timeout= in SQLAlchemy URL."
-            causes_fa = [
-                "اول PGClockMG را به v4.6.25+ آپدیت کنید "
-                "(timeout= از URL آلِمبیک حذف شد — asyncpg فقط float می‌پذیرد)",
-                "v4.6.24 به‌اشتباه timeout=20 را به‌صورت str در URL می‌گذاشت",
-                "hang همچنان با timeout بیرونی docker محدود می‌شود",
-            ]
+            _causes(
+                [
+                    "اول PGClockMG را به v4.6.25+ آپدیت کنید "
+                    "(timeout= از URL آلِمبیک حذف شد — asyncpg فقط float می‌پذیرد)",
+                    "v4.6.24 به‌اشتباه timeout=20 را به‌صورت str در URL می‌گذاشت",
+                    "hang همچنان با timeout بیرونی docker محدود می‌شود",
+                ],
+                [
+                    "Update PGClockMG to v4.6.25+ "
+                    "(timeout= removed from alembic URL — asyncpg accepts float only)",
+                    "v4.6.24 incorrectly put timeout=20 as a string in the URL",
+                    "Hangs are still bounded by the outer docker timeout",
+                ],
+            )
         elif "sslmode" in low or ("clientconfigurationerror" in low and "ssl" in low):
             fa = "ساخت اسکیمای مقصد با alembic شکست خورد (Phase 2)."
             en = "Target schema create via alembic upgrade head failed (Phase 2)."
-            causes_fa = [
-                "اول PGClockMG را به v4.6.22+ آپدیت کنید "
-                "(ssl=false دیگر به asyncpg پاس داده نمی‌شود — ssl=disable)",
-                "نسخهٔ قبلی URL را با ssl=false می‌ساخت و asyncpg آن را رد می‌کرد",
-                "اگر باز هم fail شد، لاگ auth/HBA را ببینید",
-            ]
+            _causes(
+                [
+                    "اول PGClockMG را به v4.6.22+ آپدیت کنید "
+                    "(ssl=false دیگر به asyncpg پاس داده نمی‌شود — ssl=disable)",
+                    "نسخهٔ قبلی URL را با ssl=false می‌ساخت و asyncpg آن را رد می‌کرد",
+                    "اگر باز هم fail شد، لاگ auth/HBA را ببینید",
+                ],
+                [
+                    "Update PGClockMG to v4.6.22+ "
+                    "(ssl=false is no longer passed to asyncpg — use ssl=disable)",
+                    "Older builds built URLs with ssl=false which asyncpg rejects",
+                    "If it still fails, check auth/HBA logs",
+                ],
+            )
         else:
             fa = "ساخت اسکیمای مقصد با alembic شکست خورد (Phase 2)."
             en = "Target schema create via alembic upgrade head failed (Phase 2)."
-            causes_fa = [
-                "اول PGClockMG را به v4.6.26+ آپدیت کنید "
-                "(ریستور پر از داده: skip-at-head / timeout بلند / بدون rotate وسط DDL)",
-                "v4.6.24 با timeout=180s روی CREATE INDEX بکاپ بزرگ kill+retry می‌کرد و ۹۳٪ گیر می‌کرد",
-                "اگر باز هم fail شد، لاگ را برای خطای اسکیما یا auth ببینید — نه فقط وسط Traceback",
-            ]
+            _causes(
+                [
+                    "اول PGClockMG را به v4.6.26+ آپدیت کنید "
+                    "(ریستور پر از داده: skip-at-head / timeout بلند / بدون rotate وسط DDL)",
+                    "v4.6.24 با timeout=180s روی CREATE INDEX بکاپ بزرگ kill+retry می‌کرد و ۹۳٪ گیر می‌کرد",
+                    "اگر باز هم fail شد، لاگ را برای خطای اسکیما یا auth ببینید — نه فقط وسط Traceback",
+                ],
+                [
+                    "Update PGClockMG to v4.6.26+ "
+                    "(large restores: skip-at-head / longer timeout / no rotate mid-DDL)",
+                    "v4.6.24 killed+retried CREATE INDEX at 180s on large backups and hung near 93%",
+                    "If it still fails, look for schema/auth errors — not only mid-Traceback noise",
+                ],
+            )
     elif "pasarguard failed to start" in low or "did not reach ready state" in low:
         fa = "پنل PasarGuard بعد از ریستور بالا نیامد."
         en = "PasarGuard panel did not start after restore."
@@ -3641,11 +3779,18 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         ):
             fa = "پنل بالا آمد ولی لاگ نود (controlled by another client) به‌اشتباه به‌عنوان خطای ریستور نشان داده شد."
             en = "Panel was up; node 'controlled by another client' log noise was mistaken for a restore failure."
-            causes_fa = [
-                "اول PGClockMG را به v4.6.27+ آپدیت کنید — این نویز دیگر ریستور را fail نمی‌کند",
-                "نود هنوز توسط پنل/کلاینت دیگری کنترل می‌شود (اینستنس قبلی / سرور دیگر / session باز)",
-                "پنل HTTP معمولاً سالم است؛ فقط یک کنترلر برای هر نود نگه دارید",
-            ]
+            _causes(
+                [
+                    "اول PGClockMG را به v4.6.27+ آپدیت کنید — این نویز دیگر ریستور را fail نمی‌کند",
+                    "نود هنوز توسط پنل/کلاینت دیگری کنترل می‌شود (اینستنس قبلی / سرور دیگر / session باز)",
+                    "پنل HTTP معمولاً سالم است؛ فقط یک کنترلر برای هر نود نگه دارید",
+                ],
+                [
+                    "Update PGClockMG to v4.6.27+ — this log noise no longer fails restore",
+                    "The node is still controlled by another panel/client (old instance / other server / open session)",
+                    "Panel HTTP is usually healthy; keep a single controller per node",
+                ],
+            )
         elif (
             "telegramconflicterror" in low
             or "getupdates" in low
@@ -3654,11 +3799,18 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         ):
             fa = "پنل بالا آمد ولی لاگ تلگرام (Conflict) به‌اشتباه به‌عنوان خطای ریستور نشان داده شد."
             en = "Panel was up; TelegramConflictError log noise was mistaken for a restore failure."
-            causes_fa = [
-                "اول PGClockMG را به v4.6.17+ آپدیت کنید — این نویز دیگر ریستور را fail نمی‌کند",
-                "چند instance همزمان با یک bot token getUpdates می‌زنند (سرور دیگر / webhook / چند worker)",
-                "پنل HTTP معمولاً سالم است؛ فقط ربات تلگرام را یک‌جا نگه دارید",
-            ]
+            _causes(
+                [
+                    "اول PGClockMG را به v4.6.17+ آپدیت کنید — این نویز دیگر ریستور را fail نمی‌کند",
+                    "چند instance همزمان با یک bot token getUpdates می‌زنند (سرور دیگر / webhook / چند worker)",
+                    "پنل HTTP معمولاً سالم است؛ فقط ربات تلگرام را یک‌جا نگه دارید",
+                ],
+                [
+                    "Update PGClockMG to v4.6.17+ — this log noise no longer fails restore",
+                    "Multiple instances poll getUpdates with the same bot token (other server / webhook / workers)",
+                    "Panel HTTP is usually healthy; keep the Telegram bot in one place only",
+                ],
+            )
         elif (
             "panel port" in low
             or "not accepting connections" in low
@@ -3667,19 +3819,35 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         ):
             fa = "پنل بالا آمد ولی health روی پورت host گیر کرد (مثلاً compose روی 2087:8000)."
             en = "Panel was up; health hung probing host UVICORN_PORT (e.g. compose 2087:8000)."
-            causes_fa = [
-                "اول PGClockMG را به v4.6.28+ آپدیت کنید — probe روی پورت publish‌شده / داخل کانتینر",
-                "v4.6.27 فقط 127.0.0.1:UVICORN_PORT را چک می‌کرد و وقتی map فرق داشت ۹۷٪ گیر می‌کرد",
-                "Application startup complete در لاگ یعنی پنل داخل compose بالاست",
-            ]
+            _causes(
+                [
+                    "اول PGClockMG را به v4.6.28+ آپدیت کنید — probe روی پورت publish‌شده / داخل کانتینر",
+                    "v4.6.27 فقط 127.0.0.1:UVICORN_PORT را چک می‌کرد و وقتی map فرق داشت ۹۷٪ گیر می‌کرد",
+                    "Application startup complete در لاگ یعنی پنل داخل compose بالاست",
+                ],
+                [
+                    "Update PGClockMG to v4.6.28+ — probe published / in-container ports",
+                    "v4.6.27 only checked 127.0.0.1:UVICORN_PORT and hung near 97% when the map differed",
+                    "Application startup complete in logs means the panel is up inside compose",
+                ],
+            )
         else:
-            causes_fa = [
-                "لاگ pasarguard/panel را ببینید (نه فقط اسپم Telegram / node-control)",
-                "multi-worker: NATS_URL و بالا بودن nats را چک کنید",
-                "ممکن است SSL یا SQLALCHEMY_DATABASE_URL اشتباه باشد",
-                "گیر ۹۷٪ روی port 8000: به v4.6.28+ آپدیت کنید",
-                "اگر فقط TelegramConflict یا node controlled by another client می‌بینید، به v4.6.27+ آپدیت کنید",
-            ]
+            _causes(
+                [
+                    "لاگ pasarguard/panel را ببینید (نه فقط اسپم Telegram / node-control)",
+                    "multi-worker: NATS_URL و بالا بودن nats را چک کنید",
+                    "ممکن است SSL یا SQLALCHEMY_DATABASE_URL اشتباه باشد",
+                    "گیر ۹۷٪ روی port 8000: به v4.6.28+ آپدیت کنید",
+                    "اگر فقط TelegramConflict یا node controlled by another client می‌بینید، به v4.6.27+ آپدیت کنید",
+                ],
+                [
+                    "Check pasarguard/panel logs (not only Telegram / node-control spam)",
+                    "multi-worker: verify NATS_URL and that nats is up",
+                    "SSL or SQLALCHEMY_DATABASE_URL may be wrong",
+                    "Stuck at 97% on port 8000: update to v4.6.28+",
+                    "If you only see TelegramConflict or node controlled-by-another-client, update to v4.6.27+",
+                ],
+            )
     elif (
         "appears stuck on the same revision" in low
         or "exceeded maximum wait" in low
@@ -3688,11 +3856,18 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
     ):
         fa = "Alembic روی revision سنگین گیر کرد (مثلاً refactor sub_updated_at)."
         en = "Alembic hung on a heavy revision (e.g. refactor sub_updated_at)."
-        causes_fa = [
-            "اول PGClockMG را به v4.6.29+ آپدیت کنید — e422 با bulk SQL خودکار heal می‌شود",
-            "v4.6.28 روی ORM ردیف‌به‌ردیف users گیر می‌کرد و به batch_alter نمی‌رسید",
-            "بعد از آپدیت همان مهاجرت/ریستور را دوباره بزنید",
-        ]
+        _causes(
+            [
+                "اول PGClockMG را به v4.6.29+ آپدیت کنید — e422 با bulk SQL خودکار heal می‌شود",
+                "v4.6.28 روی ORM ردیف‌به‌ردیف users گیر می‌کرد و به batch_alter نمی‌رسید",
+                "بعد از آپدیت همان مهاجرت/ریستور را دوباره بزنید",
+            ],
+            [
+                "Update PGClockMG to v4.6.29+ — e422 is auto-healed with bulk SQL",
+                "v4.6.28 hung on row-by-row ORM users updates before batch_alter",
+                "After updating, retry the same migrate/restore",
+            ],
+        )
     elif (
         "violates foreign key" in low
         or "foreign key constraint" in low
@@ -3702,29 +3877,52 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         fa = "دامپ بکاپ ردیف یتیم دارد (ارجاع به کاربر/نود حذف‌شده)."
         en = "Backup dump has orphan rows (references to deleted users/nodes)."
         ru = "В дампе есть осиротевшие строки (ссылки на удалённых пользователей/ноды)."
-        causes_fa = [
-            "مثلاً notification_reminders به user_idای اشاره می‌کند که در users نیست",
-            "ویزارد جدید این ردیف‌های یتیم را هنگام ریستور حذف می‌کند — دوباره تلاش کنید",
-            "دادهٔ اصلی کاربران/نودها دست‌نخورده می‌ماند؛ فقط یادآورها/لاگ‌های یتیم پاک می‌شوند",
-        ]
+        _causes(
+            [
+                "مثلاً notification_reminders به user_idای اشاره می‌کند که در users نیست",
+                "ویزارد جدید این ردیف‌های یتیم را هنگام ریستور حذف می‌کند — دوباره تلاش کنید",
+                "دادهٔ اصلی کاربران/نودها دست‌نخورده می‌ماند؛ فقط یادآورها/لاگ‌های یتیم پاک می‌شوند",
+            ],
+            [
+                "e.g. notification_reminders references a user_id missing from users",
+                "Newer wizard deletes these orphan rows during restore — retry",
+                "Core users/nodes stay intact; only orphan reminders/logs are removed",
+            ],
+        )
     elif "cannot stage" in low and ("timescaledb" in low or "postgresql" in low):
         fa = "دامپ Timescale/PostgreSQL برای تبدیل استیج نشد (سرویس مبدأ روی سرور نیست)."
         en = "Could not stage Timescale/PostgreSQL dump for conversion (source engine not running)."
-        causes_fa = [
-            "وقتی مقصد MySQL/MariaDB است، ویزارد باید دامپ را در کانتینر موقت Timescale لود کند",
-            "در v2.6.3+ استیج موقت برای timescaledb→mysql اضافه شد — آپدیت کنید و دوباره ریستور کنید",
-            "دسترسی Docker برای pull ایمیج timescale/timescaledb لازم است",
-        ]
+        _causes(
+            [
+                "وقتی مقصد MySQL/MariaDB است، ویزارد باید دامپ را در کانتینر موقت Timescale لود کند",
+                "در v2.6.3+ استیج موقت برای timescaledb→mysql اضافه شد — آپدیت کنید و دوباره ریستور کنید",
+                "دسترسی Docker برای pull ایمیج timescale/timescaledb لازم است",
+            ],
+            [
+                "When targeting MySQL/MariaDB, the wizard must load the dump into a temporary Timescale container",
+                "v2.6.3+ added ephemeral staging for timescaledb→mysql — update and retry",
+                "Docker access is required to pull timescale/timescaledb",
+            ],
+        )
     elif "no such file" in low or "missing" in low or "not found" in low:
         fa = "فایل دامپ یا دیتابیس منبع پیدا نشد."
         en = "Source dump/database file was not found."
-        causes_fa = ["بکاپ ناقص است", "مسیر /var/lib/pasarguard یا دامپ zip خراب است"]
+        _causes(
+            ["بکاپ ناقص است", "مسیر /var/lib/pasarguard یا دامپ zip خراب است"],
+            ["Backup is incomplete", "/var/lib/pasarguard path or the zip dump is corrupt"],
+        )
     elif "docker" in low or "compose" in low:
         fa = "مشکل در Docker / docker compose هنگام ریستور."
         en = "Docker / compose problem during restore."
-        causes_fa = ["سرویس Docker بالا نیست", "کانتینر دیتابیس استارت نمی‌شود"]
+        _causes(
+            ["سرویس Docker بالا نیست", "کانتینر دیتابیس استارت نمی‌شود"],
+            ["Docker service is not running", "Database container fails to start"],
+        )
     else:
-        causes_fa = ["جزئیات فنی در لاگ آمده است", f"پیام: {raw[:240]}"]
+        _causes(
+            ["جزئیات فنی در لاگ آمده است", f"پیام: {raw[:240]}"],
+            ["Technical details are in the log", f"Message: {raw[:240]}"],
+        )
 
     if backup_db and target_db and backup_db != target_db:
         fa += f" (بکاپ={backup_db} → نصب={target_db})"
