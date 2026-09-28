@@ -1553,7 +1553,25 @@ async function pollStatus(jobId) {
       if (data.status === 'error' || data.result?.error) {
         clearInterval(interval);
         state._migratePollInterval = null;
-        void showError(data.result?.error || data.message, data.logs.join('\n'));
+        const explain = data.result?.error_explain;
+        const lang = state.lang || 'fa';
+        const msg = explain
+          ? ((lang === 'fa' ? explain.fa : lang === 'ru' ? explain.ru : explain.en)
+            || explain.fa || explain.en || data.message)
+          : (data.result?.error || data.message);
+        const causes = explain
+          ? (lang === 'fa' ? explain.causes_fa : lang === 'ru' ? (explain.causes_ru || explain.causes_en) : explain.causes_en)
+            || explain.causes_fa || []
+          : [];
+        const causeText = causes.length
+          ? `\n\n${causes.map((c) => `• ${c}`).join('\n')}`
+          : '';
+        const tech = explain?.detail || '';
+        const errLogs = (data.logs || [])
+          .filter((l) => /error|fail|denied|fatal|panic/i.test(String(l)))
+          .slice(-40)
+          .join('\n');
+        void showError(`${msg}${causeText}`, tech || errLogs);
       }
     } catch (e) { /* retry */ }
   }, 1500);
@@ -1698,6 +1716,22 @@ async function showSuccess(result) {
   }
   document.getElementById('resultMessage').textContent = t(`step6.${msgKey}`);
 
+  if (typeof renderTransferSummaryGrid === 'function') {
+    const enriched = { ...(result || {}) };
+    if (!enriched.transfer_summary && enriched.users_migrated != null) {
+      enriched.transfer_summary = [
+        { table: 'users', count: Number(enriched.users_migrated) || 0 },
+      ];
+    }
+    renderTransferSummaryGrid(
+      document.getElementById('migrateTransferGrid'),
+      document.getElementById('migrateTransferTitle'),
+      document.getElementById('migrateTransferSection'),
+      enriched,
+      'step6.transferTitle',
+    );
+  }
+
   const tipsEl = document.getElementById('resultPostSuccessTips');
   if (tipsEl) {
     const tips = [`<p class="warn-line">${statusIcon('warn')}<span>${t('step6.disableOldPanelTip')}</span></p>`];
@@ -1737,9 +1771,6 @@ async function showSuccess(result) {
         + lines.map(x => `<li>${x}</li>`).join('')
         + '</ul>';
     }
-  }
-  if (result?.users_migrated) {
-    details += `<p>${result.users_migrated} / ${result.users_total} users</p>`;
   }
   document.getElementById('resultDetails').innerHTML = details;
   renderOwnerGuideBox(result);

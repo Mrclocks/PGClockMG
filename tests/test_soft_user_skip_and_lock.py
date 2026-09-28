@@ -262,11 +262,12 @@ def test_orchestrator_defaults_skip_for_all_panels():
             {"3x-ui": FakeMigrator, "hiddify": FakeMigrator, "pasarguard": FakeMigrator},
             clear=False,
         ):
-            for panel in ("3x-ui", "hiddify", "pasarguard"):
+            # Marzban/3x-ui/Hiddify soft-skip bad users; Change-DB keeps critical tables hard.
+            expected = {"3x-ui": True, "hiddify": True, "pasarguard": False}
+            for panel, want in expected.items():
                 params = {"source_panel": panel}
                 job = await start_migration(params)
-                assert params.get("skip_bad_user_rows") is True
-                # Wait for background task to finish so lock clears
+                assert params.get("skip_bad_user_rows") is want, panel
                 for _ in range(50):
                     if job.status in ("success", "error"):
                         break
@@ -275,7 +276,7 @@ def test_orchestrator_defaults_skip_for_all_panels():
 
     asyncio.run(_run())
     teardown_function()
-    print("OK: orchestrator defaults skip_bad_user_rows for all panels")
+    print("OK: orchestrator skip_bad_user_rows defaults by panel")
 
 
 if __name__ == "__main__":

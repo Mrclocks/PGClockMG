@@ -20,8 +20,8 @@ class PasarguardDbMigrator(BaseMigrator):
         target_db = params["target_db"]
         upload_path = params.get("upload_path")
         if "skip_bad_user_rows" not in params:
-            params["skip_bad_user_rows"] = True
-            self.params["skip_bad_user_rows"] = True
+            params["skip_bad_user_rows"] = False
+            self.params["skip_bad_user_rows"] = False
 
         self.job.set_progress(5, "Checking PasarGuard installation...")
 
@@ -76,11 +76,14 @@ class PasarguardDbMigrator(BaseMigrator):
 
         stats = getattr(self, "copy_stats", None) or {}
         self.job.set_progress(100, "Database migration completed")
+        from app.services.pg_restore import build_transfer_summary
         out = {
             "panel_url": self._get_panel_url(),
             "subscription_mode": "native",
             "method": f"{source_db} → {target_db}",
             "copy_stats": stats,
+            "verified_counts": stats,
+            "transfer_summary": build_transfer_summary(stats),
         }
         if self.copy_report:
             out["copy_report"] = self.copy_report

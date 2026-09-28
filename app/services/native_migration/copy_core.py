@@ -469,13 +469,15 @@ def normalize_raw_value(value):
     if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, bytes):
+        # MySQL BIT(1) / tiny flags — keep as 0/1 before string decode mangles them.
+        if len(value) == 1:
+            return int(value[0])
         try:
             return value.decode("utf-8-sig")
         except Exception:
             try:
                 return value.decode("utf-8")
             except Exception:
-                # Never return raw bytes — str(bytes) becomes a literal b'...' prefix.
                 return value.decode("latin-1")
     if isinstance(value, str):
         s = value.strip()
@@ -642,14 +644,32 @@ def build_table_column_plan(
 
 
 def to_bool(value):
+    """Coerce DB bool/BIT/int/str to Python bool (MySQL BIT arrives as bytes)."""
     if value is None:
         return None
     if isinstance(value, bool):
         return value
+    if isinstance(value, memoryview):
+        value = bytes(value)
+    if isinstance(value, (bytes, bytearray)):
+        if len(value) == 1:
+            return value[0] != 0
+        try:
+            value = value.decode("ascii")
+        except Exception:
+            return any(b != 0 for b in value)
     if isinstance(value, (int, float)):
         return bool(value)
     if isinstance(value, str):
-        return value.strip().lower() in ("1", "true", "t", "yes", "on")
+        s = value.strip()
+        if len(s) == 1 and ord(s[0]) in (0, 1):
+            return ord(s[0]) != 0
+        low = s.lower()
+        if low in ("0", "false", "f", "no", "off", ""):
+            return False
+        if low in ("1", "true", "t", "yes", "on"):
+            return True
+        return False
     return bool(value)
 
 

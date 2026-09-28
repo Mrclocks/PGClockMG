@@ -994,11 +994,23 @@ class PostgresWriter(TableWriter):
 
     def reset_sequence(self, table: str) -> None:
         cur = self._conn.cursor()
-        cur.execute(
-            f'SELECT setval(pg_get_serial_sequence(%s, \'id\'), '
-            f'COALESCE((SELECT MAX(id) FROM "{table}"), 1), true)',
-            (table,),
-        )
+        safe = "".join(c for c in table if c.isalnum() or c == "_")
+        if safe != table:
+            return
+        cur.execute(f'SELECT MAX(id) FROM "{safe}"')
+        row = cur.fetchone()
+        max_id = row[0] if row else None
+        if max_id is None:
+            # Empty table: next nextval must be 1 (is_called=false).
+            cur.execute(
+                "SELECT setval(pg_get_serial_sequence(%s, 'id'), 1, false)",
+                (table,),
+            )
+        else:
+            cur.execute(
+                "SELECT setval(pg_get_serial_sequence(%s, 'id'), %s, true)",
+                (table, int(max_id)),
+            )
 
     def set_alembic_version(self, version: str) -> None:
         from app.services.native_migration.source_version import alembic_revisions_for_stamp

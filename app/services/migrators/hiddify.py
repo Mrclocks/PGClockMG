@@ -216,6 +216,8 @@ class HiddifyMigrator(BaseMigrator):
                 )
 
         self.job.set_progress(100, f"مهاجرت Hiddify انجام شد — {len(created)} کاربر")
+        from app.services.pg_restore import build_transfer_summary
+
         return {
             "panel_url": self._get_panel_url(),
             "subscription_mode": "redirect",
@@ -233,6 +235,7 @@ class HiddifyMigrator(BaseMigrator):
             "users_migrated": len(created),
             "users_total": len(users),
             "users_failed": len(errors),
+            "transfer_summary": build_transfer_summary({"users": len(created)}),
             "group": group_name,
             "proxy_path_client": client_path,
             "summary": summary,

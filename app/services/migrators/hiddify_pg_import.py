@@ -347,8 +347,9 @@ async def main():
                     errors.append({"username": username, "error": f"exists but token failed: {e}"})
                 continue
 
-            want_disabled = (row.get("status") or "").strip() == "disabled"
-            raw_status = (row.get("status") or "active").strip()
+            raw_status = (row.get("status") or "active").strip().lower()
+            want_disabled = raw_status == "disabled"
+            want_expired = raw_status == "expired"
             create_status = "on_hold" if raw_status == "on_hold" and not want_disabled else "active"
 
             trojan_pw = uuid_s.replace("-", "")[:22]
@@ -409,9 +410,12 @@ async def main():
 
             try:
                 user = await create_user(db, new_user, groups=list(groups), admin=owner)
-                if want_disabled:
+                if want_disabled or want_expired:
                     try:
-                        user.status = UserStatus.disabled
+                        target = UserStatus.disabled
+                        if want_expired:
+                            target = getattr(UserStatus, "expired", None) or UserStatus.disabled
+                        user.status = target
                         await db.commit()
                     except Exception:
                         try:

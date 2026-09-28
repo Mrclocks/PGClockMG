@@ -190,7 +190,6 @@ def test_cleanup_orphans_sqlite_removes_only_orphans():
 
         deleted, nulled = cleanup_orphans_sqlite(path)
         assert deleted == 2
-        assert nulled >= 1
 
         db = sqlite3.connect(str(path))
         usage_ids = [r[0] for r in db.execute("SELECT id FROM node_usages").fetchall()]
@@ -203,9 +202,11 @@ def test_cleanup_orphans_sqlite_removes_only_orphans():
         db.close()
         assert usage_ids == [1]
         assert nuu == [(1,)]
-        # Orphan host inbound_tag is repointed onto a real inbound — never dropped.
+        # Hosts are never deleted; only case/whitespace mismatches are retargeted
+        # (no arbitrary ORDER BY tag LIMIT 1 repoint onto the wrong inbound).
         assert host_count == 2
-        assert host_tags == ["vless", "vless"]
+        assert host_tags == ["missing-tag", "vless"]
+        assert nulled == 0
 
         # Clean second pass is a no-op
         assert cleanup_orphans_sqlite(path) == (0, 0)
@@ -268,7 +269,7 @@ def test_shrink_heavy_usage_sqlite_threshold():
 
 
 def test_orphan_null_falls_back_to_delete_when_not_null():
-    """Hosts with NOT NULL inbound_tag are repointed, never deleted."""
+    """Hosts: casefold retarget only; never DELETE; never arbitrary repoint."""
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / "db.sqlite3"
         db = sqlite3.connect(str(path))
@@ -289,27 +290,26 @@ def test_orphan_null_falls_back_to_delete_when_not_null():
         db.close()
         deleted, nulled = cleanup_orphans_sqlite(path)
         assert deleted == 0
-        assert nulled >= 1
+        assert nulled >= 1  # VLESS → vless
         db = sqlite3.connect(str(path))
         tags = sorted(r[0] for r in db.execute("SELECT inbound_tag FROM hosts").fetchall())
         count = db.execute("SELECT COUNT(*) FROM hosts").fetchone()[0]
         db.close()
         assert count == 3, tags
-        assert tags == ["vless", "vless", "vless"]
-    print("OK: NOT NULL host orphans are repointed (not deleted)")
+        assert tags == ["missing-tag", "vless", "vless"]
+    print("OK: host casefold retarget; true orphans kept (not deleted/repointed)")
 
 
 def test_orphan_cleanup_sql_script_repoints_hosts_not_deletes():
     from app.services.marzban_preboot_heal import orphan_cleanup_sql_script
 
     script = orphan_cleanup_sql_script()
-    assert "orphan_repoint" in script or "ORDER BY inbounds.tag LIMIT 1" in script or (
-        "SET inbound_tag =" in script and "FROM inbounds" in script
-    )
-    # Must not DELETE hosts for missing inbound_tag anymore.
-    assert "DELETE FROM hosts WHERE hosts.inbound_tag" not in script
+    # Casefold retarget for hosts; no arbitrary ORDER BY tag LIMIT 1 wiring.
     assert "lower(trim(" in script
-    print("OK: PG orphan cleanup script repoints hosts")
+    assert "SET inbound_tag =" in script and "FROM inbounds" in script
+    assert "ORDER BY inbounds.tag LIMIT 1" not in script
+    assert "DELETE FROM hosts WHERE hosts.inbound_tag" not in script
+    print("OK: PG orphan cleanup script casefolds hosts (no arbitrary repoint)")
 
 
 def test_heal_marzban_preboot_shrinks_before_orphan_cleanup():

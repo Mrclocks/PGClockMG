@@ -53,10 +53,10 @@ async def start_migration(params: dict, on_log: Callable | None = None) -> Migra
     if not migrator_cls:
         raise ValueError(f"Unsupported panel: {panel}")
 
-    # Global default for every migrate panel (Marzban / 3x-ui / Hiddify / Change-DB / …):
-    # soft-skip broken user rows so one bad user does not abort the whole job.
+    # Marzban / 3x-ui / Hiddify: soft-skip broken user rows by default.
+    # Change-DB (pasarguard): keep critical tables hard-complete like restore convert.
     if "skip_bad_user_rows" not in params:
-        params["skip_bad_user_rows"] = True
+        params["skip_bad_user_rows"] = panel != "pasarguard"
 
     ensure_panel_idle()
 
@@ -79,11 +79,18 @@ async def start_migration(params: dict, on_log: Callable | None = None) -> Migra
             job.status = "success"
             job.set_progress(100, "Migration completed successfully!")
         except Exception as e:
+            from app.services.pg_restore import explain_restore_error
+
+            explain = explain_restore_error(
+                e,
+                params.get("source_db"),
+                params.get("target_db"),
+            )
             job.status = "error"
-            job.message = str(e)
-            job.log(f"Error: {e}")
+            job.message = explain.get("fa") or explain.get("en") or str(e)
+            job.log(f"Error: {explain.get('detail') or e}")
             job.log(traceback.format_exc())
-            job.result = {"error": str(e)}
+            job.result = {"error": str(e), "error_explain": explain}
 
     task = asyncio.create_task(_run())
     _job_tasks.add(task)

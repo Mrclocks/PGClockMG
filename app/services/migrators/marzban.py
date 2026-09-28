@@ -1463,6 +1463,9 @@ class MarzbanMigrator(BaseMigrator):
 
         dash = resolve_dashboard_path(env_text) if env_text else (access.get("dashboard_path") or "/dashboard/")
         root = (read_env_var(env_text, "UVICORN_ROOT_PATH") or "").rstrip("/") if env_text else ""
+        from app.services.pg_restore import build_transfer_summary
+
+        stats = getattr(self, "copy_stats", None) or {}
         out = {
             "panel_url": access.get("login_url") or get_panel_url_from_env(env_text),
             "panel_port": port or access.get("port") or "8000",
@@ -1475,6 +1478,9 @@ class MarzbanMigrator(BaseMigrator):
             "method": method,
             "target_db": target_db,
             "nodes_disabled": bool(getattr(self, "_nodes_disabled", False)),
+            "copy_stats": stats,
+            "verified_counts": stats,
+            "transfer_summary": build_transfer_summary(stats),
         }
         if self.copy_report:
             out["copy_report"] = self.copy_report

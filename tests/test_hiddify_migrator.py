@@ -411,7 +411,7 @@ def test_normalized_users_ready_for_pasarguard_create(real_data):
     users, _paths = parse_users_from_backup(real_data)
     assert len(users) == 237
     statuses = {u["status"] for u in users}
-    assert statuses <= {"active", "on_hold", "disabled"}
+    assert statuses <= {"active", "on_hold", "disabled", "expired"}
     for u in users:
         assert isinstance(u["data_limit"], int)
         assert u["username"] and u["uuid"]

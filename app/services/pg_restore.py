@@ -60,12 +60,37 @@ def get_running_restore_job() -> MigrationJob | None:
     return None
 
 
+TRANSFER_SUMMARY_TABLES = (
+    "users", "admins", "nodes", "hosts", "inbounds", "groups", "core_configs",
+)
+
+
+def build_transfer_summary(counts: dict | None) -> list[dict]:
+    """Ordered non-zero table counts for the success UI."""
+    if not isinstance(counts, dict):
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for table in TRANSFER_SUMMARY_TABLES:
+        n = counts.get(table)
+        if isinstance(n, int) and n >= 0:
+            out.append({"table": table, "count": n})
+            seen.add(table)
+    for table, n in counts.items():
+        if table in seen or not isinstance(n, int) or n < 0:
+            continue
+        if table.startswith("_"):
+            continue
+        out.append({"table": table, "count": n})
+    return out
+
+
 def soft_db_family(a: str | None, b: str | None) -> bool:
     """True when engines are interchangeable for *native* restore (no convert).
 
     - mysql ↔ mariadb: same wire protocol / dump style
-    - postgresql → timescaledb: plain PG dumps restore into Timescale fine
-    - timescaledb → postgresql: NOT soft — Timescale dumps need convert/strip
+    - postgresql ↔ timescaledb: native restore; Timescale DDL stripped when
+      landing on plain PostgreSQL (see strip_for_plain_pg in _restore_postgres)
     """
     if not a or not b:
         return False
@@ -73,8 +98,7 @@ def soft_db_family(a: str | None, b: str | None) -> bool:
         return True
     if {a, b} <= {"mysql", "mariadb"}:
         return True
-    # Plain PostgreSQL backup can land on Timescale (superset of PG)
-    if a == "postgresql" and b == "timescaledb":
+    if {a, b} <= {"postgresql", "timescaledb"}:
         return True
     return False
 
@@ -1323,20 +1347,7 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
                 if isinstance(v, int) and v > 0 and (k not in table_counts or table_counts.get(k, 0) < v):
                     table_counts[k] = v
         installed = is_pasarguard_installed()
-        # Auto-heal stale sqlite stamp left by a failed convert so analyze/UI
-        # report the real installed engine (compose) and the next restore converts.
-        if installed and PASARGUARD_ENV.exists():
-            try:
-                live = PASARGUARD_ENV.read_text(encoding="utf-8", errors="ignore")
-                healed, healed_to = heal_stale_sqlite_engine_env(live)
-                if healed_to and healed != live:
-                    shutil.copy2(
-                        PASARGUARD_ENV,
-                        PASARGUARD_ENV.with_suffix(".env.bak-before-heal"),
-                    )
-                    PASARGUARD_ENV.write_text(healed, encoding="utf-8")
-            except OSError:
-                pass
+        # Do not mutate live .env during analyze (GET). Restore heals stale stamps on start.
         installed_db = get_pasarguard_db_type() if installed else None
 
         warnings: list[dict] = []
@@ -1547,6 +1558,63 @@ async def _run_restore(job: MigrationJob, params: dict, analysis: dict) -> None:
         job.log(f"ERROR: {explain.get('detail') or e}")
         job.log(traceback.format_exc())
         job.result = {"error": str(e), "error_explain": explain}
+
+
+# Large mysqldump / pg_dump imports can run for hours on busy panels.
+DUMP_IMPORT_TIMEOUT_SEC = 4 * 3600
+DUMP_IMPORT_HEARTBEAT_SEC = 60
+
+
+async def _communicate_with_timeout(
+    job: MigrationJob,
+    proc: asyncio.subprocess.Process,
+    *,
+    timeout: int = DUMP_IMPORT_TIMEOUT_SEC,
+    heartbeat_sec: int = DUMP_IMPORT_HEARTBEAT_SEC,
+    label: str = "dump import",
+    stdin_data: bytes | None = None,
+) -> tuple[int, str]:
+    """Wait for subprocess with heartbeat logs; kill on timeout."""
+    import os
+    import signal
+    import time
+
+    started = time.monotonic()
+
+    async def _wait() -> tuple[bytes, bytes | None]:
+        return await proc.communicate(input=stdin_data)
+
+    task = asyncio.create_task(_wait())
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=heartbeat_sec)
+            if done:
+                out_b, _err = task.result()
+                return int(proc.returncode or 0), (out_b or b"").decode(
+                    "utf-8", errors="replace"
+                )
+            elapsed = int(time.monotonic() - started)
+            if elapsed >= timeout:
+                break
+            job.log(f"{label} still running… {elapsed}s / {timeout}s")
+        # Timed out
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        try:
+            await asyncio.wait_for(task, timeout=5)
+        except Exception:
+            pass
+        job.log(f"{label} timed out after {timeout}s — killed")
+        return -1, f"{label} timed out after {timeout}s — killed"
+    except Exception:
+        if not task.done():
+            task.cancel()
+        raise
 
 
 async def _run(
@@ -3251,22 +3319,34 @@ def _rollback_env_after_failed_convert(
 
 
 def explain_restore_error(exc: Exception, backup_db: str | None = None, target_db: str | None = None) -> dict:
-    """Human-readable multilingual restore/convert error."""
+    """Human-readable multilingual restore/convert error (engine-accurate causes only)."""
     raw = str(exc) or exc.__class__.__name__
     low = raw.lower()
     fa = "ریستور یا تبدیل دیتابیس ناموفق بود."
     en = "Restore or database conversion failed."
     ru = "Восстановление или конвертация БД не удалась."
     causes_fa: list[str] = []
+    causes_en: list[str] = []
+
+    def _causes(fa_list: list[str], en_list: list[str] | None = None) -> None:
+        nonlocal causes_fa, causes_en
+        causes_fa = fa_list
+        causes_en = en_list or fa_list
 
     if "missing 1 required positional argument" in low or "source_path" in low:
         fa = "خطای داخلی تبدیل دیتابیس (پارامتر مسیر منبع)."
         en = "Internal DB conversion error (source path)."
-        causes_fa = ["نسخه ویزارد قدیمی بود — آپدیت کنید و دوباره ریستور کنید."]
+        _causes(
+            ["ویزارد را به آخرین نسخه آپدیت کنید و دوباره ریستور کنید."],
+            ["Update the wizard to the latest version and retry restore."],
+        )
     elif "unsupported cross-db" in low:
         fa = f"تبدیل {backup_db} به {target_db} پشتیبانی نمی‌شود."
         en = f"Conversion {backup_db} → {target_db} is not supported."
-        causes_fa = ["این ترکیب موتور دیتابیس قابل تبدیل خودکار نیست."]
+        _causes(
+            ["این ترکیب موتور دیتابیس قابل تبدیل خودکار نیست."],
+            ["This database engine combination cannot be auto-converted."],
+        )
     elif is_auth_failure_text(raw) or ("password" in low and "auth" in low) or "authentication failed" in low:
         tgt = (target_db or "").lower()
         bak = (backup_db or "").lower()
@@ -3278,59 +3358,77 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
             or (not tgt and ("mysql" in low or "mariadb" in low))
         )
         if mysqlish:
-            # MySQL/MariaDB never uses SASL — keep the title engine-accurate.
-            fa = "احراز هویت MySQL/MariaDB شکست خورد (رمز اشتباه / Access denied)."
-            en = "MySQL/MariaDB authentication failed (wrong password / Access denied)."
+            fa = "احراز هویت MySQL/MariaDB شکست خورد (Access denied)."
+            en = "MySQL/MariaDB authentication failed (Access denied)."
+            ru = "Ошибка аутентификации MySQL/MariaDB (Access denied)."
             if bak == "sqlite":
-                causes_fa = [
-                    "بکاپ sqlite پسورد ندارد — ویزارد فقط از رمز نصب MySQL/MariaDB استفاده می‌کند",
-                    "رمز MYSQL_ROOT_PASSWORD / DB_PASSWORD در .env نصب باید با کانتینر زنده یکی باشد",
-                    "کانتینر MariaDB ممکن است فقط باینری mariadb داشته باشد — ویزارد هر دو کلاینت را امتحان می‌کند",
-                ]
-            elif bak in ("postgresql", "timescaledb"):
-                causes_fa = [
-                    f"بکاپ={bak} → نصب={tgt or 'mysql/mariadb'}: رمز نصب MySQL/MariaDB را نگه دارید",
-                    "رمز MYSQL_ROOT_PASSWORD / DB_PASSWORD در .env نصب با رمز واقعی کانتینر یکی نیست",
-                    "بعد از تبدیل از Timescale/Postgres، ویزارد از رمز نصب (نه رمز بکاپ Postgres) استفاده می‌کند",
-                ]
+                _causes(
+                    [
+                        "بکاپ sqlite رمز ندارد — ویزارد فقط از رمز نصب MySQL/MariaDB استفاده می‌کند",
+                        "MYSQL_ROOT_PASSWORD / DB_PASSWORD نصب باید با کانتینر یکی باشد (ویزارد heal می‌کند)",
+                    ],
+                    [
+                        "SQLite backups have no DB password — wizard uses install MySQL/MariaDB secrets only",
+                        "Install MYSQL_ROOT_PASSWORD / DB_PASSWORD must match the live container (wizard auto-heals)",
+                    ],
+                )
             elif bak in ("mysql", "mariadb"):
-                # Same-engine / soft-family: connection must use LIVE install secrets.
-                causes_fa = [
-                    "رمز MYSQL_ROOT_PASSWORD / DB_PASSWORD در .env نصب با رمز واقعی کانتینر MySQL/MariaDB یکی نیست",
-                    "ویزارد قبل از ایمپورت، رمز نصب را خودکار روی کانتینر heal می‌کند (skip-grant در صورت قفل بودن root)",
-                    "گزینه‌های قبل از ریستور (غیرفعال‌کردن نودها / رد کاربران خراب / سبک‌کردن بکاپ) حفظ می‌شوند",
-                ]
+                _causes(
+                    [
+                        "رمز نصب با volume کانتینر یکی نبود — ویزارد pre-heal و در صورت نیاز skip-grant می‌زند",
+                        "اگر باز هم خطا بود، MYSQL_ROOT_PASSWORD را در .env نصب با رمز واقعی کانتینر یکی کنید",
+                    ],
+                    [
+                        "Install password did not match the container volume — wizard pre-heals (skip-grant if needed)",
+                        "If it still fails, align MYSQL_ROOT_PASSWORD in the install .env with the live container",
+                    ],
+                )
             else:
-                causes_fa = [
-                    "رمز MYSQL_ROOT_PASSWORD / DB_PASSWORD در .env نصب با رمز واقعی کانتینر MySQL/MariaDB یکی نیست",
-                    "کانتینر MariaDB ممکن است فقط باینری mariadb داشته باشد — ویزارد هر دو کلاینت را امتحان می‌کند",
-                    "ویزارد ابتدا رمز نصب را برای ورود امتحان می‌کند و در قفل‌شدن root، skip-grant recovery می‌زند",
-                ]
+                _causes(
+                    [
+                        "برای تبدیل به MySQL/MariaDB فقط رمز نصب مقصد استفاده می‌شود (نه رمز بکاپ مبدأ)",
+                        "MYSQL_ROOT_PASSWORD / DB_PASSWORD نصب را با کانتینر هم‌تراز کنید و دوباره تلاش کنید",
+                    ],
+                    [
+                        "Cross-DB into MySQL/MariaDB uses the install target password only (not the source backup secret)",
+                        "Align install MYSQL_ROOT_PASSWORD / DB_PASSWORD with the container and retry",
+                    ],
+                )
         elif tgt in ("postgresql", "timescaledb") or (
             bak in ("postgresql", "timescaledb") and tgt not in ("mysql", "mariadb")
         ):
-            fa = "احراز هویت دیتابیس شکست خورد (پسورد/SASL)."
-            en = "Database authentication failed (password/SASL)."
+            fa = "احراز هویت PostgreSQL/TimescaleDB شکست خورد."
+            en = "PostgreSQL/TimescaleDB authentication failed."
+            ru = "Ошибка аутентификации PostgreSQL/TimescaleDB."
             if bak == "sqlite":
-                causes_fa = [
-                    "اول PGClockMG را به آخرین نسخه آپدیت کنید (هدر UI باید v4.6.14+ باشد)",
-                    "بکاپ sqlite پسورد ندارد — ویزارد فقط رمز نصب Timescale را خودکار روی کانتینر می‌نشاند",
-                    "اگر پورت 5432 پابلیش نیست، ویزارد از SCRAM داخل کانتینر (eth0) رمز را اثبات و heal می‌کند",
-                ]
+                _causes(
+                    [
+                        "بکاپ sqlite رمز ندارد — ویزارد رمز نصب Timescale/Postgres را روی کانتینر heal می‌کند",
+                        "اگر PgBouncer روشن است، بعد از heal باید recreate شود (ویزارد انجام می‌دهد)",
+                    ],
+                    [
+                        "SQLite backups have no password — wizard heals install Timescale/Postgres roles on the container",
+                        "With PgBouncer enabled, it must be recreated after role heal (wizard does this)",
+                    ],
+                )
             else:
-                causes_fa = [
-                    "رمز POSTGRES_PASSWORD در .env با رمز واقعی کانتینر TimescaleDB/PostgreSQL یکی نیست",
-                    "PgBouncer کش قدیمی دارد — ویزارد نقش‌ها را هم‌تراز و pgbouncer را ریستارت می‌کند",
-                    "بعد از ریستور postgres، globals.sql ممکن است نقش‌ها را با رمز بکاپ برگرداند",
-                ]
+                _causes(
+                    [
+                        "POSTGRES_PASSWORD نصب/بکاپ با نقش‌های زنده یکی نیست",
+                        "PgBouncer ممکن است کش قدیمی داشته باشد — ویزارد نقش‌ها را هم‌تراز و سرویس را recreate می‌کند",
+                    ],
+                    [
+                        "Install/backup POSTGRES_PASSWORD does not match live roles",
+                        "PgBouncer may hold a stale auth cache — wizard realigns roles and recreates it",
+                    ],
+                )
         else:
-            fa = "احراز هویت دیتابیس شکست خورد (پسورد/SASL)."
-            en = "Database authentication failed (password/SASL)."
-            causes_fa = [
-                "رمز دیتابیس در .env با رمز واقعی کانتینر یکی نیست",
-                "بعد از ریستور/تبدیل، نقش‌ها ممکن است با رمز دیگری هم‌خوان شده باشند",
-                "لاگ کامل کانتینر دیتابیس را برای جزئیات auth ببینید",
-            ]
+            fa = "احراز هویت دیتابیس شکست خورد."
+            en = "Database authentication failed."
+            _causes(
+                ["رمز دیتابیس در .env با کانتینر یکی نیست — ویزارد تلاش به heal می‌کند"],
+                ["Database password in .env does not match the container — wizard attempts auto-heal"],
+            )
     elif "character varying(32)" in low or "stringdatarighttruncation" in low:
         fa = "خطای ثبت نسخه alembic بعد از کپی داده (نسخه نامعتبر)."
         en = "Alembic version stamp failed after data copy (invalid revision string)."
@@ -3632,11 +3730,15 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         fa += f" (بکاپ={backup_db} → نصب={target_db})"
         en += f" (backup={backup_db} → installed={target_db})"
 
+    if not causes_en and causes_fa:
+        causes_en = list(causes_fa)
     return {
         "en": en,
         "fa": fa,
         "ru": ru,
         "causes_fa": causes_fa,
+        "causes_en": causes_en,
+        "causes_ru": causes_en,
         "detail": raw,
     }
 
@@ -3874,6 +3976,7 @@ async def _recover_hosts_if_missing(
     from app.services.marzban_preboot_heal import (
         orphan_casefold_match_sql,
         orphan_repoint_sql,
+        ORPHAN_CASEFOLD_SPECS,
         ORPHAN_REPOINT_SPECS,
     )
 
@@ -3965,11 +4068,12 @@ async def _recover_hosts_if_missing(
 
     # Append inbound_tag heal (belt-and-suspenders)
     heal_bits: list[str] = []
-    for child, child_col, parent, parent_col in ORPHAN_REPOINT_SPECS:
+    for child, child_col, parent, parent_col in (*ORPHAN_CASEFOLD_SPECS, *ORPHAN_REPOINT_SPECS):
         if child != "hosts":
             continue
         heal_bits.append(orphan_casefold_match_sql(child, child_col, parent, parent_col) + ";")
-        heal_bits.append(orphan_repoint_sql(child, child_col, parent, parent_col) + ";")
+        if (child, child_col, parent, parent_col) in ORPHAN_REPOINT_SPECS:
+            heal_bits.append(orphan_repoint_sql(child, child_col, parent, parent_col) + ";")
     if heal_bits:
         sql = sql.rstrip() + "\n" + "\n".join(heal_bits) + "\n"
 
@@ -4479,10 +4583,11 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                     job, root, restore_into or backup_db, current_env, backup_env,
                     dump=dump_path,
                 )
-                # Same-engine: force MySQL roles to backup password (written into .env next).
-                # Auth into the live container uses install secrets first (pre-heal left them
-                # matching), then applies the backup password for the final .env.
-                sync_pass = bak_db_pass or bak_mysql_root or ""
+                # One secret for root+app: backup preferred, else install.
+                sync_pass = (
+                    bak_mysql_root or bak_db_pass
+                    or cur_mysql_root or cur_db_pass or ""
+                )
                 svc = await _detect_db_container(job, restore_into or installed_db or backup_db)
                 if svc and sync_pass:
                     await _sync_mysql_passwords(
@@ -4515,8 +4620,8 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                     dump=dump_path,
                 )
                 svc = await _detect_db_container(job, restore_into or installed_db or backup_db)
-                # Same-engine: sync roles to BACKUP password (globals.sql restores old secrets)
-                sync_pass = bak_pg_pass or bak_db_pass or ""
+                # Backup preferred (globals may restore old roles); else install.
+                sync_pass = bak_pg_pass or bak_db_pass or cur_pg_pass or cur_db_pass or ""
                 if svc and sync_pass:
                     await _sync_pg_role_passwords(
                         job, svc, sync_pass,
@@ -4568,27 +4673,48 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         else:
             # Same / soft-family engine: put OLD (backup) DB password into the new .env
             # so panel auth matches roles restored from the dump.
-            same_pass = bak_db_pass or bak_pg_pass or bak_mysql_root or ""
-            same_root = bak_mysql_root or same_pass or ""
-            same_pg = bak_pg_pass or bak_db_pass or same_pass or ""
+            family_eng = (target_db or backup_db or "").lower()
+            if family_eng in ("mysql", "mariadb"):
+                # One secret for root + app after sync — prefer backup, else install.
+                same_pass = (
+                    bak_mysql_root or bak_db_pass
+                    or cur_mysql_root or cur_db_pass or ""
+                )
+                same_root = same_pass
+                same_pg = ""
+            elif family_eng in ("postgresql", "timescaledb"):
+                same_pass = (
+                    bak_pg_pass or bak_db_pass
+                    or cur_pg_pass or cur_db_pass or ""
+                )
+                same_root = ""
+                same_pg = same_pass
+            else:
+                same_pass = bak_db_pass or bak_pg_pass or bak_mysql_root or ""
+                same_root = bak_mysql_root or same_pass or ""
+                same_pg = bak_pg_pass or bak_db_pass or same_pass or ""
             if not same_pass and (backup_db or "") != "sqlite" and (target_db or "") != "sqlite":
                 raise RuntimeError(
-                    "Same-engine restore needs a database password in the backup .env "
-                    "(DB_PASSWORD / POSTGRES_PASSWORD / MYSQL_ROOT_PASSWORD)."
+                    "Same-engine restore needs a database password in the backup or "
+                    "install .env (DB_PASSWORD / POSTGRES_PASSWORD / MYSQL_ROOT_PASSWORD)."
                 )
+            used_install_fallback = not bool(
+                bak_db_pass or bak_pg_pass or bak_mysql_root
+            )
             preserve = {
                 "DB_PASSWORD": same_pass,
                 "DB_USER": bak_user or cur_user,
                 "DB_NAME": bak_name or cur_name,
             }
-            family_eng = (target_db or backup_db or "").lower()
             if family_eng in ("mysql", "mariadb"):
                 preserve["MYSQL_ROOT_PASSWORD"] = same_root
             elif family_eng in ("postgresql", "timescaledb"):
                 preserve["POSTGRES_PASSWORD"] = same_pg
             job.log(
-                "Same-engine restore: writing backup DB password into live .env "
-                "(avoids auth mismatch when dump/globals restored old roles)"
+                "Same-engine restore: writing "
+                + ("install" if used_install_fallback else "backup")
+                + " DB password into live .env "
+                "(keeps panel auth aligned with restored roles)"
             )
             # Keep install URL host/port layout but swap password to backup secret
             if cur_url and same_pass:
@@ -4970,6 +5096,7 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         access["copy_stats"] = copy_stats or verified
         access["copy_report"] = copy_report
         access["verified_counts"] = verified
+        access["transfer_summary"] = build_transfer_summary(verified or copy_stats)
         return access
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -5305,17 +5432,18 @@ async def _restore_mysql(
                 deleted += 1
         # Subscription hosts: retarget inbound_tag — never DELETE (hosts:0/N verify).
         from app.services.marzban_preboot_heal import (
+            ORPHAN_CASEFOLD_SPECS,
             ORPHAN_REPOINT_SPECS,
             orphan_casefold_match_sql,
             orphan_null_sql,
             orphan_repoint_sql,
         )
 
-        for child, child_col, parent, parent_col in ORPHAN_REPOINT_SPECS:
-            for sql in (
-                orphan_casefold_match_sql(child, child_col, parent, parent_col) + ";",
-                orphan_repoint_sql(child, child_col, parent, parent_col) + ";",
-            ):
+        for child, child_col, parent, parent_col in (*ORPHAN_CASEFOLD_SPECS, *ORPHAN_REPOINT_SPECS):
+            sqls = [orphan_casefold_match_sql(child, child_col, parent, parent_col) + ";"]
+            if (child, child_col, parent, parent_col) in ORPHAN_REPOINT_SPECS:
+                sqls.append(orphan_repoint_sql(child, child_col, parent, parent_col) + ";")
+            for sql in sqls:
                 cmd = [
                     "docker", "compose", "exec", "-T",
                     "-e", f"MYSQL_PWD={pwd}", svc, mysql_cmd, "-u", user, target_db,
@@ -5386,10 +5514,12 @@ async def _restore_mysql(
                         stdin=dump_fh,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.STDOUT,
+                        start_new_session=True,
                     )
-                    out_b, _ = await proc.communicate()
-                out = (out_b or b"").decode("utf-8", errors="replace")
-                if proc.returncode == 0:
+                    rc, out = await _communicate_with_timeout(
+                        job, proc, label=f"MySQL restore ({mysql_cmd} as {user})",
+                    )
+                if rc == 0:
                     job.log("MySQL/MariaDB dump restored")
                     try:
                         await _heal_mysql_orphans_after_restore(
@@ -5486,11 +5616,12 @@ async def _restore_postgres(
     job.log(f"PostgreSQL restore into service `{svc}` (engine={db_type})")
     await _compose_up_services(job, svc, "pgbouncer", timeout=180)
 
+    # Prefer POSTGRES_PASSWORD (matches postgres_password_candidates / role sync).
     password = (
-        read_env_var(current_env, "DB_PASSWORD")
-        or read_env_var(current_env, "POSTGRES_PASSWORD")
-        or read_env_var(backup_env, "DB_PASSWORD")
+        read_env_var(current_env, "POSTGRES_PASSWORD")
+        or read_env_var(current_env, "DB_PASSWORD")
         or read_env_var(backup_env, "POSTGRES_PASSWORD")
+        or read_env_var(backup_env, "DB_PASSWORD")
         or ""
     )
     user = (
@@ -5605,17 +5736,23 @@ async def _restore_postgres(
                     stdin=sql_fh,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
+                    start_new_session=True,
                 )
-                out_b, _ = await proc.communicate()
-            return proc.returncode == 0, (out_b or b"").decode("utf-8", errors="replace")
+                rc, out = await _communicate_with_timeout(
+                    job, proc, label=f"psql import → {db}",
+                )
+            return rc == 0, out
         proc = await asyncio.create_subprocess_exec(
             *cmd, "-c", sql,
             cwd=str(PASARGUARD_DIR),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
         )
-        out_b, _ = await proc.communicate()
-        return proc.returncode == 0, (out_b or b"").decode("utf-8", errors="replace")
+        rc, out = await _communicate_with_timeout(
+            job, proc, timeout=600, heartbeat_sec=120, label=f"psql -c → {db}",
+        )
+        return rc == 0, out
 
     async def verify_app_tables(dbn: str) -> tuple[bool, str]:
         """After tolerant dump import, require core PasarGuard tables to exist."""
@@ -5692,9 +5829,12 @@ async def _restore_postgres(
                     stdin=sql_fh,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
+                    start_new_session=True,
                 )
-                out_b, _ = await proc.communicate()
-            return proc.returncode == 0, (out_b or b"").decode("utf-8", errors="replace")
+                rc, out = await _communicate_with_timeout(
+                    job, proc, label=f"PostgreSQL dump import → {dbn}",
+                )
+            return rc == 0, out
 
         async def _role_is_superuser(pg_user: str, pg_password: str) -> bool:
             cmd = [

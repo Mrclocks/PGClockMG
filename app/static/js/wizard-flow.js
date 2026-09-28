@@ -1400,9 +1400,13 @@ function showRestoreError(explain, logs) {
   if (msgEl) msgEl.textContent = msg;
 
   const causesBox = document.getElementById('restoreErrorCauses');
-  const causes = explain.causes_fa || [];
+  const causes = (
+    lang === 'fa' ? (explain.causes_fa || [])
+      : lang === 'ru' ? (explain.causes_ru || explain.causes_en || explain.causes_fa || [])
+        : (explain.causes_en || explain.causes_fa || [])
+  );
   if (causesBox) {
-    if (causes.length && (lang === 'fa' || !explain.causes_en)) {
+    if (causes.length) {
       causesBox.innerHTML = `<h4>${escapeHtml(t('restore.causesTitle'))}</h4><ul>${
         causes.map(c => `<li>${escapeHtml(c)}</li>`).join('')
       }</ul>`;
@@ -1415,9 +1419,43 @@ function showRestoreError(explain, logs) {
 
   const detail = document.getElementById('restoreErrorDetail');
   if (detail) {
-    const lines = Array.isArray(logs) ? logs.join('\n') : (explain.detail || '');
-    detail.textContent = lines || explain.detail || '';
+    // Prefer structured detail; avoid dumping entire noisy job logs as "the error".
+    const tech = (explain.detail || '').trim();
+    const tail = Array.isArray(logs)
+      ? logs.filter((l) => /error|fail|denied|fatal|panic/i.test(String(l))).slice(-40).join('\n')
+      : '';
+    detail.textContent = tech || tail || '';
   }
+}
+
+function renderTransferSummaryGrid(gridEl, titleEl, sectionEl, result, titleKey) {
+  if (!gridEl || !sectionEl) return;
+  const summary = Array.isArray(result?.transfer_summary) && result.transfer_summary.length
+    ? result.transfer_summary
+    : Object.entries(result?.verified_counts || result?.copy_stats || {})
+      .filter(([, n]) => typeof n === 'number' && n >= 0)
+      .map(([table, count]) => ({ table, count }));
+  const prefer = ['users', 'admins', 'nodes', 'hosts', 'inbounds', 'groups', 'core_configs'];
+  summary.sort((a, b) => {
+    const ia = prefer.indexOf(a.table);
+    const ib = prefer.indexOf(b.table);
+    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+  });
+  if (!summary.length) {
+    sectionEl.classList.add('hidden');
+    gridEl.innerHTML = '';
+    return;
+  }
+  if (titleEl) titleEl.textContent = t(titleKey);
+  const labelFn = typeof transferTableLabel === 'function'
+    ? transferTableLabel
+    : (id) => id;
+  gridEl.innerHTML = summary.map((item) => `
+    <div class="transfer-summary-card">
+      <div class="tsc-name">${escapeHtml(labelFn(item.table))}</div>
+      <div class="tsc-count">${Number(item.count).toLocaleString()}</div>
+    </div>`).join('');
+  sectionEl.classList.remove('hidden');
 }
 
 function showRestoreDone(result) {
@@ -1450,6 +1488,13 @@ function showRestoreDone(result) {
       : '';
     msg.textContent = `${t('restore.doneTitle') || ''}${convert}`.trim();
   }
+  renderTransferSummaryGrid(
+    document.getElementById('restoreTransferGrid'),
+    document.getElementById('restoreTransferTitle'),
+    document.getElementById('restoreTransferSection'),
+    result || access,
+    'restore.transferTitle',
+  );
   const tipsEl = document.getElementById('restorePostSuccessTips');
   if (tipsEl) {
     const tips = [

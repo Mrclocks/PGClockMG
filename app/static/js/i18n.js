@@ -149,6 +149,7 @@ const I18N = {
       doneTitle: 'Restore complete',
       disableOldPanelTip: 'To sign in to the new panel safely, temporarily disable your previous panel. After you verify the new panel and all data has transferred, remove the old panel.',
       verifiedCounts: 'Transferred',
+      transferTitle: 'What was transferred',
       openPanel: 'Open PasarGuard panel',
       needUpload: 'Upload a backup zip first',
       confirmNeeded: 'Review the analysis, then confirm restore',
@@ -345,6 +346,7 @@ const I18N = {
       incompleteCopied: '{copied} of {source} copied',
       incompleteMissing: '{missing} missing',
       skippedRows: '{skipped} row(s) skipped',
+      transferTitle: 'What was transferred',
       error: 'Migration failed',
       retry: 'Try again',
       transferTables: {
@@ -590,6 +592,7 @@ const I18N = {
       doneTitle: 'ریستور انجام شد',
       disableOldPanelTip: 'برای ورود به پنل جدید بهتر است پنل قبلی خود را موقتاً غیرفعال کنید و بعد از تست پنل جدید و انتقال کامل اطلاعات، آن را حذف کنید.',
       verifiedCounts: 'منتقل شد',
+      transferTitle: 'اطلاعات منتقل‌شده',
       openPanel: 'ورود به پنل PasarGuard',
       needUpload: 'اول فایل بکاپ را آپلود کنید',
       confirmNeeded: 'نتیجه بررسی را ببینید و بعد تأیید کنید',
@@ -786,6 +789,7 @@ const I18N = {
       incompleteCopied: '{copied} از {source} منتقل شد',
       incompleteMissing: '{missing} مورد باقی‌مانده',
       skippedRows: '{skipped} ردیف رد شد',
+      transferTitle: 'اطلاعات منتقل‌شده',
       error: 'خطا در مهاجرت',
       retry: 'تلاش مجدد',
       transferTables: {
@@ -1031,6 +1035,7 @@ const I18N = {
       doneTitle: 'Восстановление завершено',
       disableOldPanelTip: 'Для входа в новую панель лучше временно отключить предыдущую. После проверки новой панели и полного переноса данных удалите старую.',
       verifiedCounts: 'Перенесено',
+      transferTitle: 'Что перенесено',
       openPanel: 'Открыть панель PasarGuard',
       needUpload: 'Сначала загрузите бэкап',
       confirmNeeded: 'Проверьте анализ и подтвердите',
@@ -1227,6 +1232,7 @@ const I18N = {
       incompleteCopied: '{copied} из {source} перенесено',
       incompleteMissing: 'не хватает {missing}',
       skippedRows: 'пропущено строк: {skipped}',
+      transferTitle: 'Что перенесено',
       error: 'Ошибка миграции',
       retry: 'Повторить',
       transferTables: {

@@ -272,6 +272,41 @@ async def _import_via_compose_service(
                 raise RuntimeError(
                     f"SQL staging failed (db={staging_db}): {last_out[-400:]}"
                 )
+            # Refuse hollow compose staging (USE divert / empty dump).
+            critical = ("users", "admins", "hosts", "inbounds", "nodes", "groups")
+            found: dict[str, int] = {}
+            for table in critical:
+                safe_t = "".join(c for c in table if c.isalnum() or c == "_")
+                for bin_name in mysql_client_bins(source_db, service):
+                    proc = await asyncio.create_subprocess_exec(
+                        "docker", "compose", "exec", "-T",
+                        "-e", f"MYSQL_PWD={pwd}",
+                        service, bin_name, "-N", "-u", user, safe_db,
+                        "-e", f"SELECT COUNT(*) FROM `{safe_t}`;",
+                        cwd=cwd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT,
+                    )
+                    out_b, _ = await proc.communicate()
+                    out = (out_b or b"").decode("utf-8", errors="ignore")
+                    if proc.returncode == 0:
+                        for line in out.splitlines():
+                            if line.strip().isdigit():
+                                n = int(line.strip())
+                                if n > 0:
+                                    found[table] = n
+                                break
+                        break
+            if not found:
+                raise RuntimeError(
+                    f"Compose staging DB `{safe_db}` has 0 rows in "
+                    f"users/admins/hosts/inbounds/nodes/groups after dump import — "
+                    f"dump may be empty or USE/CREATE DATABASE redirected data."
+                )
+            migrator.job.log(
+                "Compose staging has data: "
+                + ", ".join(f"{k}={v}" for k, v in found.items())
+            )
         finally:
             if import_path != dump_path and import_path.exists():
                 try:

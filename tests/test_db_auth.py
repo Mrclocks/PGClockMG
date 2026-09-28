@@ -86,11 +86,15 @@ def test_explain_auth_sqlite_to_timescale_mentions_no_backup_password():
         "timescaledb",
     )
     joined = " ".join(info.get("causes_fa") or [])
+    joined_en = " ".join(info.get("causes_en") or [])
     assert "sqlite" in joined.lower()
     assert "پسورد ندارد" in joined or "رمز نصب" in joined
     assert "globals.sql" not in joined
     assert "بکاپ=sqlite" in info["fa"]
-    assert "4.6.14" in joined or "SCRAM" in joined or "eth0" in joined.lower()
+    assert "heal" in joined.lower() or "PgBouncer" in joined or "pgbouncer" in joined.lower()
+    assert "SASL" not in joined and "SCRAM" not in joined
+    assert info.get("causes_en")
+    assert "password" in joined_en.lower() or "heal" in joined_en.lower()
     print("OK: sqlite→timescale auth tips ignore backup password")
 
 

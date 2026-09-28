@@ -868,6 +868,19 @@ def test_users_status_not_bool():
     print("OK: users_status_not_bool")
 
 
+def test_to_bool_and_normalize_mysql_bit():
+    from app.services.native_migration.copy_core import to_bool, normalize_raw_value
+
+    assert to_bool(b"\x00") is False
+    assert to_bool(b"\x01") is True
+    assert to_bool(memoryview(b"\x01")) is True
+    assert to_bool("0") is False
+    assert to_bool("true") is True
+    assert normalize_raw_value(b"\x00") == 0
+    assert normalize_raw_value(b"\x01") == 1
+    print("OK: to_bool / MySQL BIT(1)")
+
+
 def test_hosts_json_and_column_plan():
     from app.services.native_migration.copy_core import (
         build_table_column_plan,
@@ -1839,6 +1852,7 @@ if __name__ == "__main__":
     test_convert_bool_values()
     test_hosts_address_sanitizes_array_and_invisible_junk()
     test_users_status_not_bool()
+    test_to_bool_and_normalize_mysql_bit()
     test_hosts_json_and_column_plan()
     test_hosts_marzban_none_enums_copy()
     test_hosts_inbound_id_resolves_to_tag()

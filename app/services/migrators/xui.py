@@ -1952,6 +1952,7 @@ class XuiMigrator(BaseMigrator):
 
         guide_domains = list(certbot_info.get("domains") or [])
         from app.services.subscription_prefix import manual_cert_guide
+        from app.services.pg_restore import build_transfer_summary
 
         return {
             "panel_url": self._get_panel_url(),
@@ -1965,6 +1966,10 @@ class XuiMigrator(BaseMigrator):
             "mapping_file": str(mapping_file) if mapping_file.exists() else None,
             "source_counts": src_counts,
             "migrated_counts": out_counts,
+            "verified_counts": out_counts if isinstance(out_counts, dict) else {},
+            "transfer_summary": build_transfer_summary(
+                out_counts if isinstance(out_counts, dict) else {}
+            ),
             "xui_schema": schema_info.get("schema"),
             "xui_schema_modern": bool(schema_info.get("modern")),
             "admin_username": admin_info.get("username") if admin_info.get("created") else None,

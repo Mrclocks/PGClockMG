@@ -305,7 +305,7 @@ def compute_expire_and_status(user: dict) -> dict:
     if start is not None and package_days > 0:
         expire_dt = start + timedelta(days=package_days)
         return {
-            "status": "active" if expire_dt > now else "active",
+            "status": "active" if expire_dt > now else "expired",
             "expire": int(expire_dt.timestamp()),
             "on_hold_expire_duration": None,
             "on_hold_timeout": None,
