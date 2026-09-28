@@ -911,7 +911,12 @@ def _host_overlay_from_stream(stream: dict) -> dict:
 
 
 def ensure_sudo_admin_from_xui(pg_db: Path, xui_db: Path) -> dict:
-    """Create sudo admin #1 from x-ui panel user when PG admins table is empty."""
+    """Create sudo admin #1 from x-ui panel user when PG admins table is empty.
+
+    Never invents a known default password (old ``"password"`` bcrypt hash).
+    If x-ui has no usable admin hash, skip creation — operator creates Owner
+    via ``pasarguard cli``.
+    """
     pg_path = Path(pg_db)
     xui_path = Path(xui_db)
     conn = sqlite3.connect(str(pg_path))
@@ -922,8 +927,8 @@ def ensure_sudo_admin_from_xui(pg_db: Path, xui_db: Path) -> dict:
         if int(conn.execute("SELECT COUNT(*) FROM admins").fetchone()[0]) > 0:
             return {"created": False, "reason": "already-present"}
 
-        username = "admin"
-        hashed = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"  # "password"
+        username = ""
+        hashed = ""
         xui = sqlite3.connect(f"file:{xui_path.as_posix()}?mode=ro", uri=True)
         try:
             xui_tables = _xui_table_names(xui)
@@ -936,6 +941,13 @@ def ensure_sudo_admin_from_xui(pg_db: Path, xui_db: Path) -> dict:
                     hashed = str(row[1])[:128]
         finally:
             xui.close()
+
+        if not username or not hashed:
+            return {
+                "created": False,
+                "reason": "no-xui-admin-password",
+                "hint": "Create PasarGuard owner with: pasarguard cli admin create",
+            }
 
         cols = [r[1] for r in conn.execute("PRAGMA table_info(admins)")]
         now = "1970-01-01 00:00:00"
@@ -1976,14 +1988,27 @@ class XuiMigrator(BaseMigrator):
             "target_db": target_db,
             "mapping_file": str(mapping_file) if mapping_file.exists() else None,
             "source_counts": src_counts,
-            "migrated_counts": out_counts,
-            "verified_counts": out_counts if isinstance(out_counts, dict) else {},
+            "migrated_counts": (
+                getattr(self, "copy_stats", None)
+                or (out_counts if isinstance(out_counts, dict) else {})
+                or {}
+            ),
+            "verified_counts": (
+                getattr(self, "copy_stats", None)
+                or (out_counts if isinstance(out_counts, dict) else {})
+                or {}
+            ),
             "transfer_summary": build_transfer_summary(
-                out_counts if isinstance(out_counts, dict) else {}
+                getattr(self, "copy_stats", None)
+                or (out_counts if isinstance(out_counts, dict) else {})
+                or {}
             ),
             "xui_schema": schema_info.get("schema"),
             "xui_schema_modern": bool(schema_info.get("modern")),
             "admin_username": admin_info.get("username") if admin_info.get("created") else None,
+            "admin_skipped_reason": (
+                None if admin_info.get("created") else admin_info.get("reason")
+            ),
             "hosts_seeded": int(hosts_info.get("seeded") or 0),
             "certbot_attempted": bool(certbot_info.get("attempted")),
             "certbot_ok": bool(certbot_info.get("ok")),
@@ -2220,6 +2245,23 @@ class XuiMigrator(BaseMigrator):
         )
         return False, err or "pg-redirect install failed"
 
+    def _abort_if_post_convert_gaps(self, stats: dict | None) -> None:
+        """Refuse success when convert to server DB dropped inbounds/core_configs."""
+        stats = stats or {}
+        users = int(stats.get("users", 0) or 0)
+        inbounds = int(stats.get("inbounds", 0) or 0)
+        core_configs = int(stats.get("core_configs", 0) or 0)
+        if users > 0 and inbounds <= 0:
+            raise RuntimeError(
+                f"3x-ui convert copied users={users} but inbounds=0. "
+                "Aborting so the panel is not left without proxies."
+            )
+        if users > 0 and core_configs <= 0:
+            raise RuntimeError(
+                f"3x-ui convert copied users={users} but core_configs=0. "
+                "Aborting so the panel is not left without xray core config."
+            )
+
     async def _convert_landed_sqlite_to_target(
         self,
         land_db: Path,
@@ -2251,6 +2293,7 @@ class XuiMigrator(BaseMigrator):
             self.job.log(f"Credential pre-check note: {e}")
 
         await run_cross_db_migration(self, str(land_db), "sqlite", target_db)
+        self._abort_if_post_convert_gaps(getattr(self, "copy_stats", None))
 
         target_db = normalize_target_db(target_db)
         app_user = (

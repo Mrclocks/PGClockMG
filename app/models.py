@@ -69,3 +69,5 @@ class PasarguardRestoreRequest(BaseModel):
     accept_experimental: bool = False
     disable_nodes_after_restore: bool = False
     skip_bad_user_rows: bool = True
+    # Retry path: force skip-bad + more aggressive usage-table shrink before alembic.
+    stronger_heal: bool = False

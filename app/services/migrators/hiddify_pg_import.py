@@ -352,8 +352,11 @@ async def main():
             want_expired = raw_status == "expired"
             create_status = "on_hold" if raw_status == "on_hold" and not want_disabled else "active"
 
-            trojan_pw = uuid_s.replace("-", "")[:22]
-            if len(trojan_pw) < 22:
+            # Prefer password from Hiddify export; else derive from UUID (documented).
+            export_pw = (row.get("trojan_password") or row.get("password") or "").strip()
+            trojan_from_export = bool(export_pw)
+            trojan_pw = export_pw[:128] if trojan_from_export else uuid_s.replace("-", "")[:22]
+            if not trojan_from_export and len(trojan_pw) < 22:
                 trojan_pw = (trojan_pw + "hiddify-migrate-pass00")[:22]
 
             try:
@@ -439,6 +442,7 @@ async def main():
                     "user_id": int(user.id),
                     "subscription_url": f"/sub/{token}",
                     "reused": False,
+                    "trojan_password_from_export": trojan_from_export,
                 })
                 uuid_index[str(uid).lower()] = user
             except Exception as e:
@@ -448,6 +452,10 @@ async def main():
                     pass
                 errors.append({"username": username, "error": str(e)[:300]})
 
+    derived_trojan = sum(
+        1 for c in created
+        if not c.get("reused") and not c.get("trojan_password_from_export")
+    )
     write_result({
         "ok": True,
         "group": group_name,
@@ -457,6 +465,7 @@ async def main():
         "skipped": skipped,
         "created_count": len([c for c in created if not c.get("reused")]),
         "mapped_count": len(created),
+        "trojan_password_derived_count": derived_trojan,
     })
 
 

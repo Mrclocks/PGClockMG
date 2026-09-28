@@ -989,8 +989,14 @@ async def heal_heavy_usage_tables(migrator) -> list[tuple[str, int]]:
     conn = dict(get_target_connection(params))
     if target_db == "sqlite":
         conn["sqlite_path"] = conn.get("sqlite_path") or str(PASARGUARD_DATA / "db.sqlite3")
+    # stronger_heal (restore retry): shrink earlier so huge dumps finish.
+    row_threshold = HEAVY_USAGE_ROW_THRESHOLD
+    if params.get("stronger_heal"):
+        row_threshold = max(1_000, int(HEAVY_USAGE_ROW_THRESHOLD) // 10)
     try:
-        truncated = shrink_heavy_usage_tables_on_conn(target_db, conn)
+        truncated = shrink_heavy_usage_tables_on_conn(
+            target_db, conn, row_threshold=row_threshold,
+        )
     except Exception as e:
         migrator.job.log(f"Heavy-usage shrink note: {e}")
         return []

@@ -697,6 +697,48 @@ def test_postgres_value_clears_and_batch_skip_soft_tables():
     print("OK: postgres value_clears + batch soft-table skip")
 
 
+def test_postgres_copy_cell_and_flush_prefers_copy():
+    """Large bulk buffers use COPY FROM STDIN (with execute_batch fallback)."""
+    from app.services.native_migration.adapters import PostgresWriter
+
+    assert PostgresWriter._copy_cell(None) == "\\N"
+    assert PostgresWriter._copy_cell(True) == "t"
+    assert PostgresWriter._copy_cell("a\tb") == "a\\tb"
+
+    class _Cur:
+        def __init__(self):
+            self.copy_sql = None
+            self.copy_data = None
+
+        def copy_expert(self, sql, stream):
+            self.copy_sql = sql
+            self.copy_data = stream.read()
+
+    class _Conn:
+        def __init__(self):
+            self.cur = _Cur()
+
+        def cursor(self):
+            return self.cur
+
+        def rollback(self):
+            pass
+
+    w = PostgresWriter.__new__(PostgresWriter)
+    w._batch_buf = [(i, f"u{i}") for i in range(80)]
+    w._batch_table = "node_user_usages"
+    w._batch_columns = ["id", "name"]
+    w._COPY_MIN = 64
+    w._conn = _Conn()
+    w._log = None
+    w._psql = type("P", (), {})()
+    w._flush_batch()
+    assert w._conn.cur.copy_sql and 'COPY "node_user_usages"' in w._conn.cur.copy_sql
+    assert w._conn.cur.copy_data.count("\n") == 80
+    assert w._batch_buf == []
+    print("OK: postgres COPY FROM path for large batch")
+
+
 def test_rewrite_sqlalchemy_host_port_never_touches_sqlite():
     """Regression: sqlite→TS Phase1 must not become sqlite://127.0.0.1:5432//path."""
     from app.services.pasarguard_ops import (
@@ -1918,6 +1960,7 @@ if __name__ == "__main__":
     test_ensure_asyncpg_strips_string_timeout_query()
     test_postgres_fit_enum_keeps_none_label()
     test_postgres_value_clears_and_batch_skip_soft_tables()
+    test_postgres_copy_cell_and_flush_prefers_copy()
     test_rewrite_sqlalchemy_host_port_never_touches_sqlite()
     test_alembic_strategies_sqlite_ignores_timescaledb_target()
     test_extract_docker_container_id_skips_pgadmin_warning()

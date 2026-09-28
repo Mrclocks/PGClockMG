@@ -1553,13 +1553,15 @@ async def start_pasarguard_restore(params: dict) -> MigrationJob:
     backup_db = analysis.get("backup_db")
     if target_db and target_db not in SUPPORTED_RESTORE_DBS:
         raise ValueError(f"Unsupported target database: {target_db}")
+    stronger = bool(params.get("stronger_heal"))
     params = {
         **params,
         "target_db": target_db or backup_db,
         # Auto-convert when backup engine ≠ installed engine (no UI confirmation)
         "accept_experimental": True,
         # Soft-skip broken user rows on convert so one bad row does not abort Change-DB.
-        "skip_bad_user_rows": bool(params.get("skip_bad_user_rows", True)),
+        "skip_bad_user_rows": True if stronger else bool(params.get("skip_bad_user_rows", True)),
+        "stronger_heal": stronger,
     }
 
     ensure_panel_idle()
@@ -3275,9 +3277,12 @@ async def _maybe_cross_db_after_restore(
             }
 
         mig_params["_auto_db_credentials"] = True
-        # Restore convert must not soft-skip incomplete users/templates —
+        # Restore convert normally must not soft-skip incomplete users/templates —
         # partial copy after DROP SCHEMA leaves an empty/broken panel.
-        mig_params["skip_bad_user_rows"] = False
+        # stronger_heal (explicit retry) allows skip-bad + aggressive usage shrink.
+        stronger = bool(params.get("stronger_heal"))
+        mig_params["skip_bad_user_rows"] = bool(stronger)
+        mig_params["stronger_heal"] = stronger
         mini = _Mini(job, mig_params)
         try:
             await run_cross_db_migration(mini, path, backup_db, target_db)
@@ -3340,7 +3345,8 @@ async def _maybe_cross_db_after_restore(
             mig_params = migration_params_from_connection(backup_db, target_db, admin)
             mig_params["_auto_db_credentials"] = True
             mig_params["_auth_healed_once"] = True
-            mig_params["skip_bad_user_rows"] = False
+            mig_params["skip_bad_user_rows"] = bool(stronger)
+            mig_params["stronger_heal"] = stronger
             mini = _Mini(job, mig_params)
             await run_cross_db_migration(mini, path, backup_db, target_db)
         stats = getattr(mini, "copy_stats", None) or {}
@@ -4680,10 +4686,14 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
     job.set_progress(5, "Extracting backup...")
     # Honor wizard options chosen before restore starts.
     disable_nodes = bool(params.get("disable_nodes_after_restore"))
-    skip_bad = bool(params.get("skip_bad_user_rows", True))
+    stronger_heal = bool(params.get("stronger_heal"))
+    # Stronger heal retry always skips bad user rows.
+    skip_bad = True if stronger_heal else bool(params.get("skip_bad_user_rows", True))
+    params["skip_bad_user_rows"] = skip_bad
+    params["stronger_heal"] = stronger_heal
     job.log(
         f"Restore options: disable_nodes_after_restore={disable_nodes}, "
-        f"skip_bad_user_rows={skip_bad} "
+        f"skip_bad_user_rows={skip_bad}, stronger_heal={stronger_heal} "
         f"(passwords/versions heal automatically)"
     )
     work = Path(tempfile.mkdtemp(prefix="pg-restore-work-", dir=str(UPLOAD_DIR)))

@@ -1025,6 +1025,63 @@ class PostgresWriter(TableWriter):
         )
         return [r[0] for r in cur.fetchall()]
 
+    # Prefer COPY FROM STDIN once a bulk buffer is large enough.
+    _COPY_MIN = 64
+
+    @staticmethod
+    def _copy_cell(val) -> str:
+        """Serialize one already-coerced value for PostgreSQL text COPY."""
+        import json as _json
+
+        if val is None:
+            return "\\N"
+        if isinstance(val, bool):
+            return "t" if val else "f"
+        if isinstance(val, (bytes, bytearray, memoryview)):
+            val = bytes(val).decode("utf-8", errors="replace")
+        # psycopg2.extras.Json — dump adapted payload
+        adapted = getattr(val, "adapted", None)
+        if adapted is not None and type(val).__name__ == "Json":
+            dumps = getattr(val, "dumps", None)
+            try:
+                s = dumps(adapted) if callable(dumps) else _json.dumps(adapted, ensure_ascii=False)
+            except Exception:
+                s = _json.dumps(adapted, ensure_ascii=False, default=str)
+        elif isinstance(val, (dict, list, tuple)):
+            s = _json.dumps(val if not isinstance(val, tuple) else list(val), ensure_ascii=False, default=str)
+        else:
+            s = str(val)
+        return (
+            s.replace("\\", "\\\\")
+            .replace("\t", "\\t")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+        )
+
+    def _flush_batch_copy(self, table: str, columns: list[str], buf: list[tuple]) -> None:
+        import io
+
+        col_list = ", ".join(f'"{c}"' for c in columns)
+        sql = f'COPY "{table}" ({col_list}) FROM STDIN'
+        stream = io.StringIO()
+        for row in buf:
+            stream.write("\t".join(self._copy_cell(v) for v in row))
+            stream.write("\n")
+        stream.seek(0)
+        cur = self._conn.cursor()
+        cur.copy_expert(sql, stream)
+
+    def _flush_batch_insert(self, table: str, columns: list[str], buf: list[tuple]) -> None:
+        from psycopg2.extras import execute_batch
+
+        cur = self._conn.cursor()
+        col_list = self._psql.SQL(", ").join(self._psql.Identifier(c) for c in columns)
+        placeholders = self._psql.SQL(", ").join(self._psql.Placeholder() for _ in columns)
+        q = self._psql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
+            self._psql.Identifier(table), col_list, placeholders
+        )
+        execute_batch(cur, q, buf, page_size=min(len(buf), 200))
+
     def _flush_batch(self) -> None:
         buf = getattr(self, "_batch_buf", None) or []
         if not buf:
@@ -1036,15 +1093,30 @@ class PostgresWriter(TableWriter):
         self._batch_columns = None
         if not table or not columns:
             return
-        from psycopg2.extras import execute_batch
-
-        cur = self._conn.cursor()
-        col_list = self._psql.SQL(", ").join(self._psql.Identifier(c) for c in columns)
-        placeholders = self._psql.SQL(", ").join(self._psql.Placeholder() for _ in columns)
-        q = self._psql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
-            self._psql.Identifier(table), col_list, placeholders
-        )
-        execute_batch(cur, q, buf, page_size=min(len(buf), 200))
+        use_copy = len(buf) >= int(getattr(self, "_COPY_MIN", 64) or 64)
+        if use_copy:
+            try:
+                self._flush_batch_copy(table, columns, buf)
+                return
+            except Exception as exc:
+                self._note(f"COPY FROM {table} failed ({exc}); falling back to execute_batch")
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+                # Re-enter bulk FK mode after rollback when possible.
+                try:
+                    if getattr(self, "_bulk_load_active", False):
+                        mode = getattr(self, "_fk_mode", None)
+                        if mode == "replica":
+                            self._set_replication_role("replica")
+                        elif mode == "triggers":
+                            tables = list(getattr(self, "_trigger_tables", []) or [])
+                            if tables:
+                                self._disable_table_triggers(tables)
+                except Exception:
+                    pass
+        self._flush_batch_insert(table, columns, buf)
 
     # Soft-skip / retry tables need per-row savepoints — batch would hide bad rows.
     _NO_BATCH_TABLES = frozenset({

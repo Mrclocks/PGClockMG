@@ -505,10 +505,16 @@ async def _panel_boot_upgrade_intermediate(
                 # node_user_usages rows (scales with user count); orphan DELETE on those
                 # before truncate can hang for hours, and bigint alembic rebuilds them.
                 from app.services.marzban_preboot_heal import (
+                    HEAVY_USAGE_ROW_THRESHOLD,
                     shrink_heavy_usage_tables_on_conn,
                 )
 
-                truncated = shrink_heavy_usage_tables_on_conn(inter_db, staging_conn)
+                row_threshold = HEAVY_USAGE_ROW_THRESHOLD
+                if (migrator.params or {}).get("stronger_heal"):
+                    row_threshold = max(1_000, int(HEAVY_USAGE_ROW_THRESHOLD) // 10)
+                truncated = shrink_heavy_usage_tables_on_conn(
+                    inter_db, staging_conn, row_threshold=row_threshold,
+                )
                 for table, rows in truncated:
                     migrator.job.log(
                         f"Intermediate: truncated large `{table}` (~{rows} rows) "

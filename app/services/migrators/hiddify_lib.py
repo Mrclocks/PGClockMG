@@ -350,6 +350,16 @@ def normalize_hiddify_users(users: list[dict]) -> list[dict]:
             reset = mode
         elif mode in ("no_reset", "start_on_first_use"):
             reset = "no_reset"
+        # Prefer explicit trojan/proxy password from export when present.
+        trojan_pw = (
+            raw.get("trojan_password")
+            or raw.get("password")
+            or raw.get("proxy_password")
+            or ""
+        )
+        if isinstance(trojan_pw, (int, float)):
+            trojan_pw = str(trojan_pw)
+        trojan_pw = str(trojan_pw or "").strip()
         out.append({
             "username": username,
             "uuid": uuid,
@@ -365,6 +375,7 @@ def normalize_hiddify_users(users: list[dict]) -> list[dict]:
             "on_hold_timeout": timing["on_hold_timeout"],
             "package_days": int(raw.get("package_days") or 0),
             "start_date": raw.get("start_date"),
+            "trojan_password": trojan_pw or None,
         })
     return out
 

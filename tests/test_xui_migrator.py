@@ -20,6 +20,7 @@ from app.services.migrators.xui import (
     assert_xui_source_has_data,
     assert_migrated_pg_has_data,
     assert_migrated_core_config,
+    ensure_sudo_admin_from_xui,
     patch_xui_converter_tag_bug,
     normalize_subscription_mapping,
     enrich_subscription_mapping_from_clients,
@@ -908,6 +909,48 @@ def test_patch_xui_converter_tag_bug_moves_assignment():
         assert patch_xui_converter_tag_bug(tool) is False
 
 
+def test_ensure_sudo_admin_skips_without_xui_password():
+    """Never invent the known default bcrypt for ``password``."""
+    with tempfile.TemporaryDirectory() as tmp:
+        td = Path(tmp)
+        pg = td / "pg.db"
+        xui = td / "xui.db"
+        conn = sqlite3.connect(pg)
+        conn.execute(
+            "CREATE TABLE admins (id INTEGER PRIMARY KEY, username TEXT, hashed_password TEXT)"
+        )
+        conn.commit()
+        conn.close()
+        conn = sqlite3.connect(xui)
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, password TEXT)")
+        conn.execute("INSERT INTO users VALUES (1, 'admin', '')")
+        conn.commit()
+        conn.close()
+        out = ensure_sudo_admin_from_xui(pg, xui)
+        assert out.get("created") is False
+        assert out.get("reason") == "no-xui-admin-password"
+        conn = sqlite3.connect(pg)
+        n = conn.execute("SELECT COUNT(*) FROM admins").fetchone()[0]
+        conn.close()
+        assert n == 0
+
+
+def test_abort_if_post_convert_gaps():
+    job = MigrationJob(job_id="gaps")
+    m = XuiMigrator(job, {"target_db": "postgresql"})
+    try:
+        m._abort_if_post_convert_gaps({"users": 3, "inbounds": 0, "core_configs": 1})
+        raise AssertionError("expected inbounds abort")
+    except RuntimeError as e:
+        assert "inbounds=0" in str(e)
+    try:
+        m._abort_if_post_convert_gaps({"users": 3, "inbounds": 1, "core_configs": 0})
+        raise AssertionError("expected core_configs abort")
+    except RuntimeError as e:
+        assert "core_configs=0" in str(e)
+    m._abort_if_post_convert_gaps({"users": 3, "inbounds": 1, "core_configs": 1})
+
+
 def test_assert_migrated_core_config_rejects_empty():
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "db.sqlite3"
@@ -1005,6 +1048,8 @@ if __name__ == "__main__":
     test_convert_landed_sqlite_for_all_server_engines()
     test_convert_landed_sqlite_pg_diverged_secrets_align()
     test_patch_xui_converter_tag_bug_moves_assignment()
+    test_ensure_sudo_admin_skips_without_xui_password()
+    test_abort_if_post_convert_gaps()
     test_assert_migrated_core_config_rejects_empty()
     test_run_cmd_shell_string_uses_subprocess_shell()
     print("\nAll x-ui migrator tests passed.")

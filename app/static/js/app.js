@@ -1744,6 +1744,19 @@ async function showSuccess(result) {
         .replace('{rows}', usageCleared.toLocaleString());
       tips.push(`<p class="info-note">${statusIcon('warn')}<span>${note}</span></p>`);
     }
+    const clears = result?.value_clears || result?.copy_report?.value_clears || [];
+    if (Array.isArray(clears) && clears.length) {
+      tips.push(`<p class="info-note">${statusIcon('warn')}<span>${t('step6.valueClearsNote')}: ${clears.length}</span></p>`);
+    }
+    if (state.selectedPanel?.id === 'hiddify' || result?.scope === 'users_redirect_only') {
+      tips.push(`<p class="info-note">${statusIcon('warn')}<span>${t('step6.hiddifyScopeNote')}</span></p>`);
+      const derived = Number(result?.trojan_password_derived_count || 0);
+      if (derived > 0) {
+        tips.push(
+          `<p class="info-note">${statusIcon('warn')}<span>${String(t('step6.hiddifyTrojanDerived') || '').replace('{count}', String(derived))}</span></p>`,
+        );
+      }
+    }
     tipsEl.innerHTML = tips.join('');
     tipsEl.classList.remove('hidden');
   }
@@ -1755,6 +1768,14 @@ async function showSuccess(result) {
     const schemaLabel = modern ? t('step6.xuiSchemaModern') : t('step6.xuiSchemaLegacy');
     details += `<p class="status-inline">${statusIcon('ok')} <span>${schemaLabel}</span></p>`;
     details += `<p class="warn-line">${statusIcon('warn')}<span>${t('step6.xuiOldSubPortWarn')}</span></p>`;
+    details += `<p class="warn-line">${statusIcon('warn')}<span>${t('step6.xuiTlsStripNote')}</span></p>`;
+    const seeded = Number(result?.hosts_seeded || 0);
+    if (seeded > 0) {
+      details += `<p class="status-inline">${statusIcon('ok')} <span>${String(t('step6.xuiHostsSeeded') || '').replace('{count}', String(seeded))}</span></p>`;
+    }
+    if (result?.admin_skipped_reason === 'no-xui-admin-password') {
+      details += `<p class="warn-line">${statusIcon('warn')}<span>${t('step6.xuiAdminSkipped')}</span></p>`;
+    }
   }
   const warnings = result?.warnings;
   if (warnings) {
