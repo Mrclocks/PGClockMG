@@ -42,7 +42,7 @@ from app.services.auth import (
 )
 from app.config import WEB_PORT
 
-APP_VERSION = "4.8.1"
+APP_VERSION = "4.8.2"
 
 
 @asynccontextmanager
