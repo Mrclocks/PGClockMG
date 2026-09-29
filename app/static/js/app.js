@@ -75,7 +75,30 @@ function togglePassword(inputId, btn) {
 
 function getSourceEnvSummary() {
   const analysis = state.bundleStatus?.analysis || state.uploadInfo?.analysis;
-  return analysis?.env_summary || state.systemCheck?.marzban_env || null;
+  // Uploaded backup env wins. Never fall back to live Marzban/PasarGuard when
+  // an upload analysis exists (target Timescale must not become "source").
+  if (analysis) return analysis.env_summary || null;
+  return state.systemCheck?.marzban_env || null;
+}
+
+/** Marzban migrate source engines only — never PasarGuard target engines. */
+const MARZBAN_SOURCE_DBS = ['sqlite', 'mysql', 'mariadb'];
+
+function clampMarzbanSourceDb(db, analysis) {
+  if (db && MARZBAN_SOURCE_DBS.includes(db)) return db;
+  // timescaledb/postgresql here is almost always live PasarGuard contamination
+  if (analysis?.paths?.sqlite || (analysis?.categories?.database_sqlite || 0) > 0) {
+    if (!(analysis?.paths?.sql || (analysis?.categories?.database_sql || 0) > 0)) {
+      return 'sqlite';
+    }
+  }
+  if (analysis?.paths?.sql || (analysis?.categories?.database_sql || 0) > 0) {
+    return 'mysql';
+  }
+  if (analysis?.paths?.sqlite || (analysis?.categories?.database_sqlite || 0) > 0) {
+    return 'sqlite';
+  }
+  return null;
 }
 
 function defaultTargetDbUser(db) {
@@ -129,8 +152,10 @@ function pwdConfirmedMap(role) {
 
 function getPasswordRows(role) {
   const db = role === 'source' ? state.sourceDb : getDetectedTargetDb();
+  // SQLite (and unknown/empty) never need password rows — ignore stale candidates.
+  if (!dbNeedsPassword(db)) return [];
   let rows = role === 'source' ? state.sourcePasswordCandidates : state.targetPasswordCandidates;
-  if (!rows?.length && dbNeedsPassword(db)) {
+  if (!rows?.length) {
     const key = db === 'mysql' || db === 'mariadb'
       ? 'MYSQL_ROOT_PASSWORD'
       : db === 'postgresql' || db === 'timescaledb'
@@ -186,7 +211,16 @@ function hasDbCredentials(role) {
 
 function getSourcePasswordCandidates() {
   const analysis = state.bundleStatus?.analysis || state.uploadInfo?.analysis;
-  if (analysis?.password_candidates?.length) return analysis.password_candidates;
+  const detected = (analysis
+    ? clampMarzbanSourceDb(analysis.detected_source_db, analysis)
+    : null) || state.sourceDb;
+  // SQLite backups have no DB password — never surface live/stale .env secrets.
+  if (!dbNeedsPassword(detected)) return [];
+  // With an uploaded backup, only use that backup's candidates — never live
+  // Marzban or PasarGuard Timescale secrets as "source" passwords.
+  if (analysis) {
+    return analysis.password_candidates?.length ? analysis.password_candidates : [];
+  }
   if (state.systemCheck?.marzban_password_candidates?.length) {
     return state.systemCheck.marzban_password_candidates;
   }
@@ -212,8 +246,14 @@ function pwdFieldId(role, key) {
 
 function resolveVaultScope(role) {
   if (role === 'target') return 'live:pasarguard';
+  // Source vault: uploaded backup first. Never hydrate source fields from
+  // live:pasarguard (that is the TARGET Timescale/MySQL install).
   if (state.uploadId) return `upload:${state.uploadId}`;
   if (state.uploadBundleId) return `bundle:${state.uploadBundleId}`;
+  if (state.bundleStatus?.analysis || state.uploadInfo?.analysis) {
+    // Upload present but no vault scope id — do not fall back to live Marzban.
+    return null;
+  }
   const panel = state.selectedPanel?.id;
   if (panel === 'marzban' || panel === 'marzneshin') return 'live:marzban';
   if (state.systemCheck?.marzban_password_candidates?.length) return 'live:marzban';
@@ -283,18 +323,31 @@ async function hydratePasswordsFromVault(role) {
   }
 }
 
+function clearSourcePasswordState() {
+  state.sourcePasswordCandidates = [];
+  state.sourcePwdConfirmed = {};
+  state.sourcePwdValues = {};
+}
+
 function renderPasswordCandidates(role, { skipHydrate = false } = {}) {
   const isSource = role === 'source';
   const container = document.getElementById(isSource ? 'sourcePasswordCandidates' : 'targetPasswordCandidates');
   if (!container) return;
 
   const db = isSource ? state.sourceDb : getDetectedTargetDb();
+  if (!dbNeedsPassword(db)) {
+    if (isSource) clearSourcePasswordState();
+    container.classList.add('hidden');
+    container.innerHTML = '';
+    return;
+  }
+
   let candidates = isSource ? getSourcePasswordCandidates() : getTargetPasswordCandidates();
   // Prefer hydrated state rows when analysis is empty but vault seeded candidates.
   if (!candidates.length) {
     candidates = isSource ? state.sourcePasswordCandidates : state.targetPasswordCandidates;
   }
-  if (!candidates.length && dbNeedsPassword(db)) {
+  if (!candidates.length) {
     const key = db === 'mysql' || db === 'mariadb'
       ? 'MYSQL_ROOT_PASSWORD'
       : db === 'postgresql' || db === 'timescaledb'
@@ -308,12 +361,6 @@ function renderPasswordCandidates(role, { skipHydrate = false } = {}) {
 
   const values = pwdValuesMap(role);
   const confirmed = pwdConfirmedMap(role);
-
-  if (!dbNeedsPassword(db)) {
-    container.classList.add('hidden');
-    container.innerHTML = '';
-    return;
-  }
 
   container.innerHTML = `
     <div class="pwd-candidates-title">${t('dbCred.confirmTitle')}</div>
@@ -424,6 +471,7 @@ function updateSourceCredentialsVisibility() {
   const box = document.getElementById('sourceDbCredentials');
   if (!box) return;
   // Hiddify JSON migrate does not read source MySQL — no password UI
+  // SQLite never has a DB password — hide and clear any stale confirm state.
   const needs = dbNeedsPassword(state.sourceDb)
     && state.selectedPanel?.id !== 'hiddify';
   box.classList.toggle('hidden', !needs);
@@ -432,6 +480,13 @@ function updateSourceCredentialsVisibility() {
     if (portEl && !portEl.value) portEl.placeholder = defaultDbPort(state.sourceDb);
     applySourceEnvDefaults();
     renderPasswordCandidates('source');
+  } else {
+    clearSourcePasswordState();
+    const pwdBox = document.getElementById('sourcePasswordCandidates');
+    if (pwdBox) {
+      pwdBox.classList.add('hidden');
+      pwdBox.innerHTML = '';
+    }
   }
 }
 
@@ -648,12 +703,19 @@ function renderUploadResourceCard() {
 
 function detectMarzbanSourceDb() {
   const analysis = state.bundleStatus?.analysis || state.uploadInfo?.analysis;
-  if (analysis?.detected_source_db) return analysis.detected_source_db;
-  if (state.prereqData?.detected?.upload_source_db) return state.prereqData.detected.upload_source_db;
-  if (state.detected?.marzban_db) return state.detected.marzban_db;
-  if (state.detected?.marzban && (state.systemCheck?.marzban_db || state.detected.marzban_db)) {
-    return state.systemCheck?.marzban_db || state.detected.marzban_db;
+  // Uploaded backup wins over live install — and never use pasarguard_db.
+  if (analysis) {
+    const clamped = clampMarzbanSourceDb(analysis.detected_source_db, analysis);
+    if (clamped) return clamped;
   }
+  const uploadDb = state.prereqData?.detected?.upload_source_db;
+  if (uploadDb) {
+    const clamped = clampMarzbanSourceDb(uploadDb, analysis);
+    if (clamped) return clamped;
+  }
+  // No usable upload analysis — live Marzban only (never PasarGuard target).
+  const live = state.detected?.marzban_db || state.systemCheck?.marzban_db || null;
+  if (live && MARZBAN_SOURCE_DBS.includes(live)) return live;
   return null;
 }
 
@@ -814,8 +876,19 @@ function canProceedStep2() {
   } else if (!state.sourceDb) {
     return t('block.noSourceDb');
   }
-  const needsPwd = dbNeedsPassword(state.sourceDb);
+  // Prefer upload analysis for Marzban — never let PasarGuard target contaminate source.
   const analysis = state.bundleStatus?.analysis || state.uploadInfo?.analysis;
+  if (panel?.id === 'marzban' && analysis) {
+    const clamped = clampMarzbanSourceDb(analysis.detected_source_db, analysis);
+    if (clamped) state.sourceDb = clamped;
+  } else if (analysis?.detected_source_db === 'sqlite') {
+    state.sourceDb = 'sqlite';
+  }
+  const needsPwd = dbNeedsPassword(state.sourceDb);
+  if (!needsPwd) {
+    // SQLite / no-password engines: drop any leftover confirm gate state.
+    clearSourcePasswordState();
+  }
   if (
     needsPwd
     && panel?.id !== 'hiddify'
@@ -1251,7 +1324,10 @@ function renderSourceDbs() {
 
   const lang = state.lang;
   grid.innerHTML = panel.supported_source_dbs.map(db => {
-    const auto = state.detected?.marzban_db === db || state.detected?.pasarguard_db === db;
+    // Never badge PasarGuard target engine onto a source-panel picker.
+    const auto = panel.id === 'pasarguard'
+      ? state.detected?.pasarguard_db === db
+      : state.detected?.marzban_db === db;
     return `
       <div class="db-card ${auto ? 'has-badge' : ''}" data-db="${db}" onclick="selectSourceDb('${db}')">
         <h4>${dbDisplayName(db)}</h4>
@@ -1259,14 +1335,23 @@ function renderSourceDbs() {
       </div>`;
   }).join('');
 
-  if (state.detected?.marzban_db) selectSourceDb(state.detected.marzban_db);
-  else if (state.detected?.pasarguard_db && panel.id === 'pasarguard') selectSourceDb(state.detected.pasarguard_db);
-  else if (panel.supported_source_dbs.length === 1) selectSourceDb(panel.supported_source_dbs[0]);
-  else renderUploadSection();
+  if (panel.id === 'pasarguard' && state.detected?.pasarguard_db) {
+    selectSourceDb(state.detected.pasarguard_db);
+  } else if (
+    state.detected?.marzban_db
+    && panel.supported_source_dbs.includes(state.detected.marzban_db)
+  ) {
+    selectSourceDb(state.detected.marzban_db);
+  } else if (panel.supported_source_dbs.length === 1) {
+    selectSourceDb(panel.supported_source_dbs[0]);
+  } else {
+    renderUploadSection();
+  }
 }
 
 function selectSourceDb(db) {
   state.sourceDb = db;
+  if (!dbNeedsPassword(db)) clearSourcePasswordState();
   document.querySelectorAll('#sourceDbGrid .db-card').forEach(c => {
     c.classList.toggle('selected', c.dataset.db === db);
   });
@@ -2298,9 +2383,21 @@ function applyBundleAnalysis(bs) {
   const a = bs?.analysis;
   if (!a) return;
   if (state.selectedPanel?.id === 'marzban') {
+    const clamped = clampMarzbanSourceDb(a.detected_source_db, a);
+    if (clamped) {
+      state.sourceDb = clamped;
+      if (clamped === 'sqlite') clearSourcePasswordState();
+    }
     renderMarzbanDetectedSource();
-    if (a.detected_source_db) state.sourceDb = a.detected_source_db;
     updateSourceCredentialsVisibility();
+  } else if (a.detected_source_db === 'sqlite') {
+    state.sourceDb = 'sqlite';
+    clearSourcePasswordState();
+    if (state.selectedPanel?.id === 'hiddify') {
+      updateSourceCredentialsVisibility();
+    } else if (document.querySelector('#sourceDbGrid .db-card')) {
+      selectSourceDb('sqlite');
+    }
   } else if (state.selectedPanel?.id === 'hiddify') {
     state.sourceDb = a.detected_source_db || 'mysql';
     updateSourceCredentialsVisibility();

@@ -1497,14 +1497,16 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
 
         # table_counts kept for server-side verify only — not shown in the wizard UI
 
-        if upload_id and env_text:
+        # SQLite backups have no server password — do not seed vault candidates.
+        if upload_id and env_text and (db_type or "").lower() != "sqlite":
             from app.services import secret_vault
             from app.services.env_migration import extract_env_password_candidates
 
             cands = extract_env_password_candidates(env_text, db_type)
-            secret_vault.put_candidates(
-                secret_vault.upload_scope(upload_id), cands, db_type=db_type,
-            )
+            if cands:
+                secret_vault.put_candidates(
+                    secret_vault.upload_scope(upload_id), cands, db_type=db_type,
+                )
 
         return {
             "ok": ok,

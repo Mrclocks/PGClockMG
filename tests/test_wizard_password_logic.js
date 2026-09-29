@@ -100,6 +100,23 @@ assert(
   'cannot proceed with only one password confirmed'
 );
 
+// SQLite has no password — must proceed even with unconfirmed leftover rows.
+assert(!dbNeedsPassword('sqlite'), 'sqlite does not need password');
+assert(
+  hasDbCredentials('sqlite', rows, emptyConfirmed, emptyValues),
+  'sqlite hasDbCredentials always true'
+);
+assert(
+  canProceedStep2({
+    sourceDb: 'sqlite',
+    rows,
+    confirmed: emptyConfirmed,
+    values: emptyValues,
+    uploadComplete: true,
+  }) === null,
+  'sqlite can proceed without password confirm'
+);
+
 if (failed) {
   console.error(`\n${failed} test(s) failed`);
   process.exit(1);

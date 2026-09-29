@@ -78,6 +78,11 @@ def test_wizard_password_flow():
         {"key": "POSTGRES_PASSWORD", "used_for_migration": True, "server_held": True},
     ]
     assert all(r.get("server_held") for r in held_rows)
+
+    # SQLite has no password — leftover mysql rows must not block continue.
+    assert not db_needs_password("sqlite")
+    assert has_db_credentials("sqlite", rows, {}, {})
+    assert can_proceed_step2("sqlite", rows, {}, {}, True) is None
     print("OK: wizard password flow")
 
 

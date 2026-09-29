@@ -1,4 +1,4 @@
-> 🚀 **`v4.8.0`** — restore/migrate harden: accurate errors, auto-heal, transfer summary, solid Change-DB
+> 🚀 **`v4.8.1`** — fix source detection: Marzban SQLite backup no longer becomes target Timescale
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

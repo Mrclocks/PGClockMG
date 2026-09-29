@@ -208,6 +208,18 @@ def test_extract_env_password_candidates_postgres_url_only():
     print("OK: postgres/timescale URL password candidates")
 
 
+def test_extract_env_password_candidates_sqlite_returns_empty():
+    """SQLite has no DB password — leftover MYSQL_*/POSTGRES_* must not surface."""
+    text = (
+        'SQLALCHEMY_DATABASE_URL = "sqlite+aiosqlite:////var/lib/marzban/db.sqlite3"\n'
+        'MYSQL_ROOT_PASSWORD = "leftover"\n'
+        'POSTGRES_PASSWORD = "also-leftover"\n'
+        'DB_PASSWORD = "nope"\n'
+    )
+    assert extract_env_password_candidates(text, "sqlite") == []
+    print("OK: sqlite password candidates empty")
+
+
 def test_url_replacement_survives_backslashes():
     """Regression: raw dynamic strings (Windows paths, or any password containing a
     backslash) were passed directly as the `repl` argument to re.sub(), which
@@ -249,5 +261,6 @@ if __name__ == "__main__":
     test_extract_env_password_candidates_from_sqlalchemy_url_only()
     test_extract_env_password_candidates_url_dedupes_named_key()
     test_extract_env_password_candidates_postgres_url_only()
+    test_extract_env_password_candidates_sqlite_returns_empty()
     test_url_replacement_survives_backslashes()
     print("\nAll env migration tests passed.")
