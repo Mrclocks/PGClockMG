@@ -330,7 +330,10 @@ def test_telegram_conflict_is_noise_not_root_cause():
 
 
 def test_explain_restore_telegram_noise_on_panel_not_up():
-    from app.services.pg_restore import explain_restore_error
+    from app.services.pg_restore import (
+        _app_version_before,
+        explain_restore_error,
+    )
 
     exc = RuntimeError(
         "PasarGuard did not reach ready state (no 'Application startup complete' in logs).\n"
@@ -339,7 +342,14 @@ def test_explain_restore_telegram_noise_on_panel_not_up():
     )
     info = explain_restore_error(exc, "sqlite", "timescaledb")
     assert "تلگرام" in info["fa"] or "Telegram" in info["en"]
-    assert any("4.6.17" in c for c in info["causes_fa"])
+    blob = "\n".join(info["causes_fa"])
+    assert "getUpdates" in blob or "bot token" in blob or "ربات" in blob
+    # On current builds the update tip is obsolete and must not appear.
+    if not _app_version_before("4.6.17"):
+        assert "4.6.17" not in blob
+        assert "آپدیت" not in blob
+    else:
+        assert any("4.6.17" in c for c in info["causes_fa"])
     print("OK: explain_restore maps TelegramConflict panel-not-up")
 
 
@@ -422,7 +432,10 @@ def test_node_control_conflict_is_noise_not_root_cause():
 
 
 def test_explain_restore_node_control_noise_on_panel_not_up():
-    from app.services.pg_restore import explain_restore_error
+    from app.services.pg_restore import (
+        _app_version_before,
+        explain_restore_error,
+    )
 
     exc = RuntimeError(
         "PasarGuard did not reach ready state (no 'Application startup complete' in logs).\n"
@@ -431,7 +444,13 @@ def test_explain_restore_node_control_noise_on_panel_not_up():
     )
     info = explain_restore_error(exc, "sqlite", "postgresql")
     assert "نود" in info["fa"] or "node" in info["en"].lower()
-    assert any("4.6.27" in c for c in info["causes_fa"])
+    blob = "\n".join(info["causes_fa"])
+    assert "کنترل" in blob or "controller" in blob.lower() or "controlled" in blob.lower()
+    if not _app_version_before("4.6.27"):
+        assert "4.6.27" not in blob
+        assert "آپدیت" not in blob
+    else:
+        assert any("4.6.27" in c for c in info["causes_fa"])
     print("OK: explain_restore maps node-control panel-not-up")
 
 

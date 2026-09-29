@@ -927,6 +927,63 @@ def test_align_image_failed_pull_keeps_data_and_tag():
     print("OK: failed image pull keeps data and compose tag")
 
 
+def test_explain_panel_not_ready_causes_prioritized_no_obsolete_update():
+    """Generic panel-not-ready: most-likely first, no update-to-old-version tips."""
+    from app.services.pg_restore import _app_version_before
+
+    exc = RuntimeError(
+        "PasarGuard did not reach ready state "
+        "(no 'Application startup complete' in logs)."
+    )
+    info = explain_restore_error(exc, "sqlite", "timescaledb")
+    causes = info.get("causes_fa") or []
+    assert causes, "expected diagnostic causes"
+    # First cause = most likely diagnosis (DB URL/password), not an update tip.
+    assert "SQLALCHEMY" in causes[0] or "رمز" in causes[0] or "پسورد" in causes[0]
+    blob = "\n".join(causes)
+    assert "docker compose" in blob
+    if not _app_version_before("4.6.28"):
+        assert "4.6.28" not in blob
+        assert "4.6.27" not in blob
+        assert "آپدیت" not in blob
+    print("OK: panel-not-ready causes prioritized, no obsolete update tips")
+
+
+def test_panel_boot_failure_causes_auth_signal_first():
+    from app.services.pg_restore import _panel_boot_failure_causes
+
+    raw = (
+        "PasarGuard did not reach ready state.\n"
+        "asyncpg.exceptions.InvalidPasswordError: password authentication failed "
+        "for user \"pasarguard\""
+    )
+    fa, en = _panel_boot_failure_causes(raw, raw.lower())
+    assert fa and en
+    assert "پسورد" in fa[0] or "رمز" in fa[0]
+    assert "password" in en[0].lower() or "role" in en[0].lower()
+    # Auth signal ranks above generic NATS tip.
+    assert not fa[0].startswith("اگر UVICORN")
+    assert "4.6.28" not in "\n".join(fa)
+    print("OK: auth signal ranks first in panel-boot causes")
+
+
+def test_explain_alembic_phase2_no_obsolete_update_on_current():
+    from app.services.pg_restore import _app_version_before
+
+    exc = RuntimeError(
+        "Failed alembic upgrade head on target database:\n"
+        "CREATE INDEX timed out"
+    )
+    info = explain_restore_error(exc, "sqlite", "timescaledb")
+    blob = "\n".join(info.get("causes_fa") or [])
+    assert blob
+    if not _app_version_before("4.6.26"):
+        assert "4.6.26" not in blob
+        assert "آپدیت" not in blob
+        assert "skip-at-head" in blob or "timeout" in blob.lower() or "اسکیما" in blob
+    print("OK: alembic phase2 causes omit obsolete update tip")
+
+
 def test_explain_newer_ts_backup_error():
     exc = RuntimeError(f"Failed restoring pasarguard:\n{CONTINUOUS_AGG_228_ERROR}")
     info = explain_restore_error(exc, "timescaledb", "timescaledb")
