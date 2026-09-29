@@ -531,7 +531,6 @@ html[lang="fa"] .step-label {
 .cred-hint-box {
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm);
-  padding: 10px 12px;
   background: var(--bg-card);
 }
 
@@ -936,18 +935,38 @@ button.db-card {
   border-color: var(--border-soft);
 }
 
-.info-box, 
-.post-success-tips {
-  margin-top: 12px;
-  margin-bottom: 14px;
+/* Shared surface stack: consistent gap + padding so boxes never glue together */
+.info-box,
+.warnings-box,
+.warning-card,
+.option-card,
+.summary-card,
+.success-card,
+.detected-db-card,
+.db-info-card,
+.upload-resource-card,
+.cred-hint-box,
+.post-success-tips,
+.block-msg {
+  margin-top: var(--space-4);
+  margin-bottom: var(--space-5);
+  padding: var(--surface-pad);
   text-align: start;
 }
+
+.info-box:first-child,
+.warnings-box:first-child,
+.warning-card:first-child,
+.detected-db-card:first-child,
+.db-info-card:first-child,
+.upload-resource-card:first-child {
+  margin-top: 0;
+}
+
 .warnings-box, .warning-card, .option-card, .summary-card, .success-card, .block-msg {
   background: var(--bg-card);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius);
-  padding: var(--surface-pad);
-  margin-bottom: 20px;
 }
 
 /* Neutral tips — same soft edge as steps (not blue) */
@@ -956,7 +975,8 @@ button.db-card {
 .summary-card,
 .cred-hint-box,
 .detected-db-card {
-  border-color: var(--border-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
   background: var(--bg-card);
   color: var(--text);
 }
@@ -1011,7 +1031,7 @@ button.db-card {
   font-family: var(--font);
 }
 
-/* Red error / alert */
+/* Red error / alert — spacing from shared surface stack */
 .block-msg {
   border: 1px solid var(--error-border);
   border-radius: var(--radius);
@@ -1019,8 +1039,22 @@ button.db-card {
   color: var(--text);
   font-size: 0.85rem;
   line-height: 1.5;
-  margin: 12px 0;
-  padding: var(--surface-pad);
+}
+
+.marzban-source-box strong {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.marzban-source-value {
+  margin: 0 0 8px;
+  font-size: 1.1rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.marzban-source-box .desc-sm {
+  margin: 0;
 }
 
 .checks-list { margin-bottom: 20px; }
@@ -1061,8 +1095,6 @@ button.db-card {
   background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)), var(--bg-card);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius);
-  padding: 12px 14px;
-  margin-bottom: 14px;
 }
 
 .upload-resource-card.tone-warn {
@@ -1164,32 +1196,22 @@ button.db-card {
 .upload-resource-override {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  margin-top: 10px;
-  padding-top: 10px;
+  gap: 14px;
+  margin-top: 12px;
+  padding-top: 12px;
   border-top: 1px solid var(--border);
-  cursor: pointer;
 }
 
-.upload-resource-override input {
-  width: 18px;
-  height: 18px;
-  margin-top: 2px;
-  accent-color: var(--warning);
-  flex: 0 0 auto;
-}
-
-.upload-resource-override strong {
-  display: block;
+.upload-resource-override .toggle-label {
   font-size: 0.84rem;
+  font-weight: 600;
   color: var(--text);
 }
 
-.upload-resource-override small {
-  display: block;
-  margin-top: 2px;
+.upload-resource-override .toggle-hint {
   font-size: 0.76rem;
   color: var(--text-muted);
+  line-height: 1.45;
 }
 
 .upload-resource-item {
@@ -1599,9 +1621,14 @@ a.btn-panel-enter:focus {
 }
 
 .transfer-summary {
-  margin: 20px auto 8px;
+  margin: var(--space-5) auto var(--space-5);
   max-width: 520px;
   text-align: start;
+}
+
+.transfer-summary + .post-success-tips,
+.transfer-summary + .warnings-box {
+  margin-top: var(--space-5);
 }
 
 .transfer-summary-title {
@@ -1623,12 +1650,18 @@ a.btn-panel-enter:focus {
   border: 1px solid color-mix(in srgb, var(--success) 32%, var(--border-soft));
   border-radius: var(--radius-sm);
   text-align: start;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .transfer-summary-card .tsc-name {
   font-size: 0.78rem;
   color: var(--text-muted);
   margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
 }
 
 .transfer-summary-card .tsc-count {
@@ -1652,6 +1685,8 @@ a.btn-panel-enter:focus {
 
 .incomplete-transfer-card {
   padding: 12px 14px;
+  min-width: 0;
+  overflow: hidden;
   background: var(--bg-elevated);
   border: 1px solid rgba(245, 158, 11, 0.35);
   border-radius: var(--radius-sm);
@@ -1663,6 +1698,10 @@ a.btn-panel-enter:focus {
   font-size: 0.85rem;
   margin-bottom: 6px;
   color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
 }
 
 .incomplete-transfer-card .itc-stat {
@@ -1885,13 +1924,11 @@ a.btn-panel-enter:focus {
   min-width: 200px;
 }
 
-/* Detected target DB (step 3) */
+/* Detected target DB (step 3) — padding/gap via shared surface stack */
 .detected-db-card {
   background: var(--bg-card);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius);
-  padding: 20px 22px;
-  margin-bottom: 20px;
 }
 
 .detected-db-card h3 {
@@ -2775,14 +2812,14 @@ a.btn-panel-enter:focus {
 
 /* ── Restore: DB info card ─────────────────────────────────────── */
 .db-info-card {
-  margin-top: 16px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
   overflow: hidden;
 }
 .db-info-body {
-  padding: 16px;
+  /* Card already has shared surface padding — body just stacks content */
+  padding: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;

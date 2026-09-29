@@ -678,13 +678,16 @@ function renderResourceCardInto(card, kind) {
         <small>${fmtMsg(t('step2.resourceZipPolicyDetail'), { size: fmtBytes(limits.max_zip_entry_bytes) })}</small>
       </div>
     </div>
-    <label class="upload-resource-override">
-      <input type="checkbox" id="${checkboxId}" ${overrideEnabled ? 'checked' : ''}>
-      <span>
-        <strong>${t('step2.resourceOverrideTitle')}</strong>
-        <small>${fmtMsg(t('step2.resourceOverrideHint'), { size: overrideLimit })}</small>
-      </span>
-    </label>`;
+    <div class="upload-resource-override toggle-row">
+      <label class="ios-toggle" for="${checkboxId}">
+        <input type="checkbox" id="${checkboxId}" role="switch" ${overrideEnabled ? 'checked' : ''}>
+        <span class="ios-toggle-track"><span class="ios-toggle-thumb"></span></span>
+      </label>
+      <div class="toggle-text">
+        <span class="toggle-label">${t('step2.resourceOverrideTitle')}</span>
+        <span class="toggle-hint">${fmtMsg(t('step2.resourceOverrideHint'), { size: overrideLimit })}</span>
+      </div>
+    </div>`;
   const checkbox = card.querySelector(`#${checkboxId}`);
   if (checkbox) {
     checkbox.addEventListener('change', () => {

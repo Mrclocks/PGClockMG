@@ -1017,12 +1017,26 @@ def test_build_transfer_summary_orders_known_tables():
     from app.services.pg_restore import build_transfer_summary
 
     summary = build_transfer_summary(
-        {"hosts": 3, "users": 10, "_meta": 1, "admins": 2, "custom": 5}
+        {
+            "hosts": 3,
+            "users": 10,
+            "admins": 2,
+            "inbounds": 0,
+            "nodes": 0,
+            "_meta": 1,
+            "custom": 5,
+            "exclude_inbounds_association": 74,
+            "inbounds_groups_association": 20,
+        }
     )
     tables = [x["table"] for x in summary]
-    assert tables[:3] == ["users", "admins", "hosts"]
-    assert "custom" in tables
+    assert tables == ["users", "admins", "hosts"]
+    assert all(item["count"] > 0 for item in summary)
+    # Association junk and zero primary tables must not appear
+    assert "custom" not in tables
     assert "_meta" not in tables
+    assert "inbounds" not in tables
+    assert "exclude_inbounds_association" not in tables
     print("OK: build_transfer_summary order")
 
 

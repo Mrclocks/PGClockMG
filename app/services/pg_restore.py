@@ -66,22 +66,19 @@ TRANSFER_SUMMARY_TABLES = (
 
 
 def build_transfer_summary(counts: dict | None) -> list[dict]:
-    """Ordered non-zero table counts for the success UI."""
+    """Ordered primary-table counts for the success UI (zeros omitted).
+
+    Only the headline tables (users/admins/nodes/hosts/inbounds/groups/…) are
+    shown. Association / usage / leftover tables inflate the grid and confuse
+    labels (e.g. exclude_inbounds_association looking like “inbounds”).
+    """
     if not isinstance(counts, dict):
         return []
     out: list[dict] = []
-    seen: set[str] = set()
     for table in TRANSFER_SUMMARY_TABLES:
         n = counts.get(table)
-        if isinstance(n, int) and n >= 0:
+        if isinstance(n, int) and n > 0:
             out.append({"table": table, "count": n})
-            seen.add(table)
-    for table, n in counts.items():
-        if table in seen or not isinstance(n, int) or n < 0:
-            continue
-        if table.startswith("_"):
-            continue
-        out.append({"table": table, "count": n})
     return out
 
 
