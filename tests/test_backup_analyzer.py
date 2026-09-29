@@ -137,6 +137,74 @@ def test_sqlite_dump_ignores_stale_mysql_env_passwords():
         print("OK: sqlite dump wins over stale mysql .env")
 
 
+def test_marzban_sqlite_not_contaminated_by_live_timescale_compose():
+    """Regression: PasarGuard Timescale install must NOT become Marzban source.
+
+    User installs PasarGuard+Timescale on a new server, uploads Marzban sqlite
+    backup — wizard must show source=sqlite with no password, not timescaledb.
+    """
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        # Fake live PasarGuard Timescale compose (the contamination source)
+        live_pg = tmp_path / "pasarguard"
+        live_pg.mkdir()
+        (live_pg / "docker-compose.yml").write_text(
+            "services:\n  timescaledb:\n    image: timescale/timescaledb:latest-pg17\n",
+            encoding="utf-8",
+        )
+        (live_pg / ".env").write_text(
+            'PASARGUARD_DB_ENGINE="timescaledb"\n'
+            'SQLALCHEMY_DATABASE_URL="postgresql+asyncpg://postgres:x@timescaledb:5432/pasarguard"\n'
+            'POSTGRES_PASSWORD="x"\n',
+            encoding="utf-8",
+        )
+
+        upload_dir = tmp_path / "upload"
+        data = upload_dir / "extracted" / "var" / "lib" / "marzban"
+        data.mkdir(parents=True)
+        (data / "db.sqlite3").write_bytes(b"sqlite-data")
+        (data / ".env").write_text(
+            'SQLALCHEMY_DATABASE_URL = "sqlite:////var/lib/marzban/db.sqlite3"\n',
+            encoding="utf-8",
+        )
+
+        with patch("app.config.PASARGUARD_DIR", live_pg):
+            # Even if prefer_compose=True would return timescaledb, upload analysis must not.
+            from app.services.env_migration import detect_db_type_from_env
+
+            env = (data / ".env").read_text(encoding="utf-8")
+            assert detect_db_type_from_env(env, prefer_compose=True) == "timescaledb"
+            assert detect_db_type_from_env(env, prefer_compose=False) == "sqlite"
+
+            result = analyze_upload_directory(upload_dir)
+            assert result["detected_source_db"] == "sqlite", result
+            assert result["panel_hint"] == "marzban"
+            assert result["backup_ok"] is True
+            assert result["password_candidates"] == []
+            assert result["mysql_password_found"] is False
+        print("OK: marzban sqlite not contaminated by live Timescale compose")
+
+
+def test_marzban_sqlite_env_only_not_contaminated_by_live_compose():
+    """Even without finding db.sqlite3 path quirks — env sqlite must stay sqlite."""
+    from unittest.mock import patch
+    from app.services.backup_analyzer import detect_db_from_env
+
+    with tempfile.TemporaryDirectory() as tmp:
+        live_pg = Path(tmp) / "pasarguard"
+        live_pg.mkdir()
+        (live_pg / "docker-compose.yml").write_text(
+            "services:\n  timescaledb:\n    image: timescale/timescaledb:latest-pg17\n",
+            encoding="utf-8",
+        )
+        env = 'SQLALCHEMY_DATABASE_URL = "sqlite:////var/lib/marzban/db.sqlite3"\n'
+        with patch("app.config.PASARGUARD_DIR", live_pg):
+            assert detect_db_from_env(env) == "sqlite"
+        print("OK: detect_db_from_env ignores live compose")
+
+
 if __name__ == "__main__":
     test_nested_marzban_zip_sqlite()
     test_mysql_sql_dump()
@@ -145,4 +213,6 @@ if __name__ == "__main__":
     test_marzban_not_misdetected_as_xui()
     test_plain_sqlite_still_marzban_hint()
     test_sqlite_dump_ignores_stale_mysql_env_passwords()
+    test_marzban_sqlite_not_contaminated_by_live_timescale_compose()
+    test_marzban_sqlite_env_only_not_contaminated_by_live_compose()
     print("\nAll backup analyzer tests passed.")

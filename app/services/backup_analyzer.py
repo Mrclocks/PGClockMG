@@ -119,7 +119,13 @@ def _categorize_file(path: Path) -> str:
 
 
 def detect_db_from_env(text: str) -> str | None:
-    return detect_db_type_from_env(text)
+    """Detect engine from an *uploaded* backup .env only.
+
+    Must never consult live PasarGuard docker-compose. Otherwise a Timescale
+    install makes every Marzban sqlite backup look like ``timescaledb`` and the
+    wizard demands Timescale passwords for a passwordless sqlite source.
+    """
+    return detect_db_type_from_env(text, prefer_compose=False)
 
 
 def analyze_upload_directory(upload_dir: Path, vault_scope: str | None = None) -> dict:
@@ -206,8 +212,25 @@ def analyze_upload_directory(upload_dir: Path, vault_scope: str | None = None) -
         env_text = Path(paths["env"]).read_text(encoding="utf-8", errors="ignore")
 
     detected_source_db = detect_db_from_env(env_text) if env_text else None
-    # A sqlite dump without a .sql file is the source of truth. Stale .env left
-    # from an old MySQL/PG install must not flip detection (or demand passwords).
+
+    def _sniff_sql_engine() -> str | None:
+        if not paths["sql"]:
+            return None
+        sql_path = Path(paths["sql"])
+        low_name = paths["sql"].lower()
+        sniffed = "mariadb" if "mariadb" in low_name else "mysql"
+        try:
+            from app.services.pg_restore import _sniff_sql_dump
+
+            _score, found = _sniff_sql_dump(sql_path)
+            if found in ("mysql", "mariadb"):
+                return found
+        except Exception:
+            pass
+        return sniffed
+
+    # Dump artifacts beat .env. A sqlite file without .sql is always sqlite —
+    # stale MySQL/PG .env (or live-compose contamination) must not win.
     if paths["sqlite"] and not paths["sql"]:
         detected_source_db = "sqlite"
     elif not detected_source_db:
@@ -216,19 +239,22 @@ def analyze_upload_directory(upload_dir: Path, vault_scope: str | None = None) -
         elif paths.get("hiddify_json") or panel_hint == "hiddify":
             detected_source_db = "mysql"
         elif paths["sql"]:
-            sql_path = Path(paths["sql"])
-            low_name = paths["sql"].lower()
-            detected_source_db = "mariadb" if "mariadb" in low_name else "mysql"
-            # Prefer content sniff over filename — real mariadb-dump often says "MySQL dump"
-            # but still carries MariaDB markers (sandbox mode / uca1400 / ARIA).
-            try:
-                from app.services.pg_restore import _sniff_sql_dump
+            detected_source_db = _sniff_sql_engine() or "mysql"
 
-                _score, sniffed = _sniff_sql_dump(sql_path)
-                if sniffed in ("mysql", "mariadb"):
-                    detected_source_db = sniffed
-            except Exception:
-                pass
+    # Marzban migrate only supports sqlite/mysql/mariadb. postgresql/timescaledb
+    # here means live PasarGuard compose leaked into backup analysis — heal it.
+    if panel_hint == "marzban" and detected_source_db not in ("sqlite", "mysql", "mariadb", None):
+        if paths["sqlite"] and not paths["sql"]:
+            detected_source_db = "sqlite"
+        elif paths["sql"]:
+            detected_source_db = _sniff_sql_engine() or "mysql"
+        elif paths["sqlite"]:
+            detected_source_db = "sqlite"
+        else:
+            detected_source_db = None
+
+    if panel_hint == "3x-ui":
+        detected_source_db = "sqlite"
 
     env_summary = extract_env_summary(env_text) if env_text else None
     # SQLite never has a DB password — skip candidate extraction entirely.
