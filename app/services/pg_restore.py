@@ -269,6 +269,20 @@ def _scan_restore_error_signals(raw: str) -> _ErrSig:
         m = re.search(r"([/\w.\-]*(?:certs|fullchain|privkey|key)[/\w.\-]*\.pem)", s.raw, re.I)
         if m:
             s.ssl_path = m.group(1)
+    # Treat cert/key mismatch as an SSL signal even without a concrete path.
+    if (
+        not s.ssl_path
+        and any(
+            x in low
+            for x in (
+                "key_values_mismatch",
+                "key values mismatch",
+                "validate_cert_and_key",
+                "load_cert_chain",
+            )
+        )
+    ):
+        s.ssl_path = "UVICORN_SSL_CERTFILE/KEYFILE"
 
     m = re.search(r"nats://[^\s,'\"]+", low)
     if m:
@@ -540,7 +554,12 @@ def _disk_causes_from_log(sig: _ErrSig) -> tuple[list[str], list[str]]:
 
 def _ssl_causes_from_log(sig: _ErrSig) -> tuple[list[str], list[str]]:
     fa, en, add = _cause_pair_list()
-    if sig.ssl_path:
+    if "key_values_mismatch" in sig.low or "key values mismatch" in sig.low:
+        add(
+            "لاگ: KEY_VALUES_MISMATCH — فایل cert و key جفت هم نیستند.",
+            "Log: KEY_VALUES_MISMATCH — cert and key files are not a matching pair.",
+        )
+    elif sig.ssl_path and sig.ssl_path != "UVICORN_SSL_CERTFILE/KEYFILE":
         add(
             f"لاگ: فایل SSL `{sig.ssl_path}` پیدا نشد — مسیر .env با دیسک یکی نیست.",
             f"Log: SSL file `{sig.ssl_path}` missing — .env path does not match disk.",
@@ -5976,6 +5995,12 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         # Multi-worker stacks need NATS ready before panel workers boot.
         from app.services.multiworker_stack import start_panel_stack
 
+        from app.services.pasarguard_ops import (
+            build_panel_boot_warning,
+            is_panel_config_boot_failure,
+        )
+
+        panel_boot_warning: dict | None = None
         ok, out = await start_panel_stack(job, force_recreate=True)
         if not ok:
             job.log(f"compose recreate warning: {out[-1500:]}")
@@ -5988,10 +6013,20 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                 await _align_timescaledb_image(job, mismatch[0], wipe_data=False)
                 ok, out = await start_panel_stack(job, force_recreate=True)
             if not ok:
-                raise RuntimeError(
-                    "PasarGuard failed to start after restore (force-recreate):\n"
-                    f"{out[-2000:]}"
-                )
+                start_blob = (out or "")[-2000:]
+                if is_panel_config_boot_failure(start_blob):
+                    # Do not abort before data verify — SSL/panel-config crash
+                    # is a success+warning once rows are confirmed.
+                    panel_boot_warning = build_panel_boot_warning(start_blob)
+                    job.log(
+                        "WARNING: panel force-recreate failed due to panel config "
+                        "(e.g. SSL); continuing to verify restored data…"
+                    )
+                else:
+                    raise RuntimeError(
+                        "PasarGuard failed to start after restore (force-recreate):\n"
+                        f"{start_blob}"
+                    )
         from app.services.multiworker_stack import detect_multiworker_stack
 
         boot_wait = 20 if detect_multiworker_stack().get("orchestrate") else 8
@@ -6063,7 +6098,21 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
 
         from app.services.pasarguard_ops import verify_pasarguard_healthy
 
-        await verify_pasarguard_healthy(mini)
+        try:
+            await verify_pasarguard_healthy(mini)
+            # Panel recovered after a soft start warning (e.g. brief SSL probe noise).
+            panel_boot_warning = None
+        except Exception as e:
+            # Data already verified above — panel SSL/config crash is a warning.
+            if is_panel_config_boot_failure(e):
+                panel_boot_warning = build_panel_boot_warning(e)
+                job.log(
+                    "WARNING: restored data verified, but PasarGuard panel did not "
+                    f"become healthy ({panel_boot_warning.get('kind')}): "
+                    f"{panel_boot_warning.get('en')}"
+                )
+            else:
+                raise
 
         access = get_panel_access_info()
         access["nodes_disabled"] = bool(params.get("disable_nodes_after_restore"))
@@ -6078,6 +6127,11 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         access["copy_report"] = copy_report
         access["verified_counts"] = verified
         access["transfer_summary"] = build_transfer_summary(verified or copy_stats)
+        if panel_boot_warning:
+            access["panel_boot_warning"] = panel_boot_warning
+            access["panel_healthy"] = False
+        else:
+            access["panel_healthy"] = True
         return access
     finally:
         shutil.rmtree(work, ignore_errors=True)

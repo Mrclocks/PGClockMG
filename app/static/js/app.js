@@ -1869,6 +1869,23 @@ async function showSuccess(result) {
       details += '<ul>' + w.map(x => `<li class="warn-line">${statusIcon('warn')}<span>${x}</span></li>`).join('') + '</ul>';
     }
   }
+  const panelBootWarn = result?.panel_boot_warning;
+  if (panelBootWarn && typeof panelBootWarn === 'object') {
+    const lang = state.lang || 'fa';
+    const body = (lang === 'fa' ? panelBootWarn.fa : lang === 'ru' ? panelBootWarn.ru : panelBootWarn.en)
+      || panelBootWarn.en || panelBootWarn.fa || '';
+    const causes = (
+      lang === 'fa' ? (panelBootWarn.causes_fa || [])
+        : lang === 'ru' ? (panelBootWarn.causes_ru || panelBootWarn.causes_en || [])
+          : (panelBootWarn.causes_en || panelBootWarn.causes_fa || [])
+    );
+    details += `<div class="warnings-box restore-panel-boot-warn"><h4>${escapeHtmlApp(t('restore.panelBootWarnTitle'))}</h4>`;
+    details += `<p class="warn-line">${statusIcon('warn')}<span>${escapeHtmlApp(body)}</span></p>`;
+    if (causes.length) {
+      details += `<ul>${causes.map((c) => `<li>${escapeHtmlApp(c)}</li>`).join('')}</ul>`;
+    }
+    details += '</div>';
+  }
   if (result?.redirect_installed) {
     details += `<p class="status-inline">${statusIcon('ok')} <span>${t('step6.redirectInstalled')}</span></p>`;
   }

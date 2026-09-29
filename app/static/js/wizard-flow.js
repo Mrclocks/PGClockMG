@@ -618,7 +618,20 @@ function applyPhaseI18n() {
   }
   set('btnRestoreConfirm', 'restore.confirm');
   set('btnRestoreBack', 'restore.back');
-  set('restoreDoneTitle', 'restore.doneTitle');
+  {
+    const warn = state.panelAccess?.panel_boot_warning;
+    const doneTitle = document.getElementById('restoreDoneTitle');
+    if (doneTitle) {
+      doneTitle.textContent = warn
+        ? (t('restore.doneWithPanelWarnTitle') || t('restore.doneTitle'))
+        : t('restore.doneTitle');
+    }
+    renderPanelBootWarningBox(
+      document.getElementById('restorePanelBootWarn'),
+      warn,
+      'restore.panelBootWarnTitle',
+    );
+  }
   set('restorePanelLabel', 'restore.openPanel');
   set('restoreRunningTitle', 'restore.runningTitle');
   set('restoreRunningDesc', 'restore.runningDesc');
@@ -1491,12 +1504,48 @@ function renderTransferSummaryGrid(gridEl, titleEl, sectionEl, result, titleKey)
   sectionEl.classList.remove('hidden');
 }
 
+function renderPanelBootWarningBox(el, warning, titleKey) {
+  if (!el) return;
+  if (!warning || typeof warning !== 'object') {
+    el.classList.add('hidden');
+    el.innerHTML = '';
+    return;
+  }
+  const lang = state.lang || 'fa';
+  const body = (lang === 'fa' ? warning.fa : lang === 'ru' ? warning.ru : warning.en)
+    || warning.fa || warning.en || '';
+  const causes = (
+    lang === 'fa' ? (warning.causes_fa || [])
+      : lang === 'ru' ? (warning.causes_ru || warning.causes_en || [])
+        : (warning.causes_en || warning.causes_fa || [])
+  );
+  const icon = typeof statusIcon === 'function' ? statusIcon('warn') : '⚠️';
+  let html = `<h4>${escapeHtml(t(titleKey || 'restore.panelBootWarnTitle'))}</h4>`;
+  html += `<p class="warn-line">${icon}<span>${escapeHtml(body)}</span></p>`;
+  if (causes.length) {
+    html += `<ul>${causes.map((c) => `<li>${escapeHtml(c)}</li>`).join('')}</ul>`;
+  }
+  el.innerHTML = html;
+  el.classList.remove('hidden');
+}
+
 function showRestoreDone(result) {
   stopRestorePoll();
   setRestoreStage('done');
   applyPhaseI18n();
   const access = { ...(state.panelAccess || {}), ...(result || {}) };
   state.panelAccess = access;
+  const warn = access.panel_boot_warning || result?.panel_boot_warning || null;
+  const doneCard = document.querySelector('#restoreDone .result-card');
+  if (doneCard) {
+    doneCard.classList.toggle('has-panel-boot-warn', !!warn);
+  }
+  const titleEl = document.getElementById('restoreDoneTitle');
+  if (titleEl) {
+    titleEl.textContent = warn
+      ? (t('restore.doneWithPanelWarnTitle') || t('restore.doneTitle'))
+      : t('restore.doneTitle');
+  }
   const link = document.getElementById('restorePanelLink');
   const url = resolveLoginUrl(access);
   if (link) {
@@ -1519,8 +1568,15 @@ function showRestoreDone(result) {
     const convert = access.auto_db_convert
       ? ` (${access.backup_db || '?'} → ${access.final_db || '?'})`
       : '';
-    msg.textContent = `${t('restore.doneTitle') || ''}${convert}`.trim();
+    msg.textContent = convert
+      ? `${t('restore.doneTitle') || ''}${convert}`.trim()
+      : (t('restore.doneTitle') || '');
   }
+  renderPanelBootWarningBox(
+    document.getElementById('restorePanelBootWarn'),
+    warn,
+    'restore.panelBootWarnTitle',
+  );
   renderTransferSummaryGrid(
     document.getElementById('restoreTransferGrid'),
     document.getElementById('restoreTransferTitle'),

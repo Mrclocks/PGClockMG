@@ -75,6 +75,21 @@ async def start_migration(params: dict, on_log: Callable | None = None) -> Migra
                 job.log("Policy: skip broken user rows and continue (report at end)")
             migrator = migrator_cls(job, params)
             result = await migrator.run(params)
+            result = dict(result or {})
+            warn = getattr(job, "panel_boot_warning", None) or (
+                (migrator.params or {}).get("_panel_boot_warning")
+                if getattr(migrator, "params", None)
+                else None
+            )
+            if isinstance(warn, dict):
+                result["panel_boot_warning"] = warn
+                result["panel_healthy"] = False
+                job.log(
+                    "Migration data finished with panel boot warning: "
+                    f"{warn.get('kind') or 'panel_config'}"
+                )
+            elif "panel_healthy" not in result:
+                result["panel_healthy"] = True
             job.result = result
             job.status = "success"
             job.set_progress(100, "Migration completed successfully!")

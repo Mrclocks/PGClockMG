@@ -993,6 +993,21 @@ button.db-card {
   background: var(--warning-bg);
   color: var(--text);
 }
+.result-card.success.has-panel-boot-warn {
+  border-color: var(--warning-border);
+}
+.restore-panel-boot-warn {
+  margin: 12px 0 16px;
+  text-align: start;
+}
+.restore-panel-boot-warn h4 {
+  margin: 0 0 8px;
+  color: var(--warning);
+}
+.restore-panel-boot-warn ul {
+  margin: 8px 0 0;
+  padding-inline-start: 1.2em;
+}
 .warning-card h4 {
   color: var(--text);
   margin-bottom: 8px;
