@@ -1463,12 +1463,18 @@ function showRestoreError(explain, logs) {
 
 function renderTransferSummaryGrid(gridEl, titleEl, sectionEl, result, titleKey) {
   if (!gridEl || !sectionEl) return;
-  const summary = Array.isArray(result?.transfer_summary) && result.transfer_summary.length
+  const prefer = ['users', 'admins', 'nodes', 'hosts', 'inbounds', 'groups', 'core_configs'];
+  const preferSet = new Set(prefer);
+  let summary = Array.isArray(result?.transfer_summary) && result.transfer_summary.length
     ? result.transfer_summary
     : Object.entries(result?.verified_counts || result?.copy_stats || {})
-      .filter(([, n]) => typeof n === 'number' && n >= 0)
       .map(([table, count]) => ({ table, count }));
-  const prefer = ['users', 'admins', 'nodes', 'hosts', 'inbounds', 'groups', 'core_configs'];
+  // Headline tables only, drop zeros / association junk.
+  summary = summary.filter((item) => (
+    preferSet.has(item.table)
+    && typeof item.count === 'number'
+    && item.count > 0
+  ));
   summary.sort((a, b) => {
     const ia = prefer.indexOf(a.table);
     const ib = prefer.indexOf(b.table);
@@ -1485,7 +1491,7 @@ function renderTransferSummaryGrid(gridEl, titleEl, sectionEl, result, titleKey)
     : (id) => id;
   gridEl.innerHTML = summary.map((item) => `
     <div class="transfer-summary-card">
-      <div class="tsc-name">${escapeHtml(labelFn(item.table))}</div>
+      <div class="tsc-name" title="${escapeHtml(labelFn(item.table))}">${escapeHtml(labelFn(item.table))}</div>
       <div class="tsc-count">${Number(item.count).toLocaleString()}</div>
     </div>`).join('');
   sectionEl.classList.remove('hidden');
