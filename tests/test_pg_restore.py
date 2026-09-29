@@ -959,10 +959,16 @@ def test_panel_boot_failure_causes_auth_signal_first():
     )
     fa, en = _panel_boot_failure_causes(raw, raw.lower())
     assert fa and en
-    assert "پسورد" in fa[0] or "رمز" in fa[0]
-    assert "password" in en[0].lower() or "role" in en[0].lower()
-    # Auth signal ranks above generic NATS tip.
+    top = fa[0] + " " + en[0]
+    assert (
+        "پسورد" in fa[0]
+        or "رمز" in fa[0]
+        or "password" in top.lower()
+        or "authentication" in top.lower()
+    )
+    # Auth signal ranks above generic NATS tip / raw traceback noise.
     assert not fa[0].startswith("اگر UVICORN")
+    assert not fa[0].startswith("نشانهٔ لاگ")
     assert "4.6.28" not in "\n".join(fa)
     print("OK: auth signal ranks first in panel-boot causes")
 
@@ -982,6 +988,52 @@ def test_explain_alembic_phase2_no_obsolete_update_on_current():
         assert "آپدیت" not in blob
         assert "skip-at-head" in blob or "timeout" in blob.lower() or "اسکیما" in blob
     print("OK: alembic phase2 causes omit obsolete update tip")
+
+
+def test_explain_causes_cite_log_facts_for_diverse_errors():
+    """Causes must quote concrete log facts (user/path/url/constraint), ranked first."""
+    cases = [
+        (
+            "ERROR 1045 (28000): Access denied for user 'root'@'localhost'",
+            "mysql",
+            ("root", "Access denied", "MYSQL_ROOT"),
+        ),
+        (
+            'password authentication failed for user "pasarguard"',
+            "timescaledb",
+            ("pasarguard", "POSTGRES_PASSWORD"),
+        ),
+        (
+            'violates foreign key constraint "fk_hosts_user_id_users"\n'
+            'DETAIL: Key (user_id)=(9) is not present in table "users".\n'
+            'insert or update on table "hosts"',
+            "timescaledb",
+            ("hosts", "users", "user_id=9", "fk_hosts"),
+        ),
+        (
+            "ssl certificate file /var/lib/pasarguard/certs/key.pem does not exist",
+            "timescaledb",
+            ("key.pem", "certs"),
+        ),
+        (
+            "NATS is required; connection refused nats://localhost:4222",
+            "timescaledb",
+            ("localhost:4222", "nats://nats:4222"),
+        ),
+        (
+            "FileNotFoundError: No such file or directory: '/work/db_backup.sql'",
+            "timescaledb",
+            ("db_backup.sql",),
+        ),
+    ]
+    for msg, tgt, needles in cases:
+        info = explain_restore_error(RuntimeError(msg), "sqlite", tgt)
+        blob = "\n".join(info.get("causes_fa") or [])
+        assert blob, msg
+        for needle in needles:
+            assert needle in blob, f"missing {needle!r} in causes for {msg!r}: {blob}"
+        assert "4.6.28" not in blob
+    print("OK: diverse errors cite concrete log facts in prioritized causes")
 
 
 def test_explain_newer_ts_backup_error():
