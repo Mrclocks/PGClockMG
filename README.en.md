@@ -1,4 +1,4 @@
-> 🚀 **`v4.8.1`** — fix source detection: Marzban SQLite backup no longer becomes target Timescale
+> 🚀 **`v4.8.2`** — dynamic restore causes + success-with-warning for panel SSL; cleaner transfer UI
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
