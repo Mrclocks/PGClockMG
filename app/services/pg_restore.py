@@ -65,6 +65,849 @@ TRANSFER_SUMMARY_TABLES = (
 )
 
 
+def _version_tuple(version: str | None) -> tuple[int, ...]:
+    nums = [int(x) for x in re.findall(r"\d+", version or "")]
+    return tuple(nums) if nums else (0,)
+
+
+def _current_app_version() -> str:
+    try:
+        from app.main import APP_VERSION
+
+        return str(APP_VERSION or "0")
+    except Exception:
+        return "0"
+
+
+def _app_version_before(minimum: str) -> bool:
+    """True when running build is older than ``minimum`` (needs that fix)."""
+    return _version_tuple(_current_app_version()) < _version_tuple(minimum)
+
+
+# "به v4.6.28+ آپدیت" / "Update … to v4.6.28+" / "v2.8.10+ … آپدیت" / "fixed in v2.8.9+".
+_UPDATE_TIP_VER_RE = re.compile(
+    r"(?:به\s+)?v?(\d+\.\d+(?:\.\d+)?)\+?\s*آپدیت"
+    r"|update(?:\s+(?:the\s+)?(?:wizard|pgclockmg))?\s+to\s+v?(\d+\.\d+(?:\.\d+)?)"
+    r"|v(\d+\.\d+(?:\.\d+)?)\+[^\n]{0,120}(?:آپدیت|update\s+and(?:\s+retry)?)"
+    r"|(?:fixed|اصلاح\s*شد)\s+in\s+v?(\d+\.\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+
+
+def _cause_mentions_obsolete_update(text: str) -> bool:
+    """Drop tips that tell the user to update to a version they already have."""
+    m = _UPDATE_TIP_VER_RE.search(text or "")
+    if not m:
+        return False
+    need = next((g for g in m.groups() if g), None)
+    return bool(need) and not _app_version_before(need)
+
+
+def _filter_obsolete_version_tips(
+    causes_fa: list[str],
+    causes_en: list[str],
+) -> tuple[list[str], list[str]]:
+    """Remove update-to-old-version tips when APP_VERSION already includes the fix."""
+    out_fa: list[str] = []
+    out_en: list[str] = []
+    en_src = causes_en or causes_fa or []
+    for i, fa in enumerate(causes_fa or []):
+        en = en_src[i] if i < len(en_src) else fa
+        if _cause_mentions_obsolete_update(fa) or _cause_mentions_obsolete_update(en):
+            continue
+        out_fa.append(fa)
+        out_en.append(en)
+    return out_fa, out_en
+
+
+class _ErrSig:
+    """Technical signals extracted from a restore/convert error payload."""
+
+    __slots__ = (
+        "raw",
+        "low",
+        "mysql_user",
+        "mysql_host",
+        "pg_role",
+        "auth",
+        "sasl",
+        "fk_constraint",
+        "fk_child",
+        "fk_parent",
+        "fk_key",
+        "missing_path",
+        "ssl_path",
+        "nats_url",
+        "nats_localhost",
+        "nats",
+        "disk_full",
+        "docker_daemon",
+        "docker_pull",
+        "compose",
+        "alembic_ssl_false",
+        "alembic_timeout_str",
+        "alembic_sqlite_url",
+        "alembic_revision",
+        "alembic",
+        "ts_schema_name",
+        "ts_catalog_mismatch",
+        "ts_restoring",
+        "ts_version",
+        "conn_host",
+        "conn_refused",
+        "pgbouncer",
+        "oom",
+        "datetime_val",
+        "dict_param",
+        "telegram",
+        "node_control",
+        "port_map",
+        "error_code",
+        "sqlite_url",
+        "relation_missing",
+        "permission_denied",
+        "duplicate_key",
+        "enospc_context",
+        "snippet",
+    )
+
+    def __init__(self) -> None:
+        for name in self.__slots__:
+            setattr(self, name, None if name not in (
+                "auth", "sasl", "nats_localhost", "nats", "disk_full",
+                "docker_daemon", "docker_pull", "compose", "alembic_ssl_false",
+                "alembic_timeout_str", "alembic_sqlite_url", "alembic",
+                "ts_schema_name", "ts_catalog_mismatch", "ts_restoring",
+                "conn_refused", "pgbouncer", "oom", "dict_param", "telegram",
+                "node_control", "sqlite_url", "permission_denied", "duplicate_key",
+            ) else False)
+        self.raw = ""
+        self.low = ""
+        self.snippet = ""
+
+
+def _scan_restore_error_signals(raw: str) -> _ErrSig:
+    """Parse concrete technical facts from the error text (most-specific wins later)."""
+    s = _ErrSig()
+    s.raw = raw or ""
+    s.low = s.raw.lower()
+    low = s.low
+
+    m = re.search(r"access denied for user ['\"]([^'\"]+)['\"]@['\"]([^'\"]+)['\"]", low)
+    if m:
+        s.mysql_user, s.mysql_host = m.group(1), m.group(2)
+    m = re.search(
+        r"password authentication failed for user ['\"]([^'\"]+)['\"]",
+        low,
+    )
+    if m:
+        s.pg_role = m.group(1)
+    s.sasl = "sasl" in low or "scram" in low
+    s.auth = bool(
+        s.mysql_user
+        or s.pg_role
+        or is_auth_failure_text(s.raw)
+        or ("password" in low and "auth" in low)
+        or "authentication failed" in low
+        or "access denied" in low
+        or ("role" in low and "does not exist" in low)
+    )
+
+    m = re.search(
+        r'violates foreign key constraint ["\']([^"\']+)["\']',
+        s.raw,
+        re.I,
+    )
+    if m:
+        s.fk_constraint = m.group(1)
+    m = re.search(
+        r'(?:insert or update on table|on table)\s+["\']([^"\']+)["\']',
+        s.raw,
+        re.I,
+    )
+    if m:
+        s.fk_child = m.group(1)
+    m = re.search(
+        r'is not present in table\s+["\']([^"\']+)["\']',
+        s.raw,
+        re.I,
+    )
+    if m:
+        s.fk_parent = m.group(1)
+    m = re.search(
+        r'Key\s*\(([^)]+)\)\s*=\s*\(([^)]+)\)',
+        s.raw,
+        re.I,
+    )
+    if m:
+        s.fk_key = f"{m.group(1)}={m.group(2)}"
+    # MySQL 1452: FOREIGN KEY (`user_id`) REFERENCES `users`
+    m = re.search(
+        r"FOREIGN KEY\s*\(`?([^`)]+)`?\)\s*REFERENCES\s*`?([^`\s(]+)`?",
+        s.raw,
+        re.I,
+    )
+    if m and not s.fk_parent:
+        s.fk_key = s.fk_key or m.group(1)
+        s.fk_parent = m.group(2)
+
+    m = re.search(
+        r"(?:no such file or directory|not found|missing file)[:\s]+['\"]?([/\w.\-]+)",
+        s.raw,
+        re.I,
+    )
+    if m:
+        s.missing_path = m.group(1)
+    m = re.search(
+        r"(?:ssl(?:\s+certificate)?(?:\s+file)?|uvicorn_ssl_[a-z_]+)\s*[=:]?\s*['\"]?([/\w.\-]+\.pem)",
+        s.raw,
+        re.I,
+    )
+    if m:
+        s.ssl_path = m.group(1)
+    elif any(x in low for x in ("/certs/", "fullchain", "key.pem", "uvicorn_ssl")):
+        m = re.search(r"([/\w.\-]*(?:certs|fullchain|privkey|key)[/\w.\-]*\.pem)", s.raw, re.I)
+        if m:
+            s.ssl_path = m.group(1)
+    # Treat cert/key mismatch as an SSL signal even without a concrete path.
+    if (
+        not s.ssl_path
+        and any(
+            x in low
+            for x in (
+                "key_values_mismatch",
+                "key values mismatch",
+                "validate_cert_and_key",
+                "load_cert_chain",
+            )
+        )
+    ):
+        s.ssl_path = "UVICORN_SSL_CERTFILE/KEYFILE"
+
+    m = re.search(r"nats://[^\s,'\"]+", low)
+    if m:
+        s.nats_url = m.group(0)
+        s.nats_localhost = "localhost" in s.nats_url or "127.0.0.1" in s.nats_url
+    s.nats = bool(
+        s.nats_url
+        or "nats is required" in low
+        or ("nats" in low and ("worker" in low or "multi-worker" in low or "uvicorn_workers" in low))
+        or "jetstream" in low
+    )
+
+    s.disk_full = any(x in low for x in ("no space left", "enospc", "errno 28"))
+    if s.disk_full:
+        if "pull" in low or "image" in low:
+            s.enospc_context = "image_pull"
+        elif "compose" in low or ".yml" in low:
+            s.enospc_context = "compose_write"
+        else:
+            s.enospc_context = "disk"
+
+    s.docker_daemon = any(
+        x in low
+        for x in (
+            "cannot connect to the docker daemon",
+            "docker daemon",
+            "is the docker daemon running",
+            "permission denied while trying to connect to the docker",
+        )
+    )
+    s.docker_pull = any(
+        x in low for x in ("pull access denied", "could not be pulled", "manifest unknown", "not found: manifest")
+    )
+    s.compose = "compose" in low or "docker-compose" in low
+
+    s.alembic_ssl_false = "ssl=false" in low or "sslmode=false" in low or (
+        "clientconfigurationerror" in low and "ssl" in low
+    )
+    s.alembic_timeout_str = (
+        ("unsupported operand" in low and "float" in low and "str" in low)
+        or ("typeerror" in low and "timeout" in low)
+        or "timeout=" in low and "str" in low
+    )
+    s.alembic_sqlite_url = any(
+        x in low
+        for x in ("sqlite+aiosqlite", "invalid sqlite url", "intermediate sqlite")
+    )
+    m = re.search(r"\b([0-9a-f]{12})\b", low)
+    if m and ("alembic" in low or "revision" in low or "e422" in low):
+        s.alembic_revision = m.group(1)
+    if "e422f859847f" in low or "refactor sub updated" in low:
+        s.alembic_revision = s.alembic_revision or "e422f859847f"
+    s.alembic = bool(
+        s.alembic_ssl_false
+        or s.alembic_timeout_str
+        or s.alembic_sqlite_url
+        or s.alembic_revision
+        or "alembic" in low
+        or "upgrade head" in low
+    )
+
+    s.ts_schema_name = "schema_name" in low and "chunk" in low
+    s.ts_catalog_mismatch = "catalog version mismatch" in low
+    s.ts_restoring = any(
+        x in low for x in ("restoring=on", "timescaledb_post_restore", "timescaledb.restoring")
+    )
+    m = re.search(r"timescale(?:db)?[^0-9]{0,20}(\d+\.\d+(?:\.\d+)?)", low)
+    if m:
+        s.ts_version = m.group(1)
+
+    m = re.search(
+        r"connection refused[^.\n]{0,40}?(?:to\s+)?([a-z0-9_.\-]+(?::\d+)?)",
+        low,
+    )
+    if m:
+        s.conn_host = m.group(1)
+    s.conn_refused = "connection refused" in low or "could not connect" in low
+    s.pgbouncer = "pgbouncer" in low
+    s.oom = "oom" in low or "killed" in low and ("memory" in low or "oom" in low)
+    m = re.search(r"incorrect datetime value:\s*['\"]([^'\"]+)['\"]", low)
+    if m:
+        s.datetime_val = m.group(1)
+    s.dict_param = "dict can not be used as parameter" in low or "dict cannot be used as parameter" in low
+    s.telegram = any(
+        x in low for x in ("telegramconflicterror", "telegramconflict", "getupdates", "only one bot instance")
+    )
+    s.node_control = "controlled by another client" in low
+    m = re.search(r"(\d{2,5}):(\d{2,5})", low)
+    if m and ("port" in low or "uvicorn" in low or "publish" in low or "listening" in low):
+        s.port_map = f"{m.group(1)}:{m.group(2)}"
+    m = re.search(r"\b(10\d{2}|12\d{2}|14\d{2}|28\d{2})\b", low)
+    if m:
+        s.error_code = m.group(1)
+    s.sqlite_url = "sqlite:/" in low or "sqlite:///" in low
+    m = re.search(r'relation ["\']([^"\']+)["\'] does not exist', s.raw, re.I)
+    if m:
+        s.relation_missing = m.group(1)
+    s.permission_denied = "permission denied" in low and not s.docker_daemon
+    s.duplicate_key = "duplicate key" in low or "unique constraint" in low or "1062" in low
+
+    # Short high-signal line for fallback cause text
+    for line in s.raw.splitlines():
+        t = line.strip()
+        if not t or len(t) < 12:
+            continue
+        tl = t.lower()
+        if any(
+            x in tl
+            for x in (
+                "error", "exception", "failed", "denied", "refused", "traceback",
+                "violates", "does not exist", "no space", "killed",
+            )
+        ):
+            s.snippet = t[:220]
+            break
+    if not s.snippet:
+        s.snippet = (s.raw.strip().splitlines() or [""])[0][:220]
+    return s
+
+
+def _cause_pair_list() -> tuple[list[str], list[str], Callable[[str, str], None]]:
+    fa: list[str] = []
+    en: list[str] = []
+
+    def add(fa_s: str, en_s: str) -> None:
+        if fa_s and fa_s not in fa:
+            fa.append(fa_s)
+            en.append(en_s)
+
+    return fa, en, add
+
+
+def _auth_causes_from_log(
+    sig: _ErrSig,
+    backup_db: str | None,
+    target_db: str | None,
+) -> tuple[list[str], list[str]]:
+    fa, en, add = _cause_pair_list()
+    bak = (backup_db or "").lower()
+    tgt = (target_db or "").lower()
+    mysqlish = bool(sig.mysql_user) or tgt in ("mysql", "mariadb") or (
+        "mysql" in sig.low or "mariadb" in sig.low
+    ) and tgt not in ("postgresql", "timescaledb")
+
+    if mysqlish:
+        if sig.mysql_user:
+            add(
+                f"لاگ: Access denied برای کاربر `{sig.mysql_user}`"
+                + (f"@{sig.mysql_host}" if sig.mysql_host else "")
+                + " — رمز/نقش نصب با کانتینر MySQL یکی نیست.",
+                f"Log: Access denied for `{sig.mysql_user}`"
+                + (f"@{sig.mysql_host}" if sig.mysql_host else "")
+                + " — install password/role does not match the MySQL container.",
+            )
+        if bak == "sqlite":
+            add(
+                "بکاپ sqlite رمز ندارد — فقط MYSQL_ROOT_PASSWORD / DB_PASSWORD نصب معتبر است.",
+                "SQLite backup has no DB password — only install MYSQL_ROOT_PASSWORD / DB_PASSWORD applies.",
+            )
+        elif bak in ("mysql", "mariadb"):
+            add(
+                "رمز نصب با volume کانتینر یکی نبود — pre-heal / skip-grant را دوباره بزنید.",
+                "Install password did not match container volume — retry pre-heal / skip-grant.",
+            )
+        else:
+            add(
+                "برای ورود به MySQL/MariaDB فقط رمز نصب مقصد استفاده می‌شود (نه رمز بکاپ مبدأ).",
+                "MySQL/MariaDB target uses the install password only (not the source backup secret).",
+            )
+        add(
+            "MYSQL_ROOT_PASSWORD / DB_PASSWORD را در .env با کانتینر زنده هم‌تراز کنید.",
+            "Align MYSQL_ROOT_PASSWORD / DB_PASSWORD in .env with the live container.",
+        )
+        return fa, en
+
+    if sig.pg_role:
+        add(
+            f"لاگ: password authentication failed برای نقش `{sig.pg_role}` "
+            "— POSTGRES_PASSWORD / SQLALCHEMY_DATABASE_URL با نقش زنده یکی نیست.",
+            f"Log: password authentication failed for role `{sig.pg_role}` "
+            "— POSTGRES_PASSWORD / SQLALCHEMY_DATABASE_URL does not match the live role.",
+        )
+    elif sig.sasl:
+        add(
+            "لاگ احراز هویت Postgres/Timescale: رمز یا روش auth با کانتینر هم‌خوان نیست.",
+            "Postgres/Timescale auth log: password or auth method mismatches the container.",
+        )
+    if bak == "sqlite":
+        add(
+            "بکاپ sqlite رمز ندارد — ویزارد باید رمز نصب Timescale/Postgres را روی کانتینر heal کند.",
+            "SQLite backup has no password — wizard must heal install Timescale/Postgres roles on the container.",
+        )
+    else:
+        add(
+            "POSTGRES_PASSWORD نصب/بکاپ با نقش‌های زنده یکی نیست.",
+            "Install/backup POSTGRES_PASSWORD does not match live roles.",
+        )
+    if sig.pgbouncer or "pgbouncer" in sig.low:
+        add(
+            "PgBouncer احتمالاً کش auth قدیمی دارد — بعد از heal باید recreate شود.",
+            "PgBouncer likely has a stale auth cache — recreate it after role heal.",
+        )
+    elif tgt in ("postgresql", "timescaledb") or bak in ("postgresql", "timescaledb"):
+        add(
+            "اگر PgBouncer روشن است، بعد از هم‌تراز کردن نقش آن را recreate کنید.",
+            "If PgBouncer is enabled, recreate it after aligning roles.",
+        )
+    return fa, en
+
+
+def _fk_causes_from_log(sig: _ErrSig) -> tuple[list[str], list[str]]:
+    fa, en, add = _cause_pair_list()
+    child = sig.fk_child or "جدول فرزند"
+    parent = sig.fk_parent or "جدول والد"
+    key = sig.fk_key or "کلید خارجی"
+    constraint = sig.fk_constraint
+    if constraint:
+        add(
+            f"لاگ FK: `{constraint}` — ردیف یتیم در `{child}` "
+            f"({key}) که در `{parent}` نیست.",
+            f"FK log: `{constraint}` — orphan row in `{child}` "
+            f"({key}) missing from `{parent}`.",
+        )
+    else:
+        add(
+            f"دامپ ردیف یتیم دارد: `{child}` به `{parent}` ارجاع می‌دهد ({key}).",
+            f"Dump has orphan rows: `{child}` references `{parent}` ({key}).",
+        )
+    add(
+        "ویزارد هنگام ریستور ردیف‌های یتیم را حذف می‌کند — دوباره ریستور کنید.",
+        "Wizard deletes orphan rows during restore — retry restore.",
+    )
+    add(
+        "دادهٔ اصلی کاربران/نودها دست‌نخورده می‌ماند؛ فقط یادآورها/لاگ‌های یتیم پاک می‌شوند.",
+        "Core users/nodes stay intact; only orphan reminders/logs are removed.",
+    )
+    return fa, en
+
+
+def _disk_causes_from_log(sig: _ErrSig) -> tuple[list[str], list[str]]:
+    fa, en, add = _cause_pair_list()
+    ctx = sig.enospc_context or "disk"
+    if ctx == "image_pull":
+        add(
+            "لاگ ENOSPC هنگام pull ایمیج — چند گیگابایت فضای آزاد لازم است.",
+            "ENOSPC during image pull — several GB free disk are required.",
+        )
+    elif ctx == "compose_write":
+        add(
+            "لاگ ENOSPC هنگام نوشتن docker-compose — فایل ممکن است خالی/خراب شده باشد.",
+            "ENOSPC while writing docker-compose — the file may be empty/corrupt.",
+        )
+        add(
+            "از `.yml.pgclockmg.bak` برگردانید، دیسک را آزاد کنید، دوباره ریستور کنید.",
+            "Restore from `.yml.pgclockmg.bak`, free disk, then retry restore.",
+        )
+        return fa, en
+    else:
+        add(
+            "لاگ: no space left on device — دیسک سرور پر است.",
+            "Log: no space left on device — server disk is full.",
+        )
+    add(
+        "دیسک را آزاد کنید (`docker image prune` / لاگ‌ها) و دوباره ریستور کنید.",
+        "Free disk (`docker image prune` / logs) and retry restore.",
+    )
+    return fa, en
+
+
+def _ssl_causes_from_log(sig: _ErrSig) -> tuple[list[str], list[str]]:
+    fa, en, add = _cause_pair_list()
+    if "key_values_mismatch" in sig.low or "key values mismatch" in sig.low:
+        add(
+            "لاگ: KEY_VALUES_MISMATCH — فایل cert و key جفت هم نیستند.",
+            "Log: KEY_VALUES_MISMATCH — cert and key files are not a matching pair.",
+        )
+    elif sig.ssl_path and sig.ssl_path != "UVICORN_SSL_CERTFILE/KEYFILE":
+        add(
+            f"لاگ: فایل SSL `{sig.ssl_path}` پیدا نشد — مسیر .env با دیسک یکی نیست.",
+            f"Log: SSL file `{sig.ssl_path}` missing — .env path does not match disk.",
+        )
+    else:
+        add(
+            "گواهی SSL بکاپ به `/var/lib/pasarguard/certs` منتقل یا در .env مپ نشده.",
+            "Backup SSL certs were not restored/mapped under `/var/lib/pasarguard/certs`.",
+        )
+    add(
+        "پوشه `certs` باید داخل زیپ بکاپ باشد (نه فقط مسیر در .env).",
+        "The backup zip must include the `certs` folder (not only paths in .env).",
+    )
+    add(
+        "اگر بکاپ بدون certs است: دوباره با certs بکاپ بگیرید یا پنل را بدون SSL نصب کنید.",
+        "If the backup has no certs: re-backup with certs or install the panel without SSL.",
+    )
+    return fa, en
+
+
+def _nats_causes_from_log(sig: _ErrSig) -> tuple[list[str], list[str]]:
+    fa, en, add = _cause_pair_list()
+    if sig.nats_localhost and sig.nats_url:
+        add(
+            f"لاگ: `{sig.nats_url}` از داخل کانتینر کار نمی‌کند — باید `nats://nats:4222` باشد.",
+            f"Log: `{sig.nats_url}` will not work in-container — use `nats://nats:4222`.",
+        )
+    elif sig.nats_url:
+        add(
+            f"لاگ NATS: اتصال به `{sig.nats_url}` شکست خورد — سرویس nats را چک کنید.",
+            f"NATS log: connect to `{sig.nats_url}` failed — check the nats service.",
+        )
+    elif sig.conn_refused and sig.conn_host and "nats" in (sig.conn_host or ""):
+        add(
+            f"لاگ: connection refused به `{sig.conn_host}` — سرویس nats بالا نیست.",
+            f"Log: connection refused to `{sig.conn_host}` — nats service is down.",
+        )
+    add(
+        "با `UVICORN_WORKERS>1` باید `NATS_ENABLED=1` و سرویس `nats` در compose باشد.",
+        "With `UVICORN_WORKERS>1` you need `NATS_ENABLED=1` and a `nats` compose service.",
+    )
+    add(
+        "NATS را قبل از پنل بالا بیاورید؛ اگر باز خطا بود `node-worker` / `scheduler` را هم چک کنید.",
+        "Start NATS before the panel; also check `node-worker` / `scheduler` if it still fails.",
+    )
+    return fa, en
+
+
+def _alembic_causes_from_log(sig: _ErrSig) -> tuple[list[str], list[str]]:
+    fa, en, add = _cause_pair_list()
+    if sig.alembic_sqlite_url:
+        add(
+            "لاگ Phase1: URL اسکیوالایت میانی نامعتبر است — نباید host/port پستگرس بگیرد.",
+            "Phase1 log: intermediate SQLite URL is invalid — must not get Postgres host/port.",
+        )
+        if _app_version_before("4.6.21"):
+            add(
+                "اول PGClockMG را به v4.6.21+ آپدیت کنید (URL اسکیوالایت دیگر خراب نمی‌شود).",
+                "Update PGClockMG to v4.6.21+ (SQLite URL is no longer corrupted).",
+            )
+        add(
+            "Compose warning (مثل PGADMIN_EMAIL) نباید به‌عنوان container id استفاده شود.",
+            "Compose warnings (e.g. PGADMIN_EMAIL) must not be treated as container ids.",
+        )
+        return fa, en
+    if sig.alembic_timeout_str:
+        add(
+            "لاگ: `timeout=` به‌صورت رشته در SQLAlchemy URL — asyncpg فقط float می‌پذیرد.",
+            "Log: string `timeout=` in SQLAlchemy URL — asyncpg accepts float only.",
+        )
+        if _app_version_before("4.6.25"):
+            add(
+                "اول PGClockMG را به v4.6.25+ آپدیت کنید (timeout= از URL آلِمبیک حذف شد).",
+                "Update PGClockMG to v4.6.25+ (timeout= removed from alembic URL).",
+            )
+        return fa, en
+    if sig.alembic_ssl_false:
+        add(
+            "لاگ: `ssl=false` / ClientConfigurationError — برای asyncpg باید `ssl=disable` باشد.",
+            "Log: `ssl=false` / ClientConfigurationError — asyncpg needs `ssl=disable`.",
+        )
+        if _app_version_before("4.6.22"):
+            add(
+                "اول PGClockMG را به v4.6.22+ آپدیت کنید (ssl=false دیگر پاس داده نمی‌شود).",
+                "Update PGClockMG to v4.6.22+ (ssl=false is no longer passed through).",
+            )
+        add("اگر باز fail شد، لاگ auth/HBA را ببینید.", "If it still fails, check auth/HBA logs.")
+        return fa, en
+    if sig.alembic_revision and (
+        sig.alembic_revision.startswith("e422") or "stuck" in sig.low or "maximum wait" in sig.low
+    ):
+        add(
+            f"لاگ: alembic روی revision `{sig.alembic_revision}` (مثلاً refactor sub_updated_at) hang شده.",
+            f"Log: alembic hung on revision `{sig.alembic_revision}` (e.g. refactor sub_updated_at).",
+        )
+        if _app_version_before("4.6.29"):
+            add(
+                "اول PGClockMG را به v4.6.29+ آپدیت کنید — e422 با bulk SQL خودکار heal می‌شود.",
+                "Update PGClockMG to v4.6.29+ — e422 is auto-healed with bulk SQL.",
+            )
+        add(
+            "همین مهاجرت/ریستور را دوباره بزنید — heal دوباره تلاش می‌کند.",
+            "Retry the same migrate/restore — heal will re-attempt.",
+        )
+        return fa, en
+    if sig.auth:
+        af, ae = _auth_causes_from_log(sig, None, None)
+        fa.extend(af)
+        en.extend(ae)
+        return fa, en
+    if sig.relation_missing:
+        add(
+            f"لاگ alembic: relation `{sig.relation_missing}` وجود ندارد — اسکیما ناقص یا ترتیب migration غلط است.",
+            f"Alembic log: relation `{sig.relation_missing}` does not exist — incomplete schema or bad migration order.",
+        )
+    if sig.duplicate_key:
+        add(
+            "لاگ: duplicate key / unique constraint هنگام alembic — اسکیما یا دادهٔ قبلی تداخل دارد.",
+            "Log: duplicate key / unique constraint during alembic — prior schema/data conflicts.",
+        )
+    if sig.permission_denied:
+        add(
+            "لاگ: permission denied در alembic — نقش DB برای DDL کافی نیست.",
+            "Log: permission denied in alembic — DB role lacks DDL privileges.",
+        )
+    add(
+        "لاگ را برای خطای اسکیما/auth ببینید — نه فقط وسط Traceback.",
+        "Inspect schema/auth errors in the log — not only mid-Traceback noise.",
+    )
+    if _app_version_before("4.6.26"):
+        add(
+            "اول PGClockMG را به v4.6.26+ آپدیت کنید "
+            "(ریستور بزرگ: skip-at-head / timeout بلند / بدون rotate وسط DDL).",
+            "Update PGClockMG to v4.6.26+ "
+            "(large restores: skip-at-head / longer timeout / no rotate mid-DDL).",
+        )
+    else:
+        add(
+            "روی بکاپ پر از داده: skip-at-head / timeout بلند / بدون rotate وسط DDL لازم است.",
+            "Large restores need skip-at-head / longer timeout / no rotate mid-DDL.",
+        )
+    return fa, en
+
+
+def _docker_causes_from_log(sig: _ErrSig) -> tuple[list[str], list[str]]:
+    fa, en, add = _cause_pair_list()
+    if sig.docker_daemon:
+        add(
+            "لاگ: Docker daemon در دسترس نیست — `systemctl status docker` / دسترسی کاربر را چک کنید.",
+            "Log: Docker daemon unavailable — check `systemctl status docker` / user permissions.",
+        )
+    if sig.docker_pull:
+        add(
+            "لاگ: pull ایمیج شکست خورد — شبکه، registry، یا نام تگ را چک کنید.",
+            "Log: image pull failed — check network, registry, or tag name.",
+        )
+    if sig.disk_full:
+        df, de = _disk_causes_from_log(sig)
+        fa.extend(df)
+        en.extend(de)
+        return fa, en
+    if sig.compose and "empty compose" in sig.low:
+        add(
+            "فایل docker-compose.yml خالی/خراب است — از `.yml.pgclockmg.bak` برگردانید.",
+            "docker-compose.yml is empty/corrupt — restore from `.yml.pgclockmg.bak`.",
+        )
+    if not fa:
+        add(
+            "مشکل Docker/compose هنگام ریستور — سرویس Docker و کانتینر دیتابیس را چک کنید.",
+            "Docker/compose problem during restore — check Docker service and DB container.",
+        )
+    if sig.snippet and sig.snippet.lower() not in " ".join(fa).lower():
+        add(f"پیام لاگ: {sig.snippet}", f"Log line: {sig.snippet}")
+    return fa, en
+
+
+def _missing_file_causes_from_log(sig: _ErrSig) -> tuple[list[str], list[str]]:
+    fa, en, add = _cause_pair_list()
+    if sig.ssl_path or (sig.missing_path and ("cert" in (sig.missing_path or "") or ".pem" in (sig.missing_path or ""))):
+        return _ssl_causes_from_log(sig)
+    if sig.missing_path:
+        add(
+            f"لاگ: فایل `{sig.missing_path}` پیدا نشد.",
+            f"Log: file `{sig.missing_path}` was not found.",
+        )
+        if "db_backup" in sig.missing_path or sig.missing_path.endswith(".sql"):
+            add(
+                "دامپ SQL داخل بکاپ نیست یا مسیر extract اشتباه است.",
+                "SQL dump is missing from the backup or extract path is wrong.",
+            )
+        elif "sqlite" in sig.missing_path or sig.missing_path.endswith(".db"):
+            add(
+                "فایل SQLite منبع در بکاپ/مسیر کار پیدا نشد.",
+                "Source SQLite file was not found in the backup/work path.",
+            )
+    else:
+        add("بکاپ ناقص است یا مسیر دامپ خراب است.", "Backup is incomplete or dump path is corrupt.")
+    add(
+        "مسیر `/var/lib/pasarguard` و محتوای zip بکاپ را بررسی کنید.",
+        "Inspect `/var/lib/pasarguard` and the backup zip contents.",
+    )
+    return fa, en
+
+
+def _panel_boot_failure_causes(raw: str, low: str | None = None) -> tuple[list[str], list[str]]:
+    """Most-likely-first causes from technical signals in the panel boot error log."""
+    sig = _scan_restore_error_signals(raw)
+    fa, en, add = _cause_pair_list()
+
+    if sig.telegram and not (sig.auth or sig.ssl_path or sig.nats or sig.conn_refused):
+        # Handled by dedicated branch usually; keep diagnostic here too.
+        add(
+            "لاگ فقط TelegramConflict/getUpdates است — معمولاً نویز است، نه کرش پنل.",
+            "Log is only TelegramConflict/getUpdates — usually noise, not a panel crash.",
+        )
+    if sig.node_control and not (sig.auth or sig.ssl_path or sig.nats):
+        add(
+            "لاگ فقط node controlled-by-another-client است — معمولاً نویز session نود است.",
+            "Log is only node controlled-by-another-client — usually node-session noise.",
+        )
+
+    if sig.auth:
+        af, ae = _auth_causes_from_log(sig, None, None)
+        for a, b in zip(af, ae):
+            add(a, b)
+    if sig.sqlite_url:
+        add(
+            "لاگ هنوز `sqlite:/` دارد — SQLALCHEMY_DATABASE_URL بعد از ریستور به موتور مقصد عوض نشده.",
+            "Log still shows `sqlite:/` — SQLALCHEMY_DATABASE_URL was not switched to the target engine.",
+        )
+    if sig.conn_refused or (sig.conn_host and not sig.nats):
+        host = sig.conn_host or "db-host"
+        add(
+            f"لاگ: اتصال به `{host}` رد شد — هاست/پورت سرویس دیتابیس در compose/.env غلط است.",
+            f"Log: connection to `{host}` refused — DB host/port in compose/.env is wrong.",
+        )
+    if sig.ssl_path or (
+        any(x in sig.low for x in ("ssl", "certificate", "uvicorn_ssl"))
+        and any(x in sig.low for x in ("not exist", "no such file", "error", "failed"))
+    ):
+        sf, se = _ssl_causes_from_log(sig)
+        # Only the most specific SSL bullets for boot context
+        for a, b in list(zip(sf, se))[:2]:
+            add(a, b)
+    if sig.nats:
+        nf, ne = _nats_causes_from_log(sig)
+        for a, b in list(zip(nf, ne))[:2]:
+            add(a, b)
+    if sig.oom:
+        add(
+            "لاگ OOM/killed — حافظهٔ سرور/کانتینر هنگام boot کافی نبود.",
+            "OOM/killed in log — host/container memory was insufficient during boot.",
+        )
+    if sig.pgbouncer and not sig.auth:
+        add(
+            "لاگ PgBouncer: کش/کانفیگ auth ممکن است با نقش‌های جدید هم‌خوان نباشد.",
+            "PgBouncer log: auth cache/config may not match the new roles.",
+        )
+
+    has_signal = bool(fa)
+    if not has_signal:
+        add(
+            "رایج‌ترین علت از روی تجربهٔ ریستور: SQLALCHEMY_DATABASE_URL یا رمز DB با کانتینر یکی نیست.",
+            "Most common post-restore cause: SQLALCHEMY_DATABASE_URL or DB password mismatches the container.",
+        )
+        if "traceback" in sig.low or "application startup failed" in sig.low:
+            add(
+                "Traceback در لاگ هست — اول خطای ValueError/asyncpg/SSL را پیدا کنید (نه اسپم Telegram/node).",
+                "Traceback present — find the ValueError/asyncpg/SSL line first (not Telegram/node spam).",
+            )
+        add(
+            "مسیرهای UVICORN_SSL_* را با فایل‌های واقعی زیر /var/lib/pasarguard/certs چک کنید.",
+            "Check UVICORN_SSL_* paths against real files under /var/lib/pasarguard/certs.",
+        )
+        add(
+            "اگر UVICORN_WORKERS>1 است: NATS_ENABLED=1 و سرویس nats باید بالا باشد.",
+            "If UVICORN_WORKERS>1: NATS_ENABLED=1 and the nats service must be up.",
+        )
+    # Do not push a raw English traceback above the ranked diagnosis.
+    # Auth/SSL/NATS bullets already quote the relevant log facts.
+
+    add(
+        "لاگ واقعی کرش: "
+        "docker compose -f /opt/pasarguard/docker-compose.yml logs pasarguard --tail 120",
+        "Real crash log: "
+        "docker compose -f /opt/pasarguard/docker-compose.yml logs pasarguard --tail 120",
+    )
+    if sig.port_map and _app_version_before("4.6.28"):
+        add(
+            f"map پورت `{sig.port_map}`: به v4.6.28+ آپدیت کنید (probe پورت publish‌شده).",
+            f"Port map `{sig.port_map}`: update to v4.6.28+ (probe published ports).",
+        )
+    elif _app_version_before("4.6.28"):
+        add(
+            "گیر ۹۷٪ روی port 8000: به v4.6.28+ آپدیت کنید (probe پورت publish‌شده / داخل کانتینر).",
+            "Stuck at 97% on port 8000: update to v4.6.28+ (probe published / in-container ports).",
+        )
+    if (sig.telegram or sig.node_control) and _app_version_before("4.6.27"):
+        add(
+            "اگر فقط نویز Telegram/node می‌بینید، به v4.6.27+ آپدیت کنید.",
+            "If you only see Telegram/node noise, update to v4.6.27+.",
+        )
+    return fa, en
+
+
+def _generic_causes_from_log(sig: _ErrSig) -> tuple[list[str], list[str]]:
+    """Last-resort: still derive ordered causes from whatever signals exist."""
+    fa, en, add = _cause_pair_list()
+    if sig.auth:
+        return _auth_causes_from_log(sig, None, None)
+    if sig.fk_constraint or sig.fk_child or sig.fk_parent:
+        return _fk_causes_from_log(sig)
+    if sig.disk_full:
+        return _disk_causes_from_log(sig)
+    if sig.nats:
+        return _nats_causes_from_log(sig)
+    if sig.alembic:
+        return _alembic_causes_from_log(sig)
+    if sig.ssl_path or ("certificate" in sig.low and "not" in sig.low):
+        return _ssl_causes_from_log(sig)
+    if sig.docker_daemon or sig.docker_pull:
+        return _docker_causes_from_log(sig)
+    if sig.missing_path:
+        return _missing_file_causes_from_log(sig)
+    if sig.dict_param:
+        add(
+            "لاگ: dict به‌عنوان پارامتر SQL — ستون‌های JSON باید به string تبدیل شوند.",
+            "Log: dict used as SQL parameter — JSON columns must be serialized to strings.",
+        )
+    if sig.datetime_val:
+        add(
+            f"لاگ datetime: `{sig.datetime_val}` با DATETIME مای‌اسکیوال سازگار نیست (timezone را حذف کنید).",
+            f"Datetime log: `{sig.datetime_val}` is incompatible with MySQL DATETIME (strip timezone).",
+        )
+    if sig.ts_restoring or sig.ts_catalog_mismatch or sig.ts_schema_name:
+        add(
+            "لاگ Timescale: کاتالوگ/حالت restoring با ایمیج هم‌خوان نیست — ایمیج را با دامپ هم‌تراز کنید.",
+            "Timescale log: catalog/restoring mode mismatches the image — realign image to the dump.",
+        )
+    if sig.snippet:
+        add(f"نشانهٔ فنی لاگ: {sig.snippet}", f"Technical log signal: {sig.snippet}")
+    if not fa:
+        add("جزئیات فنی در لاگ آمده است.", "Technical details are in the log.")
+        if sig.raw:
+            add(f"پیام: {sig.raw[:240]}", f"Message: {sig.raw[:240]}")
+    return fa, en
+
+
 def build_transfer_summary(counts: dict | None) -> list[dict]:
     """Ordered primary-table counts for the success UI (zeros omitted).
 
@@ -3425,9 +4268,14 @@ def _rollback_env_after_failed_convert(
 
 
 def explain_restore_error(exc: Exception, backup_db: str | None = None, target_db: str | None = None) -> dict:
-    """Human-readable multilingual restore/convert error (engine-accurate causes only)."""
+    """Human-readable multilingual restore/convert error.
+
+    Causes are derived from technical signals in the error log, ordered
+    most-likely → least-likely so an operator can diagnose from the list alone.
+    """
     raw = str(exc) or exc.__class__.__name__
     low = raw.lower()
+    sig = _scan_restore_error_signals(raw)
     fa = "ریستور یا تبدیل دیتابیس ناموفق بود."
     en = "Restore or database conversion failed."
     ru = "Восстановление или конвертация БД не удалась."
@@ -3436,192 +4284,151 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
 
     def _causes(fa_list: list[str], en_list: list[str] | None = None) -> None:
         nonlocal causes_fa, causes_en
-        causes_fa = fa_list
-        causes_en = en_list or fa_list
+        causes_fa = list(fa_list or [])
+        causes_en = list(en_list or fa_list or [])
 
-    if "missing 1 required positional argument" in low or "source_path" in low:
+    tgt = (target_db or "").lower()
+    bak = (backup_db or "").lower()
+
+    if "missing 1 required positional argument" in low or (
+        "source_path" in low and "required" in low
+    ):
         fa = "خطای داخلی تبدیل دیتابیس (پارامتر مسیر منبع)."
         en = "Internal DB conversion error (source path)."
         _causes(
-            ["ویزارد را به آخرین نسخه آپدیت کنید و دوباره ریستور کنید."],
-            ["Update the wizard to the latest version and retry restore."],
+            [
+                f"نشانهٔ لاگ: {sig.snippet}" if sig.snippet else "پارامتر source_path به مبدّل پاس نشده.",
+                "ویزارد را به آخرین نسخه آپدیت کنید و دوباره ریستور کنید.",
+            ],
+            [
+                f"Log signal: {sig.snippet}" if sig.snippet else "source_path was not passed to the converter.",
+                "Update the wizard to the latest version and retry restore.",
+            ],
         )
     elif "unsupported cross-db" in low:
         fa = f"تبدیل {backup_db} به {target_db} پشتیبانی نمی‌شود."
         en = f"Conversion {backup_db} → {target_db} is not supported."
         _causes(
-            ["این ترکیب موتور دیتابیس قابل تبدیل خودکار نیست."],
-            ["This database engine combination cannot be auto-converted."],
+            [
+                f"ترکیب موتور `{bak or '?'}` → `{tgt or '?'}` در لاگ unsupported است.",
+                "این ترکیب قابل تبدیل خودکار نیست — مقصد/مبدأ سازگار انتخاب کنید.",
+            ],
+            [
+                f"Engine pair `{bak or '?'}` → `{tgt or '?'}` is unsupported in the log.",
+                "This combination cannot be auto-converted — pick a supported pair.",
+            ],
         )
-    elif is_auth_failure_text(raw) or ("password" in low and "auth" in low) or "authentication failed" in low:
-        tgt = (target_db or "").lower()
-        bak = (backup_db or "").lower()
-        mysqlish = (
-            tgt in ("mysql", "mariadb")
+    elif sig.auth or is_auth_failure_text(raw) or ("password" in low and "auth" in low):
+        mysqlish = bool(sig.mysql_user) or tgt in ("mysql", "mariadb") or (
+            "access denied for user" in low
             or "mysql/mariadb authentication" in low
             or "mysql restore failed" in low
-            or "access denied for user" in low
-            or (not tgt and ("mysql" in low or "mariadb" in low))
         )
         if mysqlish:
             fa = "احراز هویت MySQL/MariaDB شکست خورد (Access denied)."
             en = "MySQL/MariaDB authentication failed (Access denied)."
             ru = "Ошибка аутентификации MySQL/MariaDB (Access denied)."
-            if bak == "sqlite":
-                _causes(
-                    [
-                        "بکاپ sqlite رمز ندارد — ویزارد فقط از رمز نصب MySQL/MariaDB استفاده می‌کند",
-                        "MYSQL_ROOT_PASSWORD / DB_PASSWORD نصب باید با کانتینر یکی باشد (ویزارد heal می‌کند)",
-                    ],
-                    [
-                        "SQLite backups have no DB password — wizard uses install MySQL/MariaDB secrets only",
-                        "Install MYSQL_ROOT_PASSWORD / DB_PASSWORD must match the live container (wizard auto-heals)",
-                    ],
-                )
-            elif bak in ("mysql", "mariadb"):
-                _causes(
-                    [
-                        "رمز نصب با volume کانتینر یکی نبود — ویزارد pre-heal و در صورت نیاز skip-grant می‌زند",
-                        "اگر باز هم خطا بود، MYSQL_ROOT_PASSWORD را در .env نصب با رمز واقعی کانتینر یکی کنید",
-                    ],
-                    [
-                        "Install password did not match the container volume — wizard pre-heals (skip-grant if needed)",
-                        "If it still fails, align MYSQL_ROOT_PASSWORD in the install .env with the live container",
-                    ],
-                )
-            else:
-                _causes(
-                    [
-                        "برای تبدیل به MySQL/MariaDB فقط رمز نصب مقصد استفاده می‌شود (نه رمز بکاپ مبدأ)",
-                        "MYSQL_ROOT_PASSWORD / DB_PASSWORD نصب را با کانتینر هم‌تراز کنید و دوباره تلاش کنید",
-                    ],
-                    [
-                        "Cross-DB into MySQL/MariaDB uses the install target password only (not the source backup secret)",
-                        "Align install MYSQL_ROOT_PASSWORD / DB_PASSWORD with the container and retry",
-                    ],
-                )
-        elif tgt in ("postgresql", "timescaledb") or (
-            bak in ("postgresql", "timescaledb") and tgt not in ("mysql", "mariadb")
-        ):
+        elif tgt in ("postgresql", "timescaledb") or bak in ("postgresql", "timescaledb") or sig.pg_role or sig.sasl:
             fa = "احراز هویت PostgreSQL/TimescaleDB شکست خورد."
             en = "PostgreSQL/TimescaleDB authentication failed."
             ru = "Ошибка аутентификации PostgreSQL/TimescaleDB."
-            if bak == "sqlite":
-                _causes(
-                    [
-                        "بکاپ sqlite رمز ندارد — ویزارد رمز نصب Timescale/Postgres را روی کانتینر heal می‌کند",
-                        "اگر PgBouncer روشن است، بعد از heal باید recreate شود (ویزارد انجام می‌دهد)",
-                    ],
-                    [
-                        "SQLite backups have no password — wizard heals install Timescale/Postgres roles on the container",
-                        "With PgBouncer enabled, it must be recreated after role heal (wizard does this)",
-                    ],
-                )
-            else:
-                _causes(
-                    [
-                        "POSTGRES_PASSWORD نصب/بکاپ با نقش‌های زنده یکی نیست",
-                        "PgBouncer ممکن است کش قدیمی داشته باشد — ویزارد نقش‌ها را هم‌تراز و سرویس را recreate می‌کند",
-                    ],
-                    [
-                        "Install/backup POSTGRES_PASSWORD does not match live roles",
-                        "PgBouncer may hold a stale auth cache — wizard realigns roles and recreates it",
-                    ],
-                )
         else:
             fa = "احراز هویت دیتابیس شکست خورد."
             en = "Database authentication failed."
-            _causes(
-                ["رمز دیتابیس در .env با کانتینر یکی نیست — ویزارد تلاش به heal می‌کند"],
-                ["Database password in .env does not match the container — wizard attempts auto-heal"],
-            )
+        _causes(*_auth_causes_from_log(sig, backup_db, target_db))
     elif "character varying(32)" in low or "stringdatarighttruncation" in low:
         fa = "خطای ثبت نسخه alembic بعد از کپی داده (نسخه نامعتبر)."
         en = "Alembic version stamp failed after data copy (invalid revision string)."
-        _causes(
-            [
-                "خروجی docker compose با نسخه alembic قاطی شده بود — در v2.3.5+ اصلاح شد",
-                "اسکیمای target قبلاً با alembic upgrade head ساخته شده و دیگر نیاز به stamp دستی نیست",
-            ],
-            [
-                "docker compose output was mixed into the alembic revision — fixed in v2.3.5+",
-                "Target schema is already created via alembic upgrade head; manual stamp is not needed",
-            ],
-        )
-    elif "no space left" in low or "enospc" in low or "errno 28" in low:
-        fa = "فضای دیسک سرور پر است (دانلود ایمیج Timescale یا نوشتن فایل شکست خورد)."
-        en = "Server disk is full (Timescale image pull or file write failed)."
-        ru = "На диске сервера закончилось место (pull образа Timescale / запись файла)."
-        _causes(
-            [
-                "لاگ docker: no space left on device — ایمیج Timescale چند گیگابایت فضا می‌خواهد",
-                "دیسک را آزاد کنید (docker image prune / لاگ‌ها) و دوباره ریستور کنید",
-                "ویزارد جدید بدون pull، حالت restoring را اضطراری خاموش می‌کند تا پنل بالا بیاید",
-            ],
-            [
-                "Docker log: no space left on device — Timescale images need several GB free",
-                "Free disk (docker image prune / logs) and retry restore",
-                "Newer wizard clears Timescale restoring mode even when pull fails so the panel can start",
-            ],
-        )
+        stamp_fa = [
+            "لاگ: مقدار revision از حد character varying(32) بلندتر است — خروجی docker با نسخه alembic قاطی شده.",
+            "اسکیمای target با alembic upgrade head ساخته می‌شود؛ stamp دستی لازم نیست.",
+        ]
+        stamp_en = [
+            "Log: revision exceeds character varying(32) — docker output mixed into alembic version.",
+            "Target schema is created via alembic upgrade head; manual stamp is not needed.",
+        ]
+        if _app_version_before("2.3.5"):
+            stamp_fa.insert(0, "به v2.3.5+ آپدیت کنید — قاطی شدن خروجی compose با revision اصلاح شد.")
+            stamp_en.insert(0, "Update to v2.3.5+ — compose output no longer contaminates the revision.")
+        _causes(stamp_fa, stamp_en)
+    elif sig.disk_full:
+        fa = "فضای دیسک سرور پر است (دانلود ایمیج یا نوشتن فایل شکست خورد)."
+        en = "Server disk is full (image pull or file write failed)."
+        ru = "На диске сервера закончилось место."
+        _causes(*_disk_causes_from_log(sig))
     elif "empty compose file" in low:
         fa = "فایل docker-compose.yml خالی یا خراب شده است."
         en = "docker-compose.yml is empty or unusable."
         ru = "Файл docker-compose.yml пуст или повреждён."
-        _causes(
-            [
-                "پر شدن دیسک هنگام تغییر تگ ایمیج ممکن است compose را خراب کند — از .yml.pgclockmg.bak برگردانید",
-                "ویزارد جدید compose را atomic می‌نویسد و در ENOSPC برمی‌گرداند",
-            ],
-            [
-                "Disk full while rewriting the image tag can corrupt compose — restore from .yml.pgclockmg.bak",
-                "Newer wizard writes compose atomically and rolls back on ENOSPC",
-            ],
-        )
-    elif "catalog version mismatch" in low and "timescale" in low:
+        _causes(*_docker_causes_from_log(sig))
+    elif sig.ts_catalog_mismatch and "timescale" in low:
         fa = "نسخه کاتالوگ TimescaleDB بکاپ با ایمیج در حال اجرا یکی نیست (post_restore)."
         en = "TimescaleDB catalog version in the dump does not match the running image (post_restore)."
         ru = "Версия каталога TimescaleDB в дампе не совпадает с образом (post_restore)."
-        _causes(
-            [
-                "بکاپ multi ممکن است متادیتای 2.27 و 2.28 داشته باشد — ایمیج باید با کاتالوگ دامپ هم‌تراز شود",
-                "ویزارد ایمیج را بدون پاک کردن دیتا هم‌تراز می‌کند و دوباره post_restore می‌زند",
-                "اگر باز هم پیام خطا بود، نسخه timescaledb در docker-compose.yml را با نسخه بکاپ یکی کنید",
-            ],
-            [
-                "Multi backups may mix 2.27/2.28 catalog metadata — image must match the dump catalog",
-                "Wizard realigns the image without wiping data and retries post_restore",
-                "If it still fails, pin timescaledb in docker-compose.yml to the backup version",
-            ],
-        )
-    elif "restoring=on" in low or "timescaledb_post_restore" in low or (
-        "timescaledb.restoring" in low and "still on" in low
-    ):
+        ver = sig.ts_version
+        ts_fa = [
+            f"لاگ: catalog version mismatch"
+            + (f" (نسخهٔ دیده‌شده {ver})" if ver else "")
+            + " — ایمیج باید با کاتالوگ دامپ هم‌تراز شود.",
+            "ویزارد ایمیج را بدون wipe دیتا هم‌تراز می‌کند و دوباره post_restore می‌زند.",
+            "اگر باز خطا بود، تگ timescaledb در docker-compose.yml را با نسخه بکاپ یکی کنید.",
+        ]
+        ts_en = [
+            f"Log: catalog version mismatch"
+            + (f" (seen {ver})" if ver else "")
+            + " — image must match the dump catalog.",
+            "Wizard realigns the image without wiping data and retries post_restore.",
+            "If it still fails, pin timescaledb in docker-compose.yml to the backup version.",
+        ]
+        _causes(ts_fa, ts_en)
+    elif sig.ts_restoring:
         fa = "TimescaleDB در حالت ریستور گیر کرده و post_restore موفق نشد."
         en = "TimescaleDB is stuck in restore mode and post_restore failed."
         ru = "TimescaleDB застрял в режиме restore и post_restore не удался."
-        _causes(
-            [
-                "نقش واقعی سوپریوزر کانتینر معمولاً POSTGRES_USER / DB_USER است — نقش postgres ممکن است اصلاً وجود نداشته باشد",
-                "گاهی timescaledb_post_restore به‌خاطر catalog version mismatch خطا می‌دهد — ویزارد ایمیج را هم‌تراز و در نهایت GUC را اضطراری خاموش می‌کند",
-                "اگر دوباره خطا شد، لاگ را برای catalog version mismatch / Tried roles / Database: ببینید",
-            ],
-            [
-                "Container superuser is usually POSTGRES_USER / DB_USER — role postgres may not exist",
-                "post_restore can fail on catalog mismatch — wizard realigns the image then force-clears the GUC",
-                "If it persists, check logs for catalog version mismatch / Tried roles / Database:",
-            ],
-        )
-    elif "timescale" in low and "version" in low:
+        roles_fa = []
+        roles_en = []
+        if "role" in low and "does not exist" in low:
+            roles_fa.append(
+                "لاگ: نقش موردنیاز وجود ندارد — سوپریوزر واقعی معمولاً POSTGRES_USER / DB_USER است نه حتماً postgres."
+            )
+            roles_en.append(
+                "Log: required role missing — real superuser is usually POSTGRES_USER / DB_USER, not necessarily postgres."
+            )
+        if sig.ts_catalog_mismatch:
+            roles_fa.append(
+                "لاگ همزمان catalog mismatch دارد — اول ایمیج را هم‌تراز کنید، بعد post_restore."
+            )
+            roles_en.append(
+                "Log also shows catalog mismatch — realign the image first, then post_restore."
+            )
+        roles_fa.extend([
+            "ویزارد در نهایت GUC restoring را اضطراری خاموش می‌کند اگر post_restore شکست بخورد.",
+            "لاگ را برای Tried roles / Database: / catalog version mismatch ببینید.",
+        ])
+        roles_en.extend([
+            "Wizard force-clears the restoring GUC if post_restore fails.",
+            "Check logs for Tried roles / Database: / catalog version mismatch.",
+        ])
+        _causes(roles_fa, roles_en)
+    elif "timescale" in low and "version" in low and not sig.ts_schema_name:
         fa = "نسخه TimescaleDB بکاپ با سرور هم‌خوان نیست."
         en = "TimescaleDB version mismatch between backup and server."
+        ver = sig.ts_version
         _causes(
-            ["ویزارد معمولاً ایمیج را هم‌تراز می‌کند — دوباره تلاش کنید یا لاگ کامل را ببینید."],
-            ["Wizard usually realigns the image — retry or inspect the full log."],
+            [
+                f"لاگ به نسخه Timescale"
+                + (f" `{ver}`" if ver else "")
+                + " اشاره دارد — ایمیج سرور را با دامپ هم‌تراز کنید.",
+                "دوباره ریستور کنید یا لاگ کامل pin/align را ببینید.",
+            ],
+            [
+                f"Log mentions Timescale version"
+                + (f" `{ver}`" if ver else "")
+                + " — realign the server image to the dump.",
+                "Retry restore or inspect the full pin/align log.",
+            ],
         )
-    elif is_ts_catalog_mismatch_error(raw) or (
-        "schema_name" in low and "chunk" in low and "does not exist" in low
-    ):
+    elif is_ts_catalog_mismatch_error(raw) or sig.ts_schema_name:
         fa = "کاتالوگ TimescaleDB بکاپ با نسخه نصب‌شده سازگار نیست (مثلاً schema_name در chunk)."
         en = "TimescaleDB catalog in the backup does not match the installed extension (e.g. chunk.schema_name)."
         needs_ver = ts_floor_from_error_text(raw)
@@ -3633,160 +4440,137 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
                 f"the installed extension is older."
             )
             ru = f"Каталог бэкапа требует TimescaleDB {needs_ver} или новее — установленная версия старее."
-            _causes(
-                [
-                    f"نسخه TimescaleDB سرور از بکاپ قدیمی‌تر است — ایمیج باید روی {pin} پین شود",
-                    "ویزارد جدید این حالت را قبل از ریستور تشخیص می‌دهد و ایمیج را هم‌تراز می‌کند — آپدیت کنید و دوباره ریستور کنید",
-                    f"دستی: در docker-compose.yml ایمیج timescaledb را روی {pin}-pgXX بگذارید، volume را پاک کنید و ریستور را تکرار کنید",
-                ],
-                [
-                    f"Server TimescaleDB is older than the backup — pin the image to {pin}",
-                    "Newer wizard detects this before restore and realigns the image — update and retry",
-                    f"Manual: set timescaledb image to {pin}-pgXX in docker-compose.yml, wipe volume, restore again",
-                ],
-            )
+            ts_fa = [
+                f"از روی لاگ: کف نسخه `{needs_ver}` — ایمیج را روی `{pin}` پین کنید.",
+                f"دستی: در docker-compose.yml ایمیج timescaledb را `{pin}-pgXX` بگذارید، volume را پاک کنید و ریستور را تکرار کنید.",
+            ]
+            ts_en = [
+                f"From log: version floor `{needs_ver}` — pin the image to `{pin}`.",
+                f"Manual: set timescaledb image to `{pin}-pgXX` in docker-compose.yml, wipe volume, restore again.",
+            ]
+            if _app_version_before("4.5.0"):
+                ts_fa.insert(1, "ویزارد جدید این حالت را تشخیص می‌دهد — آپدیت کنید و دوباره ریستور کنید.")
+                ts_en.insert(1, "Newer wizard detects this — update and retry restore.")
+            else:
+                ts_fa.insert(1, "دوباره ریستور کنید — ویزارد باید ایمیج را قبل از ریستور هم‌تراز کند.")
+                ts_en.insert(1, "Retry restore — wizard should realign the image first.")
+            _causes(ts_fa, ts_en)
         else:
-            _causes(
-                [
-                    f"از TimescaleDB 2.29 ستون schema_name از جدول chunk حذف شده — بکاپ‌های قدیمی نیاز به ایمیج {TS_LAST_SCHEMA_NAME_CHUNK} دارند",
-                    "ویزارد در نسخه جدید اثر انگشت دامپ را تشخیص می‌دهد و ایمیج را قبل از ریستور هم‌تراز می‌کند — آپدیت کنید و دوباره ریستور کنید",
-                    "اگر هنوز خطا می‌دهد، در docker-compose.yml ایمیج timescaledb را دستی روی 2.28.3-pgXX بگذارید و volume را پاک کنید",
-                ],
-                [
-                    f"TimescaleDB 2.29 dropped chunk.schema_name — older dumps need image {TS_LAST_SCHEMA_NAME_CHUNK}",
-                    "Newer wizard fingerprints the dump and realigns the image before restore — update and retry",
-                    "If it still fails, pin timescaledb to 2.28.3-pgXX in docker-compose.yml and wipe the volume",
-                ],
-            )
+            ts_fa = [
+                f"لاگ: ستون schema_name در chunk نیست — بکاپ قدیمی به ایمیج `{TS_LAST_SCHEMA_NAME_CHUNK}` نیاز دارد.",
+                f"اگر باز خطا داد، timescaledb را روی `{TS_LAST_SCHEMA_NAME_CHUNK}-pgXX` پین و volume را پاک کنید.",
+            ]
+            ts_en = [
+                f"Log: chunk.schema_name missing — older dumps need image `{TS_LAST_SCHEMA_NAME_CHUNK}`.",
+                f"If it still fails, pin timescaledb to `{TS_LAST_SCHEMA_NAME_CHUNK}-pgXX` and wipe the volume.",
+            ]
+            if _app_version_before("4.5.0"):
+                ts_fa.insert(1, "ویزارد در نسخه جدید اثر انگشت دامپ را تشخیص می‌دهد — آپدیت و دوباره ریستور کنید.")
+                ts_en.insert(1, "Newer wizard fingerprints the dump — update and retry.")
+            else:
+                ts_fa.insert(1, "دوباره ریستور کنید — ویزارد اثر انگشت دامپ را تشخیص و ایمیج را هم‌تراز می‌کند.")
+                ts_en.insert(1, "Retry restore — wizard fingerprints the dump and realigns the image.")
+            _causes(ts_fa, ts_en)
     elif (
         "certificate files were not restored" in low
         or "certs restore failed" in low
+        or sig.ssl_path
         or ("ssl certificate file" in low and "does not exist" in low)
-    ):
+    ) and not ("alembic" in low and sig.alembic_ssl_false):
         fa = "گواهی SSL بکاپ به /var/lib/pasarguard/certs منتقل نشد یا در .env مپ نشد."
         en = "Backup SSL certs were not restored/mapped under /var/lib/pasarguard/certs."
-        _causes(
-            [
-                "پوشه certs باید داخل زیپ بکاپ باشد (نه فقط مسیر در .env)",
-                "در v2.4.0+ certs به /var/lib/pasarguard/certs کپی و UVICORN_SSL_* روی همان مسیر مپ می‌شود",
-                "اگر بکاپ بدون certs گرفته شده، دوباره با certs بکاپ بگیرید یا پنل را بدون SSL نصب کنید",
-            ],
-            [
-                "The backup zip must include the certs folder (not only paths in .env)",
-                "v2.4.0+ copies certs to /var/lib/pasarguard/certs and maps UVICORN_SSL_* there",
-                "If the backup has no certs, re-backup with certs or install the panel without SSL",
-            ],
-        )
-    elif "dict can not be used as parameter" in low or "dict cannot be used as parameter" in low:
+        _causes(*_ssl_causes_from_log(sig))
+    elif sig.dict_param:
         fa = "مقدار JSON از Postgres به‌صورت dict به MariaDB/MySQL پاس شد."
         en = "PostgreSQL JSON/JSONB dict was passed raw to MySQL/MariaDB (invalid bind param)."
-        _causes(
-            [
-                "ستون‌های permissions / proxy_settings / config باید قبل از insert به JSON string تبدیل شوند",
-                "در v2.8.10+ همه dict/list برای MySQL serialize می‌شوند — آپدیت و دوباره ریستور کنید",
-            ],
-            [
-                "permissions / proxy_settings / config columns must be JSON strings before insert",
-                "v2.8.10+ serializes all dict/list values for MySQL — update and retry",
-            ],
-        )
-    elif "incorrect datetime value" in low or "1292" in low:
+        dict_fa = [
+            "لاگ: dict به‌عنوان پارامتر SQL — ستون‌های permissions / proxy_settings / config را به JSON string تبدیل کنید.",
+        ]
+        dict_en = [
+            "Log: dict used as SQL parameter — serialize permissions / proxy_settings / config to JSON strings.",
+        ]
+        if _app_version_before("2.8.10"):
+            dict_fa.append("در v2.8.10+ serialize می‌شود — آپدیت و دوباره ریستور کنید.")
+            dict_en.append("v2.8.10+ serializes these — update and retry.")
+        else:
+            dict_fa.append("دوباره ریستور کنید — ویزارد باید dict/list را برای MySQL serialize کند.")
+            dict_en.append("Retry restore — wizard should serialize dict/list for MySQL.")
+        _causes(dict_fa, dict_en)
+    elif sig.datetime_val or ("incorrect datetime value" in low) or (
+        "1292" in low and "datetime" in low
+    ):
         fa = "فرمت تاریخ/زمان Postgres با ستون DATETIME در MySQL/MariaDB سازگار نبود."
         en = "PostgreSQL timestamptz value is incompatible with MySQL/MariaDB DATETIME."
-        _causes(
-            [
-                "مقادیر با پسوند +00:00 باید بدون timezone نوشته شوند — در v2.8.9+ اصلاح شد",
-                "آپدیت ویزارد و دوباره ریستور/تبدیل کنید",
-            ],
-            [
-                "Values with +00:00 must be written without timezone — fixed in v2.8.9+",
-                "Update the wizard and retry restore/convert",
-            ],
-        )
+        sample = sig.datetime_val or "+00:00"
+        dt_fa = [f"لاگ datetime: `{sample}` — timezone را قبل از insert به DATETIME حذف کنید."]
+        dt_en = [f"Datetime log: `{sample}` — strip timezone before inserting into DATETIME."]
+        if _app_version_before("2.8.9"):
+            dt_fa.append("در v2.8.9+ اصلاح شد — آپدیت ویزارد و دوباره ریستور/تبدیل کنید.")
+            dt_en.append("Fixed in v2.8.9+ — update the wizard and retry restore/convert.")
+        else:
+            dt_fa.append("دوباره ریستور/تبدیل کنید — حذف timezone باید خودکار باشد.")
+            dt_en.append("Retry restore/convert — timezone stripping should be automatic.")
+        _causes(dt_fa, dt_en)
     elif "migration incomplete" in low:
         fa = "بخشی از داده‌ها کپی نشد (کاربر/هاست/گروه/نود ناقص)."
         en = "Incomplete data copy (users/hosts/groups/nodes)."
+        table_hint = ""
+        m = re.search(r"(?:table|جدول)\s+[`'\"]?(\w+)", raw, re.I)
+        if m:
+            table_hint = m.group(1)
         _causes(
             [
-                "تبدیل باید ۱۰۰٪ باشد — در v2.3.9+ کپی ناقص fail می‌شود",
-                "لاگ Row skip را برای جدول مشکل‌دار ببینید",
+                (
+                    f"لاگ: کپی جدول `{table_hint}` ناقص است."
+                    if table_hint
+                    else "لاگ: migration incomplete — کپی users/hosts/groups/nodes کامل نشده."
+                ),
+                "لاگ Row skip را برای جدول مشکل‌دار ببینید.",
             ],
             [
-                "Convert must be 100% — incomplete copies fail since v2.3.9+",
-                "Check Row skip logs for the failing table",
+                (
+                    f"Log: incomplete copy for table `{table_hint}`."
+                    if table_hint
+                    else "Log: migration incomplete — users/hosts/groups/nodes copy did not finish."
+                ),
+                "Check Row skip logs for the failing table.",
             ],
         )
     elif "restore verification failed" in low or "data incomplete" in low or "panel database is empty" in low:
         fa = "داده به موتور مقصد منتقل نشده (موفقیت کاذب قطع شد)."
         en = "Data was not transferred into the target database (false success blocked)."
-        _causes(
-            [
-                "دامپ خالی/ناموفق بود یا بعد از ریستور حجم Timescale پاک شده بود — در v2.5.0 wipe بعد از ریستور حذف شد",
-                "verify اجباری: اگر بکاپ کاربر/هاست دارد، پنل خالی دیگر SUCCESS نمی‌شود",
-                "لاگ Verified / expected counts را ببینید",
-            ],
-            [
-                "Dump was empty/failed or Timescale volume was wiped after restore — post-restore wipe removed in v2.5.0",
-                "Hard verify: backups with users/hosts never report SUCCESS on an empty panel",
-                "Check Verified / expected counts in the log",
-            ],
-        )
+        ver_fa = []
+        ver_en = []
+        if "panel database is empty" in low:
+            ver_fa.append("لاگ: panel database is empty — دامپ اعمال نشده یا volume بعد از ریستور پاک شده.")
+            ver_en.append("Log: panel database is empty — dump was not applied or volume was wiped after restore.")
+        if "verified" in low or "expected" in low:
+            ver_fa.append("لاگ Verified/expected counts را با تعداد کاربران/هاست بکاپ مقایسه کنید.")
+            ver_en.append("Compare Verified/expected counts in the log with backup users/hosts.")
+        ver_fa.append("اگر بکاپ کاربر/هاست دارد، پنل خالی دیگر SUCCESS نمی‌شود.")
+        ver_en.append("Backups with users/hosts never report SUCCESS on an empty panel.")
+        if not ver_fa:
+            ver_fa = ["دامپ خالی/ناموفق بود یا داده به مقصد نرسید."]
+            ver_en = ["Dump was empty/failed or data never reached the target."]
+        _causes(ver_fa, ver_en)
     elif "pasarguard container is not running" in low:
         fa = "کانتینر PasarGuard بالا نیامد (ری‌استارت یا کرش)."
         en = "PasarGuard container is not running (crash/restart loop)."
-        _causes(
-            [
-                "بعد از تبدیل، .env هنوز URL اشتباه (مثلاً sqlite) داشت — در v2.3.8+ از .env نصب حفظ می‌شود",
-                "multi-worker: NATS باید قبل از پنل بالا باشد و NATS_URL باید nats://nats:4222 باشد نه localhost",
-                "SSL نامعتبر یا خطای اتصال به PostgreSQL/PgBouncer — لاگ واقعی ValueError/asyncpg را ببینید",
-                "روی سرور: docker compose -f /opt/pasarguard/docker-compose.yml logs pasarguard --tail 80",
-            ],
-            [
-                "After convert, .env still had a wrong URL (e.g. sqlite) — install .env is preserved since v2.3.8+",
-                "multi-worker: NATS must be up before the panel; NATS_URL must be nats://nats:4222 (not localhost)",
-                "Invalid SSL or PostgreSQL/PgBouncer connect errors — check real ValueError/asyncpg logs",
-                "On server: docker compose -f /opt/pasarguard/docker-compose.yml logs pasarguard --tail 80",
-            ],
-        )
+        _causes(*_panel_boot_failure_causes(raw))
     elif "application startup failed" in low:
         fa = "پنل بعد از ریستور در مرحله startup کرش کرد (Application startup failed)."
         en = "Panel crashed during application startup after restore."
         ru = "Панель упала на этапе application startup после restore."
-        _causes(
-            [
-                "ویزارد v4.4.4+ قبل از boot پسورد DB را sync و PgBouncer/NATS را آماده می‌کند",
-                "multi-worker: NATS باید قبل از پنل بالا باشد و NATS_URL=nats://nats:4222",
-                "Timescale/PostgreSQL: mismatch پسورد .env با DB یا PgBouncer stale cache",
-                "SSL: فایل cert/key در /var/lib/pasarguard/certs موجود باشد",
-                "روی سرور: docker compose logs pasarguard --tail 200",
-            ],
-            [
-                "Wizard v4.4.4+ syncs DB password and prepares PgBouncer/NATS before boot",
-                "multi-worker: NATS must be up first with NATS_URL=nats://nats:4222",
-                "Timescale/PostgreSQL: .env password mismatch or stale PgBouncer cache",
-                "SSL: cert/key must exist under /var/lib/pasarguard/certs",
-                "On server: docker compose logs pasarguard --tail 200",
-            ],
-        )
-    elif "nats is required" in low or (
-        "nats" in low and "multi-worker" in low
-    ) or (
-        "traceback" in low and "nats" in low and "worker" in low
+        _causes(*_panel_boot_failure_causes(raw))
+    elif sig.nats and (
+        "nats is required" in low
+        or "multi-worker" in low
+        or ("traceback" in low and "worker" in low)
+        or sig.nats_localhost
     ):
         fa = "پنل multi-worker بدون NATS سالم بالا نیامد."
         en = "Multi-worker panel failed because NATS was not ready or NATS_URL was wrong."
-        _causes(
-            [
-                "UVICORN_WORKERS>1 نیاز به NATS_ENABLED=1 و سرویس nats در compose دارد",
-                "NATS_URL داخل کانتینر باید nats://nats:4222 باشد — localhost کار نمی‌کند",
-                "ویزارد جدید NATS را قبل از پنل بالا می‌آورد؛ اگر باز خطا بود node-worker/scheduler را هم چک کنید",
-            ],
-            [
-                "UVICORN_WORKERS>1 needs NATS_ENABLED=1 and a nats service in compose",
-                "In-container NATS_URL must be nats://nats:4222 — localhost will not work",
-                "Newer wizard starts NATS before the panel; also check node-worker/scheduler if it still fails",
-            ],
-        )
+        _causes(*_nats_causes_from_log(sig))
     elif (
         "failed alembic upgrade head" in low
         or "failed to sync alembic" in low
@@ -3796,186 +4580,88 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
             and ("error" in low or "failed" in low)
         )
     ):
-        phase1 = (
-            "sqlite+aiosqlite" in low
-            or "invalid sqlite url" in low
-            or "intermediate sqlite" in low
-            or ("phase1" in low and "sqlite" in low)
-        )
-        if phase1:
+        if sig.alembic_sqlite_url:
             fa = "آپدیت اسکیمای میانی SQLite با alembic شکست خورد (Phase 1)."
             en = "Intermediate SQLite schema upgrade via alembic failed (Phase 1)."
-            _causes(
-                [
-                    "اول PGClockMG را به v4.6.21+ آپدیت کنید "
-                    "(URL اسکیوالایت دیگر با host/port پستگرس خراب نمی‌شود)",
-                    "Compose warning (مثل PGADMIN_EMAIL) دیگر به‌عنوان container id استفاده نمی‌شود",
-                    "اگر باز هم fail شد، لاگ ArgumentError / Invalid SQLite URL را ببینید",
-                ],
-                [
-                    "Update PGClockMG to v4.6.21+ "
-                    "(SQLite URL is no longer corrupted with Postgres host/port)",
-                    "Compose warnings (e.g. PGADMIN_EMAIL) are no longer treated as container ids",
-                    "If it still fails, check ArgumentError / Invalid SQLite URL in the log",
-                ],
-            )
-        elif (
-            "unsupported operand" in low
-            and "float" in low
-            and "str" in low
-        ) or ("typeerror" in low and "timeout" in low):
+        elif sig.alembic_timeout_str:
             fa = "اتصال alembic به Timescale به‌خاطر timeout رشته‌ای در URL شکست خورد."
             en = "Alembic→Timescale connect crashed: string timeout= in SQLAlchemy URL."
-            _causes(
-                [
-                    "اول PGClockMG را به v4.6.25+ آپدیت کنید "
-                    "(timeout= از URL آلِمبیک حذف شد — asyncpg فقط float می‌پذیرد)",
-                    "v4.6.24 به‌اشتباه timeout=20 را به‌صورت str در URL می‌گذاشت",
-                    "hang همچنان با timeout بیرونی docker محدود می‌شود",
-                ],
-                [
-                    "Update PGClockMG to v4.6.25+ "
-                    "(timeout= removed from alembic URL — asyncpg accepts float only)",
-                    "v4.6.24 incorrectly put timeout=20 as a string in the URL",
-                    "Hangs are still bounded by the outer docker timeout",
-                ],
-            )
-        elif "sslmode" in low or ("clientconfigurationerror" in low and "ssl" in low):
-            fa = "ساخت اسکیمای مقصد با alembic شکست خورد (Phase 2)."
-            en = "Target schema create via alembic upgrade head failed (Phase 2)."
-            _causes(
-                [
-                    "اول PGClockMG را به v4.6.22+ آپدیت کنید "
-                    "(ssl=false دیگر به asyncpg پاس داده نمی‌شود — ssl=disable)",
-                    "نسخهٔ قبلی URL را با ssl=false می‌ساخت و asyncpg آن را رد می‌کرد",
-                    "اگر باز هم fail شد، لاگ auth/HBA را ببینید",
-                ],
-                [
-                    "Update PGClockMG to v4.6.22+ "
-                    "(ssl=false is no longer passed to asyncpg — use ssl=disable)",
-                    "Older builds built URLs with ssl=false which asyncpg rejects",
-                    "If it still fails, check auth/HBA logs",
-                ],
-            )
         else:
             fa = "ساخت اسکیمای مقصد با alembic شکست خورد (Phase 2)."
             en = "Target schema create via alembic upgrade head failed (Phase 2)."
-            _causes(
-                [
-                    "اول PGClockMG را به v4.6.26+ آپدیت کنید "
-                    "(ریستور پر از داده: skip-at-head / timeout بلند / بدون rotate وسط DDL)",
-                    "v4.6.24 با timeout=180s روی CREATE INDEX بکاپ بزرگ kill+retry می‌کرد و ۹۳٪ گیر می‌کرد",
-                    "اگر باز هم fail شد، لاگ را برای خطای اسکیما یا auth ببینید — نه فقط وسط Traceback",
-                ],
-                [
-                    "Update PGClockMG to v4.6.26+ "
-                    "(large restores: skip-at-head / longer timeout / no rotate mid-DDL)",
-                    "v4.6.24 killed+retried CREATE INDEX at 180s on large backups and hung near 93%",
-                    "If it still fails, look for schema/auth errors — not only mid-Traceback noise",
-                ],
-            )
+        _causes(*_alembic_causes_from_log(sig))
     elif "pasarguard failed to start" in low or "did not reach ready state" in low:
         fa = "پنل PasarGuard بعد از ریستور بالا نیامد."
         en = "PasarGuard panel did not start after restore."
-        if (
-            "controlled by another client" in low
-            or "failed to connect node" in low
-            or "failed to get outbounds stats from node" in low
-            or "failed to get users stats from node" in low
-        ):
+        if sig.node_control or "failed to connect node" in low or "stats from node" in low:
             fa = "پنل بالا آمد ولی لاگ نود (controlled by another client) به‌اشتباه به‌عنوان خطای ریستور نشان داده شد."
             en = "Panel was up; node 'controlled by another client' log noise was mistaken for a restore failure."
-            _causes(
-                [
-                    "اول PGClockMG را به v4.6.27+ آپدیت کنید — این نویز دیگر ریستور را fail نمی‌کند",
-                    "نود هنوز توسط پنل/کلاینت دیگری کنترل می‌شود (اینستنس قبلی / سرور دیگر / session باز)",
-                    "پنل HTTP معمولاً سالم است؛ فقط یک کنترلر برای هر نود نگه دارید",
-                ],
-                [
-                    "Update PGClockMG to v4.6.27+ — this log noise no longer fails restore",
-                    "The node is still controlled by another panel/client (old instance / other server / open session)",
-                    "Panel HTTP is usually healthy; keep a single controller per node",
-                ],
-            )
-        elif (
-            "telegramconflicterror" in low
-            or "getupdates" in low
-            or "telegramconflict" in low
-            or "only one bot instance" in low
-        ):
+            node_fa = [
+                "از روی لاگ: نود هنوز توسط پنل/کلاینت دیگری کنترل می‌شود — فقط یک کنترلر نگه دارید.",
+                "پنل HTTP معمولاً سالم است؛ اگر داشبورد باز می‌شود ریستور در عمل موفق بوده.",
+            ]
+            node_en = [
+                "From log: node still controlled by another panel/client — keep a single controller.",
+                "Panel HTTP is usually healthy; if the dashboard opens, restore effectively succeeded.",
+            ]
+            if _app_version_before("4.6.27"):
+                node_fa.insert(0, "اول PGClockMG را به v4.6.27+ آپدیت کنید — این نویز دیگر ریستور را fail نمی‌کند")
+                node_en.insert(0, "Update PGClockMG to v4.6.27+ — this log noise no longer fails restore")
+            _causes(node_fa, node_en)
+        elif sig.telegram:
             fa = "پنل بالا آمد ولی لاگ تلگرام (Conflict) به‌اشتباه به‌عنوان خطای ریستور نشان داده شد."
             en = "Panel was up; TelegramConflictError log noise was mistaken for a restore failure."
-            _causes(
-                [
-                    "اول PGClockMG را به v4.6.17+ آپدیت کنید — این نویز دیگر ریستور را fail نمی‌کند",
-                    "چند instance همزمان با یک bot token getUpdates می‌زنند (سرور دیگر / webhook / چند worker)",
-                    "پنل HTTP معمولاً سالم است؛ فقط ربات تلگرام را یک‌جا نگه دارید",
-                ],
-                [
-                    "Update PGClockMG to v4.6.17+ — this log noise no longer fails restore",
-                    "Multiple instances poll getUpdates with the same bot token (other server / webhook / workers)",
-                    "Panel HTTP is usually healthy; keep the Telegram bot in one place only",
-                ],
-            )
+            tg_fa = [
+                "از روی لاگ: چند instance با یک bot token getUpdates می‌زنند — ربات را فقط یک‌جا نگه دارید.",
+                "پنل HTTP معمولاً سالم است؛ اگر داشبورد باز می‌شود ریستور در عمل موفق بوده.",
+            ]
+            tg_en = [
+                "From log: multiple instances poll getUpdates with the same bot token — keep the bot in one place.",
+                "Panel HTTP is usually healthy; if the dashboard opens, restore effectively succeeded.",
+            ]
+            if _app_version_before("4.6.17"):
+                tg_fa.insert(0, "اول PGClockMG را به v4.6.17+ آپدیت کنید — این نویز دیگر ریستور را fail نمی‌کند")
+                tg_en.insert(0, "Update PGClockMG to v4.6.17+ — this log noise no longer fails restore")
+            _causes(tg_fa, tg_en)
         elif (
             "panel port" in low
             or "not accepting connections" in low
             or "not listening" in low
             or "uvicorn_port may be unpublished" in low
+            or sig.port_map
         ):
             fa = "پنل بالا آمد ولی health روی پورت host گیر کرد (مثلاً compose روی 2087:8000)."
             en = "Panel was up; health hung probing host UVICORN_PORT (e.g. compose 2087:8000)."
-            _causes(
-                [
-                    "اول PGClockMG را به v4.6.28+ آپدیت کنید — probe روی پورت publish‌شده / داخل کانتینر",
-                    "v4.6.27 فقط 127.0.0.1:UVICORN_PORT را چک می‌کرد و وقتی map فرق داشت ۹۷٪ گیر می‌کرد",
-                    "Application startup complete در لاگ یعنی پنل داخل compose بالاست",
-                ],
-                [
-                    "Update PGClockMG to v4.6.28+ — probe published / in-container ports",
-                    "v4.6.27 only checked 127.0.0.1:UVICORN_PORT and hung near 97% when the map differed",
-                    "Application startup complete in logs means the panel is up inside compose",
-                ],
-            )
+            pm = sig.port_map or "host:container"
+            port_fa = [
+                f"از روی لاگ/compose: map پورت `{pm}` — health باید پورت publish‌شدهٔ host را بزند.",
+                "Application startup complete یعنی پنل داخل compose بالاست؛ UVICORN_PORT را با publish چک کنید.",
+            ]
+            port_en = [
+                f"From log/compose: port map `{pm}` — health must probe the published host port.",
+                "Application startup complete means the panel is up inside compose; check UVICORN_PORT vs publish.",
+            ]
+            if _app_version_before("4.6.28"):
+                port_fa.insert(0, "اول PGClockMG را به v4.6.28+ آپدیت کنید — probe روی پورت publish‌شده / داخل کانتینر")
+                port_en.insert(0, "Update PGClockMG to v4.6.28+ — probe published / in-container ports")
+            _causes(port_fa, port_en)
         else:
-            _causes(
-                [
-                    "لاگ pasarguard/panel را ببینید (نه فقط اسپم Telegram / node-control)",
-                    "multi-worker: NATS_URL و بالا بودن nats را چک کنید",
-                    "ممکن است SSL یا SQLALCHEMY_DATABASE_URL اشتباه باشد",
-                    "گیر ۹۷٪ روی port 8000: به v4.6.28+ آپدیت کنید",
-                    "اگر فقط TelegramConflict یا node controlled by another client می‌بینید، به v4.6.27+ آپدیت کنید",
-                ],
-                [
-                    "Check pasarguard/panel logs (not only Telegram / node-control spam)",
-                    "multi-worker: verify NATS_URL and that nats is up",
-                    "SSL or SQLALCHEMY_DATABASE_URL may be wrong",
-                    "Stuck at 97% on port 8000: update to v4.6.28+",
-                    "If you only see TelegramConflict or node controlled-by-another-client, update to v4.6.27+",
-                ],
-            )
+            _causes(*_panel_boot_failure_causes(raw))
     elif (
         "appears stuck on the same revision" in low
         or "exceeded maximum wait" in low
         or "e422f859847f" in low
         or "refactor sub updated" in low
+        or (sig.alembic_revision and "stuck" in low)
     ):
         fa = "Alembic روی revision سنگین گیر کرد (مثلاً refactor sub_updated_at)."
         en = "Alembic hung on a heavy revision (e.g. refactor sub_updated_at)."
-        _causes(
-            [
-                "اول PGClockMG را به v4.6.29+ آپدیت کنید — e422 با bulk SQL خودکار heal می‌شود",
-                "v4.6.28 روی ORM ردیف‌به‌ردیف users گیر می‌کرد و به batch_alter نمی‌رسید",
-                "بعد از آپدیت همان مهاجرت/ریستور را دوباره بزنید",
-            ],
-            [
-                "Update PGClockMG to v4.6.29+ — e422 is auto-healed with bulk SQL",
-                "v4.6.28 hung on row-by-row ORM users updates before batch_alter",
-                "After updating, retry the same migrate/restore",
-            ],
-        )
+        _causes(*_alembic_causes_from_log(sig))
     elif (
-        "violates foreign key" in low
+        sig.fk_constraint
+        or sig.fk_child
+        or sig.fk_parent
+        or "violates foreign key" in low
         or "foreign key constraint" in low
         or "is not present in table" in low
         or ("1452" in low and "foreign key" in low)
@@ -3983,52 +4669,43 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         fa = "دامپ بکاپ ردیف یتیم دارد (ارجاع به کاربر/نود حذف‌شده)."
         en = "Backup dump has orphan rows (references to deleted users/nodes)."
         ru = "В дампе есть осиротевшие строки (ссылки на удалённых пользователей/ноды)."
-        _causes(
-            [
-                "مثلاً notification_reminders به user_idای اشاره می‌کند که در users نیست",
-                "ویزارد جدید این ردیف‌های یتیم را هنگام ریستور حذف می‌کند — دوباره تلاش کنید",
-                "دادهٔ اصلی کاربران/نودها دست‌نخورده می‌ماند؛ فقط یادآورها/لاگ‌های یتیم پاک می‌شوند",
-            ],
-            [
-                "e.g. notification_reminders references a user_id missing from users",
-                "Newer wizard deletes these orphan rows during restore — retry",
-                "Core users/nodes stay intact; only orphan reminders/logs are removed",
-            ],
-        )
+        _causes(*_fk_causes_from_log(sig))
     elif "cannot stage" in low and ("timescaledb" in low or "postgresql" in low):
         fa = "دامپ Timescale/PostgreSQL برای تبدیل استیج نشد (سرویس مبدأ روی سرور نیست)."
         en = "Could not stage Timescale/PostgreSQL dump for conversion (source engine not running)."
-        _causes(
-            [
-                "وقتی مقصد MySQL/MariaDB است، ویزارد باید دامپ را در کانتینر موقت Timescale لود کند",
-                "در v2.6.3+ استیج موقت برای timescaledb→mysql اضافه شد — آپدیت کنید و دوباره ریستور کنید",
-                "دسترسی Docker برای pull ایمیج timescale/timescaledb لازم است",
-            ],
-            [
-                "When targeting MySQL/MariaDB, the wizard must load the dump into a temporary Timescale container",
-                "v2.6.3+ added ephemeral staging for timescaledb→mysql — update and retry",
-                "Docker access is required to pull timescale/timescaledb",
-            ],
-        )
-    elif "no such file" in low or "missing" in low or "not found" in low:
+        st_fa = [
+            "لاگ: cannot stage — برای تبدیل به MySQL/MariaDB دامپ باید در کانتینر موقت Timescale لود شود.",
+            "دسترسی Docker برای pull ایمیج timescale/timescaledb لازم است.",
+        ]
+        st_en = [
+            "Log: cannot stage — targeting MySQL/MariaDB requires loading the dump into a temporary Timescale container.",
+            "Docker access is required to pull timescale/timescaledb.",
+        ]
+        if _app_version_before("2.6.3"):
+            st_fa.insert(1, "در v2.6.3+ استیج موقت اضافه شد — آپدیت کنید و دوباره ریستور کنید.")
+            st_en.insert(1, "v2.6.3+ added ephemeral staging — update and retry.")
+        else:
+            st_fa.insert(1, "دوباره ریستور کنید — استیج موقت Timescale باید خودکار بالا بیاید.")
+            st_en.insert(1, "Retry restore — ephemeral Timescale staging should start automatically.")
+        if sig.docker_daemon or sig.docker_pull or sig.disk_full:
+            extra_fa, extra_en = _docker_causes_from_log(sig)
+            st_fa.extend(extra_fa[:2])
+            st_en.extend(extra_en[:2])
+        _causes(st_fa, st_en)
+    elif sig.missing_path or (
+        ("no such file" in low or "not found" in low)
+        and not sig.docker_pull
+        and "manifest" not in low
+    ):
         fa = "فایل دامپ یا دیتابیس منبع پیدا نشد."
         en = "Source dump/database file was not found."
-        _causes(
-            ["بکاپ ناقص است", "مسیر /var/lib/pasarguard یا دامپ zip خراب است"],
-            ["Backup is incomplete", "/var/lib/pasarguard path or the zip dump is corrupt"],
-        )
-    elif "docker" in low or "compose" in low:
+        _causes(*_missing_file_causes_from_log(sig))
+    elif sig.docker_daemon or sig.docker_pull or "docker" in low or "compose" in low:
         fa = "مشکل در Docker / docker compose هنگام ریستور."
         en = "Docker / compose problem during restore."
-        _causes(
-            ["سرویس Docker بالا نیست", "کانتینر دیتابیس استارت نمی‌شود"],
-            ["Docker service is not running", "Database container fails to start"],
-        )
+        _causes(*_docker_causes_from_log(sig))
     else:
-        _causes(
-            ["جزئیات فنی در لاگ آمده است", f"پیام: {raw[:240]}"],
-            ["Technical details are in the log", f"Message: {raw[:240]}"],
-        )
+        _causes(*_generic_causes_from_log(sig))
 
     if backup_db and target_db and backup_db != target_db:
         fa += f" (بکاپ={backup_db} → نصب={target_db})"
@@ -4036,8 +4713,10 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
 
     if not causes_en and causes_fa:
         causes_en = list(causes_fa)
-    # Prefer engine-accurate summary in detail when auth tips already explain it —
-    # avoid surfacing bare SASL/SCRAM strings as the "technical" line.
+    causes_fa, causes_en = _filter_obsolete_version_tips(causes_fa, causes_en)
+    if not causes_fa:
+        causes_fa, causes_en = _generic_causes_from_log(sig)
+        causes_fa, causes_en = _filter_obsolete_version_tips(causes_fa, causes_en)
     detail = raw
     if causes_fa and (
         "sasl" in low
@@ -5313,6 +5992,12 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         # Multi-worker stacks need NATS ready before panel workers boot.
         from app.services.multiworker_stack import start_panel_stack
 
+        from app.services.pasarguard_ops import (
+            build_panel_boot_warning,
+            is_panel_config_boot_failure,
+        )
+
+        panel_boot_warning: dict | None = None
         ok, out = await start_panel_stack(job, force_recreate=True)
         if not ok:
             job.log(f"compose recreate warning: {out[-1500:]}")
@@ -5325,10 +6010,20 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                 await _align_timescaledb_image(job, mismatch[0], wipe_data=False)
                 ok, out = await start_panel_stack(job, force_recreate=True)
             if not ok:
-                raise RuntimeError(
-                    "PasarGuard failed to start after restore (force-recreate):\n"
-                    f"{out[-2000:]}"
-                )
+                start_blob = (out or "")[-2000:]
+                if is_panel_config_boot_failure(start_blob):
+                    # Do not abort before data verify — SSL/panel-config crash
+                    # is a success+warning once rows are confirmed.
+                    panel_boot_warning = build_panel_boot_warning(start_blob)
+                    job.log(
+                        "WARNING: panel force-recreate failed due to panel config "
+                        "(e.g. SSL); continuing to verify restored data…"
+                    )
+                else:
+                    raise RuntimeError(
+                        "PasarGuard failed to start after restore (force-recreate):\n"
+                        f"{start_blob}"
+                    )
         from app.services.multiworker_stack import detect_multiworker_stack
 
         boot_wait = 20 if detect_multiworker_stack().get("orchestrate") else 8
@@ -5400,7 +6095,21 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
 
         from app.services.pasarguard_ops import verify_pasarguard_healthy
 
-        await verify_pasarguard_healthy(mini)
+        try:
+            await verify_pasarguard_healthy(mini)
+            # Panel recovered after a soft start warning (e.g. brief SSL probe noise).
+            panel_boot_warning = None
+        except Exception as e:
+            # Data already verified above — panel SSL/config crash is a warning.
+            if is_panel_config_boot_failure(e):
+                panel_boot_warning = build_panel_boot_warning(e)
+                job.log(
+                    "WARNING: restored data verified, but PasarGuard panel did not "
+                    f"become healthy ({panel_boot_warning.get('kind')}): "
+                    f"{panel_boot_warning.get('en')}"
+                )
+            else:
+                raise
 
         access = get_panel_access_info()
         access["nodes_disabled"] = bool(params.get("disable_nodes_after_restore"))
@@ -5415,6 +6124,11 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         access["copy_report"] = copy_report
         access["verified_counts"] = verified
         access["transfer_summary"] = build_transfer_summary(verified or copy_stats)
+        if panel_boot_warning:
+            access["panel_boot_warning"] = panel_boot_warning
+            access["panel_healthy"] = False
+        else:
+            access["panel_healthy"] = True
         return access
     finally:
         shutil.rmtree(work, ignore_errors=True)

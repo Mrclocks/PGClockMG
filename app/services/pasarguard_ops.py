@@ -40,6 +40,147 @@ FAIL_LOG_PATTERNS = (
     "column \"user_template_id\" of relation \"next_plans\" already exists",
 )
 
+# Panel-config boot failures: data restore/migrate may still be valid.
+# Soft-success paths use these only AFTER data verification succeeded.
+_PANEL_CONFIG_BOOT_MARKERS = (
+    "key_values_mismatch",
+    "key values mismatch",
+    "validate_cert_and_key",
+    "ssl error:",
+    "ssl.sslerror",
+    "x509:",
+    "ssl certificate file",
+    "uvicorn_ssl_certfile",
+    "uvicorn_ssl_keyfile",
+    "load_cert_chain",
+)
+_PANEL_CONFIG_BOOT_BLOCKERS = (
+    "password authentication failed",
+    "sasl authentication failed",
+    "access denied for user",
+    "panel database is empty",
+    "restore verification failed",
+    "data incomplete",
+    "migration incomplete",
+)
+
+
+def is_panel_config_boot_failure(text: str | Exception | None) -> bool:
+    """True when logs show a PasarGuard panel-config boot crash (e.g. SSL), not a DB data failure."""
+    low = str(text or "").lower()
+    if not low:
+        return False
+    if any(x in low for x in _PANEL_CONFIG_BOOT_BLOCKERS):
+        return False
+    if any(x in low for x in _PANEL_CONFIG_BOOT_MARKERS):
+        return True
+    if (".pem" in low or "/certs/" in low) and any(
+        x in low for x in ("no such file", "does not exist", "ssl")
+    ):
+        return True
+    return False
+
+
+def build_panel_boot_warning(text: str | Exception | None) -> dict:
+    """Bilingual warning payload when data is OK but the panel failed to boot."""
+    raw = str(text or "")
+    low = raw.lower()
+    detail = raw[-1200:] if len(raw) > 1200 else raw
+    if "key_values_mismatch" in low or "key values mismatch" in low:
+        kind = "ssl_key_mismatch"
+        fa = (
+            "دیتابیس با موفقیت ریستور/منتقل شد، ولی پنل PasarGuard "
+            "به‌خاطر جفت نبودن گواهی و کلید SSL بالا نیامد."
+        )
+        en = (
+            "Database restore/transfer succeeded, but PasarGuard did not start: "
+            "SSL certificate and private key do not match."
+        )
+        ru = (
+            "Данные восстановлены, но PasarGuard не запустился: "
+            "SSL-сертификат и ключ не совпадают."
+        )
+        causes_fa = [
+            "لاگ: KEY_VALUES_MISMATCH — فایل cert و key جفت هم نیستند.",
+            "مسیرهای UVICORN_SSL_CERTFILE و UVICORN_SSL_KEYFILE را با فایل‌های واقعی زیر /var/lib/pasarguard/certs چک کنید.",
+            "یا موقتاً SSL پنل را خاموش کنید تا با HTTP بالا بیاید، بعد گواهی درست بگذارید.",
+        ]
+        causes_en = [
+            "Log: KEY_VALUES_MISMATCH — cert and key files are not a matching pair.",
+            "Align UVICORN_SSL_CERTFILE / UVICORN_SSL_KEYFILE with real files under /var/lib/pasarguard/certs.",
+            "Or temporarily disable panel SSL so it boots over HTTP, then install a matching cert pair.",
+        ]
+    elif (".pem" in low or "ssl certificate file" in low or "/certs/" in low) and any(
+        x in low for x in ("no such file", "does not exist", "not restored", "certs restore")
+    ):
+        kind = "ssl_missing"
+        fa = (
+            "دیتابیس با موفقیت ریستور/منتقل شد، ولی پنل PasarGuard "
+            "به‌خاطر نبود فایل گواهی SSL بالا نیامد."
+        )
+        en = (
+            "Database restore/transfer succeeded, but PasarGuard did not start: "
+            "SSL certificate file is missing."
+        )
+        ru = (
+            "Данные восстановлены, но PasarGuard не запустился: "
+            "файл SSL-сертификата отсутствует."
+        )
+        causes_fa = [
+            "فایل cert/key زیر /var/lib/pasarguard/certs پیدا نشد یا در .env مپ نشده.",
+            "پوشه certs بکاپ را بررسی کنید یا SSL را موقتاً خاموش کنید.",
+        ]
+        causes_en = [
+            "Cert/key under /var/lib/pasarguard/certs is missing or not mapped in .env.",
+            "Check the backup certs folder, or temporarily disable SSL.",
+        ]
+    else:
+        kind = "ssl_config"
+        fa = (
+            "دیتابیس با موفقیت ریستور/منتقل شد، ولی پنل PasarGuard "
+            "به‌خاطر مشکل تنظیمات SSL بالا نیامد."
+        )
+        en = (
+            "Database restore/transfer succeeded, but PasarGuard did not start "
+            "due to an SSL configuration problem."
+        )
+        ru = (
+            "Данные восстановлены, но PasarGuard не запустился "
+            "из‑за проблемы SSL-конфигурации."
+        )
+        causes_fa = [
+            "لاگ پنل را برای خطای SSL ببینید (نه فقط اسپم Telegram/node).",
+            "مسیر و جفت بودن UVICORN_SSL_* را چک کنید یا SSL را موقتاً خاموش کنید.",
+        ]
+        causes_en = [
+            "Check the panel log for the SSL error (not only Telegram/node spam).",
+            "Verify UVICORN_SSL_* paths/pair, or temporarily disable SSL.",
+        ]
+    return {
+        "kind": kind,
+        "fa": fa,
+        "en": en,
+        "ru": ru,
+        "causes_fa": causes_fa,
+        "causes_en": causes_en,
+        "causes_ru": causes_en,
+        "detail": detail,
+    }
+
+
+def stash_panel_boot_warning(migrator, warning: dict) -> None:
+    """Attach a panel-boot warning to the job without failing the migrate/restore."""
+    if not isinstance(warning, dict):
+        return
+    job = getattr(migrator, "job", None)
+    if job is not None:
+        job.panel_boot_warning = warning
+        if isinstance(getattr(job, "result", None), dict):
+            job.result = {**job.result, "panel_boot_warning": warning}
+    params = getattr(migrator, "params", None)
+    if isinstance(params, dict):
+        params["_panel_boot_warning"] = warning
+
 # Brief docker/DB bounce lines — do not hard-fail health when the panel port is up.
 # Still surfaced in snippets when paired with "Application startup failed".
 TRANSIENT_CONNECT_PATTERNS = (
@@ -3590,10 +3731,28 @@ async def safe_start_pasarguard(migrator, *, health_max_wait: int | None = None)
     from app.services.multiworker_stack import start_panel_stack
 
     ok, out = await start_panel_stack(migrator.job, force_recreate=True)
-    if not ok:
-        raise RuntimeError(f"PasarGuard start failed:\n{(out or '')[-2000:]}")
+    start_blob = (out or "")[-2000:]
+    if not ok and not is_panel_config_boot_failure(start_blob):
+        raise RuntimeError(f"PasarGuard start failed:\n{start_blob}")
+    if not ok and is_panel_config_boot_failure(start_blob):
+        migrator.job.log(
+            "WARNING: panel stack start failed due to panel config "
+            "(e.g. SSL) — will still check health / soft-warn if data is ready"
+        )
+        stash_panel_boot_warning(migrator, build_panel_boot_warning(start_blob))
     wait = 180 if health_max_wait is None else int(health_max_wait)
-    await verify_pasarguard_healthy(migrator, max_wait=wait)
+    try:
+        await verify_pasarguard_healthy(migrator, max_wait=wait)
+    except Exception as e:
+        if is_panel_config_boot_failure(e):
+            warning = build_panel_boot_warning(e)
+            migrator.job.log(
+                "WARNING: data path finished but PasarGuard panel did not become "
+                f"healthy ({warning.get('kind')}): {warning.get('en')}"
+            )
+            stash_panel_boot_warning(migrator, warning)
+            return
+        raise
 
 
 async def stamp_alembic_head(migrator) -> bool:
