@@ -206,7 +206,11 @@ def analyze_upload_directory(upload_dir: Path, vault_scope: str | None = None) -
         env_text = Path(paths["env"]).read_text(encoding="utf-8", errors="ignore")
 
     detected_source_db = detect_db_from_env(env_text) if env_text else None
-    if not detected_source_db:
+    # A sqlite dump without a .sql file is the source of truth. Stale .env left
+    # from an old MySQL/PG install must not flip detection (or demand passwords).
+    if paths["sqlite"] and not paths["sql"]:
+        detected_source_db = "sqlite"
+    elif not detected_source_db:
         if paths["sqlite"]:
             detected_source_db = "sqlite"
         elif paths.get("hiddify_json") or panel_hint == "hiddify":
@@ -227,8 +231,11 @@ def analyze_upload_directory(upload_dir: Path, vault_scope: str | None = None) -
                 pass
 
     env_summary = extract_env_summary(env_text) if env_text else None
+    # SQLite never has a DB password — skip candidate extraction entirely.
     password_candidates = (
-        extract_env_password_candidates(env_text, detected_source_db) if env_text else []
+        []
+        if detected_source_db == "sqlite" or not env_text
+        else extract_env_password_candidates(env_text, detected_source_db)
     )
 
     env_mapping: list[dict] = []

@@ -32,6 +32,8 @@ def test_nested_marzban_zip_sqlite():
         assert result["panel_hint"] == "marzban"
         assert result["detected_source_db"] == "sqlite"
         assert result["backup_ok"] is True
+        assert result["password_candidates"] == []
+        assert result["mysql_password_found"] is False
         assert result["categories"].get("database_sqlite", 0) >= 1
         assert result["has_xray_config"] is True
         assert any(m["from"] == "V2RAY_SUBSCRIPTION_TEMPLATE" for m in result["env_mapping"])
@@ -115,6 +117,26 @@ def test_plain_sqlite_still_marzban_hint():
         print("OK: plain sqlite marzban")
 
 
+def test_sqlite_dump_ignores_stale_mysql_env_passwords():
+    """SQLite file + stale MySQL .env must detect sqlite and never ask for passwords."""
+    with tempfile.TemporaryDirectory() as tmp:
+        upload_dir = Path(tmp)
+        data = upload_dir / "extracted" / "var" / "lib" / "marzban"
+        data.mkdir(parents=True)
+        (data / "db.sqlite3").write_bytes(b"sqlite-data")
+        (data / ".env").write_text(
+            'SQLALCHEMY_DATABASE_URL = "mysql+pymysql://root:sec@127.0.0.1/marzban"\n'
+            'MYSQL_ROOT_PASSWORD = "sec"\n',
+            encoding="utf-8",
+        )
+        result = analyze_upload_directory(upload_dir)
+        assert result["detected_source_db"] == "sqlite"
+        assert result["backup_ok"] is True
+        assert result["password_candidates"] == []
+        assert result["mysql_password_found"] is False
+        print("OK: sqlite dump wins over stale mysql .env")
+
+
 if __name__ == "__main__":
     test_nested_marzban_zip_sqlite()
     test_mysql_sql_dump()
@@ -122,4 +144,5 @@ if __name__ == "__main__":
     test_xui_db_in_extracted_zip()
     test_marzban_not_misdetected_as_xui()
     test_plain_sqlite_still_marzban_hint()
+    test_sqlite_dump_ignores_stale_mysql_env_passwords()
     print("\nAll backup analyzer tests passed.")

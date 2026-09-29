@@ -203,12 +203,14 @@ def save_bundle_slot(
                 from app.services import secret_vault
                 from app.services.env_migration import extract_env_password_candidates
 
-                cands = extract_env_password_candidates(text, source_db)
-                if cands:
-                    secret_vault.put_candidates(
-                        secret_vault.bundle_scope(bundle_id), cands, db_type=source_db,
-                    )
-                    slot_meta["password_candidate_keys"] = [c["key"] for c in cands]
+                # SQLite has no DB password — never seed vault/UI from leftover keys.
+                if (source_db or "").lower() != "sqlite":
+                    cands = extract_env_password_candidates(text, source_db)
+                    if cands:
+                        secret_vault.put_candidates(
+                            secret_vault.bundle_scope(bundle_id), cands, db_type=source_db,
+                        )
+                        slot_meta["password_candidate_keys"] = [c["key"] for c in cands]
             except Exception:
                 pass
         elif slot == "xray_config":
@@ -352,8 +354,15 @@ def validate_bundle(
         analysis = db_meta.get("analysis")
 
     # Enrich scrubbed analysis with env-slot password metadata (values stay in vault).
+    # Never attach password candidates for sqlite sources — SQLite has no DB password.
     env_meta = manifest["slots"].get("env")
-    if env_meta and env_meta.get("ok") and env_meta.get("password_candidate_keys"):
+    analysis_db = (analysis or {}).get("detected_source_db") or source_db
+    if (
+        (analysis_db or "").lower() != "sqlite"
+        and env_meta
+        and env_meta.get("ok")
+        and env_meta.get("password_candidate_keys")
+    ):
         from app.services import secret_vault
         from app.services.env_migration import public_password_candidates
 

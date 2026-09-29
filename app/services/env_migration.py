@@ -105,8 +105,13 @@ def extract_env_password_candidates(text: str, db_type: str | None = None) -> li
     Named keys (MYSQL_ROOT_PASSWORD / DB_PASSWORD / …) are preferred. When the
     password only exists inside ``SQLALCHEMY_DATABASE_URL`` (common PasarGuard
     installs), that URL password is also surfaced so the wizard can auto-fill.
+
+    SQLite has no database password — never surface candidates for it (stale
+    MYSQL_*/POSTGRES_* leftovers in a sqlite .env must not block the wizard).
     """
     if not text:
+        return []
+    if (db_type or "").lower() == "sqlite":
         return []
 
     keys: list[str] = []

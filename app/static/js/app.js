@@ -129,8 +129,10 @@ function pwdConfirmedMap(role) {
 
 function getPasswordRows(role) {
   const db = role === 'source' ? state.sourceDb : getDetectedTargetDb();
+  // SQLite (and unknown/empty) never need password rows — ignore stale candidates.
+  if (!dbNeedsPassword(db)) return [];
   let rows = role === 'source' ? state.sourcePasswordCandidates : state.targetPasswordCandidates;
-  if (!rows?.length && dbNeedsPassword(db)) {
+  if (!rows?.length) {
     const key = db === 'mysql' || db === 'mariadb'
       ? 'MYSQL_ROOT_PASSWORD'
       : db === 'postgresql' || db === 'timescaledb'
@@ -186,6 +188,9 @@ function hasDbCredentials(role) {
 
 function getSourcePasswordCandidates() {
   const analysis = state.bundleStatus?.analysis || state.uploadInfo?.analysis;
+  const detected = analysis?.detected_source_db || state.sourceDb;
+  // SQLite backups have no DB password — never surface live/stale .env secrets.
+  if (!dbNeedsPassword(detected)) return [];
   if (analysis?.password_candidates?.length) return analysis.password_candidates;
   if (state.systemCheck?.marzban_password_candidates?.length) {
     return state.systemCheck.marzban_password_candidates;
@@ -283,18 +288,31 @@ async function hydratePasswordsFromVault(role) {
   }
 }
 
+function clearSourcePasswordState() {
+  state.sourcePasswordCandidates = [];
+  state.sourcePwdConfirmed = {};
+  state.sourcePwdValues = {};
+}
+
 function renderPasswordCandidates(role, { skipHydrate = false } = {}) {
   const isSource = role === 'source';
   const container = document.getElementById(isSource ? 'sourcePasswordCandidates' : 'targetPasswordCandidates');
   if (!container) return;
 
   const db = isSource ? state.sourceDb : getDetectedTargetDb();
+  if (!dbNeedsPassword(db)) {
+    if (isSource) clearSourcePasswordState();
+    container.classList.add('hidden');
+    container.innerHTML = '';
+    return;
+  }
+
   let candidates = isSource ? getSourcePasswordCandidates() : getTargetPasswordCandidates();
   // Prefer hydrated state rows when analysis is empty but vault seeded candidates.
   if (!candidates.length) {
     candidates = isSource ? state.sourcePasswordCandidates : state.targetPasswordCandidates;
   }
-  if (!candidates.length && dbNeedsPassword(db)) {
+  if (!candidates.length) {
     const key = db === 'mysql' || db === 'mariadb'
       ? 'MYSQL_ROOT_PASSWORD'
       : db === 'postgresql' || db === 'timescaledb'
@@ -308,12 +326,6 @@ function renderPasswordCandidates(role, { skipHydrate = false } = {}) {
 
   const values = pwdValuesMap(role);
   const confirmed = pwdConfirmedMap(role);
-
-  if (!dbNeedsPassword(db)) {
-    container.classList.add('hidden');
-    container.innerHTML = '';
-    return;
-  }
 
   container.innerHTML = `
     <div class="pwd-candidates-title">${t('dbCred.confirmTitle')}</div>
@@ -424,6 +436,7 @@ function updateSourceCredentialsVisibility() {
   const box = document.getElementById('sourceDbCredentials');
   if (!box) return;
   // Hiddify JSON migrate does not read source MySQL — no password UI
+  // SQLite never has a DB password — hide and clear any stale confirm state.
   const needs = dbNeedsPassword(state.sourceDb)
     && state.selectedPanel?.id !== 'hiddify';
   box.classList.toggle('hidden', !needs);
@@ -432,6 +445,13 @@ function updateSourceCredentialsVisibility() {
     if (portEl && !portEl.value) portEl.placeholder = defaultDbPort(state.sourceDb);
     applySourceEnvDefaults();
     renderPasswordCandidates('source');
+  } else {
+    clearSourcePasswordState();
+    const pwdBox = document.getElementById('sourcePasswordCandidates');
+    if (pwdBox) {
+      pwdBox.classList.add('hidden');
+      pwdBox.innerHTML = '';
+    }
   }
 }
 
@@ -648,8 +668,12 @@ function renderUploadResourceCard() {
 
 function detectMarzbanSourceDb() {
   const analysis = state.bundleStatus?.analysis || state.uploadInfo?.analysis;
+  // Uploaded backup wins over live Marzban install engine.
   if (analysis?.detected_source_db) return analysis.detected_source_db;
-  if (state.prereqData?.detected?.upload_source_db) return state.prereqData.detected.upload_source_db;
+  if (state.prereqData?.detected?.upload_source_db) {
+    return state.prereqData.detected.upload_source_db;
+  }
+  // No upload yet — fall back to live install detection.
   if (state.detected?.marzban_db) return state.detected.marzban_db;
   if (state.detected?.marzban && (state.systemCheck?.marzban_db || state.detected.marzban_db)) {
     return state.systemCheck?.marzban_db || state.detected.marzban_db;
@@ -814,8 +838,16 @@ function canProceedStep2() {
   } else if (!state.sourceDb) {
     return t('block.noSourceDb');
   }
-  const needsPwd = dbNeedsPassword(state.sourceDb);
+  // Prefer upload analysis when it says sqlite — never demand source passwords.
   const analysis = state.bundleStatus?.analysis || state.uploadInfo?.analysis;
+  if (analysis?.detected_source_db === 'sqlite') {
+    state.sourceDb = 'sqlite';
+  }
+  const needsPwd = dbNeedsPassword(state.sourceDb);
+  if (!needsPwd) {
+    // SQLite / no-password engines: drop any leftover confirm gate state.
+    clearSourcePasswordState();
+  }
   if (
     needsPwd
     && panel?.id !== 'hiddify'
@@ -1267,6 +1299,7 @@ function renderSourceDbs() {
 
 function selectSourceDb(db) {
   state.sourceDb = db;
+  if (!dbNeedsPassword(db)) clearSourcePasswordState();
   document.querySelectorAll('#sourceDbGrid .db-card').forEach(c => {
     c.classList.toggle('selected', c.dataset.db === db);
   });
@@ -2297,6 +2330,10 @@ async function uploadSlotFile(slot, file) {
 function applyBundleAnalysis(bs) {
   const a = bs?.analysis;
   if (!a) return;
+  if (a.detected_source_db === 'sqlite') {
+    state.sourceDb = 'sqlite';
+    clearSourcePasswordState();
+  }
   if (state.selectedPanel?.id === 'marzban') {
     renderMarzbanDetectedSource();
     if (a.detected_source_db) state.sourceDb = a.detected_source_db;
