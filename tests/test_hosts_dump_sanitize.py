@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.services.hosts_dump_sanitize import (
     build_hosts_insert_sql,
+    build_hosts_per_row_insert_sql,
     count_hosts_rows_in_pg_dump,
     extract_hosts_rows_from_pg_dump,
     find_hosts_dump,
@@ -118,7 +119,27 @@ def test_build_insert_retargets_inbound_tag():
         assert "cdn.example.com" in sql
         assert "missing-tag" not in sql  # retargeted to VLESS-TCP
         assert sql.count("VLESS-TCP") >= 2
+        assert "BEGIN;" in sql and "COMMIT;" in sql
     print("OK: build_insert_retargets_inbound_tag")
+
+
+def test_build_per_row_insert_is_separate_statements():
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "dump.sql"
+        src.write_text(_copy_dump(), encoding="utf-8")
+        _cols, rows = extract_hosts_rows_from_pg_dump(src)
+        sql = build_hosts_per_row_insert_sql(
+            rows,
+            ["id", "remark", "address", "port", "inbound_tag", "security",
+             "fingerprint", "allowinsecure", "priority"],
+            inbound_tags=["VLESS-TCP"],
+        )
+        assert sql is not None
+        # Clear commits before row inserts so one bad INSERT cannot roll back DELETE.
+        assert sql.index("COMMIT;") < sql.index("INSERT INTO public.hosts")
+        assert sql.count("INSERT INTO public.hosts") == 2
+        assert "missing-tag" not in sql
+    print("OK: build_per_row_insert_is_separate_statements")
 
 
 def test_find_hosts_dump_scans_candidates():
@@ -148,6 +169,10 @@ def test_recover_helper_wired():
     from app.services import pg_restore as mod
 
     assert callable(getattr(mod, "_recover_hosts_if_missing", None))
+    assert callable(getattr(mod, "psql_output_has_sql_error", None))
+    assert mod.psql_output_has_sql_error("NOTICE: ok\n") is False
+    assert mod.psql_output_has_sql_error("ERROR:  insert or update on table \"hosts\"") is True
+    assert mod.psql_output_has_sql_error("DETAIL:  Key is not present\n") is False
     print("OK: recover_helper_wired")
 
 
@@ -155,6 +180,7 @@ if __name__ == "__main__":
     test_extract_copy_with_and_without_column_list()
     test_strip_hosts_keeps_other_tables()
     test_build_insert_retargets_inbound_tag()
+    test_build_per_row_insert_is_separate_statements()
     test_find_hosts_dump_scans_candidates()
     test_sanitize_hosts_copy_row_bools()
     test_recover_helper_wired()
