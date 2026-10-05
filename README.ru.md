@@ -1,4 +1,4 @@
-> 🚀 **`v4.8.2`** — динамические причины restore + success с предупреждением SSL панели; чище UI переноса
+> 🚀 **`v4.8.3`** — hosts ensure: ошибки INSERT, per-row retry, partial OK
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
