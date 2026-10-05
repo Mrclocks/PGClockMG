@@ -1,4 +1,4 @@
-> 🚀 **`v4.8.2`** — dynamic restore causes + success-with-warning for panel SSL; cleaner transfer UI
+> 🚀 **`v4.8.3`** — hosts ensure: surface INSERT errors, per-row retry, partial OK
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

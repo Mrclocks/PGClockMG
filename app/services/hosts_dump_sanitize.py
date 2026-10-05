@@ -454,13 +454,10 @@ def strip_hosts_copy_data_from_pg_dump(src: Path, dest: Path) -> int:
     return skipped
 
 
-def build_hosts_insert_sql(
+def _hosts_use_columns(
     rows: list[dict[str, Any]],
     target_columns: list[str],
-    *,
-    inbound_tags: list[str] | None = None,
-) -> str | None:
-    """Build ``DELETE`` + ``INSERT`` SQL for hosts using live target columns."""
+) -> list[str] | None:
     if not rows or not target_columns:
         return None
     defaults = TARGET_INSERT_DEFAULTS.get("hosts", {})
@@ -471,33 +468,53 @@ def build_hosts_insert_sql(
         c for c in target_columns
         if c in present or c in defaults
     ]
-    if not use_cols:
-        return None
+    return use_cols or None
 
+
+def _retarget_host_inbound_tag(
+    row: dict[str, Any],
+    *,
+    tags: list[str],
+    default_tag: str | None,
+    tag_fold: dict[str, str],
+) -> dict[str, Any]:
+    """Map dump inbound_tag onto a live inbounds.tag when possible (FK-safe)."""
+    row = dict(row)
+    if "inbound_tag" not in row and not default_tag:
+        return row
+    tag = row.get("inbound_tag")
+    if tag is not None:
+        tag_s = str(tag).strip()
+        if tags:
+            if tag_s not in tags:
+                mapped = tag_fold.get(tag_s.lower()) if tag_s else None
+                row["inbound_tag"] = mapped or default_tag
+            else:
+                row["inbound_tag"] = tag_s
+        elif not tag_s and default_tag:
+            row["inbound_tag"] = default_tag
+        else:
+            row["inbound_tag"] = tag_s or tag
+    elif default_tag:
+        row["inbound_tag"] = default_tag
+    return row
+
+
+def _hosts_values_tuples(
+    rows: list[dict[str, Any]],
+    use_cols: list[str],
+    *,
+    inbound_tags: list[str] | None = None,
+) -> list[str]:
+    defaults = TARGET_INSERT_DEFAULTS.get("hosts", {})
     tags = [t for t in (inbound_tags or []) if t]
     default_tag = tags[0] if tags else None
     tag_fold = {t.lower().strip(): t for t in tags}
-
-    parts: list[str] = [
-        "BEGIN;",
-        "DELETE FROM public.hosts;",
-    ]
     values_sql: list[str] = []
     for row in rows:
-        row = dict(row)
-        if "inbound_tag" in use_cols:
-            tag = row.get("inbound_tag")
-            if tag is not None:
-                tag_s = str(tag).strip()
-                if tags:
-                    if tag_s not in tags:
-                        mapped = tag_fold.get(tag_s.lower())
-                        row["inbound_tag"] = mapped or default_tag
-                elif not tag_s and default_tag:
-                    row["inbound_tag"] = default_tag
-            elif default_tag:
-                row["inbound_tag"] = default_tag
-
+        row = _retarget_host_inbound_tag(
+            row, tags=tags, default_tag=default_tag, tag_fold=tag_fold,
+        ) if "inbound_tag" in use_cols else dict(row)
         vals = []
         for col in use_cols:
             if col in row and row[col] is not None:
@@ -509,7 +526,27 @@ def build_hosts_insert_sql(
             else:
                 vals.append("NULL")
         values_sql.append("(" + ", ".join(vals) + ")")
+    return values_sql
 
+
+def build_hosts_insert_sql(
+    rows: list[dict[str, Any]],
+    target_columns: list[str],
+    *,
+    inbound_tags: list[str] | None = None,
+) -> str | None:
+    """Build ``DELETE`` + bulk ``INSERT`` SQL for hosts using live target columns."""
+    use_cols = _hosts_use_columns(rows, target_columns)
+    if not use_cols:
+        return None
+    values_sql = _hosts_values_tuples(rows, use_cols, inbound_tags=inbound_tags)
+    if not values_sql:
+        return None
+
+    parts: list[str] = [
+        "BEGIN;",
+        "DELETE FROM public.hosts;",
+    ]
     col_list = ", ".join(f'"{c}"' for c in use_cols)
     chunk = 50
     for i in range(0, len(values_sql), chunk):
@@ -520,6 +557,36 @@ def build_hosts_insert_sql(
             + ";"
         )
     parts.append("COMMIT;")
+    return "\n".join(parts) + "\n"
+
+
+def build_hosts_per_row_insert_sql(
+    rows: list[dict[str, Any]],
+    target_columns: list[str],
+    *,
+    inbound_tags: list[str] | None = None,
+) -> str | None:
+    """Build clear + one INSERT per row (separate statements, no single txn).
+
+    Used as a best-effort retry after a bulk INSERT fails: good rows can land
+    even when one bad row would abort an all-or-nothing transaction. Call with
+    ``ON_ERROR_STOP=0`` and then COUNT — do not trust exit code alone.
+    """
+    use_cols = _hosts_use_columns(rows, target_columns)
+    if not use_cols:
+        return None
+    values_sql = _hosts_values_tuples(rows, use_cols, inbound_tags=inbound_tags)
+    if not values_sql:
+        return None
+
+    col_list = ", ".join(f'"{c}"' for c in use_cols)
+    parts: list[str] = [
+        "BEGIN;",
+        "DELETE FROM public.hosts;",
+        "COMMIT;",
+    ]
+    for tup in values_sql:
+        parts.append(f'INSERT INTO public.hosts ({col_list}) VALUES\n{tup};')
     return "\n".join(parts) + "\n"
 
 

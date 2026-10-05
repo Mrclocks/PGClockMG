@@ -1122,6 +1122,27 @@ def test_explain_mysql_to_mysql_access_denied_no_sasl_or_timescale():
     print("OK: mysql→mysql auth explain has no SASL/Timescale")
 
 
+def test_explain_hosts_ensure_failed_surfaces_insert_cause():
+    exc = RuntimeError(
+        "Hosts ensure failed — still 0 rows after reload from db-001.sql "
+        "(dump had 12, expected ≥12). Users/inbounds alone are not a successful restore.\n"
+        "Last INSERT error:\n"
+        'ERROR:  insert or update on table "hosts" violates foreign key constraint\n'
+        'DETAIL:  Key (inbound_tag)=(old-tag) is not present in table "inbounds".'
+    )
+    info = explain_restore_error(exc, "timescaledb", "timescaledb")
+    en = (info.get("en") or "").lower()
+    fa = info.get("fa") or ""
+    blob = "\n".join(info.get("causes_fa") or [])
+    assert "host" in en
+    assert "هاست" in fa or "host" in fa.lower()
+    assert "12" in blob
+    assert "inbound_tag" in blob or "ERROR" in blob or "INSERT" in blob
+    # Must not fall through to generic orphan-FK tip as the only cause.
+    assert "Hosts ensure" in blob or "hosts" in blob.lower() or "دامپ" in blob
+    print("OK: explain hosts ensure failed")
+
+
 def test_build_transfer_summary_orders_known_tables():
     from app.services.pg_restore import build_transfer_summary
 

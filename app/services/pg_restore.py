@@ -969,6 +969,18 @@ def extract_psql_errors(text: str, limit: int = 12) -> str:
     return "\n".join(lines[:limit])
 
 
+def psql_output_has_sql_error(text: str) -> bool:
+    """True when psql stdout contains a real SQL ERROR/FATAL (not just noise).
+
+    Critical for ``ON_ERROR_STOP=0`` retries: psql may exit 0 while the
+    transaction aborted and zero rows were committed.
+    """
+    for ln in (text or "").splitlines():
+        if re.match(r"^(ERROR|FATAL|PANIC):", ln.strip(), re.I):
+            return True
+    return False
+
+
 # CREATE EXTENSION timescaledb inserts seed rows (install_timestamp, default
 # bgw jobs, …). Logical dumps COPY the same PKs and abort with metadata_pkey /
 # bgw_job_pkey on builds without the newer upsert trigger. Clear those seeds
@@ -4658,6 +4670,47 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         en = "Alembic hung on a heavy revision (e.g. refactor sub_updated_at)."
         _causes(*_alembic_causes_from_log(sig))
     elif (
+        "hosts ensure failed" in low
+        or ("still 0 rows after reload" in low and "host" in low)
+        or ("dump had" in low and "expected" in low and "hosts" in low)
+    ):
+        fa = "هاست‌های اشتراک بعد از ریستور به دیتابیس زنده برنگشتند."
+        en = "Subscription hosts did not land in the live database after restore."
+        ru = "Hosts подписок не восстановились в живую БД после restore."
+        dump_n = ""
+        m_dump = re.search(r"dump had\s+(\d+)", raw, re.I)
+        if m_dump:
+            dump_n = m_dump.group(1)
+        hosts_fa = [
+            (
+                f"لاگ: دامپ {dump_n} ردیف hosts داشت ولی جدول زنده بعد از reload صفر ماند."
+                if dump_n
+                else "لاگ: Hosts ensure — دامپ hosts داشت ولی جدول زنده صفر ماند."
+            ),
+            "معمولاً INSERT به‌خاطر inbound_tag / تفاوت اسکیما / FK رد می‌شود؛ جزئیات ERROR همان جاب را ببینید.",
+            "Users/inbounds alone کافی نیست — بدون hosts ریستور موفق حساب نمی‌شود.",
+        ]
+        hosts_en = [
+            (
+                f"Log: dump had {dump_n} hosts rows but live table stayed 0 after reload."
+                if dump_n
+                else "Log: Hosts ensure — dump had hosts but live table stayed empty."
+            ),
+            "Usually INSERT fails on inbound_tag / schema drift / FK — check ERROR lines in the same job log.",
+            "Users/inbounds alone are not enough — restore requires hosts rows.",
+        ]
+        # Surface embedded SQL error snippet when present after the banner.
+        err_snip = ""
+        for marker in ("ERROR:", "FATAL:", "DETAIL:"):
+            idx = raw.find(marker)
+            if idx >= 0:
+                err_snip = raw[idx : idx + 240].strip()
+                break
+        if err_snip:
+            hosts_fa.insert(1, f"نشانهٔ SQL: {err_snip}")
+            hosts_en.insert(1, f"SQL signal: {err_snip}")
+        _causes(hosts_fa, hosts_en)
+    elif (
         sig.fk_constraint
         or sig.fk_child
         or sig.fk_parent
@@ -4957,12 +5010,20 @@ async def _recover_hosts_if_missing(
     Hosts data is stripped from the dump during import and re-applied here via
     convert_value + INSERT against the live schema — the only reliable path for
     same-engine restores (avoids mid-COPY abort / alembic wipe / column drift).
+
+    Strategy:
+    1. Strict bulk INSERT (single transaction).
+    2. If still empty: per-row INSERT retry so one bad row cannot zero everything.
+    3. Hard-fail only when live hosts stay 0 while the dump had rows.
+    4. Partial reload (e.g. 11/12) warns and continues — verify treats hosts soft
+       when at least one row landed.
     """
     if db_type not in ("postgresql", "timescaledb"):
         return -1
 
     from app.services.hosts_dump_sanitize import (
         build_hosts_insert_sql,
+        build_hosts_per_row_insert_sql,
         extract_hosts_rows_from_pg_dump,
         find_hosts_dump,
     )
@@ -5053,13 +5114,21 @@ async def _recover_hosts_if_missing(
             t = line.strip()
             if t and t.lower() != "tag":
                 inbound_tags.append(t)
+    if not inbound_tags:
+        job.log(
+            "Hosts ensure: WARNING — 0 live inbound tags "
+            f"(ok={ok_tags}); INSERT may fail FK on inbound_tag"
+        )
+    else:
+        job.log(f"Hosts ensure: {len(inbound_tags)} live inbound tag(s) for retarget")
 
     sql = build_hosts_insert_sql(rows, target_columns, inbound_tags=inbound_tags)
     if not sql:
         job.log("Hosts ensure: could not build INSERT SQL")
         return actual
 
-    # Append inbound_tag heal (belt-and-suspenders)
+    # Casefold heal only AFTER rows land (append post-COMMIT). Arbitrary
+    # repoint stays disabled for hosts (ORPHAN_REPOINT_SPECS is empty).
     heal_bits: list[str] = []
     for child, child_col, parent, parent_col in (*ORPHAN_CASEFOLD_SPECS, *ORPHAN_REPOINT_SPECS):
         if child != "hosts":
@@ -5076,71 +5145,102 @@ async def _recover_hosts_if_missing(
         f"({len(target_columns)} live columns)…"
     )
 
-    tmp = Path(f"/tmp/pgclockmg-hosts-ensure-{db_name}.sql")
-    try:
-        tmp.write_text(sql, encoding="utf-8")
-        cmd = [
-            "docker", "compose", "exec", "-T",
-            "-e", f"PGPASSWORD={password}",
-            svc, "psql", "-v", "ON_ERROR_STOP=1", "-U", user, "-d", db_name,
-        ]
-        with open(tmp, "rb") as sql_fh:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=str(PASARGUARD_DIR),
-                stdin=sql_fh,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            out_b, _ = await proc.communicate()
-        out = (out_b or b"").decode("utf-8", errors="replace")
-        if proc.returncode != 0:
-            # Retry without ON_ERROR_STOP — keep whatever rows land
-            job.log(
-                "Hosts ensure strict INSERT failed — retrying tolerant:\n"
-                f"{(extract_psql_errors(out) or out)[:600]}"
-            )
-            cmd_tol = [
+    last_insert_error = ""
+
+    async def _run_hosts_sql(script: str, *, on_error_stop: bool) -> tuple[int, str]:
+        tmp = Path(f"/tmp/pgclockmg-hosts-ensure-{db_name}.sql")
+        try:
+            tmp.write_text(script, encoding="utf-8")
+            stop = "ON_ERROR_STOP=1" if on_error_stop else "ON_ERROR_STOP=0"
+            cmd = [
                 "docker", "compose", "exec", "-T",
                 "-e", f"PGPASSWORD={password}",
-                svc, "psql", "-v", "ON_ERROR_STOP=0", "-U", user, "-d", db_name,
+                svc, "psql", "-v", stop, "-U", user, "-d", db_name,
             ]
             with open(tmp, "rb") as sql_fh:
-                proc2 = await asyncio.create_subprocess_exec(
-                    *cmd_tol,
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
                     cwd=str(PASARGUARD_DIR),
                     stdin=sql_fh,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
                 )
-                out_b2, _ = await proc2.communicate()
-            out2 = (out_b2 or b"").decode("utf-8", errors="replace")
-            if proc2.returncode != 0:
-                job.log(
-                    "Hosts ensure tolerant INSERT also failed:\n"
-                    f"{(extract_psql_errors(out2) or out2)[:600]}"
-                )
-    finally:
-        try:
-            tmp.unlink(missing_ok=True)
-        except TypeError:
+                out_b, _ = await proc.communicate()
+            out = (out_b or b"").decode("utf-8", errors="replace")
+            return int(proc.returncode or 0), out
+        finally:
             try:
-                if tmp.exists():
-                    tmp.unlink()
+                tmp.unlink(missing_ok=True)
+            except TypeError:
+                try:
+                    if tmp.exists():
+                        tmp.unlink()
+                except OSError:
+                    pass
             except OSError:
                 pass
-        except OSError:
-            pass
+
+    # 1) Strict bulk — success path for healthy dumps (unchanged semantics).
+    rc, out = await _run_hosts_sql(sql, on_error_stop=True)
+    if rc != 0 or psql_output_has_sql_error(out):
+        last_insert_error = (extract_psql_errors(out) or out or "")[:600]
+        job.log(
+            "Hosts ensure strict INSERT failed"
+            + (" (SQL ERROR in output)" if psql_output_has_sql_error(out) else "")
+            + ":\n"
+            + (last_insert_error or "(no psql output)")
+        )
 
     reloaded = await _count_pg_table(job, svc, password, user, db_name, "hosts")
     if reloaded < 0:
         reloaded = actual
+
+    # 2) If still empty, per-row retry (only when empty — never wipe a partial live set).
+    if reloaded <= 0 and want > 0:
+        per_row = build_hosts_per_row_insert_sql(
+            rows, target_columns, inbound_tags=inbound_tags,
+        )
+        if per_row:
+            if heal_bits:
+                per_row = per_row.rstrip() + "\n" + "\n".join(heal_bits) + "\n"
+            job.log(
+                f"Hosts ensure: retrying per-row INSERT ({dump_rows} statement(s)) "
+                "so one bad row cannot abort all…"
+            )
+            rc2, out2 = await _run_hosts_sql(per_row, on_error_stop=False)
+            # ON_ERROR_STOP=0 often exits 0 even when statements failed — trust ERROR lines.
+            if rc2 != 0 or psql_output_has_sql_error(out2):
+                detail2 = (extract_psql_errors(out2) or out2 or "")[:600]
+                last_insert_error = detail2 or last_insert_error
+                job.log(
+                    "Hosts ensure per-row INSERT had SQL errors "
+                    f"(exit={rc2}, has_error={psql_output_has_sql_error(out2)}):\n"
+                    + (detail2 or "(no psql output)")
+                )
+            elif rc2 == 0 and not psql_output_has_sql_error(out2):
+                job.log("Hosts ensure per-row INSERT finished without SQL ERROR lines")
+            reloaded = await _count_pg_table(job, svc, password, user, db_name, "hosts")
+            if reloaded < 0:
+                reloaded = 0
+
+    if reloaded < 0:
+        reloaded = actual
+
     job.log(f"Hosts ensure complete: {reloaded} row(s) (wanted ≥{want})")
     if want > 0 and reloaded <= 0:
-        raise RuntimeError(
+        detail = last_insert_error.strip()
+        msg = (
             f"Hosts ensure failed — still 0 rows after reload from {hosts_dump.name} "
             f"(dump had {dump_rows}, expected ≥{want}). "
             "Users/inbounds alone are not a successful restore."
+        )
+        if detail:
+            msg += f"\nLast INSERT error:\n{detail}"
+        raise RuntimeError(msg)
+    if want > 0 and reloaded < want:
+        job.log(
+            f"Hosts ensure WARNING: partial reload {reloaded}/{want} from "
+            f"{hosts_dump.name} — continuing (hosts soft-ok when >0)"
         )
     return reloaded
 
@@ -5245,7 +5345,10 @@ async def _verify_restored_data(
     # settings row counts often drift across PasarGuard versions (many KV rows →
     # one JSON blob) and mysqldump INSERT estimators over-count parentheses in
     # JSON values. Do not fail restore on settings alone when data is present.
-    soft_tables = frozenset({"settings"})
+    # hosts: after strip+reload, a partial landing (e.g. 11/12) is better than
+    # failing the whole restore — hard-fail only when hosts stay 0 (handled in
+    # _recover_hosts_if_missing). Soft-ok when at least one host row exists.
+    soft_tables = frozenset({"settings", "hosts"})
     for table, want in expected.items():
         got = actual.get(table, -1)
         if got < 0:
