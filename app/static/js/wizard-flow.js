@@ -935,7 +935,12 @@ function setupRestoreUpload() {
 
 /** Telegram-style ``stem-1-3.zip`` or ``name.zip.001`` / ``name.z01``. */
 function looksLikeBackupPartName(name) {
-  const n = String(name || '');
+  let n = String(name || '');
+  // Match server-side download-noise stripping so renamed parts still route to assemble.
+  n = n.replace(/(?:\s*\(\d+\))+(?=\.[^.]+$)/g, '');
+  n = n.replace(/(?:\s*[-_.]?copy)+(?=\.[^.]+$)/ig, '');
+  n = n.replace(/(?:\.download|\.crdownload|\.part)$/i, '');
+  n = n.replace(/\.zip\.zip$/i, '.zip');
   if (/^.+-\d+-\d+\.[A-Za-z0-9]+$/.test(n)) {
     const m = n.match(/^.+-(\d+)-(\d+)\.[A-Za-z0-9]+$/);
     if (m) {
@@ -984,6 +989,8 @@ async function uploadRestoreFiles(fileList) {
   if (btn) btn.disabled = true;
   state.restoreAnalysis = null;
 
+  // Restore always uses /api/upload-parts so zip-of-parts, renamed parts, and
+  // heal/repack run here — migration keeps using /api/upload unchanged.
   const multi = files.length > 1 || looksLikeBackupPartName(files[0].name);
   const label = restoreUploadLabel(files);
   const uploadMsg = multi
@@ -997,18 +1004,13 @@ async function uploadRestoreFiles(fileList) {
   });
 
   const fd = new FormData();
-  if (multi) {
-    for (const f of files) fd.append('files', f);
-  } else {
-    fd.append('file', files[0]);
-  }
+  for (const f of files) fd.append('files', f);
   if (typeof largeUploadOverrideEnabled === 'function' && largeUploadOverrideEnabled()) {
     fd.append('allow_large_upload', '1');
   }
 
-  const endpoint = multi ? '/api/upload-parts' : '/api/upload';
   try {
-    const data = await uploadFormWithProgress(endpoint, fd, (pct) => {
+    const data = await uploadFormWithProgress('/api/upload-parts', fd, (pct) => {
       setUploadProgressUi(progressIds, {
         phase: 'uploading',
         pct: pct == null ? 0 : pct,
@@ -1021,9 +1023,7 @@ async function uploadRestoreFiles(fileList) {
     setUploadProgressUi(progressIds, {
       phase: 'uploading',
       pct: 100,
-      message: multi
-        ? (t('restore.partsAssembling') || t('restore.analyzing'))
-        : t('restore.analyzing'),
+      message: t('restore.partsAssembling') || t('restore.analyzing'),
     });
 
     const ares = await fetch(`/api/pasarguard/restore/analyze/${data.upload_id}`);
@@ -1035,11 +1035,15 @@ async function uploadRestoreFiles(fileList) {
     if (btn) btn.disabled = !analysis.ok;
 
     const successName = data.merged_filename || label || files[0].name;
+    let successMsg = t('uploadSuccess');
+    if (Array.isArray(data.heals) && data.heals.length) {
+      successMsg = `${t('uploadSuccess')} · ${t('restore.partsHealed')}`;
+    }
     document.getElementById('restoreUploadZone')?.classList.add('hidden');
     document.getElementById('restoreUploadProgress')?.classList.add('hidden');
     applyUploadSuccessStatus(document.getElementById('restoreUploadStatus'), {
       ok: !!analysis.ok,
-      message: t('uploadSuccess'),
+      message: successMsg,
       fileName: successName,
       replaceId: 'restoreUploadReplaceBtn',
       onReplace: progressIds.onReplace,
