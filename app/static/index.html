@@ -208,11 +208,12 @@
           <div id="restoreUploadResourceCard" class="upload-resource-card hidden" role="status"></div>
 
           <div class="upload-zone" id="restoreUploadZone">
-            <input type="file" id="restoreFileInput" accept=".zip" hidden>
+            <input type="file" id="restoreFileInput" accept=".zip,application/zip" multiple hidden>
             <div class="upload-icon" aria-hidden="true">
               <svg class="icon icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>
             </div>
             <p><span id="restoreDragText"></span> <span class="link" id="restoreSelectText"></span></p>
+            <p class="desc-sm" id="restorePartsHint" style="margin-top:8px"></p>
           </div>
 
           <div class="info-box" id="restoreStreamBox" style="margin-top:14px">

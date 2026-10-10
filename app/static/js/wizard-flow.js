@@ -599,6 +599,7 @@ function applyPhaseI18n() {
   set('restoreDbTipText', 'restore.tip');
   set('restoreDragText', 'restore.drag');
   set('restoreSelectText', 'restore.select');
+  set('restorePartsHint', 'restore.partsHint');
   set('restoreStreamHint', 'restore.streamHint');
   set('btnStreamListen', 'restore.streamListen');
   set('chkAutoRestoreOnStreamLabel', 'restore.autoRestoreOnStream');
@@ -923,16 +924,45 @@ function setupRestoreUpload() {
   zone.addEventListener('drop', e => {
     e.preventDefault();
     zone.classList.remove('dragover');
-    const f = e.dataTransfer.files?.[0];
-    if (f) uploadRestoreZip(f);
+    const list = e.dataTransfer.files;
+    if (list?.length) uploadRestoreFiles(list);
   });
   input.addEventListener('change', () => {
-    const f = input.files?.[0];
-    if (f) uploadRestoreZip(f);
+    const list = input.files;
+    if (list?.length) uploadRestoreFiles(list);
   });
 }
 
+/** Telegram-style ``stem-1-3.zip`` or ``name.zip.001`` / ``name.z01``. */
+function looksLikeBackupPartName(name) {
+  const n = String(name || '');
+  if (/^.+-\d+-\d+\.[A-Za-z0-9]+$/.test(n)) {
+    const m = n.match(/^.+-(\d+)-(\d+)\.[A-Za-z0-9]+$/);
+    if (m) {
+      const idx = Number(m[1]);
+      const total = Number(m[2]);
+      return total >= 2 && idx >= 1 && idx <= total;
+    }
+  }
+  if (/\.zip\.\d{1,3}$/i.test(n)) return true;
+  if (/\.z\d{2}$/i.test(n)) return true;
+  return false;
+}
+
+function restoreUploadLabel(files) {
+  const arr = Array.from(files || []);
+  if (arr.length <= 1) return arr[0]?.name || '';
+  return arr.map((f) => f.name).join(', ');
+}
+
 async function uploadRestoreZip(file) {
+  return uploadRestoreFiles([file]);
+}
+
+async function uploadRestoreFiles(fileList) {
+  const files = Array.from(fileList || []).filter(Boolean);
+  if (!files.length) return;
+
   const btn = document.getElementById('btnRestoreConfirm');
   const progressIds = {
     zone: 'restoreUploadZone',
@@ -954,23 +984,35 @@ async function uploadRestoreZip(file) {
   if (btn) btn.disabled = true;
   state.restoreAnalysis = null;
 
+  const multi = files.length > 1 || looksLikeBackupPartName(files[0].name);
+  const label = restoreUploadLabel(files);
+  const uploadMsg = multi
+    ? (t('restore.partsUploading') || '').replace('{count}', String(files.length))
+    : `${t('uploadProgress')} (${files[0].name})`;
+
   setUploadProgressUi(progressIds, {
     phase: 'uploading',
     pct: 0,
-    message: `${t('uploadProgress')} (${file.name})`,
+    message: uploadMsg,
   });
 
   const fd = new FormData();
-  fd.append('file', file);
+  if (multi) {
+    for (const f of files) fd.append('files', f);
+  } else {
+    fd.append('file', files[0]);
+  }
   if (typeof largeUploadOverrideEnabled === 'function' && largeUploadOverrideEnabled()) {
     fd.append('allow_large_upload', '1');
   }
+
+  const endpoint = multi ? '/api/upload-parts' : '/api/upload';
   try {
-    const data = await uploadFormWithProgress('/api/upload', fd, (pct) => {
+    const data = await uploadFormWithProgress(endpoint, fd, (pct) => {
       setUploadProgressUi(progressIds, {
         phase: 'uploading',
         pct: pct == null ? 0 : pct,
-        message: `${t('uploadProgress')} (${file.name})`,
+        message: uploadMsg,
       });
     });
     if (!data?.upload_id) throw new Error('upload failed');
@@ -979,7 +1021,9 @@ async function uploadRestoreZip(file) {
     setUploadProgressUi(progressIds, {
       phase: 'uploading',
       pct: 100,
-      message: t('restore.analyzing'),
+      message: multi
+        ? (t('restore.partsAssembling') || t('restore.analyzing'))
+        : t('restore.analyzing'),
     });
 
     const ares = await fetch(`/api/pasarguard/restore/analyze/${data.upload_id}`);
@@ -990,12 +1034,13 @@ async function uploadRestoreZip(file) {
     renderRestoreAnalysis(analysis);
     if (btn) btn.disabled = !analysis.ok;
 
+    const successName = data.merged_filename || label || files[0].name;
     document.getElementById('restoreUploadZone')?.classList.add('hidden');
     document.getElementById('restoreUploadProgress')?.classList.add('hidden');
     applyUploadSuccessStatus(document.getElementById('restoreUploadStatus'), {
       ok: !!analysis.ok,
       message: t('uploadSuccess'),
-      fileName: file.name,
+      fileName: successName,
       replaceId: 'restoreUploadReplaceBtn',
       onReplace: progressIds.onReplace,
     });
