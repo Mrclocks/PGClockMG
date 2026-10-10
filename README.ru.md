@@ -1,4 +1,4 @@
-> 🚀 **`v4.8.3`** — hosts ensure: ошибки INSERT, per-row retry, partial OK
+> 🚀 **`v4.9.0`** — restore многочастного бэкапа (автосклейка/heal) + фикс ручного edit пользователей после x-ui
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

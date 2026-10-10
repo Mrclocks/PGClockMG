@@ -1,4 +1,4 @@
-> 🚀 **`v4.8.3`** — hosts ensure: surface INSERT errors, per-row retry, partial OK
+> 🚀 **`v4.9.0`** — multi-part backup restore (auto merge/heal) + fix manual edit for x-ui migrated users
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
