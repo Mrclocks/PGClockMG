@@ -1,5 +1,6 @@
 """PG-Migrator FastAPI application."""
 
+import shutil
 import socket
 import tempfile
 from contextlib import asynccontextmanager
@@ -535,6 +536,71 @@ async def api_upload(
             tmp_dir.rmdir()
         except Exception:
             pass
+
+
+@app.post("/api/upload-parts")
+async def api_upload_parts(
+    files: list[UploadFile] = File(...),
+    allow_large_upload: str | None = Form(None),
+):
+    """Assemble split backup parts into one zip, then run the normal upload save.
+
+    Isolated from ``/api/upload`` so migration / single-zip restore stay unchanged.
+    """
+    from app.services.backup_parts import BackupPartsError, assemble_part_paths
+
+    if not files:
+        raise HTTPException(
+            400,
+            "هیچ فایلی ارسال نشده — No files uploaded.",
+        )
+
+    use_large = str(allow_large_upload or "").strip().lower() in ("1", "true", "yes", "on")
+    stream_cap = allowed_upload_bytes(True)
+    tmp_root = Path(tempfile.mkdtemp(prefix="pg-upload-parts-"))
+    staged: list[tuple[str, Path]] = []
+    total = 0
+    try:
+        for idx, upload in enumerate(files):
+            filename = safe_upload_name(upload.filename)
+            # Unique path even if two parts share a basename after sanitizing.
+            part_dir = tmp_root / f"p{idx:03d}"
+            part_dir.mkdir(parents=True, exist_ok=True)
+            dest = part_dir / filename
+            size = 0
+            try:
+                with open(dest, "wb") as out:
+                    while True:
+                        chunk = await upload.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        total += len(chunk)
+                        if total > stream_cap:
+                            limit_mb = stream_cap // (1024 * 1024)
+                            raise HTTPException(
+                                400,
+                                f"حداکثر حجم مجموع پارت‌ها {limit_mb} مگابایت است — "
+                                f"Combined parts exceed {limit_mb} MB.",
+                            )
+                        out.write(chunk)
+            finally:
+                await upload.close()
+            staged.append((filename, dest))
+
+        try:
+            from functools import partial
+
+            result = await run_in_threadpool(
+                partial(assemble_part_paths, staged, allow_large=use_large),
+            )
+        except BackupPartsError as e:
+            raise HTTPException(400, e.message) from e
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        return result
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
 
 
 def _resolve_upload_params(params: dict) -> dict:
