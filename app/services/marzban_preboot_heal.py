@@ -44,6 +44,9 @@ ORPHAN_DELETE_SPECS: tuple[tuple[str, str, str, str], ...] = (
     ("user_hwids", "user_id", "users", "id"),
     ("user_subscription_updates", "user_id", "users", "id"),
     ("users_groups_association", "user_id", "users", "id"),
+    # PasarGuard column is groups_id; older Marzban dumps may still use group_id.
+    # Specs are column-existence gated, so listing both is safe.
+    ("users_groups_association", "groups_id", "groups", "id"),
     ("users_groups_association", "group_id", "groups", "id"),
     ("exclude_inbounds_association", "user_id", "users", "id"),
     ("exclude_inbounds_association", "inbound_id", "inbounds", "id"),

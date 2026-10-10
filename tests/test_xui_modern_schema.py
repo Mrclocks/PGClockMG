@@ -122,6 +122,7 @@ def test_sync_user_groups_fills_multi_inbound_membership():
         assert result["synced"] is True
         assert result["links_added"] == 4  # 2 users × 2 missing groups
         assert result["orphans_removed"] == 1
+        assert result.get("orphan_users_removed") == 1
 
         conn = sqlite3.connect(f"file:{pg}?mode=ro", uri=True)
         try:
@@ -138,6 +139,90 @@ def test_sync_user_groups_fills_multi_inbound_membership():
                 """
             ).fetchone()[0]
             assert orphans == 0
+        finally:
+            conn.close()
+
+
+def test_sync_removes_stale_groups_id_and_fallback_links():
+    """Stale groups_id is the root cause of manual modify 404 after x-ui migrate."""
+    with tempfile.TemporaryDirectory() as tmp:
+        xui = Path(tmp) / "x-ui.db"
+        pg = Path(tmp) / "pg.db"
+
+        xconn = sqlite3.connect(xui)
+        xconn.executescript(
+            """
+            CREATE TABLE inbounds (id INTEGER PRIMARY KEY, settings TEXT);
+            CREATE TABLE clients (
+                id INTEGER PRIMARY KEY, email TEXT
+            );
+            CREATE TABLE client_inbounds (
+                client_id INTEGER, inbound_id INTEGER
+            );
+            CREATE TABLE client_traffics (
+                email TEXT, inbound_id INTEGER
+            );
+            INSERT INTO inbounds VALUES
+                (1, '{"clients":[{"email":"alice"}]}'),
+                (2, '{"clients":[]}');
+            INSERT INTO clients VALUES (1, 'alice'), (2, 'bob');
+            INSERT INTO client_inbounds VALUES (1, 1), (1, 2), (2, 2);
+            INSERT INTO client_traffics VALUES ('alice', 1), ('bob', 2);
+            """
+        )
+        xconn.commit()
+        xconn.close()
+
+        pconn = sqlite3.connect(pg)
+        pconn.executescript(
+            """
+            CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT UNIQUE);
+            CREATE TABLE groups (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE inbounds_groups_association (
+                inbound_id INTEGER, group_id INTEGER
+            );
+            CREATE TABLE users_groups_association (
+                user_id INTEGER, groups_id INTEGER
+            );
+            INSERT INTO users VALUES (1, 'alice'), (2, 'bob'), (3, 'carol');
+            INSERT INTO groups VALUES (10, 'g1'), (20, 'g2');
+            INSERT INTO inbounds_groups_association VALUES (1, 10), (2, 20);
+            -- alice: one good + one stale group (deleted group 999)
+            -- bob: only stale group
+            -- carol: no associations at all
+            INSERT INTO users_groups_association VALUES
+                (1, 10), (1, 999), (2, 999);
+            """
+        )
+        pconn.commit()
+        pconn.close()
+
+        result = sync_user_groups_from_xui_settings(pg, xui)
+        assert result["synced"] is True
+        assert result["orphan_groups_removed"] == 2
+        assert result["users_without_group"] == 0
+
+        conn = sqlite3.connect(f"file:{pg}?mode=ro", uri=True)
+        try:
+            rows = {
+                int(uid): sorted(int(g) for (g,) in conn.execute(
+                    "SELECT groups_id FROM users_groups_association WHERE user_id=?",
+                    (uid,),
+                ))
+                for uid in (1, 2, 3)
+            }
+            assert 999 not in rows[1] and 999 not in rows[2]
+            assert rows[1] == [10, 20]  # both inbound groups
+            assert rows[2] == [20]
+            assert rows[3]  # carol got fallback default group
+            assert all(g in (10, 20) for g in rows[3])
+            stale = conn.execute(
+                """
+                SELECT COUNT(*) FROM users_groups_association
+                WHERE groups_id NOT IN (SELECT id FROM groups)
+                """
+            ).fetchone()[0]
+            assert stale == 0
         finally:
             conn.close()
 
