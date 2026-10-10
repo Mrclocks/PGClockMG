@@ -167,6 +167,10 @@ def test_cleanup_orphans_sqlite_removes_only_orphans():
             """
             CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT);
             CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT);
+            CREATE TABLE groups (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE users_groups_association (
+                user_id INTEGER, groups_id INTEGER
+            );
             CREATE TABLE node_usages (id INTEGER PRIMARY KEY, node_id INTEGER);
             CREATE TABLE node_user_usages (
                 id INTEGER PRIMARY KEY, node_id INTEGER, user_id INTEGER
@@ -176,6 +180,10 @@ def test_cleanup_orphans_sqlite_removes_only_orphans():
 
             INSERT INTO nodes VALUES (1, 'ok');
             INSERT INTO users VALUES (1, 'u1');
+            INSERT INTO groups VALUES (1, 'g1');
+            INSERT INTO users_groups_association VALUES (1, 1);
+            INSERT INTO users_groups_association VALUES (1, 999);  -- orphan group
+            INSERT INTO users_groups_association VALUES (888, 1);  -- orphan user
             INSERT INTO node_usages VALUES (1, 1);
             INSERT INTO node_usages VALUES (2, 999);  -- orphan
             INSERT INTO node_user_usages VALUES (1, 1, 1);
@@ -189,11 +197,16 @@ def test_cleanup_orphans_sqlite_removes_only_orphans():
         db.close()
 
         deleted, nulled = cleanup_orphans_sqlite(path)
-        assert deleted == 2
+        assert deleted == 4
 
         db = sqlite3.connect(str(path))
         usage_ids = [r[0] for r in db.execute("SELECT id FROM node_usages").fetchall()]
         nuu = db.execute("SELECT id FROM node_user_usages").fetchall()
+        uga = sorted(
+            db.execute(
+                "SELECT user_id, groups_id FROM users_groups_association"
+            ).fetchall()
+        )
         host_tags = sorted(
             (r[0] if r[0] is not None else "")
             for r in db.execute("SELECT inbound_tag FROM hosts").fetchall()
@@ -202,6 +215,7 @@ def test_cleanup_orphans_sqlite_removes_only_orphans():
         db.close()
         assert usage_ids == [1]
         assert nuu == [(1,)]
+        assert uga == [(1, 1)]
         # Hosts are never deleted; only case/whitespace mismatches are retargeted
         # (no arbitrary ORDER BY tag LIMIT 1 repoint onto the wrong inbound).
         assert host_count == 2

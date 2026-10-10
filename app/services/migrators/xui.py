@@ -700,37 +700,78 @@ def normalize_modern_xui_sqlite(db_path: Path) -> dict:
         conn.close()
 
 
-def sync_user_groups_from_xui_settings(pg_db: Path, xui_db: Path) -> dict:
-    """Ensure each PG user is in every inbound group their x-ui email belongs to.
-
-    Official migrator associates a user with only the single ``inbound_id`` from
-    their ``client_traffics`` row. After modern-schema normalize, that under-links
-    multi-inbound clients. Also removes orphan association rows left by REPLACE.
-    """
-    pg_path = Path(pg_db)
+def _collect_xui_email_inbounds(xui_db: Path) -> dict[str, set[int]]:
+    """Map x-ui client email → inbound ids from settings, membership, and traffic."""
     xui_path = Path(xui_db)
     email_to_inbounds: dict[str, set[int]] = {}
+
+    def _add(email: str | None, inbound_id: int | None) -> None:
+        name = (email or "").strip()
+        if not name or not inbound_id:
+            return
+        try:
+            iid = int(inbound_id)
+        except (TypeError, ValueError):
+            return
+        if iid <= 0:
+            return
+        email_to_inbounds.setdefault(name, set()).add(iid)
 
     xui = sqlite3.connect(f"file:{xui_path.as_posix()}?mode=ro", uri=True)
     try:
         xui.row_factory = sqlite3.Row
-        for row in xui.execute("SELECT id, settings FROM inbounds"):
-            iid = int(row["id"])
-            try:
-                settings = json.loads(row["settings"] or "{}")
-            except json.JSONDecodeError:
-                settings = {}
-            for client in (settings.get("clients") or []) if isinstance(settings, dict) else []:
-                if not isinstance(client, dict):
-                    continue
-                email = (client.get("email") or "").strip()
-                if email:
-                    email_to_inbounds.setdefault(email, set()).add(iid)
+        tables = _xui_table_names(xui)
+
+        if "inbounds" in tables:
+            for row in xui.execute("SELECT id, settings FROM inbounds"):
+                iid = int(row["id"])
+                try:
+                    settings = json.loads(row["settings"] or "{}")
+                except json.JSONDecodeError:
+                    settings = {}
+                clients = (settings.get("clients") or []) if isinstance(settings, dict) else []
+                for client in clients:
+                    if isinstance(client, dict):
+                        _add(client.get("email"), iid)
+
+        # Modern multi-inbound membership (authoritative when present).
+        if "clients" in tables and "client_inbounds" in tables:
+            for row in xui.execute(
+                """
+                SELECT c.email AS email, ci.inbound_id AS inbound_id
+                FROM client_inbounds ci
+                JOIN clients c ON c.id = ci.client_id
+                """
+            ):
+                _add(row["email"], row["inbound_id"])
+
+        # Traffic rows: cover legacy DBs and emails missing from settings.
+        if "client_traffics" in tables:
+            for row in xui.execute(
+                "SELECT email, inbound_id FROM client_traffics"
+            ):
+                _add(row["email"], row["inbound_id"])
     finally:
         xui.close()
+    return email_to_inbounds
 
-    if not email_to_inbounds:
-        return {"synced": False, "reason": "no-clients-in-settings"}
+
+def sync_user_groups_from_xui_settings(pg_db: Path, xui_db: Path) -> dict:
+    """Repair PasarGuard user↔group links after official x-ui migrate.
+
+    Root cause of manual edit 404s ("item does not exist" / Group not found):
+    migrated users keep stale or incomplete ``users_groups_association.groups_id``
+    values. Dashboard modify always resubmits ``group_ids``; template edit
+    replaces them and therefore appears to work.
+
+    This heal:
+    1. Drops association rows with missing user_id **or** missing groups_id
+    2. Links each user to every inbound group their x-ui email belongs to
+       (settings.clients ∪ client_inbounds ∪ client_traffics)
+    3. Ensures every remaining user has at least one valid group
+    """
+    pg_path = Path(pg_db)
+    email_to_inbounds = _collect_xui_email_inbounds(xui_db)
 
     conn = sqlite3.connect(str(pg_path))
     try:
@@ -744,31 +785,55 @@ def sync_user_groups_from_xui_settings(pg_db: Path, xui_db: Path) -> dict:
         if not needed.issubset(tables):
             return {"synced": False, "reason": "missing-pg-tables"}
 
+        # Association column is groups_id on PasarGuard; tolerate legacy group_id.
+        uga_cols = {
+            str(r[1])
+            for r in conn.execute("PRAGMA table_info(users_groups_association)")
+        }
+        group_fk_col = "groups_id" if "groups_id" in uga_cols else (
+            "group_id" if "group_id" in uga_cols else None
+        )
+        if not group_fk_col:
+            return {"synced": False, "reason": "missing-group-fk-column"}
+
         inbound_to_group = {
             int(r[0]): int(r[1])
             for r in conn.execute(
                 "SELECT inbound_id, group_id FROM inbounds_groups_association"
             )
         }
+        valid_group_ids = [
+            int(r[0])
+            for r in conn.execute("SELECT id FROM groups ORDER BY id")
+        ]
+        valid_group_set = set(valid_group_ids)
         users = {
             str(r[0]): int(r[1])
             for r in conn.execute("SELECT username, id FROM users")
             if r[0]
         }
 
-        # Drop associations pointing at missing users
-        orphan_deleted = conn.execute(
+        orphan_users = conn.execute(
             """
             DELETE FROM users_groups_association
             WHERE user_id NOT IN (SELECT id FROM users)
             """
         ).rowcount
+        orphan_groups = conn.execute(
+            f"""
+            DELETE FROM users_groups_association
+            WHERE {group_fk_col} IS NOT NULL
+              AND {group_fk_col} NOT IN (SELECT id FROM groups)
+            """
+        ).rowcount
+        orphan_deleted = int(orphan_users or 0) + int(orphan_groups or 0)
 
         existing = {
             (int(r[0]), int(r[1]))
             for r in conn.execute(
-                "SELECT user_id, groups_id FROM users_groups_association"
+                f"SELECT user_id, {group_fk_col} FROM users_groups_association"
             )
+            if r[0] is not None and r[1] is not None
         }
         added = 0
         for email, inbound_ids in email_to_inbounds.items():
@@ -777,24 +842,65 @@ def sync_user_groups_from_xui_settings(pg_db: Path, xui_db: Path) -> dict:
                 continue
             for iid in inbound_ids:
                 group_id = inbound_to_group.get(iid)
-                if not group_id:
+                if not group_id or group_id not in valid_group_set:
                     continue
                 key = (user_id, group_id)
                 if key in existing:
                     continue
                 conn.execute(
-                    "INSERT INTO users_groups_association (user_id, groups_id) VALUES (?, ?)",
+                    f"INSERT INTO users_groups_association (user_id, {group_fk_col}) "
+                    "VALUES (?, ?)",
                     key,
                 )
                 existing.add(key)
                 added += 1
+
+        # Every user must keep at least one valid group or manual modify 404s.
+        linked_users = {uid for uid, _gid in existing}
+        fallback_added = 0
+        default_group = valid_group_ids[0] if valid_group_ids else None
+        for email, user_id in users.items():
+            if user_id in linked_users:
+                continue
+            candidate = None
+            for iid in sorted(email_to_inbounds.get(email) or ()):
+                gid = inbound_to_group.get(iid)
+                if gid in valid_group_set:
+                    candidate = gid
+                    break
+            if candidate is None:
+                candidate = default_group
+            if candidate is None:
+                continue
+            key = (user_id, candidate)
+            if key in existing:
+                linked_users.add(user_id)
+                continue
+            conn.execute(
+                f"INSERT INTO users_groups_association (user_id, {group_fk_col}) "
+                "VALUES (?, ?)",
+                key,
+            )
+            existing.add(key)
+            linked_users.add(user_id)
+            fallback_added += 1
+            added += 1
+
+        users_without_group = sum(
+            1 for uid in users.values() if uid not in {u for u, _g in existing}
+        )
 
         conn.commit()
         return {
             "synced": True,
             "emails": len(email_to_inbounds),
             "links_added": added,
-            "orphans_removed": int(orphan_deleted or 0),
+            "fallback_links_added": fallback_added,
+            "orphans_removed": orphan_deleted,
+            "orphan_users_removed": int(orphan_users or 0),
+            "orphan_groups_removed": int(orphan_groups or 0),
+            "users_without_group": users_without_group,
+            "group_fk_col": group_fk_col,
         }
     finally:
         conn.close()
@@ -1793,10 +1899,18 @@ class XuiMigrator(BaseMigrator):
         group_sync = sync_user_groups_from_xui_settings(output_db, input_db)
         if group_sync.get("synced"):
             self.job.log(
-                "Synced user↔inbound groups from x-ui settings: "
+                "Healed user↔group links after x-ui migrate: "
                 f"emails={group_sync.get('emails')} "
                 f"links_added={group_sync.get('links_added')} "
-                f"orphans_removed={group_sync.get('orphans_removed')}"
+                f"fallback_links_added={group_sync.get('fallback_links_added')} "
+                f"orphans_removed={group_sync.get('orphans_removed')} "
+                f"(users={group_sync.get('orphan_users_removed')}, "
+                f"groups={group_sync.get('orphan_groups_removed')}) "
+                f"users_without_group={group_sync.get('users_without_group')}"
+            )
+        else:
+            self.job.log(
+                f"User↔group heal skipped: {group_sync.get('reason')}"
             )
 
         admin_info = ensure_sudo_admin_from_xui(output_db, input_db)
