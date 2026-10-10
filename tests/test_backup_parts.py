@@ -74,6 +74,7 @@ def test_plan_parts_sorts_and_detects_missing():
 def test_assemble_telegram_parts_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setenv("PG_MIGRATOR_HOME", str(tmp_path))
     import importlib
+    import sqlite3
     import app.config as cfg
 
     importlib.reload(cfg)
@@ -84,9 +85,18 @@ def test_assemble_telegram_parts_roundtrip(tmp_path, monkeypatch):
 
     importlib.reload(parts)
 
+    db_path = tmp_path / "src.sqlite3"
+    con = sqlite3.connect(db_path)
+    con.execute("CREATE TABLE users(id INTEGER PRIMARY KEY, username TEXT)")
+    con.execute("INSERT INTO users(username) VALUES ('alice')")
+    con.commit()
+    con.close()
     payload = _zip_bytes({
-        ".env": "UVICORN_PORT=8000\nSQLALCHEMY_DATABASE_URL=sqlite:////var/lib/pasarguard/db.sqlite3\n",
-        "db.sqlite3": b"SQLITE-DEMO" + b"\x00" * 200,
+        ".env": (
+            "UVICORN_PORT=8000\n"
+            "SQLALCHEMY_DATABASE_URL=sqlite:////var/lib/pasarguard/db.sqlite3\n"
+        ),
+        "db.sqlite3": db_path.read_bytes(),
     })
     chunks = _split_bytes(payload, 3)
     items = []
@@ -109,7 +119,13 @@ def test_assemble_telegram_parts_roundtrip(tmp_path, monkeypatch):
     assert zipfile.is_zipfile(merged)
     with zipfile.ZipFile(merged, "r") as zf:
         assert "db.sqlite3" in zf.namelist()
-        assert zf.read("db.sqlite3").startswith(b"SQLITE-DEMO")
+        assert zf.read("db.sqlite3").startswith(b"SQLite format 3")
+
+    from app.services.pg_restore import analyze_pasarguard_backup
+
+    analysis = analyze_pasarguard_backup(upload_id=result["upload_id"])
+    assert analysis.get("layout") == "sqlite_file"
+    assert analysis.get("ok") is True
 
 
 def test_assemble_single_incomplete_part_clear_error(tmp_path, monkeypatch):
@@ -166,9 +182,16 @@ def test_api_upload_parts_and_single_upload_untouched(tmp_path, monkeypatch):
 
     importlib.reload(main_mod)
 
+    import sqlite3
+
+    db_path = tmp_path / "api-src.sqlite3"
+    con = sqlite3.connect(db_path)
+    con.execute("CREATE TABLE t(id INTEGER PRIMARY KEY)")
+    con.commit()
+    con.close()
     payload = _zip_bytes({
-        ".env": "UVICORN_PORT=8000\n",
-        "db.sqlite3": b"X" * 120,
+        ".env": "UVICORN_PORT=8000\nSQLALCHEMY_DATABASE_URL=sqlite:////var/lib/pasarguard/db.sqlite3\n",
+        "db.sqlite3": db_path.read_bytes(),
     })
     chunks = _split_bytes(payload, 2)
 
