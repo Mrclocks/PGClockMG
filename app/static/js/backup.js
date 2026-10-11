@@ -2224,8 +2224,11 @@ async function testTelegram() {
     if (!started || !started.job_id) {
       throw new Error(t("errTelegramTestFailed"));
     }
+    let lastPhase = "";
     const job = await pollTelegramJob(started.job_id, {
       onTick: (j) => {
+        if (!j || j.status === lastPhase) return;
+        lastPhase = j.status;
         if (j.status === "backing_up") showToast(t("backupRunning"), "warning", { ttl: 3500 });
         else if (j.status === "sending") showToast(t("tgSending"), "warning", { ttl: 3500 });
       },
