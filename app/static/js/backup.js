@@ -112,6 +112,8 @@ const I18N = {
     tgTestOkTitle: "تست تلگرام",
     tgTestFailTitle: "خطای تلگرام",
     tgTestOkBody: "اتصال برقرار شد و فایل بکاپ به تلگرام ارسال شد",
+    tgSending: "در حال ارسال به تلگرام…",
+    tgTesting: "در حال اتصال و ارسال بکاپ تست…",
     tgSendOk: "فایل بکاپ به تلگرام ارسال شد",
     tgSendFail: "ارسال به تلگرام انجام نشد",
     tgAutoSent: "بکاپ به تلگرام هم ارسال شد",
@@ -333,6 +335,8 @@ const I18N = {
     tgTestOkTitle: "Telegram test",
     tgTestFailTitle: "Telegram error",
     tgTestOkBody: "Connected — the backup file was sent to Telegram",
+    tgSending: "Sending to Telegram…",
+    tgTesting: "Connecting and sending a test backup…",
     tgSendOk: "Backup file sent to Telegram",
     tgSendFail: "Could not send to Telegram",
     tgAutoSent: "Backup was also sent to Telegram",
@@ -554,6 +558,8 @@ const I18N = {
     tgTestOkTitle: "Тест Telegram",
     tgTestFailTitle: "Ошибка Telegram",
     tgTestOkBody: "Подключено — файл бэкапа отправлен в Telegram",
+    tgSending: "Отправка в Telegram…",
+    tgTesting: "Подключение и отправка тестового бэкапа…",
     tgSendOk: "Файл бэкапа отправлен в Telegram",
     tgSendFail: "Не удалось отправить в Telegram",
     tgAutoSent: "Бэкап также отправлен в Telegram",
@@ -976,6 +982,8 @@ function applyI18n() {
 }
 
 const API_TIMEOUT_MS = 10000;
+/** Probe talks to Telegram (often via proxy); must exceed server getMe timeout. */
+const API_TELEGRAM_STATUS_TIMEOUT_MS = 45000;
 
 
 /** Map backup API error codes / FastAPI validation to the active UI language. */
@@ -1050,12 +1058,15 @@ function localizeApiError(detail, status) {
 }
 
 async function api(path, opts = {}) {
-  const timeoutMs = Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : API_TIMEOUT_MS;
+  // timeoutMs: 0 → no client abort (long background work must use jobs + short polls).
+  let timeoutMs = API_TIMEOUT_MS;
+  if (opts.timeoutMs === 0) timeoutMs = 0;
+  else if (Number(opts.timeoutMs) > 0) timeoutMs = Number(opts.timeoutMs);
   const fetchOpts = { ...opts };
   delete fetchOpts.timeoutMs;
 
   const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
-  const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
+  const timer = ctrl && timeoutMs > 0 ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
   let res;
   try {
     res = await fetch(path, {
@@ -1671,17 +1682,51 @@ async function refreshList() {
   }).join("");
 }
 
+async function pollTelegramJob(jobId, { onTick } = {}) {
+  const started = Date.now();
+  const hardDeadlineMs = 45 * 60 * 1000;
+  let consecutiveErrors = 0;
+  while (Date.now() - started < hardDeadlineMs) {
+    try {
+      const job = await api("/api/telegram/jobs/" + encodeURIComponent(jobId));
+      consecutiveErrors = 0;
+      if (typeof onTick === "function") onTick(job);
+      if (job.status === "success") return job;
+      if (job.status === "error") {
+        const err = new Error(job.error || t("tgSendFail"));
+        err.isTelegramJobError = true;
+        throw err;
+      }
+    } catch (e) {
+      if (e && e.isTelegramJobError) throw e;
+      consecutiveErrors += 1;
+      if (consecutiveErrors > 25) throw e;
+    }
+    await new Promise((r) => setTimeout(r, Math.min(2000, 400 + consecutiveErrors * 200)));
+  }
+  throw new Error(t("tgSendFail"));
+}
+
 async function sendTelegram(id) {
   try {
-    const r = await api("/api/backups/" + encodeURIComponent(id) + "/telegram", { method: "POST", body: "{}" });
-    showToast(
-      r.ok
-        ? t("tgSendOk") + (r.parts ? ` · parts=${r.parts}` : "")
-        : (r.error || t("tgSendFail")),
-      r.ok ? "success" : "error",
-    );
+    showToast(t("tgSending"), "warning", { ttl: 4000 });
+    const started = await api("/api/backups/" + encodeURIComponent(id) + "/telegram", {
+      method: "POST",
+      body: "{}",
+    });
+    // Legacy sync response (older builds): { ok, parts, ... }
+    if (started && started.ok === true && !started.job_id) {
+      showToast(t("tgSendOk") + (started.parts ? ` · parts=${started.parts}` : ""), "success");
+      return;
+    }
+    if (!started || !started.job_id) {
+      throw new Error(t("tgSendFail"));
+    }
+    const job = await pollTelegramJob(started.job_id);
+    const parts = job.result && job.result.parts;
+    showToast(t("tgSendOk") + (parts ? ` · parts=${parts}` : ""), "success");
   } catch (e) {
-    showToast(t("tgSendFail") + ": " + e.message, "error");
+    showToast(t("tgSendFail") + ": " + (e.message || e), "error");
   }
 }
 
@@ -1995,7 +2040,7 @@ function setTelegramStatusTag({ connected, checking } = {}) {
 async function refreshTelegramStatusTag() {
   setTelegramStatusTag({ checking: true });
   try {
-    const st = await api("/api/telegram/status");
+    const st = await api("/api/telegram/status", { timeoutMs: API_TELEGRAM_STATUS_TIMEOUT_MS });
     setTelegramStatusTag({ connected: !!st.connected });
     return st;
   } catch (_) {
@@ -2163,18 +2208,41 @@ async function testTelegram() {
   try {
     document.getElementById("tgEnabled").checked = true;
     await saveSettings({ quiet: true });
-    showToast(t("backupRunning"), "warning", { ttl: 4000 });
-    const r = await api("/api/telegram/test", { method: "POST", body: "{}" });
+    showToast(t("tgTesting"), "warning", { ttl: 5000 });
+    const started = await api("/api/telegram/test", { method: "POST", body: "{}" });
+    // Legacy sync response from older builds.
+    if (started && started.ok === true && !started.job_id) {
+      setTelegramStatusTag({ connected: true });
+      const bot = (started.bot && started.bot.username) ? (" @" + started.bot.username) : "";
+      const file = (started.backup && started.backup.filename) ? ("\n" + started.backup.filename) : "";
+      showToast(t("tgTestOkBody") + bot + file, "success", { ttl: 8000 });
+      await refreshList();
+      await refreshDashboard();
+      await loadSettingsForm();
+      return;
+    }
+    if (!started || !started.job_id) {
+      throw new Error(t("errTelegramTestFailed"));
+    }
+    let lastPhase = "";
+    const job = await pollTelegramJob(started.job_id, {
+      onTick: (j) => {
+        if (!j || j.status === lastPhase) return;
+        lastPhase = j.status;
+        if (j.status === "backing_up") showToast(t("backupRunning"), "warning", { ttl: 3500 });
+        else if (j.status === "sending") showToast(t("tgSending"), "warning", { ttl: 3500 });
+      },
+    });
     setTelegramStatusTag({ connected: true });
-    const bot = (r.bot && r.bot.username) ? (" @" + r.bot.username) : "";
-    const file = (r.backup && r.backup.filename) ? ("\n" + r.backup.filename) : "";
-    showToast(t("tgTestOkBody") + bot + file, "success", { ttl: 8000 });
+    const botName = job.bot && job.bot.username ? (" @" + job.bot.username) : "";
+    const file = (job.backup && job.backup.filename) ? ("\n" + job.backup.filename) : "";
+    showToast(t("tgTestOkBody") + botName + file, "success", { ttl: 8000 });
     await refreshList();
     await refreshDashboard();
     await loadSettingsForm();
   } catch (e) {
     setTelegramStatusTag({ connected: false });
-    showToast(t("tgTestFailTitle") + ": " + e.message, "error");
+    showToast(t("tgTestFailTitle") + ": " + (e.message || e), "error");
   } finally {
     if (btn) btn.disabled = false;
   }

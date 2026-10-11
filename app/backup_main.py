@@ -38,9 +38,10 @@ from app.services.backup_settings import (
 from app.services.backup_net import UnsafeDestinationError
 from app.services.backup_stream import get_push_job, start_create_and_stream_async, start_push_async
 from app.services.backup_telegram import (
+    get_telegram_job,
     probe_telegram_connection,
-    send_backup_to_telegram,
-    test_telegram_connection,
+    start_telegram_send_async,
+    start_telegram_test_async,
 )
 from app.services.prerequisites import get_system_status, is_pasarguard_installed
 
@@ -429,6 +430,7 @@ async def api_delete_backup(backup_id: str):
 
 @app.post("/api/backups/{backup_id}/telegram")
 async def api_send_telegram(backup_id: str):
+    """Queue Telegram delivery in a background job; UI polls ``/api/telegram/jobs/{id}``."""
     path = resolve_backup_path(backup_id)
     if not path:
         raise HTTPException(404, "backup_not_found")
@@ -440,10 +442,15 @@ async def api_send_telegram(backup_id: str):
             meta = json.loads(sidecar.read_text(encoding="utf-8"))
         except Exception:
             meta = None
-    result = send_backup_to_telegram(path, manifest=meta)
-    if not result.get("ok"):
-        raise HTTPException(400, result.get("error") or "telegram_failed")
-    return result
+    return start_telegram_send_async(path, manifest=meta, backup_id=backup_id)
+
+
+@app.get("/api/telegram/jobs/{job_id}")
+async def api_telegram_job(job_id: str):
+    job = get_telegram_job(job_id)
+    if not job:
+        raise HTTPException(404, "job_not_found")
+    return job
 
 
 @app.post("/api/backups/stream/send")
@@ -575,6 +582,8 @@ async def api_put_settings(body: SettingsPatch):
 
 @app.get("/api/telegram/status")
 async def api_telegram_status():
+    import asyncio
+
     cfg = load_settings()
     from app.services.backup_telegram import resolve_destinations, telegram_config
 
@@ -589,7 +598,8 @@ async def api_telegram_status():
             "configured": configured,
             "error": "disabled" if not enabled else "not_configured",
         }
-    result = probe_telegram_connection(cfg)
+    # Probe talks to api.telegram.org (often slow via proxy) — never block the event loop.
+    result = await asyncio.to_thread(probe_telegram_connection, cfg)
     return {
         "ok": bool(result.get("ok")),
         "connected": bool(result.get("connected")),
@@ -602,14 +612,8 @@ async def api_telegram_status():
 
 @app.post("/api/telegram/test")
 async def api_telegram_test(body: TelegramTestBody | None = None):
-    """Connect Telegram, create a real backup, and send the zip document to Admin ID."""
-    import asyncio
-
-    result = await asyncio.to_thread(test_telegram_connection)
-    if not result.get("ok"):
-        raise HTTPException(400, result.get("error") or "telegram_test_failed")
-    result["connected"] = True
-    return result
+    """Queue connect-test (real backup + sendDocument); UI polls the telegram job."""
+    return start_telegram_test_async()
 
 
 @app.delete("/api/dashboard/last-error")

@@ -5,6 +5,9 @@ from __future__ import annotations
 import logging
 import math
 import mimetypes
+import secrets
+import threading
+import time
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -26,6 +29,14 @@ log = logging.getLogger("pgclockmg.backup_telegram")
 
 TELEGRAM_CAPTION_MAX = 1024
 TELEGRAM_TEXT_MAX = 4000
+
+# Transient transport / upstream blips are common (proxy, Iran routing, Telegram 5xx).
+TELEGRAM_TRANSPORT_ATTEMPTS = 3
+TELEGRAM_TRANSPORT_BACKOFF_SEC = 1.5
+
+_TG_JOBS: dict[str, dict[str, Any]] = {}
+_TG_JOBS_LOCK = threading.RLock()
+_TG_JOB_TTL_SEC = 60 * 60
 
 
 def telegram_part_filename(path: Path, part_index: int, parts: int) -> str:
@@ -72,6 +83,103 @@ def _client(tg: dict, timeout: float = 120.0) -> httpx.Client:
     if proxy:
         kwargs["proxy"] = proxy
     return httpx.Client(**kwargs)
+
+
+def _purge_telegram_jobs(now: float | None = None) -> None:
+    current = time.time() if now is None else now
+    with _TG_JOBS_LOCK:
+        dead = [
+            jid
+            for jid, job in _TG_JOBS.items()
+            if current - float(job.get("started_at") or 0) > _TG_JOB_TTL_SEC
+        ]
+        for jid in dead:
+            _TG_JOBS.pop(jid, None)
+
+
+def get_telegram_job(job_id: str) -> dict | None:
+    """Return a copy of an async Telegram job, or None."""
+    _purge_telegram_jobs()
+    with _TG_JOBS_LOCK:
+        job = _TG_JOBS.get(job_id)
+        return dict(job) if job else None
+
+
+def _set_telegram_job(job_id: str, **fields: Any) -> None:
+    with _TG_JOBS_LOCK:
+        job = _TG_JOBS.get(job_id)
+        if not job:
+            return
+        job.update(fields)
+        _TG_JOBS[job_id] = job
+
+
+def _is_transient_telegram_http(resp: httpx.Response) -> bool:
+    if resp.status_code in (408, 429, 500, 502, 503, 504):
+        return True
+    try:
+        body = resp.json()
+    except Exception:
+        return False
+    if not isinstance(body, dict):
+        return False
+    desc = str(body.get("description") or "").lower()
+    # Telegram sometimes returns 200 with ok=false for overload / retry-after.
+    return "retry after" in desc or "too many requests" in desc or "timed out" in desc
+
+
+def _post_with_transport_retry(
+    client: httpx.Client,
+    url: str,
+    *,
+    data: dict[str, Any] | None = None,
+    files: dict | None = None,
+    attempts: int = TELEGRAM_TRANSPORT_ATTEMPTS,
+) -> httpx.Response:
+    """POST with retries for proxy/TLS blips and Telegram 5xx/429."""
+    last_exc: Exception | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            # Re-wrap BytesIO so retries re-send the same payload from the start.
+            send_files = None
+            if files:
+                send_files = {}
+                for key, value in files.items():
+                    if isinstance(value, tuple) and len(value) >= 2 and hasattr(value[1], "seek"):
+                        name, bio = value[0], value[1]
+                        mime = value[2] if len(value) > 2 else None
+                        try:
+                            bio.seek(0)
+                        except Exception:
+                            pass
+                        send_files[key] = (name, bio, mime) if mime is not None else (name, bio)
+                    else:
+                        send_files[key] = value
+            resp = client.post(url, data=data, files=send_files)
+            if _is_transient_telegram_http(resp) and attempt < attempts:
+                log.warning(
+                    "telegram transient HTTP %s on attempt %s/%s — retrying",
+                    resp.status_code,
+                    attempt,
+                    attempts,
+                )
+                time.sleep(TELEGRAM_TRANSPORT_BACKOFF_SEC * attempt)
+                continue
+            return resp
+        except httpx.TransportError as exc:
+            last_exc = exc
+            if attempt >= attempts:
+                break
+            log.warning(
+                "telegram transport error on attempt %s/%s: %s",
+                attempt,
+                attempts,
+                exc,
+            )
+            time.sleep(TELEGRAM_TRANSPORT_BACKOFF_SEC * attempt)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("telegram_post_failed")
 
 
 def format_caption(template: str | None, ctx: dict[str, Any]) -> str:
@@ -152,9 +260,30 @@ def probe_telegram_connection(settings: dict | None = None) -> dict:
         return {"ok": False, "connected": False, "error": "admin_id_missing"}
     try:
         with _client(tg, timeout=20.0) as client:
-            me = client.get(f"https://api.telegram.org/bot{token}/getMe")
-            me.raise_for_status()
-            me_data = me.json()
+            last_exc: Exception | None = None
+            me_data: dict | None = None
+            for attempt in range(1, TELEGRAM_TRANSPORT_ATTEMPTS + 1):
+                try:
+                    me = client.get(f"https://api.telegram.org/bot{token}/getMe")
+                    if _is_transient_telegram_http(me) and attempt < TELEGRAM_TRANSPORT_ATTEMPTS:
+                        log.warning(
+                            "telegram getMe HTTP %s on attempt %s — retrying",
+                            me.status_code,
+                            attempt,
+                        )
+                        time.sleep(TELEGRAM_TRANSPORT_BACKOFF_SEC * attempt)
+                        continue
+                    me.raise_for_status()
+                    me_data = me.json()
+                    break
+                except httpx.TransportError as exc:
+                    last_exc = exc
+                    if attempt >= TELEGRAM_TRANSPORT_ATTEMPTS:
+                        raise
+                    log.warning("telegram getMe transport error on attempt %s: %s", attempt, exc)
+                    time.sleep(TELEGRAM_TRANSPORT_BACKOFF_SEC * attempt)
+            if me_data is None:
+                raise last_exc or RuntimeError("getMe_failed")
             if not me_data.get("ok"):
                 return {
                     "ok": False,
@@ -262,7 +391,11 @@ def send_telegram_message(
         data["message_thread_id"] = str(tid)
     try:
         with _client(tg, timeout=30.0) as client:
-            resp = client.post(f"https://api.telegram.org/bot{token}/sendMessage", data=data)
+            resp = _post_with_transport_retry(
+                client,
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                data=data,
+            )
             if resp.status_code >= 400:
                 return {"ok": False, "error": _api_error(resp)}
             body = resp.json()
@@ -308,11 +441,20 @@ def _send_document_parts(
             tid = normalize_thread_id(message_thread_id)
             if tid is not None:
                 data["message_thread_id"] = str(tid)
-            resp = client.post(
-                f"https://api.telegram.org/bot{token}/sendDocument",
-                data=data,
-                files=files,
-            )
+            try:
+                resp = _post_with_transport_retry(
+                    client,
+                    f"https://api.telegram.org/bot{token}/sendDocument",
+                    data=data,
+                    files=files,
+                )
+            except httpx.TransportError as exc:
+                return {
+                    "ok": False,
+                    "error": str(exc),
+                    "sent_parts": len(sent),
+                    "total_parts": parts,
+                }
             if resp.status_code >= 400:
                 return {
                     "ok": False,
@@ -459,3 +601,195 @@ def maybe_auto_send_backup(
     if not result.get("ok"):
         log.warning("auto telegram send failed: %s", result.get("error"))
     return result
+
+
+def start_telegram_send_async(
+    path: Path,
+    *,
+    manifest: dict | None = None,
+    settings: dict | None = None,
+    backup_id: str | None = None,
+) -> dict:
+    """
+    Queue a background Telegram document send and return immediately.
+
+    The panel polls ``get_telegram_job`` so the browser never holds a long HTTP
+    upload request (which used to hit the 10s UI abort and look like a connect failure).
+    """
+    _purge_telegram_jobs()
+    job_id = secrets.token_hex(6)
+    size = int(path.stat().st_size) if path.is_file() else 0
+    job = {
+        "job_id": job_id,
+        "kind": "send",
+        "status": "queued",  # queued | sending | success | error
+        "backup_id": backup_id,
+        "filename": path.name if path else None,
+        "size_bytes": size,
+        "error": None,
+        "result": None,
+        "started_at": time.time(),
+        "finished_at": None,
+    }
+    with _TG_JOBS_LOCK:
+        _TG_JOBS[job_id] = job
+
+    cfg = settings
+    man = dict(manifest or {})
+
+    def _run() -> None:
+        _set_telegram_job(job_id, status="sending")
+        try:
+            result = send_backup_to_telegram(path, manifest=man, settings=cfg)
+            if result.get("ok"):
+                _set_telegram_job(
+                    job_id,
+                    status="success",
+                    result=result,
+                    error=None,
+                    finished_at=time.time(),
+                )
+            else:
+                _set_telegram_job(
+                    job_id,
+                    status="error",
+                    result=result,
+                    error=result.get("error") or "telegram_failed",
+                    finished_at=time.time(),
+                )
+        except Exception as exc:
+            log.exception("async telegram send crashed")
+            _set_telegram_job(
+                job_id,
+                status="error",
+                error=str(exc) or "telegram_failed",
+                finished_at=time.time(),
+            )
+
+    threading.Thread(target=_run, daemon=True, name=f"tg-send-{job_id}").start()
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "kind": "send",
+        "backup_id": backup_id,
+        "filename": path.name if path else None,
+        "size_bytes": size,
+    }
+
+
+def start_telegram_test_async(settings: dict | None = None) -> dict:
+    """
+    Queue connect-test (probe + real backup + sendDocument) as a background job.
+    """
+    _purge_telegram_jobs()
+    job_id = secrets.token_hex(6)
+    job = {
+        "job_id": job_id,
+        "kind": "test",
+        "status": "queued",  # queued | probing | backing_up | sending | success | error
+        "error": None,
+        "result": None,
+        "bot": None,
+        "backup": None,
+        "started_at": time.time(),
+        "finished_at": None,
+    }
+    with _TG_JOBS_LOCK:
+        _TG_JOBS[job_id] = job
+
+    cfg = settings
+
+    def _run() -> None:
+        try:
+            _set_telegram_job(job_id, status="probing")
+            probe = probe_telegram_connection(cfg)
+            if not probe.get("ok"):
+                _set_telegram_job(
+                    job_id,
+                    status="error",
+                    error=probe.get("error") or "telegram_probe_failed",
+                    bot=probe.get("bot"),
+                    finished_at=time.time(),
+                )
+                return
+
+            update_settings({"telegram": {"enabled": True}})
+            live = load_settings()
+
+            from app.services.backup_engine import create_backup_bundle, resolve_backup_path
+
+            _set_telegram_job(job_id, status="backing_up", bot=probe.get("bot"))
+            backup = create_backup_bundle(trigger="telegram_connect")
+            if backup.get("status") != "success":
+                _set_telegram_job(
+                    job_id,
+                    status="error",
+                    error=backup.get("error") or "backup_failed",
+                    bot=probe.get("bot"),
+                    backup=backup,
+                    finished_at=time.time(),
+                )
+                return
+
+            path = resolve_backup_path(str(backup.get("backup_id") or ""))
+            if not path or not path.is_file():
+                _set_telegram_job(
+                    job_id,
+                    status="error",
+                    error="backup_path_missing",
+                    bot=probe.get("bot"),
+                    backup=backup,
+                    finished_at=time.time(),
+                )
+                return
+
+            backup_pub = {
+                "backup_id": backup.get("backup_id"),
+                "filename": backup.get("filename"),
+                "size_bytes": backup.get("size_bytes"),
+            }
+            _set_telegram_job(job_id, status="sending", bot=probe.get("bot"), backup=backup_pub)
+            send = send_backup_to_telegram(
+                path,
+                manifest=backup.get("manifest") or {},
+                settings=live,
+            )
+            if not send.get("ok"):
+                _set_telegram_job(
+                    job_id,
+                    status="error",
+                    error=send.get("error") or "telegram_send_failed",
+                    bot=probe.get("bot"),
+                    backup=backup_pub,
+                    result={"send": send},
+                    finished_at=time.time(),
+                )
+                return
+
+            _set_telegram_job(
+                job_id,
+                status="success",
+                bot=probe.get("bot"),
+                backup=backup_pub,
+                result={
+                    "ok": True,
+                    "connected": True,
+                    "bot": probe.get("bot"),
+                    "backup": backup_pub,
+                    "send": send,
+                    "message_id": (send.get("sent") or [{}])[0].get("message_id") if send.get("sent") else None,
+                },
+                error=None,
+                finished_at=time.time(),
+            )
+        except Exception as exc:
+            log.exception("async telegram test crashed")
+            _set_telegram_job(
+                job_id,
+                status="error",
+                error=str(exc) or "telegram_test_failed",
+                finished_at=time.time(),
+            )
+
+    threading.Thread(target=_run, daemon=True, name=f"tg-test-{job_id}").start()
+    return {"job_id": job_id, "status": "queued", "kind": "test"}

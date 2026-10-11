@@ -157,6 +157,93 @@ def test_send_backup_uses_sendDocument_with_caption(tmp_path, monkeypatch):
     print("OK: sendDocument carries real caption + file")
 
 
+def test_send_document_retries_transient_transport(tmp_path, monkeypatch):
+    """Proxy/TLS blips must retry sendDocument instead of failing the first attempt."""
+    import app.services.backup_telegram as tg
+    import httpx
+
+    zip_path = tmp_path / "retry.zip"
+    zip_path.write_bytes(b"PK\x03\x04" + b"1" * 512)
+
+    monkeypatch.setattr(
+        tg,
+        "load_settings",
+        lambda: {
+            "telegram": {
+                "enabled": True,
+                "bot_token": "1:TOK",
+                "chat_id": "42",
+            }
+        },
+    )
+    monkeypatch.setattr(tg, "TELEGRAM_TRANSPORT_BACKOFF_SEC", 0)
+
+    attempts = {"n": 0}
+
+    class _Ok:
+        status_code = 200
+
+        def json(self):
+            return {"ok": True, "result": {"message_id": 1}}
+
+    class _Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, url, data=None, files=None, json=None):
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                raise httpx.ConnectError("simulated blip")
+            return _Ok()
+
+    monkeypatch.setattr(tg, "_client", lambda *a, **k: _Client())
+    result = tg.send_backup_to_telegram(zip_path, manifest={})
+    assert result["ok"] is True
+    assert attempts["n"] == 3
+    print("OK: telegram send retries transient transport errors")
+
+
+def test_telegram_send_async_job_returns_immediately(tmp_path, monkeypatch):
+    """Manual send must queue a job; HTTP handler must not wait for Telegram upload."""
+    import time
+
+    import app.services.backup_telegram as tg
+
+    zip_path = tmp_path / "async.zip"
+    zip_path.write_bytes(b"PK\x03\x04" + b"2" * 128)
+
+    release = {"go": False}
+
+    def slow_send(*a, **k):
+        while not release["go"]:
+            time.sleep(0.01)
+        return {"ok": True, "parts": 1, "sent": [{"message_id": 7}]}
+
+    monkeypatch.setattr(tg, "send_backup_to_telegram", slow_send)
+    t0 = time.monotonic()
+    started = tg.start_telegram_send_async(zip_path, manifest={}, backup_id="b9")
+    assert time.monotonic() - t0 < 0.4
+    assert started["job_id"]
+    assert started["status"] == "queued"
+    job = tg.get_telegram_job(started["job_id"])
+    assert job is not None
+    assert job["status"] in ("queued", "sending")
+
+    release["go"] = True
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        job = tg.get_telegram_job(started["job_id"])
+        if job and job["status"] == "success":
+            break
+        time.sleep(0.02)
+    assert job["status"] == "success"
+    assert job["result"]["ok"] is True
+    print("OK: telegram send async job is non-blocking")
+
+
 def test_maybe_auto_send_only_manual(monkeypatch, tmp_path):
     import app.services.backup_engine as engine
     import app.services.backup_telegram as tg
