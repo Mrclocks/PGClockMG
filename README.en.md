@@ -1,4 +1,4 @@
-> 🚀 **`v4.9.0`** — multi-part backup restore (auto merge/heal) + fix manual edit for x-ui migrated users
+> 🚀 **`v4.9.1`** — root-cause fix for Telegram backup delivery (no false connect errors / 10s abort)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
