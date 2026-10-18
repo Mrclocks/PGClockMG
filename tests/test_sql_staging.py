@@ -202,6 +202,69 @@ def test_create_staging_db_runs_drop_and_create_separately():
         mod._container_running = orig_run
 
 
+def test_ephemeral_timescale_staging_repins_image_on_catalog_mismatch(tmp_path):
+    """backup=timescaledb → mysql: post_restore mismatch must re-stage on the dump's version."""
+    import asyncio
+    from unittest.mock import MagicMock
+    from app.services.native_migration import sql_staging as mod
+
+    dump = tmp_path / "d.sql"
+    dump.write_text("CREATE EXTENSION timescaledb;\nCREATE TABLE users (id int);\n", encoding="utf-8")
+    images: list[str] = []
+
+    class Mig:
+        job = MagicMock()
+
+        async def _run_cmd(self, cmd, timeout=0):
+            if cmd[:3] == ["docker", "run", "-d"]:
+                images.append(cmd[-1])
+            return True, ""
+
+    async def fake_ready(*_a, **_k):
+        return None
+
+    async def fake_create(*_a, **_k):
+        return None
+
+    async def fake_retry(container, pwd, db, sql, **_k):
+        if "timescaledb_post_restore" in sql and "latest" in images[-1]:
+            raise RuntimeError(
+                'psql failed: SELECT timescaledb_post_restore(); → ERROR:  catalog '
+                'version mismatch, expected "2.30.2" seen "2.29.2"'
+            )
+        return ""
+
+    async def fake_psql(container, pwd, db, sql=None, *, stdin_path=None, on_error_stop=True):
+        if sql and "COUNT(*)" in sql:
+            return 0, "3\n"
+        return 0, ""
+
+    async def fake_logs(_c):
+        return ""
+
+    saved = {
+        k: getattr(mod, k)
+        for k in ("_wait_ephemeral_pg_ready", "_create_pg_staging_db",
+                  "_psql_ephemeral_retry", "_psql_ephemeral", "_container_logs_tail")
+    }
+    mod._wait_ephemeral_pg_ready = fake_ready
+    mod._create_pg_staging_db = fake_create
+    mod._psql_ephemeral_retry = fake_retry
+    mod._psql_ephemeral = fake_psql
+    mod._container_logs_tail = fake_logs
+    try:
+        res = asyncio.run(
+            mod._import_via_ephemeral_postgres(Mig(), dump, "timescaledb", {}, "pgmig_x", "c1")
+        )
+    finally:
+        for k, v in saved.items():
+            setattr(mod, k, v)
+    assert images[0].endswith("latest-pg17")
+    assert images[-1] == "timescale/timescaledb:2.29.2-pg17"
+    assert res["database"] == "pgmig_x"
+    print("OK: ephemeral staging re-pins Timescale image on catalog mismatch")
+
+
 def test_transient_pg_error_detection():
     from app.services.native_migration.sql_staging import _is_transient_pg_error
 

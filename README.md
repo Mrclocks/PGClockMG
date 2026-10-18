@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.9.2`** — فیکس ریستور mysql→timescaledb (خطای catalog version mismatch / post_restore در تبدیل بین دیتابیس‌ها)
+> 🚀 **`v4.9.2`** — فیکس ریستور timescaledb→mysql/sqlite (خطای catalog version mismatch در staging) + مقاوم‌سازی تبدیل mysql→timescaledb
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
