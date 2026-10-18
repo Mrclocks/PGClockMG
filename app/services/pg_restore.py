@@ -3750,6 +3750,15 @@ async def _ensure_timescaledb_not_in_restore_mode(
             if working is not None:
                 ordered = [working] + [a for a in auth_attempts if a != working]
                 await _heal_extension(database, ordered)
+            else:
+                # GUC unreadable (auth/probe failed): cannot prove it is off, so
+                # force it off best-effort — never fatal on the convert path.
+                emerg_ok, _auth, _errs = await _emergency_clear(database, list(auth_attempts))
+                if not emerg_ok:
+                    job.log(
+                        f"restore-mode state on {database} could not be verified or cleared "
+                        "(convert path) — continuing"
+                    )
             return
         need_post = restoring == "on" or working is None
         if not need_post:
