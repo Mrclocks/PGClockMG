@@ -1,4 +1,4 @@
-> 🚀 **`v4.9.2`** — фикс restore timescaledb→mysql/sqlite (catalog version mismatch в staging) + усиление конвертации mysql→timescaledb
+> 🚀 **`v4.9.3`** — фикс restore timescaledb→mysql/sqlite (catalog version mismatch в staging) + усиление конвертации mysql→timescaledb
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

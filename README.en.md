@@ -1,4 +1,4 @@
-> 🚀 **`v4.9.2`** — fix timescaledb→mysql/sqlite restore (catalog version mismatch in staging) + mysql→timescaledb convert hardening
+> 🚀 **`v4.9.3`** — fix timescaledb→mysql/sqlite restore (catalog version mismatch in staging) + mysql→timescaledb convert hardening
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
