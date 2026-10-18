@@ -393,6 +393,97 @@ def test_ensure_timescaledb_emergency_clear_when_post_restore_fails():
     print("OK: emergency clear after catalog mismatch post_restore failure")
 
 
+def test_ensure_timescaledb_convert_skips_post_restore_when_check_fails():
+    """mysql→timescaledb: restoring was never on; inconclusive probe must not fail."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from app.services import pg_restore as mod
+
+    job = MagicMock()
+    job.log = MagicMock()
+    posts = {"n": 0}
+
+    async def fake_run(_job, cmd, **_kwargs):
+        joined = " ".join(str(c) for c in cmd)
+        if "current_setting" in joined:
+            return False, 'FATAL:  password authentication failed for user "pasarguard"\n'
+        if "timescaledb_post_restore" in joined:
+            posts["n"] += 1
+            return False, 'ERROR:  catalog version mismatch, expected "2.28.0" seen "2.27.0"\n'
+        return False, "Timeout"
+
+    async def _go():
+        with (
+            patch.object(mod, "_detect_db_container", AsyncMock(return_value="timescaledb")),
+            patch.object(mod, "_read_pg_container_init_env", AsyncMock(return_value={})),
+            patch.object(mod, "_read_current_env", return_value="DB_USER=pasarguard\n"),
+            patch.object(mod, "_run", side_effect=fake_run),
+        ):
+            await mod._ensure_timescaledb_not_in_restore_mode(
+                job, "secret", "pasarguard", "pasarguard", from_convert=True,
+            )
+
+    asyncio.run(_go())  # must not raise
+    assert posts["n"] == 0
+    print("OK: convert path skips post_restore when restoring is not on")
+
+
+def test_ensure_timescaledb_catalog_mismatch_heals_extension_before_emergency():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from app.services import pg_restore as mod
+
+    job = MagicMock()
+    job.log = MagicMock()
+    state = {"updated": False, "phase": "check"}
+    calls: list[str] = []
+
+    async def fake_run(_job, cmd, **_kwargs):
+        joined = " ".join(str(c) for c in cmd)
+        calls.append(joined)
+        if "pg_available_extensions" in joined:
+            return True, "2.27.0|2.28.0\n"
+        if "ALTER EXTENSION timescaledb UPDATE" in joined:
+            state["updated"] = True
+            return True, "ALTER EXTENSION\n"
+        if "current_setting" in joined:
+            return True, ("off\n" if state["phase"] == "after" else "on\n")
+        if "timescaledb_post_restore" in joined:
+            if state["updated"]:
+                state["phase"] = "after"
+                return True, "t\n"
+            return False, 'ERROR:  catalog version mismatch, expected "2.28.0" seen "2.27.0"\n'
+        if "datname" in joined:
+            return True, "pasarguard\n"
+        return True, ""
+
+    async def _go():
+        with (
+            patch.object(mod, "_detect_db_container", AsyncMock(return_value="timescaledb")),
+            patch.object(mod, "_read_pg_container_init_env", AsyncMock(return_value={})),
+            patch.object(mod, "_read_current_env", return_value="DB_USER=pasarguard\n"),
+            patch.object(mod, "_run", side_effect=fake_run),
+        ):
+            await mod._ensure_timescaledb_not_in_restore_mode(
+                job, "secret", "pasarguard", "pasarguard",
+            )
+
+    asyncio.run(_go())
+    assert state["updated"]
+    assert not any("ALTER DATABASE" in c for c in calls), "no emergency clear needed"
+    assert not any(" restart " in c for c in calls)
+    print("OK: catalog mismatch healed via ALTER EXTENSION UPDATE")
+
+
+def test_catalog_mismatch_signal_needs_real_error_line():
+    from app.services.pg_restore import _scan_restore_error_signals
+
+    real = _scan_restore_error_signals('ERROR: catalog version mismatch, expected "2.28.0" seen "2.27.0"')
+    assert real.ts_catalog_mismatch
+    assert not _scan_restore_error_signals("note: catalog version mismatch").ts_catalog_mismatch
+    print("OK: catalog mismatch signal requires the real error")
+
+
 def test_atomic_write_text_and_compose_guard():
     import tempfile
     import shutil

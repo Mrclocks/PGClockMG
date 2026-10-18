@@ -345,7 +345,10 @@ def _scan_restore_error_signals(raw: str) -> _ErrSig:
     )
 
     s.ts_schema_name = "schema_name" in low and "chunk" in low
-    s.ts_catalog_mismatch = "catalog version mismatch" in low
+    # Only the real post_restore error line — not any log line mentioning the phrase.
+    s.ts_catalog_mismatch = bool(
+        re.search(r"catalog version mismatch[^\n]{0,20}expected", low)
+    )
     s.ts_restoring = any(
         x in low for x in ("restoring=on", "timescaledb_post_restore", "timescaledb.restoring")
     )
@@ -3493,8 +3496,15 @@ async def _ensure_timescaledb_not_in_restore_mode(
     password: str,
     user: str,
     db_name: str,
+    *,
+    from_convert: bool = False,
 ) -> None:
     """Guard against TimescaleDB being stuck in restore mode before panel start.
+
+    ``from_convert``: data arrived via cross-DB INSERT copy (e.g. mysql→timescaledb),
+    so ``timescaledb_pre_restore()`` was never called on the live DB. There is
+    nothing to "post restore" unless the GUC is positively on — an inconclusive
+    probe must not become a fatal error. The extension version is still realigned.
 
     If timescaledb_pre_restore() was called but post_restore() was never
     confirmed, the extension keeps the DB in maintenance mode and PasarGuard
@@ -3669,8 +3679,78 @@ async def _ensure_timescaledb_not_in_restore_mode(
             return True, after
         return False, ""
 
+    ext_ver_sql = (
+        "SELECT COALESCE((SELECT extversion FROM pg_extension WHERE extname='timescaledb'),'') "
+        "|| '|' || COALESCE((SELECT default_version FROM pg_available_extensions "
+        "WHERE name='timescaledb'),'');"
+    )
+
+    async def _heal_extension(
+        database: str,
+        attempts: list[tuple[str, str | None]],
+        *,
+        restart: bool = False,
+    ) -> bool:
+        """Realign the installed extension with the image library (no data wipe).
+
+        Returns True when something was changed (caller should retry post_restore).
+        ``restart`` reloads the preloaded library after an image/tag change.
+        """
+        if restart:
+            ok_r, out_r = await _compose(job, "restart", svc, timeout=180)
+            if not ok_r:
+                job.log(f"Timescale container restart failed: {(out_r or '')[-200:]}")
+                return False
+            job.log("Restarted TimescaleDB container to reload the extension library")
+            for _ in range(30):
+                for auth_user, auth_pwd in attempts:
+                    ok_p, _out = await _try(check_sql, auth_user, auth_pwd, database, timeout=20)
+                    if ok_p:
+                        return True
+                await asyncio.sleep(2)
+            return True
+
+        installed = available = ""
+        for auth_user, auth_pwd in attempts:
+            ok_v, out_v = await _try(ext_ver_sql, auth_user, auth_pwd, database, timeout=20)
+            if not ok_v:
+                continue
+            lines = (out_v or "").strip().splitlines()
+            parts = lines[-1].strip().split("|") if lines else []
+            if len(parts) == 2:
+                installed, available = parts[0].strip(), parts[1].strip()
+                break
+        if available and not installed:
+            job.log(f"timescaledb extension missing on {database} — creating {available}")
+            sql = "CREATE EXTENSION IF NOT EXISTS timescaledb;"
+        elif installed and available and installed != available:
+            job.log(
+                f"timescaledb extension on {database} is {installed} but image ships "
+                f"{available} — running ALTER EXTENSION UPDATE"
+            )
+            sql = "ALTER EXTENSION timescaledb UPDATE;"
+        else:
+            return False
+        for auth_user, auth_pwd in attempts:
+            ok_u, out_u = await _try(sql, auth_user, auth_pwd, database, timeout=60)
+            if ok_u:
+                return True
+            err = extract_psql_errors(out_u or "")[:240] or (out_u or "")[-240:]
+            if err:
+                job.log(f"timescaledb extension realign note ({auth_user}): {err}")
+        return False
+
     async def _clear_one_database(database: str) -> None:
         working, restoring, check_errors = await _find_auth_for_db(database)
+        if from_convert and restoring != "on":
+            job.log(
+                f"TimescaleDB restore mode on {database}: {restoring or 'inconclusive'} — "
+                "cross-DB convert never entered restore mode, skipping post_restore"
+            )
+            if working is not None:
+                ordered = [working] + [a for a in auth_attempts if a != working]
+                await _heal_extension(database, ordered)
+            return
         need_post = restoring == "on" or working is None
         if not need_post:
             job.log(f"TimescaleDB restore mode on {database}: {restoring or 'off/n/a'} — OK")
@@ -3707,6 +3787,18 @@ async def _ensure_timescaledb_not_in_restore_mode(
                     cleared = True
                 else:
                     cleared = False
+
+        if not cleared and catalog_seen:
+            # Cheapest fix first: ALTER EXTENSION UPDATE, then reload the library by
+            # restarting the container. No image pull, no data wipe.
+            for restart in (False, True):
+                if not await _heal_extension(database, attempts, restart=restart):
+                    continue
+                cleared, used_auth, post_errors2, _ = await _run_post_restore(database, attempts)
+                post_errors.extend(post_errors2)
+                if cleared:
+                    job.log(f"post_restore succeeded on {database} after extension realign")
+                    break
 
         if not cleared and catalog_seen:
             # Catalog mismatch (e.g. expected 2.28 seen 2.27): post_restore cannot run
@@ -3821,6 +3913,8 @@ async def _prepare_panel_boot_after_finalize(
     verify_pass: str,
     verify_user: str,
     verify_db: str,
+    *,
+    from_convert: bool = False,
 ) -> tuple[str, str, str]:
     """Prevent panel startup failures: sync DB, PgBouncer, Timescale GUC, NATS."""
     from app.services.db_auth import (
@@ -3918,6 +4012,7 @@ async def _prepare_panel_boot_after_finalize(
         )
         await _ensure_timescaledb_not_in_restore_mode(
             job, verify_pass, verify_user, verify_db,
+            from_convert=from_convert,
         )
     elif final_engine in ("mysql", "mariadb") and verify_pass:
         svc = await _detect_db_container(job, final_engine)
@@ -6051,6 +6146,7 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             verify_pass,
             verify_user,
             verify_db,
+            from_convert=needs_convert,
         )
         mini.params["target_db_password"] = verify_pass
         mini.params["target_db_user"] = verify_user
