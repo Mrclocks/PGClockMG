@@ -625,3 +625,18 @@ if __name__ == "__main__":
     test_import_mysql_dump_routes_to_ephemeral_when_target_is_timescale()
     test_mysql_ephemeral_passes_create_sql_as_exec_argv()
     print("\nAll sql staging tests passed.")
+
+
+def test_ephemeral_timescale_pin_tries_dump_pg_major(tmp_path):
+    """Old Timescale has no -pg17 tag: pin on the dump's PG major first, then 17/16."""
+    from app.services.native_migration import sql_staging as mod
+
+    dump = tmp_path / "d.sql"
+    dump.write_text(
+        "--\n-- Dumped from database version 15.6\n-- Dumped by pg_dump version 15.6\n",
+        encoding="utf-8",
+    )
+    assert mod._ts_pin_pg_majors(dump) == ["15", "17", "16"]
+    dump.write_text("CREATE TABLE users (id int);\n", encoding="utf-8")
+    assert mod._ts_pin_pg_majors(dump) == ["17", "16"]
+    print("OK: pinned Timescale staging tries the dump's PG major first")

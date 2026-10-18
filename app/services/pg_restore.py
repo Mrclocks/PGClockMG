@@ -4477,6 +4477,14 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         en = "docker-compose.yml is empty or unusable."
         ru = "Файл docker-compose.yml пуст или повреждён."
         _causes(*_docker_causes_from_log(sig))
+    elif "failed alembic upgrade head" in low and "--- staging container" in low:
+        # Throwaway staging DB (Phase 1). Its appended container logs may carry
+        # Timescale post_restore / catalog lines that were tolerated — the alembic
+        # failure is the real error, so classify it before the Timescale branches.
+        fa = "آپدیت اسکیمای دیتابیس میانی (staging) با alembic شکست خورد (Phase 1)."
+        en = "Intermediate staging DB schema upgrade via alembic failed (Phase 1)."
+        ru = "Обновление схемы промежуточной БД (staging) через alembic не удалось (Phase 1)."
+        _causes(*_alembic_causes_from_log(sig))
     elif sig.ts_catalog_mismatch and "timescale" in low:
         fa = "نسخه کاتالوگ TimescaleDB بکاپ با ایمیج در حال اجرا یکی نیست (post_restore)."
         en = "TimescaleDB catalog version in the dump does not match the running image (post_restore)."

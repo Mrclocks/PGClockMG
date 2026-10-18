@@ -2646,7 +2646,7 @@ def _is_alembic_connect_auth_error(output: str) -> bool:
 
 
 async def _alembic_endpoint_strategies(
-    migrator, url: str,
+    migrator, url: str, *, pin_url: bool = False,
 ) -> list[tuple[list[str], str, str]]:
     """Ordered ``(net_args, url, label)`` endpoints to try until alembic succeeds.
 
@@ -2657,6 +2657,12 @@ async def _alembic_endpoint_strategies(
     of sqlite→timescaledb upgrades an intermediate SQLite file while target_db
     is already timescaledb — rewriting that URL with PG host:port is what
     produced ``Invalid SQLite URL: sqlite+aiosqlite://127.0.0.1:5432//…``.
+
+    ``pin_url``: the URL names a specific staging DB (e.g. a throwaway Timescale
+    container on 127.0.0.1:54330) — use it as-is. Rewriting it to the live
+    target's endpoints would point alembic at a different server: on a MySQL
+    target, asyncpg then spoke Postgres to :3306 and died with
+    ``connection was closed in the middle of operation``.
     """
     # Best-effort: keep compose ps -q free of PGADMIN interpolation warnings.
     try:
@@ -2677,6 +2683,10 @@ async def _alembic_endpoint_strategies(
         url_engine != "postgresql" and target_db not in ("postgresql", "timescaledb")
     ):
         return [(["--network", "host"], url, "host")]
+    # A PG URL with a non-PG target can only be a staging DB (the target's
+    # endpoints are MySQL/SQLite) — same for an explicitly pinned staging URL.
+    if pin_url or target_db in ("mysql", "mariadb", "sqlite"):
+        return [(["--network", "host"], url, "staging-direct")]
 
     conn = get_target_connection(migrator.params)
     port = migration_port(conn, target_db if target_db in ("postgresql", "timescaledb") else "timescaledb")
@@ -2950,15 +2960,19 @@ async def _run_pasarguard_alembic(
     *args: str,
     url_override: str | None = None,
     attempt_timeout: int | None = None,
+    pin_url: bool = False,
 ) -> tuple[bool, str]:
     """Run python -m alembic in panel image.
 
     Auto-heals connect/auth by rotating endpoints: compose DNS → DB container
     netns → published → docker-bridge → host loopback. Schema errors and
     mid-DDL timeouts return immediately (do not rotate TCP paths).
+    ``pin_url`` skips the rotation for a staging URL (see _alembic_endpoint_strategies).
     """
     base_url = url_override or build_local_alembic_url(migrator.params)
-    strategies = await _alembic_endpoint_strategies(migrator, base_url)
+    strategies = await _alembic_endpoint_strategies(
+        migrator, base_url, pin_url=bool(pin_url and url_override),
+    )
     last_out = ""
     for idx, (net_args, url, label) in enumerate(strategies):
         ok, out = await _run_pasarguard_alembic_once(
@@ -3381,6 +3395,9 @@ async def run_alembic_upgrade_head(
     upgrade_to = _alembic_upgrade_target(heads) if heads else "head"
     if len(heads) > 1:
         migrator.job.log(f"Alembic has {len(heads)} heads — using `upgrade {upgrade_to}`")
+    # Throwaway staging container: its URL is authoritative and its credentials
+    # are our own — never rewrite it to (or heal auth on) the live target DB.
+    ephemeral_staging = bool(url_override and (heal_conn or {}).get("_ephemeral_container"))
 
     for attempt in range(1, 8):
         ok, out = await _run_pasarguard_alembic(
@@ -3389,6 +3406,7 @@ async def run_alembic_upgrade_head(
             upgrade_to,
             url_override=url_override,
             attempt_timeout=attempt_timeout,
+            pin_url=ephemeral_staging,
         )
         if ok:
             if attempt > 1:
@@ -3433,7 +3451,7 @@ async def run_alembic_upgrade_head(
             _is_alembic_connect_auth_error(last_out)
             and auth_heals < max_auth_heals
         ):
-            healed = await _try_heal_db_auth_mismatch(
+            healed = False if ephemeral_staging else await _try_heal_db_auth_mismatch(
                 migrator, last_out, force=True,
             )
             if healed:

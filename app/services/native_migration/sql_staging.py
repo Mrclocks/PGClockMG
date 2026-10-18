@@ -906,6 +906,27 @@ async def _create_pg_staging_db(container: str, pwd: str, staging_db: str) -> No
     await _psql_ephemeral_retry(container, pwd, safe, "SELECT 1;")
 
 
+def _ts_pin_pg_majors(dump_path: Path) -> list[str]:
+    """PG majors to try for a pinned Timescale image: the dump's own major first.
+
+    Timescale < 2.17 publishes no ``-pg17`` tag, so pinning only on pg17 always
+    fell through to ``latest``.
+    """
+    majors: list[str] = []
+    try:
+        with open(dump_path, encoding="utf-8", errors="ignore") as fh:
+            head = fh.read(4096)
+        m = re.search(r"Dumped from database version (\d+)", head)
+        if m and m.group(1) in ("14", "15", "16", "17"):
+            majors.append(m.group(1))
+    except OSError:
+        pass
+    for major in ("17", "16"):
+        if major not in majors:
+            majors.append(major)
+    return majors
+
+
 async def _import_via_ephemeral_postgres(
     migrator,
     dump_path: Path,
@@ -915,6 +936,7 @@ async def _import_via_ephemeral_postgres(
     container: str,
     *,
     ts_pin: str | None = None,
+    pg_major: str = "17",
     tolerate_post_restore: bool = False,
 ) -> dict:
     """Stage PG/Timescale dump when the source engine is not in live compose (e.g. MySQL target).
@@ -922,6 +944,7 @@ async def _import_via_ephemeral_postgres(
     ``ts_pin``: pin the throwaway image to the dump's Timescale version. The default
     ``latest`` tag moves on, and ``timescaledb_post_restore()`` refuses a dump whose
     catalog version differs from the image ("catalog version mismatch").
+    ``pg_major``: Postgres major of the pinned image (older Timescale has no -pg17 tag).
     ``tolerate_post_restore``: the staging DB is read-only scratch space, so a failed
     post_restore only costs hypertable planner features — row data stays readable.
     """
@@ -938,7 +961,7 @@ async def _import_via_ephemeral_postgres(
 
     if use_ts:
         image = (
-            f"timescale/timescaledb:{ts_pin}-pg17" if ts_pin
+            f"timescale/timescaledb:{ts_pin}-pg{pg_major}" if ts_pin
             else "timescale/timescaledb:latest-pg17"
         )
     else:
@@ -1084,24 +1107,27 @@ async def _import_via_ephemeral_postgres(
                 # "seen" is the catalog version stored in the dump — match the image to it.
                 pin = parse_timescale_wanted([mismatch[1]])
                 if pin and pin != ts_pin and re.match(r"^\d+\.\d+(\.\d+)?$", pin):
-                    migrator.job.log(
-                        f"Timescale catalog mismatch (dump {mismatch[1]}, image {mismatch[0]}) — "
-                        f"re-staging with timescale/timescaledb:{pin}-pg17"
-                    )
-                    try:
-                        return await _import_via_ephemeral_postgres(
-                            migrator, dump_path, source_db, conn, staging_db, container,
-                            ts_pin=pin,
-                        )
-                    except Exception as pin_exc:
+                    for major in _ts_pin_pg_majors(dump_path):
                         migrator.job.log(
-                            f"Pinned Timescale staging failed ({pin_exc}) — "
-                            "retrying on latest and tolerating post_restore"
+                            f"Timescale catalog mismatch (dump {mismatch[1]}, image {mismatch[0]}) — "
+                            f"re-staging with timescale/timescaledb:{pin}-pg{major}"
                         )
-                        return await _import_via_ephemeral_postgres(
-                            migrator, dump_path, source_db, conn, staging_db, container,
-                            tolerate_post_restore=True,
-                        )
+                        try:
+                            return await _import_via_ephemeral_postgres(
+                                migrator, dump_path, source_db, conn, staging_db, container,
+                                ts_pin=pin, pg_major=major,
+                            )
+                        except Exception as pin_exc:
+                            migrator.job.log(
+                                f"Pinned Timescale staging pg{major} failed ({str(pin_exc)[-300:]})"
+                            )
+                    migrator.job.log(
+                        "Pinned Timescale staging failed — retrying on latest and tolerating post_restore"
+                    )
+                    return await _import_via_ephemeral_postgres(
+                        migrator, dump_path, source_db, conn, staging_db, container,
+                        tolerate_post_restore=True,
+                    )
         raise
 
     return {

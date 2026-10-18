@@ -1876,3 +1876,21 @@ if __name__ == "__main__":
     test_analyze_sql_gz_dump()
     test_discover_ignores_xui_sqlite()
     print("\nAll pg_restore tests passed")
+
+
+def test_explain_alembic_staging_failure_not_labelled_catalog_mismatch():
+    """A tolerated staging catalog mismatch in the logs must not mask the alembic failure."""
+    from app.services.pg_restore import explain_restore_error
+
+    msg = (
+        "Failed alembic upgrade head:\n"
+        "asyncpg.exceptions.ConnectionDoesNotExistError: connection was closed in the middle of operation\n"
+        "--- staging container pgmig-eph logs ---\n"
+        'ERROR:  catalog version mismatch, expected "2.30.2" seen "2.29.2"\n'
+        "STATEMENT:  SELECT timescaledb_post_restore();\n"
+    )
+    info = explain_restore_error(RuntimeError(msg), "timescaledb", "mysql")
+    assert "catalog" not in info["en"].lower()
+    assert "staging" in info["en"].lower()
+    assert "alembic" in info["en"].lower()
+    print("OK: alembic staging failure is not labelled as catalog mismatch")

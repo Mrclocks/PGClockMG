@@ -1,4 +1,4 @@
-> 🚀 **`v4.9.3`** — fix timescaledb→mysql/sqlite restore (catalog version mismatch in staging) + mysql→timescaledb convert hardening
+> 🚀 **`v4.9.4`** — fix timescaledb→mysql/sqlite restore (staging alembic was pointed at the MySQL port: connection was closed in the middle of operation)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

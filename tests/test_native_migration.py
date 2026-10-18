@@ -860,6 +860,95 @@ def test_alembic_strategies_sqlite_ignores_timescaledb_target():
     print("OK: sqlite strategies ignore timescaledb target_db")
 
 
+def test_alembic_strategies_staging_pg_url_never_rewritten_to_mysql_target():
+    """backup=timescaledb → mysql: the staging PG URL must stay on the ephemeral port.
+
+    It used to be rewritten to the MySQL target's 127.0.0.1:3306, and asyncpg died with
+    ``connection was closed in the middle of operation``.
+    """
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.services import pasarguard_ops as ops
+
+    url = "postgresql+asyncpg://postgres:pgmigrator@127.0.0.1:54330/pgmig_x?ssl=disable"
+    mig = MagicMock()
+    mig.params = {
+        "target_db": "mysql",
+        "target_host": "127.0.0.1",
+        "target_port": "3306",
+        "target_user": "root",
+        "target_password": "secret",
+        "target_database": "pasarguard",
+    }
+    mig.job = MagicMock()
+
+    async def _go(params, pin):
+        mig.params = params
+        with (
+            patch.object(ops, "_tcp_port_open", return_value=True),
+            patch.object(ops, "resolve_db_service", return_value="timescaledb"),
+            patch.object(
+                ops, "_compose_network_name", new_callable=AsyncMock, return_value="net",
+            ),
+            patch.object(
+                ops, "_compose_service_container_id",
+                new_callable=AsyncMock, return_value="abcdef012345",
+            ),
+            patch(
+                "app.services.env_migration.silence_compose_pgadmin_warnings",
+                return_value=False,
+            ),
+        ):
+            return await ops._alembic_endpoint_strategies(mig, url, pin_url=pin)
+
+    for params, pin in (
+        (dict(mig.params), False),
+        (dict(mig.params, target_db="sqlite"), False),
+        # PG-family target but a throwaway staging container: pinned explicitly.
+        (dict(mig.params, target_db="timescaledb", target_port="5432"), True),
+    ):
+        strategies = asyncio.run(_go(params, pin))
+        assert len(strategies) == 1, strategies
+        net_args, out_url, label = strategies[0]
+        assert label == "staging-direct"
+        assert net_args == ["--network", "host"]
+        assert "@127.0.0.1:54330/pgmig_x" in out_url
+    print("OK: staging PG URL is never rewritten to the live target endpoint")
+
+
+def test_run_alembic_upgrade_head_pins_ephemeral_staging_url():
+    """Ephemeral staging conn → pin_url, and never heal auth on the live target."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.services import pasarguard_ops as ops
+
+    mig = MagicMock()
+    mig.params = {"target_db": "timescaledb"}
+    mig.job = MagicMock()
+    seen: list[bool] = []
+
+    async def _run(_m, *args, url_override=None, attempt_timeout=None, pin_url=False):
+        seen.append(pin_url)
+        return True, ""
+
+    async def _go(heal_conn):
+        with (
+            patch.object(ops, "get_alembic_head_revisions", new_callable=AsyncMock, return_value=["abc"]),
+            patch.object(ops, "_run_pasarguard_alembic", side_effect=_run),
+        ):
+            await ops.run_alembic_upgrade_head(
+                mig, url_override="postgresql+asyncpg://u:p@127.0.0.1:54330/x",
+                heal_db="timescaledb", heal_conn=heal_conn,
+            )
+
+    asyncio.run(_go({"_ephemeral_container": "pgmig-eph"}))
+    asyncio.run(_go({"host": "127.0.0.1"}))
+    assert seen == [True, False]
+    print("OK: run_alembic_upgrade_head pins only ephemeral staging URLs")
+
+
 def test_extract_docker_container_id_skips_pgadmin_warning():
     """Exact failure from the field: compose warning became --network=container:time=…"""
     from app.services.pasarguard_ops import extract_docker_container_id
@@ -2022,6 +2111,8 @@ if __name__ == "__main__":
     test_change_db_assert_convert_counts_rejects_partial_empty()
     test_rewrite_sqlalchemy_host_port_never_touches_sqlite()
     test_alembic_strategies_sqlite_ignores_timescaledb_target()
+    test_alembic_strategies_staging_pg_url_never_rewritten_to_mysql_target()
+    test_run_alembic_upgrade_head_pins_ephemeral_staging_url()
     test_extract_docker_container_id_skips_pgadmin_warning()
     test_run_pasarguard_alembic_does_not_rotate_on_invalid_sqlite_url()
     test_sqlite_column_intersection()
