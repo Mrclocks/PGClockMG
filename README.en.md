@@ -1,4 +1,4 @@
-> 🚀 **`v4.9.1`** — root-cause fix for Telegram backup delivery (no false connect errors / 10s abort)
+> 🚀 **`v4.9.2`** — fix mysql→timescaledb restore (catalog version mismatch / post_restore on cross-DB convert)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

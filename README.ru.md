@@ -1,4 +1,4 @@
-> 🚀 **`v4.9.1`** — корневой фикс отправки бэкапа в Telegram (без ложных ошибок соединения / abort 10с)
+> 🚀 **`v4.9.2`** — фикс restore mysql→timescaledb (catalog version mismatch / post_restore при конвертации БД)
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
