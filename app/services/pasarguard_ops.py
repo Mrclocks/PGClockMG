@@ -3443,17 +3443,46 @@ async def run_alembic_upgrade_head(
                     f"({auth_heals}/{max_auth_heals}) — retrying upgrade head…"
                 )
                 continue
-            if attempt < 3:
+            if attempt < (5 if (heal_conn or {}).get("_ephemeral_container") else 3):
                 migrator.job.log(
                     "Alembic connect still failing — retrying endpoints…"
                 )
+                await _backoff_alembic_connect_retry(migrator, heal_conn, attempt)
                 continue
 
         break
 
-    raise RuntimeError(
-        "Failed alembic upgrade head:\n" + _format_alembic_failure(last_out or "")
-    )
+    detail = _format_alembic_failure(last_out or "")
+    ephemeral = (heal_conn or {}).get("_ephemeral_container")
+    if ephemeral and _is_alembic_connect_auth_error(last_out):
+        try:
+            from app.services.native_migration.sql_staging import _container_logs_tail
+
+            logs = (await _container_logs_tail(ephemeral, 40)).strip()
+            if logs:
+                detail += f"\n--- staging container {ephemeral} logs ---\n{logs[-1500:]}"
+        except Exception:
+            pass
+    raise RuntimeError("Failed alembic upgrade head:\n" + detail)
+
+
+async def _backoff_alembic_connect_retry(migrator, conn: dict | None, attempt: int) -> None:
+    """Give a restarting/crashing Postgres time to come back before the next attempt.
+
+    Retries used to fire back-to-back, so a server that closed connections for a few
+    seconds (crash recovery, init restart, Timescale background worker restart) burned
+    every attempt. For a throwaway staging container, also surface an early exit.
+    """
+    await asyncio.sleep(min(4 * attempt, 12))
+    container = (conn or {}).get("_ephemeral_container")
+    if not container:
+        return
+    try:
+        from app.services.native_migration.sql_staging import _wait_ephemeral_pg_ready
+
+        await _wait_ephemeral_pg_ready(container, (conn or {}).get("password") or "pgmigrator", attempts=15)
+    except RuntimeError as e:
+        migrator.job.log(f"Staging Postgres not stable before alembic retry: {str(e)[-500:]}")
 
 
 async def get_alembic_head_revisions(migrator) -> list[str]:
