@@ -37,6 +37,7 @@ from app.services.pg_restore import (
     explain_restore_error,
     discover_backup_artifacts,
     build_mysql_restore_auth_attempts,
+    mysql_same_engine_panel_password,
 )
 
 
@@ -1307,6 +1308,148 @@ def test_build_mysql_restore_auth_attempts_prefers_install_password():
     print("OK: mysql restore auth prefers install password")
 
 
+def test_mysql_same_engine_panel_password_install_first():
+    """Regression: MySQL→MySQL must not flip .env to backup secret when install has one.
+
+    Writing backup MYSQL_ROOT_PASSWORD into .env after pre-heal caused
+    Access denied for user 'pasarguard'@'127.0.0.1' on panel boot.
+    """
+    assert (
+        mysql_same_engine_panel_password(
+            install_root="install-root",
+            install_app="install-app",
+            install_url="install-url",
+            backup_root="backup-root",
+            backup_app="backup-app",
+        )
+        == "install-root"
+    )
+    assert (
+        mysql_same_engine_panel_password(
+            install_root=None,
+            install_app="install-app",
+            install_url="install-url",
+            backup_root="backup-root",
+            backup_app="backup-app",
+        )
+        == "install-app"
+    )
+    assert (
+        mysql_same_engine_panel_password(
+            install_root="",
+            install_app="",
+            install_url="from-url",
+            backup_root="backup-root",
+            backup_app="backup-app",
+        )
+        == "from-url"
+    )
+    # Backup only as last resort when install has nothing.
+    assert (
+        mysql_same_engine_panel_password(
+            install_root=None,
+            install_app=None,
+            install_url=None,
+            backup_root="backup-root",
+            backup_app="backup-app",
+        )
+        == "backup-root"
+    )
+    assert (
+        mysql_same_engine_panel_password(
+            install_root=None,
+            install_app=None,
+            install_url=None,
+            backup_root=None,
+            backup_app="backup-app",
+        )
+        == "backup-app"
+    )
+    assert mysql_same_engine_panel_password() == ""
+    print("OK: mysql same-engine panel password is install-first")
+
+
+def test_ensure_mysql_panel_login_requires_tcp_probe():
+    """Sync alone is not enough — must prove user@127.0.0.1 TCP like SQLAlchemy."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.services import pg_restore as mod
+
+    job = MagicMock()
+    job.log = MagicMock()
+
+    async def _run():
+        with patch.object(
+            mod, "_sync_mysql_passwords", new_callable=AsyncMock, return_value=True,
+        ) as sync, patch.object(
+            mod, "_probe_mysql_tcp_login", new_callable=AsyncMock, return_value=False,
+        ) as probe:
+            ok = await mod._ensure_mysql_panel_login(
+                job, "mysql", "install-secret",
+                app_user="pasarguard",
+                db_type="mysql",
+                db_name="pasarguard",
+            )
+            assert ok is False
+            assert sync.await_count == 2
+            assert probe.await_count == 2
+            # Probe must target the panel app user, not only root.
+            assert probe.await_args_list[0].kwargs["user"] == "pasarguard"
+            assert probe.await_args_list[0].kwargs["password"] == "install-secret"
+
+        with patch.object(
+            mod, "_sync_mysql_passwords", new_callable=AsyncMock, return_value=True,
+        ), patch.object(
+            mod, "_probe_mysql_tcp_login", new_callable=AsyncMock, return_value=True,
+        ):
+            ok2 = await mod._ensure_mysql_panel_login(
+                job, "mysql", "install-secret",
+                app_user="pasarguard",
+            )
+            assert ok2 is True
+
+    asyncio.run(_run())
+    print("OK: ensure mysql panel login requires TCP prove")
+
+
+def test_probe_mysql_tcp_login_uses_host_127():
+    """Panel SQLAlchemy uses TCP to 127.0.0.1 — socket @localhost must not count."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.services import pg_restore as mod
+
+    job = MagicMock()
+    calls: list[list[str]] = []
+
+    async def fake_run(_job, cmd, **_kwargs):
+        calls.append(list(cmd))
+        return True, "1"
+
+    async def _run():
+        with patch.object(mod, "_mysql_client_bins", return_value=["mysql"]), \
+             patch.object(mod, "_run", new=fake_run), \
+             patch.object(mod, "PASARGUARD_DIR", "/tmp"):
+            ok = await mod._probe_mysql_tcp_login(
+                job, "mysql",
+                user="pasarguard",
+                password="secret",
+                db_name="pasarguard",
+                db_type="mysql",
+            )
+            assert ok is True
+        assert calls, "expected docker compose exec"
+        flat = " ".join(calls[0])
+        assert "-h" in calls[0]
+        assert "127.0.0.1" in calls[0]
+        assert "pasarguard" in flat
+        assert "localhost" not in flat or "127.0.0.1" in flat
+
+    asyncio.run(_run())
+    print("OK: mysql TCP probe uses 127.0.0.1")
+
+
 def test_sql_literal_escapes_quotes():
     assert _sql_literal("a'b") == "'a''b'"
     print("OK: sql literal")
@@ -1859,6 +2002,9 @@ if __name__ == "__main__":
     test_explain_mysql_to_mysql_access_denied_no_sasl_or_timescale()
     test_build_transfer_summary_orders_known_tables()
     test_build_mysql_restore_auth_attempts_prefers_install_password()
+    test_mysql_same_engine_panel_password_install_first()
+    test_ensure_mysql_panel_login_requires_tcp_probe()
+    test_probe_mysql_tcp_login_uses_host_127()
     test_sql_literal_escapes_quotes()
     test_merge_env_preserves_password()
     test_parse_manifest_ts_versions()
