@@ -1,4 +1,4 @@
-> 🚀 **`v4.9.4`** — fix timescaledb→mysql/sqlite restore (staging alembic was pointed at the MySQL port: connection was closed in the middle of operation)
+> 🚀 **`v4.9.5`** — fix MySQL→MySQL restore (backup password was written into `.env` instead of the install secret → Access denied for `pasarguard@127.0.0.1`)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
