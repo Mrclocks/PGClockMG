@@ -1,4 +1,4 @@
-> 🚀 **`v4.9.4`** — фикс restore timescaledb→mysql/sqlite (alembic staging подключался к порту MySQL: connection was closed in the middle of operation)
+> 🚀 **`v4.9.5`** — фикс restore MySQL→MySQL (в `.env` писался пароль бэкапа вместо install → Access denied для `pasarguard@127.0.0.1`)
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">

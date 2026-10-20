@@ -1,6 +1,6 @@
 <div dir="rtl" align="right">
 
-> 🚀 **`v4.9.4`** — فیکس ریستور timescaledb→mysql/sqlite (alembic روی staging به پورت MySQL وصل می‌شد: connection was closed in the middle of operation)
+> 🚀 **`v4.9.5`** — فیکس ریستور MySQL→MySQL (رمز بکاپ به‌جای رمز نصب در `.env` نوشته می‌شد → Access denied برای `pasarguard@127.0.0.1`)
 > ⚠️ قبل از ریستور یا مهاجرت حتماً بکاپ کامل بگیرید.
 
 <p align="center">
