@@ -2950,6 +2950,136 @@ async def _align_timescaledb_image(job: MigrationJob, wanted: str, *, wipe_data:
         job.log(f"TimescaleDB ready (version probe: {live or 'n/a'})")
 
 
+def mysql_same_engine_panel_password(
+    *,
+    install_root: str | None = None,
+    install_app: str | None = None,
+    install_url: str | None = None,
+    backup_root: str | None = None,
+    backup_app: str | None = None,
+) -> str:
+    """Canonical MySQL/MariaDB password for same-engine restore → panel .env.
+
+    App dumps almost never rewrite ``mysql.user``. ``_restore_mysql`` already
+    pre-heals the live volume to the **install** secret before import. Writing the
+    backup password into ``.env`` afterward (without a proven TCP login) is what
+    produces ``Access denied for user 'pasarguard'@'127.0.0.1'`` on panel boot.
+
+    Prefer install secrets; keep backup only as last resort when install has none.
+    """
+    for cand in (
+        install_root,
+        install_app,
+        install_url,
+        backup_root,
+        backup_app,
+    ):
+        if cand:
+            return cand
+    return ""
+
+
+async def _probe_mysql_tcp_login(
+    job: MigrationJob,
+    svc: str,
+    *,
+    user: str,
+    password: str,
+    db_name: str,
+    db_type: str = "mysql",
+) -> bool:
+    """Prove panel-style TCP auth (``user@127.0.0.1``), not Unix-socket ``@localhost``.
+
+    PasarGuard SQLAlchemy uses TCP to 127.0.0.1; socket probes can pass while the
+    TCP grant/password for ``@'127.0.0.1'`` is still wrong.
+    """
+    if not password or not svc or not user:
+        return False
+    for bin_name in _mysql_client_bins(db_type, svc):
+        for db_arg in (db_name, ""):
+            cmd = [
+                "docker", "compose", "exec", "-T",
+                "-e", f"MYSQL_PWD={password}",
+                svc, bin_name,
+                "-h", "127.0.0.1",
+                "-u", user,
+                "-N", "-e", "SELECT 1",
+            ]
+            if db_arg:
+                cmd.append(db_arg)
+            ok, out = await _run(
+                job, cmd, cwd=str(PASARGUARD_DIR), timeout=25, quiet=True,
+            )
+            if ok and "1" in (out or ""):
+                return True
+    return False
+
+
+async def _ensure_mysql_panel_login(
+    job: MigrationJob,
+    svc: str,
+    password: str,
+    *,
+    app_user: str,
+    db_type: str = "mysql",
+    db_name: str = "pasarguard",
+    auth_passwords: list[str] | None = None,
+) -> bool:
+    """Sync MySQL roles to ``password`` and require TCP login as the panel app user."""
+    if not password or not svc:
+        return False
+    synced = await _sync_mysql_passwords(
+        job,
+        svc,
+        password,
+        user=app_user or "pasarguard",
+        db_type=db_type,
+        db_name=db_name or "pasarguard",
+        auth_passwords=auth_passwords,
+        allow_skip_grant_recovery=True,
+    )
+    if not synced:
+        job.log("MySQL panel-login ensure: role sync did not confirm")
+        return False
+    user = (app_user or "pasarguard").strip() or "pasarguard"
+    if await _probe_mysql_tcp_login(
+        job, svc, user=user, password=password,
+        db_name=db_name or "pasarguard", db_type=db_type,
+    ):
+        job.log(
+            f"MySQL panel login OK — {user}@127.0.0.1 TCP accepts panel password"
+        )
+        return True
+    # One more skip-grant pass then re-probe (covers partial ALTER / missing host row).
+    job.log(
+        f"MySQL panel login: {user}@127.0.0.1 TCP still denied after sync — "
+        "re-running skip-grant heal…"
+    )
+    synced2 = await _sync_mysql_passwords(
+        job,
+        svc,
+        password,
+        user=user,
+        db_type=db_type,
+        db_name=db_name or "pasarguard",
+        auth_passwords=auth_passwords,
+        allow_skip_grant_recovery=True,
+    )
+    if synced2 and await _probe_mysql_tcp_login(
+        job, svc, user=user, password=password,
+        db_name=db_name or "pasarguard", db_type=db_type,
+    ):
+        job.log(
+            f"MySQL panel login OK after re-heal — {user}@127.0.0.1 TCP accepts password"
+        )
+        return True
+    job.log(
+        f"MySQL panel login FAILED — {user}@127.0.0.1 still Access denied "
+        "with the password that will be written into .env"
+    )
+    return False
+
+
 async def _sync_mysql_passwords(
     job: MigrationJob,
     svc: str,
@@ -4026,6 +4156,8 @@ async def _prepare_panel_boot_after_finalize(
     elif final_engine in ("mysql", "mariadb") and verify_pass:
         svc = await _detect_db_container(job, final_engine)
         if svc:
+            # Keep sync-only here (convert + same-engine). Same-engine already
+            # proved TCP earlier; convert must not gain a new hard-fail gate.
             await _sync_mysql_passwords(
                 job,
                 svc,
@@ -5755,7 +5887,7 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         if needs_convert:
             job.log(f"DB mismatch — will auto-convert {backup_db} → {target_db}")
 
-        # Backup passwords (same-engine restore must put OLD password into new .env)
+        # Backup passwords (PG same-engine may prefer these; MySQL same-engine is install-first).
         bak_db_pass = read_env_var(backup_env, "DB_PASSWORD")
         bak_mysql_root = read_env_var(backup_env, "MYSQL_ROOT_PASSWORD")
         bak_pg_pass = read_env_var(backup_env, "POSTGRES_PASSWORD") or bak_db_pass
@@ -5795,25 +5927,39 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                     job, root, restore_into or backup_db, current_env, backup_env,
                     dump=dump_path,
                 )
-                # One secret for root+app: backup preferred, else install.
-                sync_pass = (
-                    bak_mysql_root or bak_db_pass
-                    or cur_mysql_root or cur_db_pass or ""
+                # Keep the install secret that pre-heal already applied to the live
+                # volume. App dumps rarely rewrite mysql.user — flipping .env to the
+                # backup password here is what caused Access denied @127.0.0.1.
+                sync_pass = mysql_same_engine_panel_password(
+                    install_root=cur_mysql_root,
+                    install_app=cur_db_pass,
+                    install_url=cur_url_pwd,
+                    backup_root=bak_mysql_root,
+                    backup_app=bak_db_pass,
                 )
                 svc = await _detect_db_container(job, restore_into or installed_db or backup_db)
+                app_user = bak_user or cur_user or "pasarguard"
+                dbn = bak_name or cur_name or "pasarguard"
+                eng = restore_into or installed_db or backup_db
                 if svc and sync_pass:
-                    await _sync_mysql_passwords(
+                    ok_login = await _ensure_mysql_panel_login(
                         job, svc, sync_pass,
-                        user=bak_user or cur_user or "pasarguard",
-                        db_type=restore_into or installed_db or backup_db,
-                        db_name=bak_name or cur_name or "pasarguard",
+                        app_user=app_user,
+                        db_type=eng,
+                        db_name=dbn,
                         auth_passwords=[
                             p for p in (
-                                cur_mysql_root, cur_db_pass,
+                                cur_mysql_root, cur_db_pass, cur_url_pwd,
                                 bak_mysql_root, bak_db_pass,
                             ) if p
                         ],
                     )
+                    if not ok_login:
+                        raise RuntimeError(
+                            "MySQL same-engine restore: could not prove panel login as "
+                            f"{app_user}@127.0.0.1 after password heal. "
+                            "Check MYSQL_ROOT_PASSWORD / DB_PASSWORD on the live install."
+                        )
         elif backup_db in ("postgresql", "timescaledb"):
             if needs_convert:
                 dump = dump_path
@@ -5883,36 +6029,45 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                 )
             )
         else:
-            # Same / soft-family engine: put OLD (backup) DB password into the new .env
-            # so panel auth matches roles restored from the dump.
+            # Same / soft-family engine: password in .env must match live roles.
             family_eng = (target_db or backup_db or "").lower()
             if family_eng in ("mysql", "mariadb"):
-                # One secret for root + app after sync — prefer backup, else install.
-                same_pass = (
-                    bak_mysql_root or bak_db_pass
-                    or cur_mysql_root or cur_db_pass or ""
+                # Install-first (matches pre-heal + TCP login prove above).
+                same_pass = mysql_same_engine_panel_password(
+                    install_root=cur_mysql_root,
+                    install_app=cur_db_pass,
+                    install_url=cur_url_pwd,
+                    backup_root=bak_mysql_root,
+                    backup_app=bak_db_pass,
                 )
                 same_root = same_pass
                 same_pg = ""
+                used_install_secret = bool(
+                    same_pass and same_pass in (
+                        cur_mysql_root, cur_db_pass, cur_url_pwd,
+                    )
+                )
             elif family_eng in ("postgresql", "timescaledb"):
+                # PG globals.sql can restore backup role secrets — prefer backup.
                 same_pass = (
                     bak_pg_pass or bak_db_pass
                     or cur_pg_pass or cur_db_pass or ""
                 )
                 same_root = ""
                 same_pg = same_pass
+                used_install_secret = not bool(bak_pg_pass or bak_db_pass)
             else:
                 same_pass = bak_db_pass or bak_pg_pass or bak_mysql_root or ""
                 same_root = bak_mysql_root or same_pass or ""
                 same_pg = bak_pg_pass or bak_db_pass or same_pass or ""
+                used_install_secret = not bool(
+                    bak_db_pass or bak_pg_pass or bak_mysql_root
+                )
             if not same_pass and (backup_db or "") != "sqlite" and (target_db or "") != "sqlite":
                 raise RuntimeError(
                     "Same-engine restore needs a database password in the backup or "
                     "install .env (DB_PASSWORD / POSTGRES_PASSWORD / MYSQL_ROOT_PASSWORD)."
                 )
-            used_install_fallback = not bool(
-                bak_db_pass or bak_pg_pass or bak_mysql_root
-            )
             preserve = {
                 "DB_PASSWORD": same_pass,
                 "DB_USER": bak_user or cur_user,
@@ -5924,11 +6079,11 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                 preserve["POSTGRES_PASSWORD"] = same_pg
             job.log(
                 "Same-engine restore: writing "
-                + ("install" if used_install_fallback else "backup")
+                + ("install" if used_install_secret else "backup")
                 + " DB password into live .env "
                 "(keeps panel auth aligned with restored roles)"
             )
-            # Keep install URL host/port layout but swap password to backup secret
+            # Keep install URL host/port layout; password matches live roles (install for MySQL).
             if cur_url and same_pass:
                 from app.services.env_migration import _replace_sqlalchemy_password
                 preserve["SQLALCHEMY_DATABASE_URL"] = _replace_sqlalchemy_password(cur_url, same_pass)
@@ -6078,11 +6233,27 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
                     verify_user = live_admin["user"]
         else:
             verify_user = bak_user or cur_user or live_admin.get("user") or "pasarguard"
-            verify_pass = (
-                bak_db_pass or bak_pg_pass or bak_mysql_root
-                or live_admin.get("password") or ""
-            )
             verify_db = bak_name or cur_name or live_admin.get("database") or "pasarguard"
+            if (final_engine_pre or "") in ("mysql", "mariadb"):
+                # Must match pre-heal + post-import TCP prove + .env merge (install-first).
+                # Preferring backup here used to re-ALTER roles to the dump secret and
+                # leave pasarguard@127.0.0.1 Access denied on panel boot.
+                verify_pass = (
+                    mysql_same_engine_panel_password(
+                        install_root=cur_mysql_root,
+                        install_app=cur_db_pass,
+                        install_url=cur_url_pwd,
+                        backup_root=bak_mysql_root,
+                        backup_app=bak_db_pass,
+                    )
+                    or live_admin.get("password")
+                    or ""
+                )
+            else:
+                verify_pass = (
+                    bak_db_pass or bak_pg_pass or bak_mysql_root
+                    or live_admin.get("password") or ""
+                )
         if (
             final_engine_pre in ("postgresql", "timescaledb")
             and verify_pass
@@ -6099,23 +6270,45 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
         elif final_engine_pre in ("mysql", "mariadb") and verify_pass:
             svc = await _detect_db_container(job, final_engine_pre)
             if svc:
-                job.log(
-                    f"Aligning MySQL roles to {'install' if needs_convert else 'backup'} password "
-                    f"(user={verify_user})"
-                )
-                await _sync_mysql_passwords(
-                    job, svc, verify_pass,
-                    user=verify_user or "pasarguard",
-                    db_type=final_engine_pre,
-                    db_name=verify_db or "pasarguard",
-                    auth_passwords=[
-                        p for p in (
-                            cur_mysql_root, cur_db_pass,
-                            bak_mysql_root, bak_db_pass,
-                            live_admin.get("password"),
-                        ) if p
-                    ],
-                )
+                auth_pwds = [
+                    p for p in (
+                        cur_mysql_root, cur_db_pass, cur_url_pwd,
+                        bak_mysql_root, bak_db_pass,
+                        live_admin.get("password"),
+                    ) if p
+                ]
+                if needs_convert:
+                    # Convert already uses install secrets — keep prior sync path.
+                    job.log(
+                        f"Aligning MySQL roles to install password "
+                        f"(user={verify_user})"
+                    )
+                    await _sync_mysql_passwords(
+                        job, svc, verify_pass,
+                        user=verify_user or "pasarguard",
+                        db_type=final_engine_pre,
+                        db_name=verify_db or "pasarguard",
+                        auth_passwords=auth_pwds,
+                    )
+                else:
+                    # Same-engine: prove pasarguard@127.0.0.1 before finalize/boot.
+                    job.log(
+                        f"Aligning MySQL roles to install password "
+                        f"(user={verify_user}) with TCP panel-login prove"
+                    )
+                    ok_align = await _ensure_mysql_panel_login(
+                        job, svc, verify_pass,
+                        app_user=verify_user or "pasarguard",
+                        db_type=final_engine_pre,
+                        db_name=verify_db or "pasarguard",
+                        auth_passwords=auth_pwds,
+                    )
+                    if not ok_align:
+                        raise RuntimeError(
+                            "MySQL same-engine restore: panel TCP login still fails as "
+                            f"{verify_user}@127.0.0.1 after role align. "
+                            "Check MYSQL_ROOT_PASSWORD / DB_PASSWORD on the live install."
+                        )
 
         job.set_progress(88, "Finalizing .env for target database...")
         await _finalize_env_after_restore(
