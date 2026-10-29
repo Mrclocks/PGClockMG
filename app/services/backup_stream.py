@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -20,16 +21,44 @@ _LOCK = threading.RLock()
 _LISTENERS: dict[str, dict[str, Any]] = {}
 
 LISTENER_TTL_SEC = 30 * 60
+LISTENER_READY_TTL_SEC = 6 * 60 * 60  # keep ready listeners long enough for the UI
 STREAM_CHUNK = 8 * 1024 * 1024  # 8 MiB — fewer syscalls for large zips
 PROGRESS_EVERY = 1 * 1024 * 1024  # update listener progress every 1 MiB (smoother UI)
 MAX_STREAM_BYTES = 20 * 1024 * 1024 * 1024  # 20 GiB hard cap even without expected_size
+PUSH_JOB_TTL_SEC = 60 * 60
+PUSH_JOB_MAX_FINISHED = 50
+PUSH_RETRY_BACKOFF_SEC = (2, 4, 8)
 
 _PUSH_JOBS: dict[str, dict[str, Any]] = {}
 _PUSH_LOCK = threading.RLock()
 
 
+def _prune_push_jobs() -> None:
+    """Drop old finished push jobs (age > 1h or more than 50 finished)."""
+    now = time.time()
+    finished = [
+        (k, v) for k, v in list(_PUSH_JOBS.items())
+        if v.get("status") in ("success", "error")
+    ]
+    for key, job in finished:
+        started = float(job.get("started_at") or 0)
+        if started and (now - started) > PUSH_JOB_TTL_SEC:
+            _PUSH_JOBS.pop(key, None)
+    finished = sorted(
+        (
+            (k, v) for k, v in _PUSH_JOBS.items()
+            if v.get("status") in ("success", "error")
+        ),
+        key=lambda kv: float(kv[1].get("started_at") or 0),
+    )
+    while len(finished) > PUSH_JOB_MAX_FINISHED:
+        key, _ = finished.pop(0)
+        _PUSH_JOBS.pop(key, None)
+
+
 def get_push_job(job_id: str) -> dict | None:
     with _PUSH_LOCK:
+        _prune_push_jobs()
         job = _PUSH_JOBS.get(job_id)
         return dict(job) if job else None
 
@@ -54,6 +83,7 @@ def start_push_async(
         "started_at": time.time(),
     }
     with _PUSH_LOCK:
+        _prune_push_jobs()
         _PUSH_JOBS[job_id] = job
 
     def _run() -> None:
@@ -165,6 +195,13 @@ def _normalize_dest_url(dest_base_url: str) -> str:
     return normalize_stream_dest_url(dest_base_url)
 
 
+class ListenerBusyError(RuntimeError):
+    """Raised when a second writer tries to use a receiving listener."""
+
+    def __init__(self):
+        super().__init__("listener_busy")
+
+
 async def receive_stream(
     token: str,
     request_stream,
@@ -174,6 +211,7 @@ async def receive_stream(
     expected_size: int | None = None,
 ) -> dict:
     """Consume an ASGI/Starlette request body stream into an upload zip."""
+    stale_partial: str | None = None
     with _LOCK:
         _purge_expired()
         info = _LISTENERS.get(token)
@@ -181,12 +219,28 @@ async def receive_stream(
             raise FileNotFoundError("listener_not_found")
         if float(info["expires_at"]) < time.time():
             raise TimeoutError("listener_expired")
-        if info["status"] not in ("listening", "receiving"):
-            raise RuntimeError(f"listener_status_{info['status']}")
+        status = info.get("status")
+        # Error must not burn the token — allow retry until expiry.
+        # Concurrent writers on a receiving listener are rejected (409).
+        if status == "receiving":
+            raise ListenerBusyError()
+        if status not in ("listening", "error"):
+            raise RuntimeError(f"listener_status_{status}")
+        stale_partial = info.get("partial_path")
         info["status"] = "receiving"
+        info["error"] = None
         info["expected_sha256"] = expected_sha256
         info["expected_size"] = expected_size
         info["filename"] = filename or "streamed-backup.zip"
+        info["partial_path"] = None
+        info["upload_id"] = None
+        info["bytes_received"] = 0
+
+    if stale_partial:
+        try:
+            Path(stale_partial).unlink(missing_ok=True)
+        except OSError:
+            pass
 
     upload_id = secrets.token_hex(8)
     dest_dir = UPLOAD_DIR / upload_id
@@ -275,18 +329,29 @@ async def receive_stream(
                     "error": None,
                     "partial_path": None,
                     "sha256": digest,
-                    "expires_at": time.time() + LISTENER_TTL_SEC,
+                    # Ready stays discoverable longer so the UI does not show "not found".
+                    "expires_at": time.time() + LISTENER_READY_TTL_SEC,
                 })
         return {"ok": True, "upload_id": upload_id, "size_bytes": received, "sha256": digest}
     except Exception as exc:
+        # Drop the whole receive dir (partial + any verified dest) so retries start clean.
         try:
-            partial.unlink(missing_ok=True)
-        except OSError:
-            pass
+            shutil.rmtree(dest_dir, ignore_errors=True)
+        except Exception:
+            try:
+                partial.unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
         with _LOCK:
             if token in _LISTENERS:
                 _LISTENERS[token]["status"] = "error"
                 _LISTENERS[token]["error"] = str(exc)
+                _LISTENERS[token]["partial_path"] = None
+                _LISTENERS[token]["upload_id"] = None
         raise
 
 
@@ -299,6 +364,58 @@ def _file_sha256(path: Path) -> str:
                 break
             h.update(chunk)
     return h.hexdigest()
+
+
+def _http_error_payload(resp: httpx.Response) -> dict:
+    text = (resp.text or "")[:400]
+    detail = ""
+    try:
+        body = resp.json()
+        if isinstance(body, dict):
+            detail = str(body.get("detail") or body.get("error") or "")[:200]
+    except Exception:
+        detail = ""
+    if not detail:
+        detail = text.strip().replace("\n", " ")[:200] or "http_error"
+    code = f"http_{resp.status_code}:{detail}"
+    return {
+        "ok": False,
+        "error": code,
+        "status_code": resp.status_code,
+        "response_text": text,
+    }
+
+
+def _is_retryable_network_error(exc: BaseException) -> bool:
+    return isinstance(
+        exc,
+        (
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            httpx.ReadTimeout,
+            httpx.WriteTimeout,
+            httpx.RemoteProtocolError,
+            httpx.ReadError,
+            httpx.WriteError,
+        ),
+    )
+
+
+def _is_retryable_http_status(status_code: int) -> bool:
+    """409 = destination still briefly ``receiving`` after a dropped connection."""
+    return int(status_code) == 409
+
+
+def _notify_retry_progress(progress_cb: Any | None, size: int) -> None:
+    if not progress_cb:
+        return
+    try:
+        progress_cb(0, size, phase="connecting")
+    except TypeError:
+        try:
+            progress_cb(0, size)
+        except Exception:
+            pass
 
 
 def push_backup_file(
@@ -321,7 +438,8 @@ def push_backup_file(
         return {"ok": False, "error": str(exc)}
     if not token or not str(token).strip():
         return {"ok": False, "error": "token_missing"}
-    url = f"{base}/api/stream/receive/{token.strip()}"
+    tok = token.strip()
+    url = f"{base}/api/stream/receive/{tok}"
     size = path.stat().st_size
     if size < 64:
         return {"ok": False, "error": "file_too_small"}
@@ -364,21 +482,42 @@ def push_backup_file(
             except TypeError:
                 progress_cb(size, size)
 
-    try:
-        timeout_cfg = httpx.Timeout(timeout, connect=30.0, read=timeout, write=timeout)
-        limits = httpx.Limits(max_connections=2, max_keepalive_connections=0)
-        with httpx.Client(timeout=timeout_cfg, follow_redirects=False, limits=limits) as client:
-            # Generator body streams without loading the whole zip into RAM
-            resp = client.put(url, content=_iter_file(), headers=headers)
-        if resp.status_code >= 400:
-            return {"ok": False, "error": "http_error", "status_code": resp.status_code}
+    timeout_cfg = httpx.Timeout(timeout, connect=30.0, read=timeout, write=timeout)
+    limits = httpx.Limits(max_connections=2, max_keepalive_connections=0)
+    last_error: str | None = None
+
+    # Initial attempt + up to 3 retries with 2s / 4s / 8s backoff.
+    # Do NOT probe /api/stream/status (auth-gated on older builds / unnecessary):
+    # just re-PUT; receive answers 404/410/409 clearly.
+    for attempt in range(1 + len(PUSH_RETRY_BACKOFF_SEC)):
         try:
-            body = resp.json()
-        except Exception:
-            body = {"raw": resp.text[:400]}
-        return {"ok": True, "response": body, "sha256": sha256, "size_bytes": size, "dest": url}
-    except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+            with httpx.Client(timeout=timeout_cfg, follow_redirects=False, limits=limits) as client:
+                resp = client.put(url, content=_iter_file(), headers=headers)
+            if resp.status_code >= 400:
+                if (
+                    _is_retryable_http_status(resp.status_code)
+                    and attempt < len(PUSH_RETRY_BACKOFF_SEC)
+                ):
+                    last_error = _http_error_payload(resp).get("error")
+                    _notify_retry_progress(progress_cb, size)
+                    time.sleep(PUSH_RETRY_BACKOFF_SEC[attempt])
+                    continue
+                return _http_error_payload(resp)
+            try:
+                body = resp.json()
+            except Exception:
+                body = {"raw": (resp.text or "")[:400]}
+            return {"ok": True, "response": body, "sha256": sha256, "size_bytes": size, "dest": url}
+        except Exception as exc:
+            if not _is_retryable_network_error(exc):
+                return {"ok": False, "error": str(exc)}
+            last_error = str(exc)
+            if attempt >= len(PUSH_RETRY_BACKOFF_SEC):
+                break
+            _notify_retry_progress(progress_cb, size)
+            time.sleep(PUSH_RETRY_BACKOFF_SEC[attempt])
+
+    return {"ok": False, "error": last_error or "network_error"}
 
 
 def start_create_and_stream_async(
@@ -416,6 +555,7 @@ def start_create_and_stream_async(
         "started_at": time.time(),
     }
     with _PUSH_LOCK:
+        _prune_push_jobs()
         _PUSH_JOBS[job_id] = job
 
     def _run() -> None:

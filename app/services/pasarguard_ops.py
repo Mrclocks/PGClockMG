@@ -939,7 +939,6 @@ async def _mysql_ddl_status(migrator) -> str | None:
         host = conn.get("host") or "127.0.0.1"
         if not pwd:
             return None
-        pwd_q = (pwd or "").replace('"', '\\"')
         cwd = str(PASARGUARD_DIR)
         for bin_name in mysql_client_bins(target_db, service):
             cmd = [
@@ -1154,7 +1153,6 @@ async def _heal_silent_restart_loop(migrator) -> bool:
     except Exception as e:
         migrator.job.log(f"alembic stamp note: {e}")
 
-    cwd = str(PASARGUARD_DIR)
     from app.services.multiworker_stack import start_panel_stack, stop_panel_stack
 
     await stop_panel_stack(migrator.job)
@@ -1457,7 +1455,6 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
     silent_loop_healed = False
     soft_up_during_alembic = False
     refactor_sub_heals = 0
-    prev_restart_count = 0
     alembic_extensions = 0
     probe_i = 0
     last_upgrade_sig: str | None = None
@@ -1844,9 +1841,7 @@ async def verify_pasarguard_healthy(migrator, max_wait: int = 180) -> None:
                 await _heal_silent_restart_loop(migrator)
                 boot_since = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 await asyncio.sleep(15)
-                prev_restart_count = 0
                 continue
-        prev_restart_count = restart_count
 
         if state != "running":
             not_running_streak += 1
@@ -2142,7 +2137,6 @@ async def _wait_db_service(migrator, target_db: str, service: str, attempts: int
     pwd = conn.get("password") or "password"
     db = conn.get("database") or "pasarguard"
     host = conn.get("host") or "127.0.0.1"
-    pwd_q = (pwd or "").replace('"', '\\"')
 
     for _ in range(attempts):
         cmds: list[list[str]] = []
@@ -2205,7 +2199,6 @@ async def read_target_alembic_version(migrator, target_db: str) -> str | None:
         ]
     elif service in ("mysql", "mariadb"):
         host = conn.get("host") or "127.0.0.1"
-        pwd_q = (pwd or "").replace('"', '\\"')
         from app.services.native_migration.source_version import normalize_alembic_revision
         from app.services.native_migration.sql_staging import (
             _safe_mysql_ident,

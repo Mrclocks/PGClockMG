@@ -1,9 +1,7 @@
 """Pre-migration validation — block migration if prerequisites fail."""
 
-from pathlib import Path
-
 from app.config import (
-    MARZBAN_DIR, MARZBAN_DATA, PASARGUARD_DIR, PASARGUARD_DATA,
+    MARZBAN_DATA, PASARGUARD_DATA,
 )
 from app.panels import PANELS
 from app.services.db_credentials import validate_db_credentials

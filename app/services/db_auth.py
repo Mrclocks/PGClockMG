@@ -1791,7 +1791,7 @@ async def resolve_live_admin_connection(
         # 3) Always force-align to install/minted preferred (root heal).
         migrator.job.log(
             "PostgreSQL SCRAM not yet aligned to install password — force-aligning "
-            f"roles (trust → live-HBA → single-user volumes-from → HBA"
+            "roles (trust → live-HBA → single-user volumes-from → HBA"
             + (", minted=yes" if minted else "")
             + (", had-working-alt=yes" if working_pwd else "")
             + ")..."
@@ -2583,8 +2583,6 @@ async def sync_postgres_roles_to_app_password(
     ``DB_PASSWORD`` while finalize wrote ``POSTGRES_PASSWORD`` into the panel
     URL, PostgreSQL auth fails after sqlite→PG migration when those differ.
     """
-    import asyncio
-
     from app.services.env_migration import parse_sqlalchemy_url
 
     text = env_text if env_text is not None else read_env_text()

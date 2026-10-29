@@ -1816,18 +1816,21 @@ def is_auth_failure_text(text: str) -> bool:
 
 
 def _zip_allow_large(zip_path: Path) -> bool:
-    """Trusted local backups / staged uploads / recognized panel zips may exceed defaults."""
+    """True for local BACKUP_DIR archives or zip layouts that look like panel backups.
+
+    Upload staging dirs are not blindly trusted — only recognized panel-backup
+    member layouts raise the large-entry ceilings.
+    """
     try:
-        from app.config import BACKUP_DIR, UPLOAD_DIR
+        from app.config import BACKUP_DIR
         from app.services.archive_guard import looks_like_panel_backup_zip
 
         resolved = zip_path.resolve()
-        for root in (BACKUP_DIR, UPLOAD_DIR):
-            try:
-                resolved.relative_to(Path(root).resolve())
-                return True
-            except (ValueError, OSError):
-                continue
+        try:
+            resolved.relative_to(Path(BACKUP_DIR).resolve())
+            return True
+        except (ValueError, OSError):
+            pass
         return looks_like_panel_backup_zip(resolved)
     except Exception:
         pass
@@ -2393,7 +2396,14 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
 
 
 async def start_pasarguard_restore(params: dict) -> MigrationJob:
-    from app.services.panel_job_lock import ensure_panel_idle
+    from app.services.panel_job_lock import (
+        acquire_panel_busy,
+        clear_incomplete_job_marker,
+        ensure_panel_idle,
+        release_panel_busy,
+        try_pre_restore_backup,
+        write_incomplete_job_marker,
+    )
 
     if not is_pasarguard_installed():
         raise ValueError("PasarGuard is not installed")
@@ -2426,7 +2436,27 @@ async def start_pasarguard_restore(params: dict) -> MigrationJob:
     _prune_finished_restore_jobs()
     job = MigrationJob()
     _restore_jobs[job.job_id] = job
-    task = asyncio.create_task(_run_restore(job, params, analysis))
+
+    # Best-effort safety backup off the event loop — never aborts restore on failure.
+    safety = await asyncio.to_thread(try_pre_restore_backup, job.log)
+    if safety:
+        params = {**params, "_pre_restore_backup": safety}
+    write_incomplete_job_marker(
+        kind="restore",
+        job_id=job.job_id,
+        pre_restore_backup_id=(safety or {}).get("backup_id"),
+        pre_restore_path=(safety or {}).get("path"),
+    )
+    acquire_panel_busy(kind="restore", job_id=job.job_id)
+
+    async def _guarded_restore() -> None:
+        try:
+            await _run_restore(job, params, analysis)
+        finally:
+            clear_incomplete_job_marker(job_id=job.job_id)
+            release_panel_busy(job_id=job.job_id)
+
+    task = asyncio.create_task(_guarded_restore())
     _restore_tasks.add(task)
     task.add_done_callback(_restore_tasks.discard)
     return job
@@ -2436,6 +2466,9 @@ async def _run_restore(job: MigrationJob, params: dict, analysis: dict) -> None:
     job.status = "running"
     try:
         result = await _restore_backup(job, params, analysis)
+        result = dict(result or {})
+        if params.get("_pre_restore_backup"):
+            result["pre_restore_backup"] = params["_pre_restore_backup"]
         job.result = result
         job.status = "success"
         job.set_progress(100, "Restore completed")
@@ -4623,14 +4656,14 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         ru = "Версия каталога TimescaleDB в дампе не совпадает с образом (post_restore)."
         ver = sig.ts_version
         ts_fa = [
-            f"لاگ: catalog version mismatch"
+            "لاگ: catalog version mismatch"
             + (f" (نسخهٔ دیده‌شده {ver})" if ver else "")
             + " — ایمیج باید با کاتالوگ دامپ هم‌تراز شود.",
             "ویزارد ایمیج را بدون wipe دیتا هم‌تراز می‌کند و دوباره post_restore می‌زند.",
             "اگر باز خطا بود، تگ timescaledb در docker-compose.yml را با نسخه بکاپ یکی کنید.",
         ]
         ts_en = [
-            f"Log: catalog version mismatch"
+            "Log: catalog version mismatch"
             + (f" (seen {ver})" if ver else "")
             + " — image must match the dump catalog.",
             "Wizard realigns the image without wiping data and retries post_restore.",
@@ -4672,13 +4705,13 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         ver = sig.ts_version
         _causes(
             [
-                f"لاگ به نسخه Timescale"
+                "لاگ به نسخه Timescale"
                 + (f" `{ver}`" if ver else "")
                 + " اشاره دارد — ایمیج سرور را با دامپ هم‌تراز کنید.",
                 "دوباره ریستور کنید یا لاگ کامل pin/align را ببینید.",
             ],
             [
-                f"Log mentions Timescale version"
+                "Log mentions Timescale version"
                 + (f" `{ver}`" if ver else "")
                 + " — realign the server image to the dump.",
                 "Retry restore or inspect the full pin/align log.",

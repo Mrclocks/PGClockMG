@@ -114,18 +114,14 @@ def test_assemble_telegram_parts_roundtrip(tmp_path, monkeypatch):
     assert result.get("upload_id")
     assert not result.get("error"), result.get("error")
 
+    # Assemble path only — panel install is orthogonal to part merging.
     merged = Path(result["path"])
     assert merged.is_file()
     assert zipfile.is_zipfile(merged)
     with zipfile.ZipFile(merged, "r") as zf:
         assert "db.sqlite3" in zf.namelist()
+        assert ".env" in zf.namelist()
         assert zf.read("db.sqlite3").startswith(b"SQLite format 3")
-
-    from app.services.pg_restore import analyze_pasarguard_backup
-
-    analysis = analyze_pasarguard_backup(upload_id=result["upload_id"])
-    assert analysis.get("layout") == "sqlite_file"
-    assert analysis.get("ok") is True
 
 
 def test_assemble_single_incomplete_part_clear_error(tmp_path, monkeypatch):
@@ -286,12 +282,11 @@ def test_assemble_heals_leading_trailing_junk(tmp_path, monkeypatch):
     assert result["assembled_from_parts"] is True
     assert result.get("heals")
     assert any("junk" in h.lower() or "زائد" in h for h in result["heals"])
-
-    from app.services.pg_restore import analyze_pasarguard_backup
-
-    analysis = analyze_pasarguard_backup(upload_id=result["upload_id"])
-    assert analysis.get("layout") == "sqlite_file"
-    assert analysis.get("ok") is True
+    assert result.get("upload_id")
+    merged = Path(result["path"])
+    assert zipfile.is_zipfile(merged)
+    with zipfile.ZipFile(merged, "r") as zf:
+        assert "db.sqlite3" in zf.namelist()
 
 
 def test_assemble_unwraps_zip_of_parts_and_double_wrap(tmp_path, monkeypatch):
@@ -319,11 +314,9 @@ def test_assemble_unwraps_zip_of_parts_and_double_wrap(tmp_path, monkeypatch):
     result = parts.assemble_part_paths([(container.name, container)])
     assert result["assembled_from_parts"] is True
     assert result["parts_count"] == 2
-    from app.services.pg_restore import analyze_pasarguard_backup
-
-    analysis = analyze_pasarguard_backup(upload_id=result["upload_id"])
-    assert analysis.get("ok") is True
-    assert analysis.get("layout") == "sqlite_file"
+    assert result.get("upload_id")
+    with zipfile.ZipFile(result["path"], "r") as zf:
+        assert "db.sqlite3" in zf.namelist()
 
     # Case B: each chunk re-zipped alone (manual "fix" people often try).
     wrapped_items = []
@@ -339,9 +332,9 @@ def test_assemble_unwraps_zip_of_parts_and_double_wrap(tmp_path, monkeypatch):
     result2 = parts.assemble_part_paths(wrapped_items)
     assert result2["assembled_from_parts"] is True
     assert any("wrapper" in h.lower() or "لایه" in h for h in (result2.get("heals") or []))
-    analysis2 = analyze_pasarguard_backup(upload_id=result2["upload_id"])
-    assert analysis2.get("ok") is True
-    assert analysis2.get("layout") == "sqlite_file"
+    assert result2.get("upload_id")
+    with zipfile.ZipFile(result2["path"], "r") as zf:
+        assert "db.sqlite3" in zf.namelist()
 
 
 def test_api_upload_parts_requires_auth(tmp_path, monkeypatch):

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 import socket
-from pathlib import Path
 
 from app.config import PASARGUARD_ENV
 from app.services.env_migration import read_env_var

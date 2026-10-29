@@ -18,6 +18,8 @@ DEFAULT_MAX_ZIP_FILES = 20_000
 DEFAULT_MAX_ZIP_ENTRY_BYTES = 8 * 1024 * 1024 * 1024
 DEFAULT_MAX_ZIP_TOTAL_BYTES = 16 * 1024 * 1024 * 1024
 DEFAULT_MAX_ZIP_RATIO = 200
+# Legitimate panel dumps (text SQL / sparse sqlite) often exceed the bomb ratio.
+DEFAULT_MAX_PANEL_ZIP_RATIO = 1000
 # When the UI "large upload" override is on, raise entry/total further.
 DEFAULT_MAX_OVERRIDE_ZIP_ENTRY_BYTES = 32 * 1024 * 1024 * 1024
 DEFAULT_MAX_OVERRIDE_ZIP_TOTAL_BYTES = 64 * 1024 * 1024 * 1024
@@ -40,12 +42,53 @@ MAX_ZIP_FILES = _env_int("PG_MAX_ZIP_FILES", DEFAULT_MAX_ZIP_FILES)
 MAX_ZIP_ENTRY_BYTES = _env_int("PG_MAX_ZIP_ENTRY_BYTES", DEFAULT_MAX_ZIP_ENTRY_BYTES)
 MAX_ZIP_TOTAL_BYTES = _env_int("PG_MAX_ZIP_TOTAL_BYTES", DEFAULT_MAX_ZIP_TOTAL_BYTES)
 MAX_ZIP_RATIO = _env_int("PG_MAX_ZIP_RATIO", DEFAULT_MAX_ZIP_RATIO)
+MAX_PANEL_ZIP_RATIO = _env_int("PG_MAX_PANEL_ZIP_RATIO", DEFAULT_MAX_PANEL_ZIP_RATIO)
 MAX_OVERRIDE_ZIP_ENTRY_BYTES = _env_int(
     "PG_MAX_OVERRIDE_ZIP_ENTRY_BYTES", DEFAULT_MAX_OVERRIDE_ZIP_ENTRY_BYTES,
 )
 MAX_OVERRIDE_ZIP_TOTAL_BYTES = _env_int(
     "PG_MAX_OVERRIDE_ZIP_TOTAL_BYTES", DEFAULT_MAX_OVERRIDE_ZIP_TOTAL_BYTES,
 )
+
+
+def preferred_temp_dir() -> str:
+    """Prefer UPLOAD_DIR / WORK_DIR (more free space) over system /tmp."""
+    from app.config import UPLOAD_DIR, WORK_DIR
+
+    candidates: list[tuple[int, str]] = []
+    for d in (UPLOAD_DIR, WORK_DIR):
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            free = shutil.disk_usage(str(d)).free
+            candidates.append((free, str(d)))
+        except OSError:
+            continue
+    if not candidates:
+        import tempfile
+
+        return tempfile.gettempdir()
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def zip_ratio_limit(*, panel_backup: bool = False) -> int:
+    if panel_backup:
+        return max(MAX_ZIP_RATIO, MAX_PANEL_ZIP_RATIO)
+    return MAX_ZIP_RATIO
+
+
+def _ratio_too_high_message(ratio: int, limit: int, *, panel_backup: bool) -> str:
+    if panel_backup:
+        return (
+            f"Zip compression ratio is too high ({ratio}× > {limit}×). "
+            "This usually means a damaged download. Re-download the backup, "
+            "or raise PG_MAX_PANEL_ZIP_RATIO / PG_MAX_ZIP_RATIO on the server."
+        )
+    return (
+        f"Zip compression ratio is too high ({ratio}× > {limit}×) — possible zip bomb. "
+        "If this is a real panel backup (large text dump / sparse sqlite), enable "
+        "«large upload» or raise PG_MAX_ZIP_RATIO / PG_MAX_PANEL_ZIP_RATIO on the server."
+    )
 
 
 @dataclass(frozen=True)
@@ -172,6 +215,7 @@ def preflight_zip(zf: zipfile.ZipFile, *, allow_large: bool = False) -> ZipPrefl
     largest_entry = 0
     entry_limit = zip_entry_limit_bytes(allow_large)
     total_limit = zip_total_limit_bytes(allow_large)
+    panel_backup = looks_like_panel_backup_zip(zf)
 
     for info in infos:
         name = info.filename.replace("\\", "/")
@@ -196,8 +240,11 @@ def preflight_zip(zf: zipfile.ZipFile, *, allow_large: bool = False) -> ZipPrefl
 
     ratio_base = max(total_compressed, 1)
     compression_ratio = total_uncompressed // ratio_base if total_uncompressed else 0
-    if total_uncompressed and compression_ratio > MAX_ZIP_RATIO:
-        raise ValueError("Zip compression ratio is too high")
+    ratio_limit = zip_ratio_limit(panel_backup=panel_backup)
+    if total_uncompressed and compression_ratio > ratio_limit:
+        raise ValueError(
+            _ratio_too_high_message(compression_ratio, ratio_limit, panel_backup=panel_backup)
+        )
 
     return ZipPreflight(
         files=files,

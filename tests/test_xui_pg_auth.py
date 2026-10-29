@@ -125,7 +125,8 @@ class _RecordingMigrator(XuiMigrator):
         self.commands.append(argv)
         joined = " ".join(argv)
         if "ps" in argv and "-q" in argv:
-            return True, "pgbouncer-container-id\n"
+            # extract_docker_container_id requires a hex container id.
+            return True, "abc123def456\n"
         if "inspect" in joined:
             return True, _pgbouncer_env(self.container_password)
         if "config" in argv and "-q" in argv:
@@ -392,7 +393,7 @@ class _FakePgStack(XuiMigrator):
                 {"5432/tcp": [{"HostIp": host_ip, "HostPort": host_port}]}
             )
         if argv[:3] == ["docker", "compose", "ps"]:
-            return True, "db-container-id\n"
+            return True, "abc123def456\n"
         if argv[:2] == ["docker", "ps"]:
             return True, "some-other-stack-db\t127.0.0.1:5432->5432/tcp\n"
         if "run" in argv and "--network" in argv:

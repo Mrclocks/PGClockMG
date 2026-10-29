@@ -432,21 +432,65 @@ def delete_backup_file(backup_id: str) -> bool:
         return False
 
 
+PRE_RESTORE_KEEP_COUNT = 3
+PRE_RESTORE_KEEP_DAYS = 7
+
+
+def _backup_trigger_of(path: Path) -> str:
+    """Read trigger from sidecar JSON only — never open the zip during retention."""
+    meta = _read_sidecar_meta(path) or {}
+    trigger = meta.get("trigger")
+    if isinstance(trigger, str) and trigger.strip():
+        return trigger.strip()
+    return ""
+
+
+def _backup_is_verified(path: Path) -> bool:
+    """Sidecar-only verified flag — opening large zips here would stall retention."""
+    meta = _read_sidecar_meta(path) or {}
+    return meta.get("verified") is True
+
+
 def apply_retention(keep: int | None = None, keep_days: int | None = None, *, keep_count: int | None = None) -> int:
     """
     Delete old backups by count and/or age.
 
-    - Always keep at most ``keep_count`` newest files (default 10).
-    - If ``keep_days`` > 0, also delete files older than that many days.
-    A file is removed when it exceeds the count limit OR the age limit.
+    - Always keep at most ``keep_count`` newest *regular* files (default 10).
+    - ``pre_restore`` safety backups are retained separately (3 newest or 7 days)
+      and do not consume the normal quota.
+    - The newest verified backup is never deleted.
+    - If ``keep_days`` > 0, also delete regular files older than that many days.
     """
     count = keep_count if keep_count is not None else keep
     count = max(1, int(count if count is not None else 10))
     days = max(0, int(keep_days if keep_days is not None else 0))
     files = sorted(BACKUP_DIR.glob("pgclockmg-*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
     now = time.time()
+
+    newest_verified: Path | None = None
+    for path in files:
+        if _backup_is_verified(path):
+            newest_verified = path
+            break
+
+    pre_restore = [p for p in files if _backup_trigger_of(p) == "pre_restore"]
+    regular = [p for p in files if p not in pre_restore]
+
     removed = 0
-    for idx, path in enumerate(files):
+
+    def _delete(path: Path) -> bool:
+        nonlocal removed
+        if newest_verified is not None and path.resolve() == newest_verified.resolve():
+            return False
+        try:
+            path.unlink(missing_ok=True)
+            path.with_suffix(path.suffix + ".json").unlink(missing_ok=True)
+            removed += 1
+            return True
+        except OSError:
+            return False
+
+    for idx, path in enumerate(regular):
         too_many = idx >= count
         too_old = False
         if days > 0:
@@ -455,14 +499,19 @@ def apply_retention(keep: int | None = None, keep_days: int | None = None, *, ke
             except OSError:
                 age_days = 0
             too_old = age_days > days
-        if not (too_many or too_old):
-            continue
+        if too_many or too_old:
+            _delete(path)
+
+    for idx, path in enumerate(pre_restore):
+        too_many = idx >= PRE_RESTORE_KEEP_COUNT
         try:
-            path.unlink(missing_ok=True)
-            path.with_suffix(path.suffix + ".json").unlink(missing_ok=True)
-            removed += 1
+            age_days = (now - path.stat().st_mtime) / 86400.0
         except OSError:
-            pass
+            age_days = 0
+        too_old = age_days > PRE_RESTORE_KEEP_DAYS
+        if too_many or too_old:
+            _delete(path)
+
     return removed
 
 
@@ -554,7 +603,6 @@ def estimate_backup_source_bytes() -> int:
                 pass
 
         def _add_tree(root: Path) -> None:
-            nonlocal total
             if not root.exists():
                 return
             if root.is_file():
@@ -1135,8 +1183,33 @@ def _collect_extra_files(staging: Path, job: dict) -> None:
 
 
 
+def _reject_if_panel_busy(*, trigger: str) -> dict | None:
+    """Block manual/scheduled creates while restore/migrate holds the disk lock.
+
+    ``pre_restore`` safety backups are exempt (taken before the lock is written).
+    """
+    if str(trigger or "").startswith("pre_restore"):
+        return None
+    from app.services.panel_job_lock import PanelBusyLocked, is_panel_busy_locked, read_panel_busy
+
+    if not is_panel_busy_locked():
+        return None
+    info = read_panel_busy() or {}
+    return {
+        "job_id": None,
+        "status": "error",
+        "trigger": trigger,
+        "error": str(PanelBusyLocked(info)),
+        "finished_at": _utc_now(),
+    }
+
+
 def create_backup_bundle(*, trigger: str = "manual") -> dict:
     """Synchronously build a full-bundle zip. Returns job dict."""
+    blocked = _reject_if_panel_busy(trigger=trigger)
+    if blocked is not None:
+        blocked["job_id"] = uuid.uuid4().hex[:12]
+        return blocked
     job_id = uuid.uuid4().hex[:12]
     with _jobs_lock:
         _jobs[job_id] = {
@@ -1171,6 +1244,13 @@ def create_backup_bundle(*, trigger: str = "manual") -> dict:
 
 def start_backup_async(*, trigger: str = "manual") -> dict:
     """Start backup in a background thread; return running job stub."""
+    blocked = _reject_if_panel_busy(trigger=trigger)
+    if blocked is not None:
+        job_id = uuid.uuid4().hex[:12]
+        blocked["job_id"] = job_id
+        with _jobs_lock:
+            _jobs[job_id] = blocked
+        return dict(blocked)
     job_id = uuid.uuid4().hex[:12]
     job = {
         "job_id": job_id,

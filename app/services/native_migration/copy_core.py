@@ -13,7 +13,7 @@ import re
 import sqlite3
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Callable, Iterable
+from typing import Iterable
 
 TABLE_ORDER = [
     "jwt",

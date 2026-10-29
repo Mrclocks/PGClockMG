@@ -103,6 +103,8 @@ def test_due_for_scheduled_run_interval():
 
 
 def test_due_respects_failure_backoff():
+    from app.services.backup_scheduler import failure_backoff_seconds
+
     now = datetime(2026, 8, 30, 15, 0, tzinfo=timezone.utc)
     success = (now - timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
     attempt = (now - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -111,6 +113,7 @@ def test_due_respects_failure_backoff():
         interval_hours=3,
         last_success_at=success,
         last_attempt_at=attempt,
+        consecutive_failures=1,
         now=now,
     ) is False
 
@@ -120,6 +123,28 @@ def test_due_respects_failure_backoff():
         interval_hours=3,
         last_success_at=success,
         last_attempt_at=attempt_old,
+        consecutive_failures=1,
+        now=now,
+    ) is True
+
+    # After 3 failures backoff is 60 minutes — 20 minutes is still too soon.
+    assert failure_backoff_seconds(3) == 60 * 60
+    attempt_20m = (now - timedelta(minutes=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert due_for_scheduled_run(
+        enabled=True,
+        interval_hours=3,
+        last_success_at=success,
+        last_attempt_at=attempt_20m,
+        consecutive_failures=3,
+        now=now,
+    ) is False
+    attempt_61m = (now - timedelta(minutes=61)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert due_for_scheduled_run(
+        enabled=True,
+        interval_hours=3,
+        last_success_at=success,
+        last_attempt_at=attempt_61m,
+        consecutive_failures=3,
         now=now,
     ) is True
 
