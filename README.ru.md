@@ -1,4 +1,4 @@
-> 🚀 **`v4.9.5`** — фикс restore MySQL→MySQL (в `.env` писался пароль бэкапа вместо install → Access denied для `pasarguard@127.0.0.1`)
+> 🚀 **`v4.9.6`** — загрузка multi-GB без зависания UI, сборка частей с датами, реальные retry стрима, safety-бэкап перед restore/миграцией
 > ⚠️ Перед restore или миграцией сделайте полный бэкап.
 
 <p align="center">
