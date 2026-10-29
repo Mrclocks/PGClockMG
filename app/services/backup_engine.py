@@ -437,30 +437,18 @@ PRE_RESTORE_KEEP_DAYS = 7
 
 
 def _backup_trigger_of(path: Path) -> str:
+    """Read trigger from sidecar JSON only — never open the zip during retention."""
     meta = _read_sidecar_meta(path) or {}
     trigger = meta.get("trigger")
     if isinstance(trigger, str) and trigger.strip():
         return trigger.strip()
-    # Fall back to in-zip manifest when sidecar is missing.
-    try:
-        enriched = resolve_backup_manifest(path)
-        trigger = enriched.get("trigger")
-        if isinstance(trigger, str):
-            return trigger.strip()
-    except Exception:
-        pass
     return ""
 
 
 def _backup_is_verified(path: Path) -> bool:
+    """Sidecar-only verified flag — opening large zips here would stall retention."""
     meta = _read_sidecar_meta(path) or {}
-    if meta.get("verified") is True:
-        return True
-    try:
-        enriched = resolve_backup_manifest(path)
-        return bool(enriched.get("verified"))
-    except Exception:
-        return False
+    return meta.get("verified") is True
 
 
 def apply_retention(keep: int | None = None, keep_days: int | None = None, *, keep_count: int | None = None) -> int:

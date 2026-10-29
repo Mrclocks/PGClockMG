@@ -2437,8 +2437,8 @@ async def start_pasarguard_restore(params: dict) -> MigrationJob:
     job = MigrationJob()
     _restore_jobs[job.job_id] = job
 
-    # Safety backup before mutating the live panel — never aborts restore on failure.
-    safety = try_pre_restore_backup(log_fn=job.log)
+    # Best-effort safety backup off the event loop — never aborts restore on failure.
+    safety = await asyncio.to_thread(try_pre_restore_backup, job.log)
     if safety:
         params = {**params, "_pre_restore_backup": safety}
     write_incomplete_job_marker(

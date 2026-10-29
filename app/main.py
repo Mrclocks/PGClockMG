@@ -102,8 +102,8 @@ _STATIC_ASSET_SUFFIXES = (
 def _is_public_path(path: str) -> bool:
     if path in PUBLIC_PATHS:
         return True
-    # One-time stream receive tokens authenticate the request themselves.
-    if path.startswith("/api/stream/receive/"):
+    # One-time stream tokens authenticate receive/status themselves (no login cookie).
+    if path.startswith("/api/stream/receive/") or path.startswith("/api/stream/status/"):
         return True
     if path.startswith("/static/"):
         lower = path.lower()

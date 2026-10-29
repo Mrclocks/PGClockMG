@@ -386,21 +386,6 @@ def _http_error_payload(resp: httpx.Response) -> dict:
     }
 
 
-def _listener_still_usable(client: httpx.Client, base: str, token: str) -> bool:
-    """True when the destination listener can still accept a (re)send."""
-    try:
-        resp = client.get(f"{base}/api/stream/status/{token}", timeout=15.0)
-    except Exception:
-        return False
-    if resp.status_code != 200:
-        return False
-    try:
-        info = resp.json()
-    except Exception:
-        return False
-    return str(info.get("status") or "") in ("listening", "error")
-
-
 def _is_retryable_network_error(exc: BaseException) -> bool:
     return isinstance(
         exc,
@@ -414,6 +399,23 @@ def _is_retryable_network_error(exc: BaseException) -> bool:
             httpx.WriteError,
         ),
     )
+
+
+def _is_retryable_http_status(status_code: int) -> bool:
+    """409 = destination still briefly ``receiving`` after a dropped connection."""
+    return int(status_code) == 409
+
+
+def _notify_retry_progress(progress_cb: Any | None, size: int) -> None:
+    if not progress_cb:
+        return
+    try:
+        progress_cb(0, size, phase="connecting")
+    except TypeError:
+        try:
+            progress_cb(0, size)
+        except Exception:
+            pass
 
 
 def push_backup_file(
@@ -482,14 +484,24 @@ def push_backup_file(
 
     timeout_cfg = httpx.Timeout(timeout, connect=30.0, read=timeout, write=timeout)
     limits = httpx.Limits(max_connections=2, max_keepalive_connections=0)
-    last_network_error: Exception | None = None
+    last_error: str | None = None
 
-    # Initial attempt + up to 3 network retries with 2s / 4s / 8s backoff.
+    # Initial attempt + up to 3 retries with 2s / 4s / 8s backoff.
+    # Do NOT probe /api/stream/status (auth-gated on older builds / unnecessary):
+    # just re-PUT; receive answers 404/410/409 clearly.
     for attempt in range(1 + len(PUSH_RETRY_BACKOFF_SEC)):
         try:
             with httpx.Client(timeout=timeout_cfg, follow_redirects=False, limits=limits) as client:
                 resp = client.put(url, content=_iter_file(), headers=headers)
             if resp.status_code >= 400:
+                if (
+                    _is_retryable_http_status(resp.status_code)
+                    and attempt < len(PUSH_RETRY_BACKOFF_SEC)
+                ):
+                    last_error = _http_error_payload(resp).get("error")
+                    _notify_retry_progress(progress_cb, size)
+                    time.sleep(PUSH_RETRY_BACKOFF_SEC[attempt])
+                    continue
                 return _http_error_payload(resp)
             try:
                 body = resp.json()
@@ -499,29 +511,13 @@ def push_backup_file(
         except Exception as exc:
             if not _is_retryable_network_error(exc):
                 return {"ok": False, "error": str(exc)}
-            last_network_error = exc
+            last_error = str(exc)
             if attempt >= len(PUSH_RETRY_BACKOFF_SEC):
                 break
-            # Only retry while the destination listener is still usable.
-            try:
-                with httpx.Client(timeout=timeout_cfg, follow_redirects=False, limits=limits) as probe:
-                    usable = _listener_still_usable(probe, base, tok)
-            except Exception:
-                usable = False
-            if not usable:
-                return {"ok": False, "error": str(exc)}
-            # Keep UI progress from freezing mid-retry.
-            if progress_cb:
-                try:
-                    progress_cb(0, size, phase="connecting")
-                except TypeError:
-                    try:
-                        progress_cb(0, size)
-                    except Exception:
-                        pass
+            _notify_retry_progress(progress_cb, size)
             time.sleep(PUSH_RETRY_BACKOFF_SEC[attempt])
 
-    return {"ok": False, "error": str(last_network_error or "network_error")}
+    return {"ok": False, "error": last_error or "network_error"}
 
 
 def start_create_and_stream_async(

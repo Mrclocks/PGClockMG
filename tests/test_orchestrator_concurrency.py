@@ -40,10 +40,24 @@ def test_start_migration_rejects_second_job():
                 await asyncio.sleep(0.05)
                 return {"ok": True}
 
+        async def _fast_safety(fn, *a, **k):
+            return None
+
         with patch.dict(
             "app.services.orchestrator.MIGRATORS",
             {"marzban": FakeMigrator},
             clear=False,
+        ), patch(
+            "app.services.orchestrator.asyncio.to_thread",
+            side_effect=_fast_safety,
+        ), patch(
+            "app.services.orchestrator.acquire_panel_busy",
+        ), patch(
+            "app.services.orchestrator.release_panel_busy",
+        ), patch(
+            "app.services.orchestrator.write_incomplete_job_marker",
+        ), patch(
+            "app.services.orchestrator.clear_incomplete_job_marker",
         ):
             job1 = await start_migration({"source_panel": "marzban"})
             try:
@@ -51,7 +65,6 @@ def test_start_migration_rejects_second_job():
                 raise AssertionError("expected MigrationAlreadyRunning")
             except MigrationAlreadyRunning as e:
                 assert e.job.job_id == job1.job_id
-            # Let first finish
             for _ in range(50):
                 if job1.status in ("success", "error"):
                     break

@@ -6,7 +6,7 @@ import io
 import time
 import zipfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -145,7 +145,6 @@ def test_push_backup_file_retries_network_errors(tmp_path, monkeypatch):
     sleeps: list[float] = []
     monkeypatch.setattr(stream.time, "sleep", lambda s: sleeps.append(s))
     monkeypatch.setattr(stream, "_normalize_dest_url", lambda u: "http://dest.example")
-    monkeypatch.setattr(stream, "_listener_still_usable", lambda *a, **k: True)
 
     calls = {"n": 0}
 
@@ -172,14 +171,59 @@ def test_push_backup_file_retries_network_errors(tmp_path, monkeypatch):
                 raise httpx.ConnectError("boom")
             return _Ok()
 
-        def get(self, *a, **k):
-            return MagicMock(status_code=200, json=lambda: {"status": "listening"})
-
     monkeypatch.setattr(stream.httpx, "Client", _Client)
     result = stream.push_backup_file(path, dest_base_url="http://dest.example", token="tok")
     assert result["ok"] is True
     assert calls["n"] == 3
     assert sleeps == [2, 4]
+
+
+def test_push_backup_file_retries_http_409(tmp_path, monkeypatch):
+    """After a drop, destination may still report receiving → 409; retry with backoff."""
+    import app.services.backup_stream as stream
+
+    path = _tiny_backup_zip(tmp_path)
+    sleeps: list[float] = []
+    monkeypatch.setattr(stream.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(stream, "_normalize_dest_url", lambda u: "http://dest.example")
+
+    calls = {"n": 0}
+
+    class _Busy:
+        status_code = 409
+        text = '{"detail":"listener_busy"}'
+
+        def json(self):
+            return {"detail": "listener_busy"}
+
+    class _Ok:
+        status_code = 200
+        text = '{"ok":true}'
+
+        def json(self):
+            return {"ok": True}
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def put(self, *a, **k):
+            calls["n"] += 1
+            if calls["n"] < 2:
+                return _Busy()
+            return _Ok()
+
+    monkeypatch.setattr(stream.httpx, "Client", _Client)
+    result = stream.push_backup_file(path, dest_base_url="http://dest.example", token="tok")
+    assert result["ok"] is True
+    assert calls["n"] == 2
+    assert sleeps == [2]
 
 
 def test_prune_push_jobs_drops_old_and_caps(tmp_path, monkeypatch):

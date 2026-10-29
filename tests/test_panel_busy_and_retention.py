@@ -137,3 +137,71 @@ def test_stale_busy_lock_auto_clears(tmp_path, monkeypatch):
     )
     assert lock.read_panel_busy() is None
     assert not lock.PANEL_BUSY_FILE.exists()
+
+
+def test_pre_restore_backup_honors_env_disable(monkeypatch):
+    from app.services.panel_job_lock import try_pre_restore_backup
+
+    logs: list[str] = []
+    monkeypatch.setenv("PG_PRE_RESTORE_BACKUP", "0")
+    assert try_pre_restore_backup(log_fn=logs.append) is None
+    assert any("PG_PRE_RESTORE_BACKUP=0" in m for m in logs)
+
+
+def test_pre_restore_runs_off_event_loop(monkeypatch):
+    """start_migration must await to_thread so create_backup_bundle cannot block the loop."""
+    import asyncio
+    from unittest.mock import patch
+
+    from app.services.orchestrator import _active_jobs, start_migration
+
+    _active_jobs.clear()
+    seen = {"threaded": False}
+
+    async def _fake_to_thread(fn, *args, **kwargs):
+        seen["threaded"] = True
+        assert getattr(fn, "__name__", "") == "try_pre_restore_backup"
+        return None
+
+    class FakeMigrator:
+        def __init__(self, job, params):
+            self.job = job
+
+        async def run(self, params):
+            return {"ok": True}
+
+    async def _run():
+        with patch.dict(
+            "app.services.orchestrator.MIGRATORS",
+            {"marzban": FakeMigrator},
+            clear=False,
+        ), patch(
+            "app.services.orchestrator.asyncio.to_thread",
+            side_effect=_fake_to_thread,
+        ), patch(
+            "app.services.orchestrator.acquire_panel_busy",
+        ), patch(
+            "app.services.orchestrator.release_panel_busy",
+        ), patch(
+            "app.services.orchestrator.write_incomplete_job_marker",
+        ), patch(
+            "app.services.orchestrator.clear_incomplete_job_marker",
+        ):
+            job = await start_migration({"source_panel": "marzban"})
+            for _ in range(50):
+                if job.status in ("success", "error"):
+                    break
+                await asyncio.sleep(0.02)
+            assert job.status == "success"
+            assert seen["threaded"] is True
+
+    asyncio.run(_run())
+    _active_jobs.clear()
+
+
+def test_stream_status_is_public_path():
+    from app.main import _is_public_path
+
+    assert _is_public_path("/api/stream/status/abcToken") is True
+    assert _is_public_path("/api/stream/receive/abcToken") is True
+    assert _is_public_path("/api/info") is False

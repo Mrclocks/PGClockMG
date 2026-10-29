@@ -75,8 +75,9 @@ async def start_migration(params: dict, on_log: Callable | None = None) -> Migra
     if on_log:
         job.on_log(on_log)
 
-    # Safety backup before any panel mutation — never blocks migration on failure.
-    safety = try_pre_restore_backup(log_fn=job.log)
+    # Best-effort safety backup off the event loop (large panels can take minutes).
+    # Job is already registered as pending so a second start is rejected.
+    safety = await asyncio.to_thread(try_pre_restore_backup, job.log)
     write_incomplete_job_marker(
         kind="migrate",
         job_id=job.job_id,

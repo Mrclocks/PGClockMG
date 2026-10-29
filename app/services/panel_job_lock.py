@@ -148,10 +148,9 @@ def release_panel_busy(*, job_id: str | None = None) -> None:
         return
     if job_id and info.get("job_id") and info.get("job_id") != job_id:
         return
-    if int(info.get("pid") or 0) not in (0, os.getpid()):
-        # Another process owns it — leave alone unless stale.
-        if read_panel_busy() is None:
-            return
+    owner_pid = int(info.get("pid") or 0)
+    if owner_pid not in (0, os.getpid()) and _pid_alive(owner_pid):
+        # Another live process owns the lock — leave it alone.
         return
     _clear_file(PANEL_BUSY_FILE)
 
@@ -212,6 +211,8 @@ def try_pre_restore_backup(log_fn=None) -> dict[str, Any] | None:
     """Take a safety backup before restore/migrate. Never raises; never blocks the job.
 
     Exempt from the panel busy lock (called before the lock is written).
+    Callers must run this via ``asyncio.to_thread`` so the event loop stays free.
+    Set ``PG_PRE_RESTORE_BACKUP=0`` to skip.
     """
     def _log(msg: str) -> None:
         if log_fn:
@@ -219,6 +220,11 @@ def try_pre_restore_backup(log_fn=None) -> dict[str, Any] | None:
                 log_fn(msg)
             except Exception:
                 pass
+
+    flag = os.environ.get("PG_PRE_RESTORE_BACKUP", "1").strip().lower()
+    if flag in ("0", "false", "no", "off"):
+        _log("Pre-restore safety backup skipped: PG_PRE_RESTORE_BACKUP=0")
+        return None
 
     try:
         from app.services.prerequisites import is_pasarguard_installed
