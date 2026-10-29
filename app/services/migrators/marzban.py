@@ -1,7 +1,6 @@
 """Marzban → PasarGuard migration (fresh install only — PasarGuard must be pre-installed)."""
 
 import asyncio
-import re
 import shutil
 import sqlite3
 import time
@@ -9,12 +8,11 @@ from pathlib import Path
 
 from app.config import (
     MARZBAN_DIR, MARZBAN_DATA, PASARGUARD_DIR, PASARGUARD_DATA,
-    PASARGUARD_ENV, BACKUP_DIR, TOOLS_DIR,
+    PASARGUARD_ENV, BACKUP_DIR,
 )
 from app.services.migrators.base import BaseMigrator
 from app.services.native_migration import run_cross_db_migration
 from app.services.env_migration import (
-    transform_marzban_env,
     transform_compose_marzban_to_pasarguard,
     transform_xray_config,
     rewrite_mysql_dump_file_for_pasarguard,

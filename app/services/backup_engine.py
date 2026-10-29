@@ -615,7 +615,6 @@ def estimate_backup_source_bytes() -> int:
                 pass
 
         def _add_tree(root: Path) -> None:
-            nonlocal total
             if not root.exists():
                 return
             if root.is_file():

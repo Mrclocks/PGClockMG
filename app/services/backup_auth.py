@@ -10,7 +10,6 @@ import os
 import re
 import secrets
 import time
-from pathlib import Path
 
 from app.config import BACKUP_PASSWORD_FILE, BACKUP_SECRET_FILE, BACKUP_SETUP_TOKEN_FILE
 

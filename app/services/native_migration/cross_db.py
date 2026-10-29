@@ -19,7 +19,6 @@ from app.services.pasarguard_ops import (
     build_alembic_url_from_conn,
     build_local_alembic_url,
     run_alembic_upgrade_head,
-    read_target_alembic_version,
     heal_unknown_alembic_revision,
     read_sqlite_alembic_version,
 )

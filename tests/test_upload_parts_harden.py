@@ -217,7 +217,6 @@ def test_api_upload_does_not_block_event_loop(tmp_path, monkeypatch):
 
 
 def test_zip_allow_large_requires_panel_layout(tmp_path, monkeypatch):
-    from app.config import BACKUP_DIR
     from app.services.pg_restore import _zip_allow_large
 
     upload_dir = tmp_path / "uploads"

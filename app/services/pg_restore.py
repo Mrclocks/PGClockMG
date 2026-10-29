@@ -4656,14 +4656,14 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         ru = "Версия каталога TimescaleDB в дампе не совпадает с образом (post_restore)."
         ver = sig.ts_version
         ts_fa = [
-            f"لاگ: catalog version mismatch"
+            "لاگ: catalog version mismatch"
             + (f" (نسخهٔ دیده‌شده {ver})" if ver else "")
             + " — ایمیج باید با کاتالوگ دامپ هم‌تراز شود.",
             "ویزارد ایمیج را بدون wipe دیتا هم‌تراز می‌کند و دوباره post_restore می‌زند.",
             "اگر باز خطا بود، تگ timescaledb در docker-compose.yml را با نسخه بکاپ یکی کنید.",
         ]
         ts_en = [
-            f"Log: catalog version mismatch"
+            "Log: catalog version mismatch"
             + (f" (seen {ver})" if ver else "")
             + " — image must match the dump catalog.",
             "Wizard realigns the image without wiping data and retries post_restore.",
@@ -4705,13 +4705,13 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
         ver = sig.ts_version
         _causes(
             [
-                f"لاگ به نسخه Timescale"
+                "لاگ به نسخه Timescale"
                 + (f" `{ver}`" if ver else "")
                 + " اشاره دارد — ایمیج سرور را با دامپ هم‌تراز کنید.",
                 "دوباره ریستور کنید یا لاگ کامل pin/align را ببینید.",
             ],
             [
-                f"Log mentions Timescale version"
+                "Log mentions Timescale version"
                 + (f" `{ver}`" if ver else "")
                 + " — realign the server image to the dump.",
                 "Retry restore or inspect the full pin/align log.",

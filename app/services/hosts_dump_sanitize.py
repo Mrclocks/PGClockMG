@@ -666,9 +666,6 @@ def extract_sanitized_hosts_copy_sql(src: Path) -> str | None:
     columns, rows = extract_hosts_rows_from_pg_dump(src)
     if not columns or not rows:
         return None
-    lines = [sanitize_hosts_copy_row(columns, "\t".join(
-        ("\\N" if r.get(c) is None else str(r.get(c)) for c in columns)
-    )) for r in rows]
     # Rebuild properly via sanitize path from dicts
     out_lines: list[str] = []
     for row in rows:

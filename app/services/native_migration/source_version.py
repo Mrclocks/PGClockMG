@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
-
-from app.services.pasarguard_ops import read_sqlite_alembic_version
 
 # Alembic revision ids (12-char hex typical; merge heads may appear in noisy stdout)
 _REVISION_RE = re.compile(r"\b([0-9a-f]{12,64})\b", re.I)
