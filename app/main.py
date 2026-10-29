@@ -788,6 +788,10 @@ async def api_stream_receive(token: str, request: Request):
     except TimeoutError:
         raise HTTPException(410, "listener_expired")
     except Exception as e:
+        from app.services.backup_stream import ListenerBusyError
+
+        if isinstance(e, ListenerBusyError):
+            raise HTTPException(409, str(e)) from e
         raise HTTPException(400, str(e))
 
 
