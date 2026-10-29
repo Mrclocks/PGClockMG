@@ -29,8 +29,8 @@ from app.services.upload_requirements import get_upload_requirements
 from app.services.archive_guard import (
     MAX_UPLOAD_BYTES, MAX_OVERRIDE_UPLOAD_BYTES, MAX_ZIP_ENTRY_BYTES, MAX_ZIP_FILES, MAX_ZIP_RATIO,
     MAX_ZIP_TOTAL_BYTES, MAX_OVERRIDE_ZIP_ENTRY_BYTES, MAX_OVERRIDE_ZIP_TOTAL_BYTES,
-    allowed_upload_bytes, looks_like_panel_backup_zip, resolve_allow_large_for_zip,
-    safe_upload_name, zip_entry_limit_bytes, zip_total_limit_bytes,
+    allowed_upload_bytes, looks_like_panel_backup_zip, preferred_temp_dir,
+    resolve_allow_large_for_zip, safe_upload_name, zip_entry_limit_bytes, zip_total_limit_bytes,
 )
 from app.services.pg_access import get_panel_access_info
 from app.services.pg_restore import (
@@ -476,7 +476,7 @@ async def api_upload(
     allow_large_upload: str | None = Form(None),
 ):
     filename = safe_upload_name(file.filename)
-    tmp_dir = Path(tempfile.mkdtemp(prefix="pg-upload-"))
+    tmp_dir = Path(tempfile.mkdtemp(prefix="pg-upload-", dir=preferred_temp_dir()))
     tmp_path = tmp_dir / filename
     size = 0
     use_large_upload_limit = str(allow_large_upload or "").strip().lower() in ("1", "true", "yes", "on")
@@ -513,16 +513,25 @@ async def api_upload(
 
         if slot or bundle_id:
             bid = bundle_id or init_bundle()
-            result = save_bundle_slot(
-                bid, slot or "bundle_zip", tmp_path, filename,
-                panel_id=panel_id, source_db=source_db, marzban_mode=marzban_mode,
-                allow_large=use_large_upload_limit,
+            from functools import partial
+
+            result = await run_in_threadpool(
+                partial(
+                    save_bundle_slot,
+                    bid, slot or "bundle_zip", tmp_path, filename,
+                    panel_id=panel_id, source_db=source_db, marzban_mode=marzban_mode,
+                    allow_large=use_large_upload_limit,
+                ),
             )
             if result.get("error"):
                 raise HTTPException(400, result["error"])
             return result
 
-        result = save_upload(tmp_path, filename, allow_large=use_large_upload_limit)
+        from functools import partial
+
+        result = await run_in_threadpool(
+            partial(save_upload, tmp_path, filename, allow_large=use_large_upload_limit),
+        )
         if result.get("error"):
             raise HTTPException(400, result["error"])
         return result
@@ -557,7 +566,7 @@ async def api_upload_parts(
 
     use_large = str(allow_large_upload or "").strip().lower() in ("1", "true", "yes", "on")
     stream_cap = allowed_upload_bytes(True)
-    tmp_root = Path(tempfile.mkdtemp(prefix="pg-upload-parts-"))
+    tmp_root = Path(tempfile.mkdtemp(prefix="pg-upload-parts-", dir=preferred_temp_dir()))
     staged: list[tuple[str, Path]] = []
     total = 0
     try:

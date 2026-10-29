@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -279,14 +280,24 @@ async def receive_stream(
                 })
         return {"ok": True, "upload_id": upload_id, "size_bytes": received, "sha256": digest}
     except Exception as exc:
+        # Drop the whole receive dir (partial + any verified dest) so retries start clean.
         try:
-            partial.unlink(missing_ok=True)
-        except OSError:
-            pass
+            shutil.rmtree(dest_dir, ignore_errors=True)
+        except Exception:
+            try:
+                partial.unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
         with _LOCK:
             if token in _LISTENERS:
                 _LISTENERS[token]["status"] = "error"
                 _LISTENERS[token]["error"] = str(exc)
+                _LISTENERS[token]["partial_path"] = None
+                _LISTENERS[token]["upload_id"] = None
         raise
 
 

@@ -18,6 +18,7 @@ from pathlib import Path
 from app.services.archive_guard import (
     allowed_upload_bytes,
     looks_like_panel_backup_zip,
+    preferred_temp_dir,
     resolve_allow_large_for_zip,
     safe_extract_zip_file,
     safe_upload_name,
@@ -28,6 +29,8 @@ from app.services.upload import save_upload
 _PART_RE = re.compile(
     r"^(?P<stem>.+)-(?P<index>\d+)-(?P<total>\d+)(?P<suffix>\.[A-Za-z0-9]+)$"
 )
+# Date-stamped whole backups must not be mistaken for ``-MM-DD`` parts.
+_DATE_STAMP_RE = re.compile(r"-\d{4}-\d{2}-\d{2}(?=\.[^.]+$)")
 # Common alternate splits: ``name.zip.001`` / ``name.z01``
 _NUM_SUFFIX_RE = re.compile(
     r"^(?P<stem>.+\.zip)\.(?P<index>\d{1,3})$",
@@ -105,6 +108,9 @@ def normalize_part_filename(filename: str) -> str:
 def parse_part_filename(filename: str) -> PartSpec | None:
     """Return part metadata when the name looks like a split volume."""
     name = normalize_part_filename(filename)
+    # ``backup-2025-10-29.zip`` looks like index/total but is a dated whole file.
+    if _DATE_STAMP_RE.search(name):
+        return None
     m = _PART_RE.match(name)
     if m:
         index = int(m.group("index"))
@@ -173,10 +179,16 @@ def _is_valid_zip(path: Path) -> bool:
 
 def _looks_like_html(path: Path) -> bool:
     try:
-        head = path.read_bytes()[:256].lstrip().lower()
+        with path.open("rb") as fh:
+            head = fh.read(256).lstrip().lower()
     except OSError:
         return False
     return head.startswith((b"<!doctype html", b"<html", b"<head"))
+
+
+def _is_complete_panel_backup_zip(path: Path) -> bool:
+    """True when path is a readable zip that looks like a full panel backup."""
+    return _is_valid_zip(path) and looks_like_panel_backup_zip(path)
 
 
 def _zip_file_entries(path: Path) -> list[zipfile.ZipInfo]:
@@ -392,6 +404,12 @@ def _expand_inputs(
             )
             continue
 
+        # Complete panel backup zip — even when the filename looks like a part.
+        if _is_complete_panel_backup_zip(path):
+            out_name = name if name.lower().endswith(".zip") else f"{Path(name).stem}.zip"
+            out.append((out_name, path))
+            continue
+
         # Each Telegram chunk re-zipped alone → unwrap the single payload.
         if len(entries) == 1 and looks_like_part_filename(name):
             e = entries[0]
@@ -419,32 +437,64 @@ def _expand_inputs(
     return out
 
 
-def _find_eocd_offset(data: bytes) -> int | None:
-    """Return start of EOCD (classic EOCD lives in the last 64KiB+22 bytes)."""
-    max_back = min(len(data), (1 << 16) + 22)
-    window = data[-max_back:]
+def _find_zip_sig_offset(path: Path, *, size: int) -> int | None:
+    """Scan from the start for a local/spanning zip signature without loading the file."""
+    chunk = 1024 * 1024
+    carry = b""
+    with path.open("rb") as fh:
+        while True:
+            block = fh.read(chunk)
+            if not block:
+                break
+            window = carry + block
+            for sig in (_ZIP_LOCAL, _ZIP_SPAN):
+                pos = window.find(sig)
+                if pos >= 0:
+                    # Absolute offset = bytes already consumed before this window + pos
+                    already = fh.tell() - len(window)
+                    return already + pos
+            # Keep last 3 bytes so a signature split across chunks is still found.
+            carry = window[-3:] if len(window) >= 3 else window
+    return None
+
+
+def _find_eocd_in_tail(tail: bytes, *, file_size: int, data_start: int) -> int | None:
+    """Return absolute EOCD offset within the logical zip (relative to data_start)."""
+    logical_size = file_size - data_start
+    max_back = min(len(tail), (1 << 16) + 22, logical_size)
+    window = tail[-max_back:]
     pos = window.rfind(_ZIP_EOCD)
     if pos >= 0:
-        return len(data) - len(window) + pos
-    pos = data.rfind(_ZIP_EOCD64)
+        # Offset of window start within the logical zip body.
+        window_start_in_logical = logical_size - len(window)
+        return window_start_in_logical + pos
+    pos = window.rfind(_ZIP_EOCD64)
     if pos >= 0:
-        return pos
+        window_start_in_logical = logical_size - len(window)
+        return window_start_in_logical + pos
     return None
 
 
 def heal_concatenated_zip(src: Path, dest: Path, heals: HealReport) -> Path:
-    """Trim leading/trailing junk so a concatenated Telegram split becomes a real zip."""
-    data = src.read_bytes()
-    if not data:
+    """Trim leading/trailing junk so a concatenated Telegram split becomes a real zip.
+
+    Uses seek/tail reads only — never loads the whole archive into RAM.
+    """
+    try:
+        size = src.stat().st_size
+    except OSError as exc:
+        raise BackupPartsError(
+            _bilingual("فایل اسمبل‌شده خالی است.", "Assembled file is empty."),
+            code="empty_merge",
+        ) from exc
+    if size <= 0:
         raise BackupPartsError(
             _bilingual("فایل اسمبل‌شده خالی است.", "Assembled file is empty."),
             code="empty_merge",
         )
 
-    start = data.find(_ZIP_LOCAL)
-    if start < 0:
-        start = data.find(_ZIP_SPAN)
-    if start < 0:
+    start = _find_zip_sig_offset(src, size=size)
+    if start is None:
         raise BackupPartsError(
             _bilingual(
                 "بعد از چسباندن پارت‌ها امضای zip پیدا نشد. "
@@ -458,34 +508,53 @@ def heal_concatenated_zip(src: Path, dest: Path, heals: HealReport) -> Path:
         )
 
     if start > 0:
-        data = data[start:]
         heals.add(
             f"{start} بایت زائد از ابتدای فایل حذف شد.",
             f"Removed {start} leading junk bytes.",
         )
 
-    eocd = _find_eocd_offset(data)
-    if eocd is not None:
-        # EOCD size = 22 + comment length (uint16 at offset eocd+20)
-        comment_len = 0
-        if data[eocd:eocd + 4] == _ZIP_EOCD and eocd + 22 <= len(data):
-            comment_len = int.from_bytes(data[eocd + 20 : eocd + 22], "little")
-            end = eocd + 22 + comment_len
-            if end < len(data):
-                trimmed = len(data) - end
-                data = data[:end]
-                heals.add(
-                    f"{trimmed} بایت زائد از انتهای فایل حذف شد.",
-                    f"Removed {trimmed} trailing junk bytes.",
-                )
-            elif end > len(data):
-                # Truncated comment — keep what we have; ZipFile may still open.
-                heals.add(
-                    "کامنت انتهای zip ناقص بود؛ با دادهٔ موجود ادامه داده شد.",
-                    "Zip end comment was truncated; continued with available bytes.",
-                )
+    tail_len = min(size - start, (1 << 16) + 22)
+    with src.open("rb") as fh:
+        fh.seek(size - tail_len)
+        tail = fh.read(tail_len)
 
-    dest.write_bytes(data)
+    end = size - start  # logical end relative to start (default: keep all remaining)
+    eocd = _find_eocd_in_tail(tail, file_size=size, data_start=start)
+    if eocd is not None:
+        # Map eocd (relative to logical start) back into the absolute file for comment len.
+        abs_eocd = start + eocd
+        # Comment length lives at EOCD+20 when classic EOCD.
+        with src.open("rb") as fh:
+            fh.seek(abs_eocd)
+            sig = fh.read(4)
+            if sig == _ZIP_EOCD:
+                fh.seek(abs_eocd + 20)
+                comment_raw = fh.read(2)
+                comment_len = int.from_bytes(comment_raw, "little") if len(comment_raw) == 2 else 0
+                logical_end = eocd + 22 + comment_len
+                if logical_end < end:
+                    trimmed = end - logical_end
+                    end = logical_end
+                    heals.add(
+                        f"{trimmed} بایت زائد از انتهای فایل حذف شد.",
+                        f"Removed {trimmed} trailing junk bytes.",
+                    )
+                elif logical_end > end:
+                    heals.add(
+                        "کامنت انتهای zip ناقص بود؛ با دادهٔ موجود ادامه داده شد.",
+                        "Zip end comment was truncated; continued with available bytes.",
+                    )
+
+    # Stream only the healed range — never materialize the full payload in RAM.
+    remaining = end
+    with src.open("rb") as inp, dest.open("wb") as out:
+        inp.seek(start)
+        while remaining > 0:
+            chunk = inp.read(min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            out.write(chunk)
+            remaining -= len(chunk)
     return dest
 
 
@@ -647,7 +716,7 @@ def assemble_part_paths(
         )
 
     heals = HealReport()
-    tmp_dir = Path(tempfile.mkdtemp(prefix="pg-parts-assemble-"))
+    tmp_dir = Path(tempfile.mkdtemp(prefix="pg-parts-assemble-", dir=preferred_temp_dir()))
     try:
         expanded = _expand_inputs(items, tmp_dir / "expanded", heals)
 
@@ -657,15 +726,10 @@ def assemble_part_paths(
             name = normalize_part_filename(name)
             if _is_valid_zip(path):
                 out_name = name if name.lower().endswith(".zip") else f"{Path(name).stem}.zip"
-                clean = tmp_dir / out_name
-                try:
-                    repack_clean_zip(path, clean, heals, allow_large=allow_large)
-                    final_path = clean
-                except BackupPartsError:
-                    # Already a fine zip — hand through without failing the upload.
-                    final_path = path
+                # Already a clean complete zip — skip expensive repack (only needed
+                # after concatenating Telegram-style split parts).
                 return _save_result(
-                    final_path,
+                    path,
                     out_name,
                     allow_large=allow_large,
                     assembled=False,
@@ -768,10 +832,18 @@ def assemble_part_paths(
 
         healed = tmp_dir / f"healed-{merged_name}"
         heal_concatenated_zip(raw_merged, healed, heals)
+        try:
+            raw_merged.unlink(missing_ok=True)
+        except OSError:
+            pass
         _verify_zip_readable(healed)
 
         clean = tmp_dir / merged_name
         repack_clean_zip(healed, clean, heals, allow_large=allow_large or looks_like_panel_backup_zip(healed))
+        try:
+            healed.unlink(missing_ok=True)
+        except OSError:
+            pass
         _verify_zip_readable(clean)
 
         return _save_result(

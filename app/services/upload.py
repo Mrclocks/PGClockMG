@@ -7,6 +7,7 @@ from pathlib import Path
 
 from app.config import UPLOAD_DIR
 from app.services.archive_guard import (
+    preferred_temp_dir,
     resolve_allow_large_for_zip,
     safe_extract_zip_file,
     safe_upload_name,
@@ -23,7 +24,7 @@ def save_upload(
     cleanup_tmp = False
     cleanup_path: Path | None = None
     if isinstance(src_path, (bytes, bytearray)):
-        tmp_dir = Path(tempfile.mkdtemp(prefix="pg-upload-save-"))
+        tmp_dir = Path(tempfile.mkdtemp(prefix="pg-upload-save-", dir=preferred_temp_dir()))
         src_tmp = tmp_dir / safe_upload_name(filename)
         src_tmp.write_bytes(bytes(src_path))
         src_path = src_tmp
@@ -52,6 +53,22 @@ def save_upload(
             except ValueError as e:
                 zip_error = str(e)
 
+        if zip_error:
+            try:
+                shutil.rmtree(dest_dir, ignore_errors=True)
+            except Exception:
+                pass
+            return {
+                "upload_id": upload_id,
+                "filename": filename,
+                "path": str(dest_file),
+                "size": 0,
+                "detected": {},
+                "analysis": None,
+                "allow_large_upload": bool(effective_large),
+                "error": zip_error,
+            }
+
         from app.services.secret_vault import upload_scope
         analysis = analyze_upload_directory(dest_dir, vault_scope=upload_scope(upload_id))
         detected = _legacy_detected(analysis)
@@ -72,8 +89,6 @@ def save_upload(
                 "largest_entry": zip_meta.largest_entry,
                 "compression_ratio": zip_meta.compression_ratio,
             }
-        if zip_error:
-            result["error"] = zip_error
         return result
     finally:
         if cleanup_tmp and cleanup_path is not None:

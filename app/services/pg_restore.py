@@ -1816,18 +1816,21 @@ def is_auth_failure_text(text: str) -> bool:
 
 
 def _zip_allow_large(zip_path: Path) -> bool:
-    """Trusted local backups / staged uploads / recognized panel zips may exceed defaults."""
+    """True for local BACKUP_DIR archives or zip layouts that look like panel backups.
+
+    Upload staging dirs are not blindly trusted — only recognized panel-backup
+    member layouts raise the large-entry ceilings.
+    """
     try:
-        from app.config import BACKUP_DIR, UPLOAD_DIR
+        from app.config import BACKUP_DIR
         from app.services.archive_guard import looks_like_panel_backup_zip
 
         resolved = zip_path.resolve()
-        for root in (BACKUP_DIR, UPLOAD_DIR):
-            try:
-                resolved.relative_to(Path(root).resolve())
-                return True
-            except (ValueError, OSError):
-                continue
+        try:
+            resolved.relative_to(Path(BACKUP_DIR).resolve())
+            return True
+        except (ValueError, OSError):
+            pass
         return looks_like_panel_backup_zip(resolved)
     except Exception:
         pass
