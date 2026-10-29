@@ -814,6 +814,22 @@ function applySystemCheck(sys) {
   renderUploadResourceCard();
 }
 
+function renderIncompleteOperation(info) {
+  const el = document.getElementById('welcomeIncompleteOp');
+  if (!el) return;
+  if (!info) {
+    el.textContent = '';
+    el.classList.add('hidden');
+    return;
+  }
+  const path = info.pre_restore_path || info.pre_restore_backup_id || '';
+  const pathBit = path
+    ? String(t('welcome.incompleteOpPath') || '').replace('{path}', String(path))
+    : '';
+  el.textContent = String(t('welcome.incompleteOp') || '').replace('{path}', pathBit);
+  el.classList.remove('hidden');
+}
+
 async function loadInfo() {
   try {
     const data = await fetchJson('/api/info');
@@ -828,6 +844,7 @@ async function loadInfo() {
     if (data.pasarguard_install_guide) state.installGuide = data.pasarguard_install_guide;
     if (data.system) applySystemCheck(data.system);
     if (data.panel_access) state.panelAccess = data.panel_access;
+    renderIncompleteOperation(data.incomplete_operation || null);
     renderUploadResourceCard();
   } catch (e) {
     console.error(e);

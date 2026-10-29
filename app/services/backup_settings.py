@@ -63,6 +63,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "last_attempt_at": None,
         # Compat alias — scheduler prefers last_success_at.
         "last_run_at": None,
+        "consecutive_failures": 0,
     },
     "telegram": {
         "enabled": False,
@@ -277,9 +278,15 @@ def normalize_schedule(patch: dict | None) -> dict:
         "send_telegram": bool(src.get("send_telegram")),
         "notify_on_failure": bool(src.get("notify_on_failure", True)),
     }
-    for key in ("last_run_at", "last_success_at", "last_attempt_at"):
+    for key in ("last_run_at", "last_success_at", "last_attempt_at", "consecutive_failures"):
         if key in src:
-            out[key] = src.get(key)
+            if key == "consecutive_failures":
+                try:
+                    out[key] = max(0, int(src.get(key) or 0))
+                except (TypeError, ValueError):
+                    out[key] = 0
+            else:
+                out[key] = src.get(key)
     return out
 
 

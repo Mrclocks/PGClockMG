@@ -210,6 +210,8 @@ def _server_ip() -> str:
 
 @app.get("/api/info")
 async def api_info():
+    from app.services.panel_job_lock import incomplete_operation_status
+
     return {
         "version": APP_VERSION,
         "server_ip": _server_ip(),
@@ -228,6 +230,7 @@ async def api_info():
         "subscription_labels": SUBSCRIPTION_LABELS,
         "system": get_system_status(),
         "panel_access": get_panel_access_info(),
+        "incomplete_operation": incomplete_operation_status(),
         "upload_limits": {
             "max_upload_bytes": MAX_UPLOAD_BYTES,
             "max_override_upload_bytes": MAX_OVERRIDE_UPLOAD_BYTES,

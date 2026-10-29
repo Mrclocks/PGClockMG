@@ -2396,7 +2396,14 @@ def analyze_pasarguard_backup(upload_id: str | None = None, path: str | Path | N
 
 
 async def start_pasarguard_restore(params: dict) -> MigrationJob:
-    from app.services.panel_job_lock import ensure_panel_idle
+    from app.services.panel_job_lock import (
+        acquire_panel_busy,
+        clear_incomplete_job_marker,
+        ensure_panel_idle,
+        release_panel_busy,
+        try_pre_restore_backup,
+        write_incomplete_job_marker,
+    )
 
     if not is_pasarguard_installed():
         raise ValueError("PasarGuard is not installed")
@@ -2429,7 +2436,27 @@ async def start_pasarguard_restore(params: dict) -> MigrationJob:
     _prune_finished_restore_jobs()
     job = MigrationJob()
     _restore_jobs[job.job_id] = job
-    task = asyncio.create_task(_run_restore(job, params, analysis))
+
+    # Safety backup before mutating the live panel — never aborts restore on failure.
+    safety = try_pre_restore_backup(log_fn=job.log)
+    if safety:
+        params = {**params, "_pre_restore_backup": safety}
+    write_incomplete_job_marker(
+        kind="restore",
+        job_id=job.job_id,
+        pre_restore_backup_id=(safety or {}).get("backup_id"),
+        pre_restore_path=(safety or {}).get("path"),
+    )
+    acquire_panel_busy(kind="restore", job_id=job.job_id)
+
+    async def _guarded_restore() -> None:
+        try:
+            await _run_restore(job, params, analysis)
+        finally:
+            clear_incomplete_job_marker(job_id=job.job_id)
+            release_panel_busy(job_id=job.job_id)
+
+    task = asyncio.create_task(_guarded_restore())
     _restore_tasks.add(task)
     task.add_done_callback(_restore_tasks.discard)
     return job
@@ -2439,6 +2466,9 @@ async def _run_restore(job: MigrationJob, params: dict, analysis: dict) -> None:
     job.status = "running"
     try:
         result = await _restore_backup(job, params, analysis)
+        result = dict(result or {})
+        if params.get("_pre_restore_backup"):
+            result["pre_restore_backup"] = params["_pre_restore_backup"]
         job.result = result
         job.status = "success"
         job.set_progress(100, "Restore completed")

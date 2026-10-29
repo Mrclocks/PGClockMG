@@ -10,7 +10,15 @@ from app.services.migrators.xui import XuiMigrator
 from app.services.migrators.hiddify import HiddifyMigrator
 from app.services.migrators.pasarguard_db import PasarguardDbMigrator
 
-from app.services.panel_job_lock import PanelJobAlreadyRunning, ensure_panel_idle
+from app.services.panel_job_lock import (
+    PanelJobAlreadyRunning,
+    acquire_panel_busy,
+    clear_incomplete_job_marker,
+    ensure_panel_idle,
+    release_panel_busy,
+    try_pre_restore_backup,
+    write_incomplete_job_marker,
+)
 
 MIGRATORS = {
     "marzban": MarzbanMigrator,
@@ -67,6 +75,16 @@ async def start_migration(params: dict, on_log: Callable | None = None) -> Migra
     if on_log:
         job.on_log(on_log)
 
+    # Safety backup before any panel mutation — never blocks migration on failure.
+    safety = try_pre_restore_backup(log_fn=job.log)
+    write_incomplete_job_marker(
+        kind="migrate",
+        job_id=job.job_id,
+        pre_restore_backup_id=(safety or {}).get("backup_id"),
+        pre_restore_path=(safety or {}).get("path"),
+    )
+    acquire_panel_busy(kind="migrate", job_id=job.job_id)
+
     async def _run():
         try:
             job.status = "running"
@@ -90,6 +108,8 @@ async def start_migration(params: dict, on_log: Callable | None = None) -> Migra
                 )
             elif "panel_healthy" not in result:
                 result["panel_healthy"] = True
+            if safety:
+                result["pre_restore_backup"] = safety
             job.result = result
             job.status = "success"
             job.set_progress(100, "Migration completed successfully!")
@@ -106,6 +126,9 @@ async def start_migration(params: dict, on_log: Callable | None = None) -> Migra
             job.log(f"Error: {explain.get('detail') or e}")
             job.log(traceback.format_exc())
             job.result = {"error": str(e), "error_explain": explain}
+        finally:
+            clear_incomplete_job_marker(job_id=job.job_id)
+            release_panel_busy(job_id=job.job_id)
 
     task = asyncio.create_task(_run())
     _job_tasks.add(task)
