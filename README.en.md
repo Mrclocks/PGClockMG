@@ -1,4 +1,4 @@
-> 🚀 **`v4.9.5`** — fix MySQL→MySQL restore (backup password was written into `.env` instead of the install secret → Access denied for `pasarguard@127.0.0.1`)
+> 🚀 **`v4.9.6`** — multi-GB upload without UI freeze, date-named part assemble, real stream retries, pre-restore safety backup
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
