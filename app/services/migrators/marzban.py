@@ -16,6 +16,7 @@ from app.services.env_migration import (
     transform_compose_marzban_to_pasarguard,
     transform_xray_config,
     rewrite_mysql_dump_file_for_pasarguard,
+    rewrite_marzban_mysql_dump_for_target_db,
     read_env_var,
     merge_marzban_env_into_pasarguard,
     get_panel_url_from_env,
@@ -256,6 +257,7 @@ class MarzbanMigrator(BaseMigrator):
             return
 
         self.job.set_progress(40, "Preparing two-phase Marzban MySQL → target...")
+        self._expected_counts_from_dump(source_sql)
         await self._update_env_paths(source_db, target_db)
         await self._ensure_target_database_stack(target_db)
         if extra_data_dir:
@@ -679,6 +681,13 @@ class MarzbanMigrator(BaseMigrator):
         inbounds = int(found.get("inbounds", 0) or 0)
         core_configs = int(found.get("core_configs", 0) or 0)
 
+        expected_users = int((getattr(self, "_expected_dump_counts", None) or {}).get("users") or 0)
+        if expected_users > 0 and users <= 0:
+            raise RuntimeError(
+                f"Marzban backup has {expected_users} users but PasarGuard {engine} "
+                "has 0 after migration (only core config was seeded). Aborting — "
+                "users/hosts did not land in the panel database."
+            )
         if users <= 0 and hosts <= 0 and inbounds <= 0:
             raise RuntimeError(
                 "Marzban → PasarGuard schema upgrade left critical tables empty "
@@ -742,9 +751,7 @@ class MarzbanMigrator(BaseMigrator):
             if source_sqlite:
                 break
 
-        for p in sorted(work_dir.rglob("*.sql")):
-            source_sql = p
-            break
+        source_sql = self._pick_marzban_sql(work_dir)
 
         for p in work_dir.rglob("xray_config.json"):
             extra = p.parent
@@ -764,6 +771,39 @@ class MarzbanMigrator(BaseMigrator):
             raise RuntimeError("No .sql dump found in backup")
 
         return source_sqlite, source_sql, extra
+
+    def _pick_marzban_sql(self, work_dir: Path) -> Path | None:
+        """Pick the Marzban dump among all ``*.sql`` files in the backup.
+
+        Backups often ship several dumps (per-database files, ``mysql.sql``,
+        ``sys.sql``…). Alphabetical-first could import a system/other-app dump
+        with no users. Prefer the file whose data actually holds Marzban users.
+        """
+        cands = [
+            p for p in sorted(work_dir.rglob("*.sql"))
+            if p.is_file() and not p.name.startswith("fixed_import")
+        ]
+        if len(cands) <= 1:
+            return cands[0] if cands else None
+        from app.services.sql_dump_counts import scan_sql_dump_file
+
+        def _score(p: Path) -> tuple[int, int, int, int]:
+            try:
+                meta = scan_sql_dump_file(p, ("users", "admins"))
+                counts = meta.get("counts") or {}
+                ddl = meta.get("ddl_seen") or {}
+            except Exception:
+                counts, ddl = {}, {}
+            users = int(counts.get("users") or 0)
+            has_schema = int(bool(ddl.get("users")) and bool(ddl.get("admins")))
+            name_hit = int("marzban" in p.name.lower())
+            return (int(users > 0), has_schema, name_hit, p.stat().st_size)
+
+        best = max(cands, key=_score)
+        self.job.log(
+            f"Multiple .sql files in backup ({len(cands)}) — using {best.name}"
+        )
+        return best
 
     async def _extract_upload(self, upload_path: str, work_dir: Path, source_db: str):
         upload = Path(upload_path)
@@ -1285,8 +1325,18 @@ class MarzbanMigrator(BaseMigrator):
         size_mb = dump_file.stat().st_size / (1024 * 1024)
         fixed = dump_file.parent / "fixed_import.sql"
         self.job.log(f"Rewriting MySQL dump for PasarGuard ({size_mb:.1f} MB, streaming)...")
-        changed = rewrite_mysql_dump_file_for_pasarguard(dump_file, fixed)
-        self.job.log(f"Dump rewrite complete ({changed} lines changed)")
+        rw = rewrite_marzban_mysql_dump_for_target_db(dump_file, fixed)
+        self.job.log(
+            f"Dump rewrite complete ({rw['changed']} lines changed, "
+            f"{rw['db_statements_stripped']} CREATE/USE DATABASE stripped → rows pinned to `{db}`)"
+        )
+        if rw.get("databases"):
+            self.job.log(
+                "Dump databases: " + ", ".join(rw["databases"])
+                + f" — importing `{rw.get('kept_db')}`"
+                + (f" (skipped {rw['skipped_lines']} lines of other DBs)" if rw["skipped_lines"] else "")
+            )
+        expected = self._expected_counts_from_dump(fixed)
 
         from app.services.mysql_import_diagnostics import (
             assess_mysql_import_ram,
@@ -1461,12 +1511,77 @@ class MarzbanMigrator(BaseMigrator):
                 return await self._import_mysql_dump(dump_file, _heal_attempted=True)
             raise err
         self.job.log(f"MySQL dump import finished ({elapsed}s, client={client})")
+        await self._verify_mysql_import_counts(svc, client, user, pwd, host, db, expected)
         for path in (fixed, session_file):
             try:
                 if path.exists() and path.resolve() != dump_file.resolve():
                     path.unlink()
             except OSError:
                 pass
+
+    def _expected_counts_from_dump(self, dump_file: Path) -> dict[str, int]:
+        """Row counts the dump promises (users/admins/hosts); empty on scan failure."""
+        try:
+            from app.services.sql_dump_counts import scan_sql_dump_file
+
+            meta = scan_sql_dump_file(Path(dump_file), ("users", "admins", "hosts"))
+            counts = meta.get("counts") or {}
+            out = {k: int(v) for k, v in counts.items() if isinstance(v, int)}
+        except Exception as e:  # advisory — never block on the estimator
+            self.job.log(f"Warning: could not estimate dump row counts — {e}")
+            return {}
+        if out:
+            self.job.log(
+                "Dump contains: " + ", ".join(f"{k}={v}" for k, v in sorted(out.items()))
+            )
+            self._expected_dump_counts = out
+        return out
+
+    async def _verify_mysql_import_counts(
+        self, svc: str, client: str, user: str, pwd: str, host: str, db: str,
+        expected: dict[str, int],
+    ) -> None:
+        """Refuse a 'successful' import that left the target DB without users."""
+        want_users = int(expected.get("users") or 0)
+        if want_users <= 0:
+            return
+        sql = (
+            "SELECT (SELECT COUNT(*) FROM users), "
+            "(SELECT COUNT(*) FROM admins);"
+        )
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "compose", "exec", "-T",
+            "-e", f"MYSQL_PWD={pwd}",
+            svc, client, "-u", user, "-h", host, "-N", "-B", db, "-e", sql,
+            cwd=str(PASARGUARD_DIR),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        out_b, _ = await proc.communicate()
+        out = (out_b or b"").decode("utf-8", errors="replace").strip()
+        users = None
+        if proc.returncode == 0:
+            for line in reversed(out.splitlines()):
+                parts = line.split()
+                if len(parts) >= 2 and parts[0].isdigit():
+                    users, admins = int(parts[0]), int(parts[1])
+                    self.job.log(
+                        f"Imported into `{db}`: users={users}, admins={admins} "
+                        f"(dump users={want_users})"
+                    )
+                    break
+        if users is None:
+            raise RuntimeError(
+                f"Marzban dump has {want_users} users but `{db}` has no readable "
+                f"users table after import — rows went to another database or the "
+                f"import was incomplete.\n{out[-400:]}"
+            )
+        if users == 0:
+            raise RuntimeError(
+                f"Marzban dump has {want_users} users but 0 landed in `{db}` after "
+                "import. Aborting before panel boot (it would re-create an empty DB "
+                "with only core config)."
+            )
 
     async def _update_env_paths(self, source_db: str, target_db: str):
         env_path = PASARGUARD_DIR / ".env"
