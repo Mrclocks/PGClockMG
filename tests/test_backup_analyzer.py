@@ -216,3 +216,29 @@ if __name__ == "__main__":
     test_marzban_sqlite_not_contaminated_by_live_timescale_compose()
     test_marzban_sqlite_env_only_not_contaminated_by_live_compose()
     print("\nAll backup analyzer tests passed.")
+
+
+def test_marzban_stale_sqlite_next_to_mysql_dump_picks_dump():
+    """MySQL Marzban backup with an old empty db.sqlite3 and a .env that says sqlite."""
+    import sqlite3
+
+    with tempfile.TemporaryDirectory() as tmp:
+        upload_dir = Path(tmp)
+        data = upload_dir / "extracted" / "var" / "lib" / "marzban"
+        data.mkdir(parents=True)
+        c = sqlite3.connect(str(data / "db.sqlite3"))
+        c.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT)")
+        c.commit()
+        c.close()
+        (data / "marzban.sql").write_text(
+            "CREATE TABLE `users` (`id` int);\nINSERT INTO `users` VALUES (1),(2);\n",
+            encoding="utf-8",
+        )
+        (data / ".env").write_text(
+            'SQLALCHEMY_DATABASE_URL = "sqlite:////var/lib/marzban/db.sqlite3"\n',
+            encoding="utf-8",
+        )
+        (data / "xray_config.json").write_text("{}", encoding="utf-8")
+        result = analyze_upload_directory(upload_dir)
+        assert result["panel_hint"] == "marzban"
+        assert result["detected_source_db"] == "mysql"

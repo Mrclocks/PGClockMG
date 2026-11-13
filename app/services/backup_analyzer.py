@@ -253,6 +253,17 @@ def analyze_upload_directory(upload_dir: Path, vault_scope: str | None = None) -
         else:
             detected_source_db = None
 
+    # Both a db.sqlite3 and a .sql dump: MySQL Marzban servers often keep an old,
+    # nearly empty db.sqlite3. Pick whichever actually holds the users.
+    if panel_hint == "marzban" and paths["sqlite"] and paths["sql"]:
+        sq_users = _sqlite_user_count(Path(paths["sqlite"]))
+        sql_users = _sql_user_count(Path(paths["sql"]))
+        if (sql_users or 0) > (sq_users or 0):
+            if detected_source_db not in ("mysql", "mariadb"):
+                detected_source_db = _sniff_sql_engine() or "mysql"
+        elif (sq_users or 0) > (sql_users or 0):
+            detected_source_db = "sqlite"
+
     if panel_hint == "3x-ui":
         detected_source_db = "sqlite"
 
@@ -340,6 +351,28 @@ def analyze_upload_directory(upload_dir: Path, vault_scope: str | None = None) -
         "xui_schema": xui_schema,
         "xui_schema_modern": bool(xui_schema and xui_schema.get("modern")),
     }
+
+
+def _sqlite_user_count(path: Path) -> int | None:
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            row = conn.execute('SELECT COUNT(*) FROM "users"').fetchone()
+            return int(row[0] or 0) if row else 0
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
+def _sql_user_count(path: Path) -> int | None:
+    try:
+        from app.services.sql_dump_counts import scan_sql_dump_file
+
+        n = (scan_sql_dump_file(path, ("users",)).get("counts") or {}).get("users")
+        return n if isinstance(n, int) else None
+    except Exception:
+        return None
 
 
 def _sqlite_table_names(path: Path) -> set[str]:
