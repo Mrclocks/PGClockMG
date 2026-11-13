@@ -579,6 +579,32 @@ class MarzbanMigrator(BaseMigrator):
 
     async def _assert_target_pasarguard_ready(self, target_db: str) -> None:
         """Post-boot readiness for live target engines (sqlite/mysql/pg/ts)."""
+        await self._assert_target_ready_inner(target_db)
+        self._warn_invalid_usernames(target_db)
+
+    def _warn_invalid_usernames(self, target_db: str) -> None:
+        """Log users PasarGuard's stricter username rules would reject (never fatal)."""
+        try:
+            from app.services.db_credentials import migration_port
+            from app.services.username_check import fetch_usernames, find_invalid_usernames
+
+            conn = dict(get_target_connection(self.params) or {})
+            if target_db != "sqlite":
+                conn["port"] = migration_port(conn, target_db)
+            names = fetch_usernames(target_db, conn, PASARGUARD_DATA / "db.sqlite3")
+            bad = find_invalid_usernames(names)
+        except Exception as exc:  # advisory only
+            self.job.log(f"Username check skipped: {exc}")
+            return
+        if bad:
+            sample = ", ".join(f"{n!r} ({r})" for n, r in bad[:15])
+            self.job.log(
+                f"WARNING: {len(bad)} username(s) violate current PasarGuard rules "
+                f"(3-128 chars, [A-Za-z0-9-_@.], no consecutive special chars) and may "
+                f"error in the panel: {sample}"
+            )
+
+    async def _assert_target_ready_inner(self, target_db: str) -> None:
         if target_db == "sqlite":
             self._assert_sqlite_pasarguard_ready(PASARGUARD_DATA / "db.sqlite3")
             return
