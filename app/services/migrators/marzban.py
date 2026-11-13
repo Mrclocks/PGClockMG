@@ -134,6 +134,15 @@ class MarzbanMigrator(BaseMigrator):
                 "Marzban backup required — upload ZIP or separate files in the wizard."
             )
 
+        if upload_work_dir or upload_path:
+            source_db = self._auto_pick_source(source_db, target_db, source_sqlite, source_sql)
+            if source_db == "sqlite":
+                source_sql = None
+            else:
+                source_sqlite = None
+        elif source_db == "sqlite" and source_sqlite:
+            self._record_sqlite_expected(source_sqlite)
+
         if not PASARGUARD_DIR.exists():
             raise RuntimeError(
                 "PasarGuard must be installed manually before migration. "
@@ -811,12 +820,82 @@ class MarzbanMigrator(BaseMigrator):
                 if extra:
                     break
 
-        if source_db == "sqlite" and not source_sqlite:
-            raise RuntimeError("No SQLite database found in backup (db.sqlite3)")
-        if source_db in ("mysql", "mariadb") and not source_sql:
+        # Declared engine is only a hint: _auto_pick_source decides by real data.
+        if not source_sqlite and not source_sql:
+            if source_db == "sqlite":
+                raise RuntimeError("No SQLite database found in backup (db.sqlite3)")
             raise RuntimeError("No .sql dump found in backup")
 
         return source_sqlite, source_sql, extra
+
+    @staticmethod
+    def _sqlite_user_count(path: Path | None) -> int | None:
+        if not path or not Path(path).exists():
+            return None
+        try:
+            conn = sqlite3.connect(f"file:{Path(path)}?mode=ro", uri=True)
+            try:
+                row = conn.execute('SELECT COUNT(*) FROM "users"').fetchone()
+                return int(row[0] or 0) if row else 0
+            finally:
+                conn.close()
+        except Exception:
+            return None
+
+    def _record_sqlite_expected(self, path: Path) -> None:
+        n = self._sqlite_user_count(path)
+        if n:
+            self._expected_dump_counts = {"users": n}
+            self.job.log(f"Source SQLite contains users={n}")
+
+    def _auto_pick_source(
+        self,
+        source_db: str,
+        target_db: str,
+        source_sqlite: Path | None,
+        source_sql: Path | None,
+    ) -> str:
+        """Pick the backup DB that actually holds the Marzban users.
+
+        MySQL Marzban servers often still carry an old, almost empty
+        ``db.sqlite3`` from before the switch to MySQL. Migrating that file
+        "succeeds" with 1 admin + core config and zero users. Decide by data.
+        """
+        sqlite_users = self._sqlite_user_count(source_sqlite)
+        sql_users: int | None = None
+        if source_sql and Path(source_sql).exists():
+            try:
+                from app.services.sql_dump_counts import scan_sql_dump_file
+
+                c = (scan_sql_dump_file(Path(source_sql), ("users",)).get("counts") or {})
+                sql_users = c.get("users") if isinstance(c.get("users"), int) else None
+            except Exception as e:
+                self.job.log(f"Warning: could not count users in .sql dump — {e}")
+        self.job.log(
+            f"Backup sources: sqlite={'-' if source_sqlite is None else sqlite_users} users, "
+            f"sql={'-' if source_sql is None else sql_users} users (declared: {source_db})"
+        )
+
+        chosen = source_db
+        if source_db == "sqlite":
+            if not source_sqlite or (source_sql and (sql_users or 0) > (sqlite_users or 0)):
+                chosen = "mysql"
+        elif source_db in ("mysql", "mariadb"):
+            if not source_sql or (source_sqlite and (sqlite_users or 0) > (sql_users or 0)):
+                chosen = "sqlite"
+        if chosen == "mysql" and source_db not in ("mysql", "mariadb"):
+            chosen = "mariadb" if target_db == "mariadb" else "mysql"
+        if chosen != source_db:
+            self.job.log(
+                f"Auto-heal: declared source `{source_db}` but the users are in the "
+                f"{'.sql dump' if chosen != 'sqlite' else 'SQLite file'} — migrating from `{chosen}`"
+            )
+            self.params["source_db"] = chosen
+        if chosen == "sqlite" and sqlite_users:
+            self._expected_dump_counts = {"users": sqlite_users}
+        if chosen != "sqlite" and sql_users:
+            self._expected_dump_counts = {"users": sql_users}
+        return chosen
 
     def _pick_marzban_sql(self, work_dir: Path) -> Path | None:
         """Pick the Marzban dump among all ``*.sql`` files in the backup.

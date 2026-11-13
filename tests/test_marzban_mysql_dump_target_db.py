@@ -240,3 +240,48 @@ def test_same_family_retries_once_on_landing_error(monkeypatch):
         Path("/x.sql"), "mysql", "mysql", None, "",
     ))
     assert calls == {"n": 2, "stop": 1}
+
+
+def _mk_sqlite(path, users):
+    import sqlite3
+
+    c = sqlite3.connect(str(path))
+    c.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT)")
+    c.executemany("INSERT INTO users (username) VALUES (?)", [(f"u{i}",) for i in range(users)])
+    c.commit()
+    c.close()
+
+
+def test_auto_pick_prefers_sql_over_stale_sqlite(tmp_path):
+    """User report: success card showed admins=1, inbounds=13, core=1, no users —
+    a stale db.sqlite3 next to marzban.sql was migrated instead of the dump."""
+    sq = tmp_path / "db.sqlite3"
+    _mk_sqlite(sq, 0)
+    sql = tmp_path / "marzban.sql"
+    sql.write_text(MARZBAN_DUMP)
+    m = MarzbanMigrator(MigrationJob(job_id="pick-src"), {"target_db": "mysql", "source_db": "sqlite"})
+    assert m._auto_pick_source("sqlite", "mysql", sq, sql) == "mysql"
+    assert m.params["source_db"] == "mysql"
+    assert m._expected_dump_counts == {"users": 3}
+
+
+def test_auto_pick_keeps_sqlite_when_it_has_the_users(tmp_path):
+    sq = tmp_path / "db.sqlite3"
+    _mk_sqlite(sq, 5)
+    sql = tmp_path / "other.sql"
+    sql.write_text("CREATE TABLE `x` (`id` int);\n")
+    m = MarzbanMigrator(MigrationJob(job_id="pick-src2"), {"target_db": "mysql"})
+    assert m._auto_pick_source("mysql", "mysql", sq, sql) == "sqlite"
+    assert m._expected_dump_counts == {"users": 5}
+    assert m._auto_pick_source("sqlite", "mysql", sq, None) == "sqlite"
+
+
+def test_sqlite_path_refuses_core_only_when_source_had_users():
+    m = MarzbanMigrator(MigrationJob(job_id="sq-shape"), {"target_db": "mysql"})
+    m._expected_dump_counts = {"users": 40}
+    with pytest.raises(RuntimeError, match="40 users"):
+        m._assert_pasarguard_shape_ready(
+            {"admins": 1, "inbounds": 13, "core_configs": 1},
+            tables_present={"users", "admins", "inbounds", "core_configs"},
+            engine="sqlite",
+        )
