@@ -1,4 +1,4 @@
-> 🚀 **`v4.9.8`** — migrate from the backup DB that actually holds users (stale empty sqlite no longer wins over MySQL dump)
+> 🚀 **`v4.9.9`** — pick the backup source that holds users on every path (Marzban / 3x-ui / Hiddify / PasarGuard restore)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
