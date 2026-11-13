@@ -150,3 +150,21 @@ def test_verify_import_counts_raises_on_zero_users(monkeypatch):
     asyncio.run(m._verify_mysql_import_counts(
         "mysql", "mysql", "root", "pw", "127.0.0.1", "pasarguard", {"users": 5},
     ))
+
+
+def test_usernames_and_hosts_containing_marzban_are_preserved():
+    """PasarGuard still resolves legacy Marzban sub links by exact username."""
+    from app.services.env_migration import fix_mysql_dump_for_pasarguard
+
+    sql = (
+        "USE `marzban`;\n"
+        "INSERT INTO `users` VALUES (1,'marzban_ali'),(2,'Marzban.vip');\n"
+        "INSERT INTO `admins` VALUES (1,'marzban');\n"
+        "INSERT INTO `hosts` VALUES (1,'marzban.example.com','/var/lib/marzban/certs/a.pem');\n"
+    )
+    out = fix_mysql_dump_for_pasarguard(sql)
+    assert "USE `pasarguard`;" in out
+    assert "'marzban_ali'" in out and "'Marzban.vip'" in out
+    assert "(1,'marzban')" in out
+    assert "'marzban.example.com'" in out
+    assert "/var/lib/pasarguard/certs/a.pem" in out

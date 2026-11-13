@@ -1370,9 +1370,18 @@ def fix_mysql_dump_line_for_pasarguard(line: str) -> str:
     # Do not rename inside our strip comments.
     if line.lstrip().startswith("-- pgclockmg-stripped:"):
         return line
-    line = re.sub(r"(?i)^(CREATE DATABASE.*)\bmarzban\b", r"\1pasarguard", line)
-    line = re.sub(r"(?i)^(USE )\bmarzban\b", r"\1pasarguard", line)
-    return line.replace("marzban", "pasarguard")
+    if re.match(r"(?i)^\s*(?:/\*!\d*\s*)?(?:CREATE|DROP)\s+(?:DATABASE|SCHEMA)\b", line) or re.match(
+        r"(?i)^\s*USE\s", line
+    ):
+        return re.sub(r"(?i)\bmarzban\b", "pasarguard", line)
+    # Data lines: rename install paths only. A blanket "marzban"→"pasarguard"
+    # rewrote usernames (marzban_ali → pasarguard_ali, breaking legacy
+    # username-based subscription links → 404), admin logins, host addresses
+    # (marzban.example.com) and notes.
+    return _MARZBAN_PATH_RE.sub(lambda m: m.group(1) + "pasarguard", line)
+
+
+_MARZBAN_PATH_RE = re.compile(r"(/var/lib/|/opt/)marzban(?=[/'\"\\\s,;)]|$)")
 
 
 def fix_mysql_dump_for_pasarguard(sql_text: str) -> str:
