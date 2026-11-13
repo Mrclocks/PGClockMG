@@ -54,6 +54,10 @@ from app.services.marzban_migrate_heal import (
 )
 
 
+class MarzbanDataLandingError(RuntimeError):
+    """Dump had users but they did not land in the PasarGuard DB (retryable)."""
+
+
 class MarzbanMigrator(BaseMigrator):
     """Marzban → PasarGuard (fresh install only — PasarGuard must be pre-installed)."""
 
@@ -232,29 +236,25 @@ class MarzbanMigrator(BaseMigrator):
             )
 
         if same_family:
-            self.job.set_progress(40, f"Importing Marzban dump into PasarGuard {target_db}...")
             await self._update_env_paths(source_db, target_db)
             await self._ensure_target_database_stack(target_db)
-            await self._import_mysql_dump(source_sql)
-            if extra_data_dir:
-                await self._copy_marzban_assets(extra_data_dir)
-            # Dump is in PasarGuard target DB (Marzban live untouched). Heal unknown stamp.
-            from app.services.native_migration.cross_db import _heal_staging_alembic_if_unknown
-
-            tconn = dict(get_target_connection(self.params))
-            tconn["_allow_live_alembic_heal"] = True
-            await _heal_staging_alembic_if_unknown(self, source_db, tconn)
-            self.job.set_progress(68, "Healing Marzban dump for PasarGuard constraints...")
-            from app.services.marzban_preboot_heal import heal_marzban_preboot
-
-            self._preboot_heal = await heal_marzban_preboot(self)
-            self.job.set_progress(70, "Upgrading Marzban MySQL schema via panel boot...")
-            # Large dumps: alembic may spend a long time on "use bigint for id column".
-            self._maybe_relocate_inbound_certs()
-            self._prepare_xray_for_panel_boot()
-            await self._safe_start_with_heal(health_max_wait=1800)
-            await self._assert_target_pasarguard_ready(target_db)
-            return
+            # Fully automatic: if users do not land (post-import or post-boot),
+            # stop the panel and redo import+heal+boot once before giving up.
+            attempts = 2
+            for attempt in range(1, attempts + 1):
+                try:
+                    await self._same_family_import_and_boot(
+                        source_sql, source_db, target_db, extra_data_dir,
+                    )
+                    return
+                except MarzbanDataLandingError as e:
+                    if attempt >= attempts:
+                        raise
+                    self.job.log(
+                        f"Auto-heal: {e} — stopping panel and re-running "
+                        f"import + schema upgrade (attempt {attempt + 1}/{attempts})..."
+                    )
+                    await self._stop_panel()
 
         self.job.set_progress(40, "Preparing two-phase Marzban MySQL → target...")
         self._expected_counts_from_dump(source_sql)
@@ -277,6 +277,34 @@ class MarzbanMigrator(BaseMigrator):
         self.job.set_progress(90, "Starting PasarGuard...")
         self._prepare_xray_for_panel_boot()
         await self._safe_start_with_heal()
+        await self._assert_target_pasarguard_ready(target_db)
+
+    async def _same_family_import_and_boot(
+        self,
+        source_sql: Path,
+        source_db: str,
+        target_db: str,
+        extra_data_dir: Path | None,
+    ) -> None:
+        self.job.set_progress(40, f"Importing Marzban dump into PasarGuard {target_db}...")
+        await self._import_mysql_dump(source_sql)
+        if extra_data_dir:
+            await self._copy_marzban_assets(extra_data_dir)
+        # Dump is in PasarGuard target DB (Marzban live untouched). Heal unknown stamp.
+        from app.services.native_migration.cross_db import _heal_staging_alembic_if_unknown
+
+        tconn = dict(get_target_connection(self.params))
+        tconn["_allow_live_alembic_heal"] = True
+        await _heal_staging_alembic_if_unknown(self, source_db, tconn)
+        self.job.set_progress(68, "Healing Marzban dump for PasarGuard constraints...")
+        from app.services.marzban_preboot_heal import heal_marzban_preboot
+
+        self._preboot_heal = await heal_marzban_preboot(self)
+        self.job.set_progress(70, "Upgrading Marzban MySQL schema via panel boot...")
+        # Large dumps: alembic may spend a long time on "use bigint for id column".
+        self._maybe_relocate_inbound_certs()
+        self._prepare_xray_for_panel_boot()
+        await self._safe_start_with_heal(health_max_wait=1800)
         await self._assert_target_pasarguard_ready(target_db)
 
     async def _convert_pg_sqlite_to_target(
@@ -682,8 +710,12 @@ class MarzbanMigrator(BaseMigrator):
         core_configs = int(found.get("core_configs", 0) or 0)
 
         expected_users = int((getattr(self, "_expected_dump_counts", None) or {}).get("users") or 0)
+        self._landing_counts = {
+            "expected": dict(getattr(self, "_expected_dump_counts", None) or {}),
+            "landed": {k: int(v) for k, v in found.items()},
+        }
         if expected_users > 0 and users <= 0:
-            raise RuntimeError(
+            raise MarzbanDataLandingError(
                 f"Marzban backup has {expected_users} users but PasarGuard {engine} "
                 "has 0 after migration (only core config was seeded). Aborting — "
                 "users/hosts did not land in the panel database."
@@ -713,6 +745,20 @@ class MarzbanMigrator(BaseMigrator):
             f"PasarGuard {engine} ready: "
             + (", ".join(f"{k}={v}" for k, v in found.items()) or "(empty)")
         )
+        expected = getattr(self, "_expected_dump_counts", None) or {}
+        for table in ("users", "admins", "hosts"):
+            want = int(expected.get(table) or 0)
+            if want <= 0:
+                continue
+            got = int(found.get(table, 0) or 0)
+            if got == want:
+                self.job.log(f"Verified {table}: {got}/{want} from backup")
+            else:
+                # Orphan/duplicate heal can legitimately drop or merge a few rows.
+                self.job.log(
+                    f"WARNING: {table} {got}/{want} from backup "
+                    f"({want - got:+d} difference after PasarGuard constraint heal)"
+                )
 
     async def _apply_live_marzban_env(self, target_db: str) -> None:
         """Merge live Marzban .env keys (incl. XRAY_JSON) into PasarGuard .env."""
@@ -1570,18 +1616,111 @@ class MarzbanMigrator(BaseMigrator):
                         f"(dump users={want_users})"
                     )
                     break
-        if users is None:
-            raise RuntimeError(
-                f"Marzban dump has {want_users} users but `{db}` has no readable "
-                f"users table after import — rows went to another database or the "
-                f"import was incomplete.\n{out[-400:]}"
+        if users:
+            return
+        # Auto-heal: rows landed in a side schema (dump-side USE/CREATE DATABASE
+        # we could not neutralize, or an old partial run). Move them into `db`.
+        moved = await self._relocate_side_schema_into_target(
+            svc, client, user, pwd, host, db,
+        )
+        if moved:
+            self.job.log(f"Auto-heal: moved Marzban tables from `{moved}` into `{db}`")
+            users = await self._mysql_scalar(
+                svc, client, user, pwd, host, db, "SELECT COUNT(*) FROM users;",
             )
-        if users == 0:
-            raise RuntimeError(
-                f"Marzban dump has {want_users} users but 0 landed in `{db}` after "
-                "import. Aborting before panel boot (it would re-create an empty DB "
-                "with only core config)."
+            if users:
+                self.job.log(f"Imported into `{db}` after relocation: users={users}")
+                return
+        raise MarzbanDataLandingError(
+            f"Marzban dump has {want_users} users but 0 landed in `{db}` after import"
+            + (f" ({out[-300:]})" if out and users is None else "")
+        )
+
+    async def _mysql_exec(
+        self, svc: str, client: str, user: str, pwd: str, host: str, db: str, sql: str,
+    ) -> tuple[int, str]:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "compose", "exec", "-T",
+            "-e", f"MYSQL_PWD={pwd}",
+            svc, client, "-u", user, "-h", host, "-N", "-B", db, "-e", sql,
+            cwd=str(PASARGUARD_DIR),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        out_b, _ = await proc.communicate()
+        return int(proc.returncode or 0), (out_b or b"").decode("utf-8", errors="replace")
+
+    async def _mysql_scalar(
+        self, svc: str, client: str, user: str, pwd: str, host: str, db: str, sql: str,
+    ) -> int | None:
+        code, out = await self._mysql_exec(svc, client, user, pwd, host, db, sql)
+        if code != 0:
+            return None
+        for line in reversed(out.splitlines()):
+            line = line.strip()
+            if line.isdigit():
+                return int(line)
+        return None
+
+    async def _relocate_side_schema_into_target(
+        self, svc: str, client: str, user: str, pwd: str, host: str, db: str,
+    ) -> str | None:
+        """Find the schema that actually holds Marzban users; RENAME its tables into ``db``."""
+        import re as _re
+
+        ident = _re.compile(r"^[A-Za-z0-9_$-]{1,64}$")
+        code, out = await self._mysql_exec(
+            svc, client, user, pwd, host, db,
+            "SELECT table_schema FROM information_schema.tables "
+            "WHERE table_name='users' AND table_schema NOT IN "
+            "('mysql','sys','information_schema','performance_schema');",
+        )
+        if code != 0:
+            return None
+        best, best_n = None, 0
+        for schema in {ln.strip() for ln in out.splitlines() if ln.strip()}:
+            if schema == db or not ident.match(schema):
+                continue
+            n = await self._mysql_scalar(
+                svc, client, user, pwd, host, db,
+                f"SELECT COUNT(*) FROM `{schema}`.`users`;",
             )
+            if n and n > best_n:
+                best, best_n = schema, n
+        if not best:
+            return None
+        self.job.log(f"Auto-heal: found {best_n} Marzban users in side schema `{best}`")
+        code, out = await self._mysql_exec(
+            svc, client, user, pwd, host, db,
+            "SELECT table_schema, table_name FROM information_schema.tables "
+            f"WHERE table_schema IN ('{best}','{db}') AND table_type='BASE TABLE';",
+        )
+        if code != 0:
+            return None
+        src_tables, dst_tables = [], []
+        for ln in out.splitlines():
+            parts = ln.split("\t")
+            if len(parts) != 2 or not ident.match(parts[1]):
+                continue
+            (src_tables if parts[0] == best else dst_tables).append(parts[1])
+        if not src_tables:
+            return None
+        stmts = ["SET FOREIGN_KEY_CHECKS=0;"]
+        if dst_tables:
+            stmts.append(
+                "DROP TABLE IF EXISTS " + ", ".join(f"`{db}`.`{t}`" for t in dst_tables) + ";"
+            )
+        stmts.append(
+            "RENAME TABLE "
+            + ", ".join(f"`{best}`.`{t}` TO `{db}`.`{t}`" for t in src_tables)
+            + ";"
+        )
+        stmts.append("SET FOREIGN_KEY_CHECKS=1;")
+        code, out = await self._mysql_exec(svc, client, user, pwd, host, db, " ".join(stmts))
+        if code != 0:
+            self.job.log(f"Auto-heal relocation failed: {out[-300:]}")
+            return None
+        return best
 
     async def _update_env_paths(self, source_db: str, target_db: str):
         env_path = PASARGUARD_DIR / ".env"
@@ -1622,6 +1761,9 @@ class MarzbanMigrator(BaseMigrator):
             "verified_counts": stats,
             "transfer_summary": build_transfer_summary(stats),
         }
+        landing = getattr(self, "_landing_counts", None)
+        if landing:
+            out["marzban_landing"] = landing
         heal = getattr(self, "_preboot_heal", None) or {}
         if isinstance(heal, dict) and (
             int(heal.get("usage_tables_truncated") or 0) > 0

@@ -168,3 +168,75 @@ def test_usernames_and_hosts_containing_marzban_are_preserved():
     assert "(1,'marzban')" in out
     assert "'marzban.example.com'" in out
     assert "/var/lib/pasarguard/certs/a.pem" in out
+
+
+def test_relocates_users_from_side_schema(monkeypatch):
+    """0 users in target but rows found in a side schema → auto RENAME TABLE."""
+    from app.services.migrators.marzban import MarzbanMigrator as M
+
+    m = M(MigrationJob(job_id="reloc"), {"target_db": "mysql"})
+    executed: list[str] = []
+    state = {"moved": False}
+
+    async def fake_exec(self, svc, client, user, pwd, host, db, sql):
+        executed.append(sql)
+        if sql.startswith("SELECT (SELECT COUNT(*) FROM users)"):
+            return 0, "0\t0\n"
+        if "table_name='users'" in sql:
+            return 0, "pasarguard\nmarzban\n"
+        if sql.startswith("SELECT COUNT(*) FROM `marzban`"):
+            return 0, "7\n"
+        if "table_type='BASE TABLE'" in sql:
+            return 0, "marzban\tusers\nmarzban\tadmins\npasarguard\tusers\n"
+        if sql.startswith("SET FOREIGN_KEY_CHECKS=0;"):
+            state["moved"] = True
+            return 0, ""
+        if sql == "SELECT COUNT(*) FROM users;":
+            return 0, ("7\n" if state["moved"] else "0\n")
+        return 1, "unexpected"
+
+    monkeypatch.setattr(M, "_mysql_exec", fake_exec)
+
+    async def first_query(*_a, **_k):
+        class P:
+            returncode = 0
+
+            async def communicate(self):
+                return b"0\t0\n", None
+
+        return P()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", first_query)
+    asyncio.run(m._verify_mysql_import_counts(
+        "mysql", "mysql", "root", "pw", "127.0.0.1", "pasarguard", {"users": 7},
+    ))
+    rename = [q for q in executed if "RENAME TABLE" in q][0]
+    assert "`marzban`.`users` TO `pasarguard`.`users`" in rename
+    assert "DROP TABLE IF EXISTS `pasarguard`.`users`" in rename
+
+
+def test_same_family_retries_once_on_landing_error(monkeypatch):
+    from app.services.migrators import marzban as mz
+
+    m = mz.MarzbanMigrator(MigrationJob(job_id="retry"), {"target_db": "mysql"})
+    calls = {"n": 0, "stop": 0}
+
+    async def flaky(*_a, **_k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise mz.MarzbanDataLandingError("0 users landed")
+
+    async def noop(*_a, **_k):
+        return None
+
+    async def stop():
+        calls["stop"] += 1
+
+    monkeypatch.setattr(m, "_same_family_import_and_boot", flaky)
+    monkeypatch.setattr(m, "_update_env_paths", noop)
+    monkeypatch.setattr(m, "_ensure_target_database_stack", noop)
+    monkeypatch.setattr(m, "_stop_panel", stop)
+    asyncio.run(m._migrate_mysql_like_restore(
+        Path("/x.sql"), "mysql", "mysql", None, "",
+    ))
+    assert calls == {"n": 2, "stop": 1}
