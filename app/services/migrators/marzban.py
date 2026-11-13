@@ -1,6 +1,7 @@
 """Marzban → PasarGuard migration (fresh install only — PasarGuard must be pre-installed)."""
 
 import asyncio
+import re
 import shutil
 import sqlite3
 import time
@@ -51,6 +52,52 @@ from app.services.marzban_migrate_heal import (
     normalize_templates_layout,
     safe_replace_tree,
 )
+
+
+_INSERT_TABLE_RE = re.compile(r"^\s*INSERT\s+(?:IGNORE\s+)?INTO\s+[`\"]?([A-Za-z_][A-Za-z0-9_]*)[`\"]?", re.IGNORECASE)
+_DATA_TABLES = ("users", "hosts", "admins", "nodes")
+
+
+def sql_tables_with_inserts(path: Path, tables: tuple[str, ...] = _DATA_TABLES) -> set[str]:
+    """Stream a dump and return which of ``tables`` have INSERT statements."""
+    want = {t.lower() for t in tables}
+    found: set[str] = set()
+    try:
+        with Path(path).open("r", encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                if not line.startswith(("INSERT", "insert", " INSERT")):
+                    continue
+                m = _INSERT_TABLE_RE.match(line)
+                if m and m.group(1).lower() in want:
+                    found.add(m.group(1).lower())
+                    if found >= want:
+                        break
+    except OSError:
+        pass
+    return found
+
+
+def pick_marzban_sql(work_dir: Path) -> Path | None:
+    """Pick the dump that actually holds Marzban data (not just the first *.sql).
+
+    Skips our own rewritten intermediates; prefers the file with the most data
+    tables, then ``marzban.sql``, then the largest file.
+    """
+    cands = [
+        p for p in Path(work_dir).rglob("*.sql")
+        if p.is_file() and not p.name.startswith("fixed_import")
+    ]
+    if not cands:
+        return None
+
+    def key(p: Path):
+        return (
+            len(sql_tables_with_inserts(p)),
+            1 if p.name.lower() == "marzban.sql" else 0,
+            p.stat().st_size,
+        )
+
+    return max(cands, key=key)
 
 
 class MarzbanMigrator(BaseMigrator):
@@ -127,6 +174,14 @@ class MarzbanMigrator(BaseMigrator):
         else:
             raise RuntimeError(
                 "Marzban backup required — upload ZIP or separate files in the wizard."
+            )
+
+        self._expected_source_tables: set[str] = set()
+        if source_sql:
+            self._expected_source_tables = sql_tables_with_inserts(Path(source_sql))
+            self.job.log(
+                f"Source dump: {Path(source_sql).name} — data for: "
+                f"{', '.join(sorted(self._expected_source_tables)) or '(no user/host rows found)'}"
             )
 
         if not PASARGUARD_DIR.exists():
@@ -679,6 +734,15 @@ class MarzbanMigrator(BaseMigrator):
         inbounds = int(found.get("inbounds", 0) or 0)
         core_configs = int(found.get("core_configs", 0) or 0)
 
+        expected = getattr(self, "_expected_source_tables", None) or set()
+        for tbl, n in (("users", users), ("hosts", hosts)):
+            if tbl in expected and n <= 0:
+                raise RuntimeError(
+                    f"Marzban dump contains `{tbl}` rows but PasarGuard {engine} has "
+                    f"{tbl}=0 after migration (users={users} hosts={hosts} "
+                    f"inbounds={inbounds}). Only core/inbounds were seeded from "
+                    "xray_config.json — the data did not land. Aborting."
+                )
         if users <= 0 and hosts <= 0 and inbounds <= 0:
             raise RuntimeError(
                 "Marzban → PasarGuard schema upgrade left critical tables empty "
@@ -742,9 +806,7 @@ class MarzbanMigrator(BaseMigrator):
             if source_sqlite:
                 break
 
-        for p in sorted(work_dir.rglob("*.sql")):
-            source_sql = p
-            break
+        source_sql = pick_marzban_sql(work_dir)
 
         for p in work_dir.rglob("xray_config.json"):
             extra = p.parent
