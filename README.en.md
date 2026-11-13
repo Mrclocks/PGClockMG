@@ -1,4 +1,4 @@
-> 🚀 **`v4.9.6`** — multi-GB upload without UI freeze, date-named part assemble, real stream retries, pre-restore safety backup
+> 🚀 **`v4.9.7`** — fix Marzban MySQL→PasarGuard migration: users/hosts land, usernames preserved, automatic self-heal
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
