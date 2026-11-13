@@ -1370,9 +1370,18 @@ def fix_mysql_dump_line_for_pasarguard(line: str) -> str:
     # Do not rename inside our strip comments.
     if line.lstrip().startswith("-- pgclockmg-stripped:"):
         return line
-    line = re.sub(r"(?i)^(CREATE DATABASE.*)\bmarzban\b", r"\1pasarguard", line)
-    line = re.sub(r"(?i)^(USE )\bmarzban\b", r"\1pasarguard", line)
-    return line.replace("marzban", "pasarguard")
+    if re.match(r"(?i)^\s*(?:/\*!\d*\s*)?(?:CREATE|DROP)\s+(?:DATABASE|SCHEMA)\b", line) or re.match(
+        r"(?i)^\s*USE\s", line
+    ):
+        return re.sub(r"(?i)\bmarzban\b", "pasarguard", line)
+    # Data lines: rename install paths only. A blanket "marzban"→"pasarguard"
+    # rewrote usernames (marzban_ali → pasarguard_ali, breaking legacy
+    # username-based subscription links → 404), admin logins, host addresses
+    # (marzban.example.com) and notes.
+    return _MARZBAN_PATH_RE.sub(lambda m: m.group(1) + "pasarguard", line)
+
+
+_MARZBAN_PATH_RE = re.compile(r"(/var/lib/|/opt/)marzban(?=[/'\"\\\s,;)]|$)")
 
 
 def fix_mysql_dump_for_pasarguard(sql_text: str) -> str:
@@ -1449,6 +1458,138 @@ def rewrite_mysql_dump_file_for_pasarguard(src: Path, dest: Path) -> int:
             except OSError:
                 pass
     return changed
+
+
+# mysqldump database-switch statements, optionally inside /*!NNNNN … */ wrappers:
+#   CREATE DATABASE /*!32312 IF NOT EXISTS*/ `marzban` /*!40100 … */;
+#   /*!40000 DROP DATABASE IF EXISTS `marzban`*/;
+#   USE `marzban`;
+_DUMP_COND_PREFIX = r"(?:/\*!\d*\s*)?"
+_DUMP_USE_RE = re.compile(
+    rf"(?i)^\s*{_DUMP_COND_PREFIX}USE\s+(?:`(?P<bq>[^`]+)`|(?P<plain>[^\s;`*/]+))\s*(?:\*/)?\s*;?\s*$"
+)
+_DUMP_CREATE_DB_RE = re.compile(
+    rf"(?i)^\s*{_DUMP_COND_PREFIX}CREATE\s+(?:DATABASE|SCHEMA)\b.*;\s*$"
+)
+_DUMP_DROP_DB_RE = re.compile(
+    rf"(?i)^\s*{_DUMP_COND_PREFIX}DROP\s+(?:DATABASE|SCHEMA)\b.*;\s*$"
+)
+_DUMP_CREATE_TABLE_RE = re.compile(
+    r"(?i)^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?(?P<table>[A-Za-z0-9_]+)`?"
+)
+_MYSQL_SYSTEM_DBS = frozenset(
+    {"mysql", "sys", "information_schema", "performance_schema"}
+)
+_MARZBAN_MARKER_TABLES = frozenset({"users", "admins", "proxies", "hosts"})
+
+
+def _dump_use_db(line: str) -> str | None:
+    m = _DUMP_USE_RE.match(line)
+    if not m:
+        return None
+    return m.group("bq") or m.group("plain")
+
+
+def pick_marzban_db_from_mysql_dump(src: Path) -> tuple[str | None, list[str]]:
+    """Return ``(database_to_keep, all_databases_seen)`` for a mysqldump file.
+
+    ``None`` means the dump never switches database (plain single-DB dump):
+    keep every line. With ``--databases``/``--all-databases`` dumps we keep the
+    one section that holds Marzban tables, so ``mysql``/``sys``/other apps do
+    not leak into the PasarGuard database.
+    """
+    seen: list[str] = []
+    markers: dict[str, set[str]] = {}
+    current: str | None = None
+    with Path(src).open("r", encoding="utf-8", errors="ignore") as fh:
+        for line in fh:
+            head = line[:512]
+            db = _dump_use_db(head)
+            if db is not None:
+                current = db
+                if db not in seen:
+                    seen.append(db)
+                continue
+            if current is None:
+                continue
+            m = _DUMP_CREATE_TABLE_RE.match(head)
+            if m and m.group("table").lower() in _MARZBAN_MARKER_TABLES:
+                markers.setdefault(current, set()).add(m.group("table").lower())
+    if not seen:
+        return None, seen
+
+    def _score(db: str) -> tuple[int, int, int]:
+        tables = markers.get(db, set())
+        return (
+            len(tables & {"users", "admins"}),
+            1 if "marzban" in db.lower() else 0,
+            len(tables),
+        )
+
+    candidates = [d for d in seen if d.lower() not in _MYSQL_SYSTEM_DBS] or seen
+    best = max(candidates, key=_score)
+    return best, seen
+
+
+def rewrite_marzban_mysql_dump_for_target_db(src: Path, dest: Path) -> dict:
+    """Rewrite a Marzban mysqldump so *all* rows land in the client-selected DB.
+
+    The import client already connects to the PasarGuard target database. A
+    dump made with ``mysqldump --databases marzban`` (the Marzban default) carries
+    ``CREATE DATABASE``/``USE`` lines that switch the session to another schema;
+    if that name differs from the PasarGuard database, users/hosts/admins land
+    in a side database while the panel boots on an empty one and only re-seeds
+    core config from ``xray_config.json`` — a "successful" migration with no users.
+
+    Strips database create/drop/switch statements, keeps only the Marzban DB
+    section of multi-database dumps, then applies the usual GTID sanitize +
+    marzban→pasarguard rename. Returns stats for logging.
+    """
+    src = Path(src)
+    dest = Path(dest)
+    if not src.exists():
+        raise RuntimeError(f"MySQL dump not found: {src}")
+    keep_db, all_dbs = pick_marzban_db_from_mysql_dump(src)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    stats = {
+        "changed": 0,
+        "db_statements_stripped": 0,
+        "skipped_lines": 0,
+        "kept_db": keep_db,
+        "databases": all_dbs,
+    }
+    tmp = dest if dest.resolve() != src.resolve() else dest.with_suffix(dest.suffix + ".rewriting")
+    current: str | None = None
+    try:
+        with src.open("r", encoding="utf-8", errors="ignore") as fin, tmp.open(
+            "w", encoding="utf-8", newline=""
+        ) as fout:
+            for line in fin:
+                head = line[:512]
+                db = _dump_use_db(head)
+                if db is not None:
+                    current = db
+                    stats["db_statements_stripped"] += 1
+                    continue
+                if _DUMP_CREATE_DB_RE.match(head) or _DUMP_DROP_DB_RE.match(head):
+                    stats["db_statements_stripped"] += 1
+                    continue
+                if keep_db is not None and current is not None and current != keep_db:
+                    stats["skipped_lines"] += 1
+                    continue
+                new_line = fix_mysql_dump_line_for_pasarguard(line)
+                if new_line != line:
+                    stats["changed"] += 1
+                fout.write(new_line)
+        if tmp != dest:
+            tmp.replace(dest)
+    finally:
+        if tmp != dest and tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+    return stats
 
 
 MIGRATE_ENV_KEYS = {
