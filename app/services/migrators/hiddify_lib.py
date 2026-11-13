@@ -103,16 +103,22 @@ def find_hiddify_json_in_dir(root: Path) -> Path | None:
                 continue
             candidates.append(p)
 
-    # Prefer smaller panel dumps first (xray configs can be large)
-    candidates.sort(key=lambda p: (p.stat().st_size if p.exists() else 0, str(p)))
+    # Several exports (auto-backups of different dates): the smallest/oldest one
+    # used to win. Take the newest export that actually has users; an export
+    # without users only if nothing better exists.
+    valid: list[tuple[tuple, Path]] = []
     for p in candidates:
         try:
             data = json.loads(p.read_text(encoding="utf-8", errors="ignore"))
         except Exception:
             continue
-        if is_hiddify_json_backup(data):
-            return p
-    return None
+        if not is_hiddify_json_backup(data):
+            continue
+        n_users = len(data.get("users") or [])
+        valid.append(((int(n_users > 0), p.stat().st_mtime, p.name), p))
+    if not valid:
+        return None
+    return max(valid, key=lambda x: x[0])[1]
 
 
 def hconfig_map(hconfigs: list[dict] | None) -> dict[str, Any]:

@@ -113,12 +113,23 @@ def write_mysql_dump_for_staging(dump_path: Path, staging_db: str) -> tuple[Path
     loaded entirely into memory via ``read_text()``.
     Also neutralizes mysqldump GTID/SQL_LOG_BIN preamble for MariaDB imports.
     """
-    from app.services.env_migration import sanitize_mysql_dump_line_for_import
+    from app.services.env_migration import (
+        _DUMP_CREATE_DB_RE,
+        _DUMP_DROP_DB_RE,
+        _dump_use_db,
+        pick_marzban_db_from_mysql_dump,
+        sanitize_mysql_dump_line_for_import,
+    )
 
     dump_path = Path(dump_path)
     _safe_mysql_ident(staging_db)  # validate only
     if not dump_path.exists():
         raise RuntimeError(f"MySQL dump not found: {dump_path}")
+
+    # Multi-database dumps (--all-databases): keep only the panel's section so
+    # mysql/sys/other apps do not leak into staging (or win over panel tables).
+    keep_db, _all_dbs = pick_marzban_db_from_mysql_dump(dump_path)
+    current: str | None = None
 
     out = dump_path.with_suffix(dump_path.suffix + f".stage-{staging_db}")
     stripped = 0
@@ -130,11 +141,22 @@ def write_mysql_dump_for_staging(dump_path: Path, staging_db: str) -> tuple[Path
             if not body or body.startswith("--") or body.startswith("#"):
                 fout.write(line)
                 continue
+            head = line[:512]
+            use_db = _dump_use_db(head)
+            if use_db is not None:
+                current = use_db
+                stripped += 1
+                continue
             if (
                 _MYSQL_USE_DB_RE.match(body)
                 or _MYSQL_CREATE_DB_RE.match(body)
                 or _MYSQL_DROP_DB_RE.match(body)
+                or _DUMP_CREATE_DB_RE.match(head)
+                or _DUMP_DROP_DB_RE.match(head)
             ):
+                stripped += 1
+                continue
+            if keep_db is not None and current is not None and current != keep_db:
                 stripped += 1
                 continue
             new_line, did = sanitize_mysql_dump_line_for_import(line)
