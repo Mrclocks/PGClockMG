@@ -112,7 +112,7 @@ class MarzbanMigrator(BaseMigrator):
                 upload_path, work_dir, source_db,
             )
             await self._apply_backup_env_and_assets(work_dir, source_db, target_db)
-        elif marzban_exists and source_db == "sqlite":
+        elif marzban_exists and (source_db := self._resolve_live_source(source_db)) == "sqlite":
             src = MARZBAN_DATA / "db.sqlite3"
             if not src.exists():
                 raise RuntimeError("Marzban db.sqlite3 not found at /var/lib/marzban/")
@@ -122,7 +122,22 @@ class MarzbanMigrator(BaseMigrator):
             self.job.log(f"Using live Marzban database: {src}")
             await self._apply_live_marzban_env(target_db)
         elif marzban_exists and source_db in ("mysql", "mariadb"):
-            source_sql = await self._dump_marzban_mysql(work_dir)
+            try:
+                source_sql = await self._dump_marzban_mysql(work_dir)
+            except RuntimeError as e:
+                fallback = MARZBAN_DATA / "db.sqlite3"
+                fb_users = self._sqlite_user_count(fallback)
+                if not fb_users:
+                    raise
+                self.job.log(
+                    f"Auto-heal: live MySQL dump failed ({e}) but db.sqlite3 has "
+                    f"users={fb_users} — migrating from SQLite"
+                )
+                source_db = "sqlite"
+                self.params["source_db"] = "sqlite"
+                source_sqlite = work_dir / "db.sqlite3"
+                shutil.copy2(fallback, source_sqlite)
+                self._record_sqlite_expected(source_sqlite)
             # Same as live SQLite: copy certs/xray_config and merge .env so panel
             # alembic can seed core_configs/inbounds (previously left extra_data_dir=None).
             if MARZBAN_DATA.exists():
@@ -799,13 +814,7 @@ class MarzbanMigrator(BaseMigrator):
         source_sql = None
         extra = None
 
-        for name in ("db.sqlite3", "marzban.db", "x-ui.db"):
-            for p in work_dir.rglob(name):
-                source_sqlite = p
-                break
-            if source_sqlite:
-                break
-
+        source_sqlite = self._pick_marzban_sqlite(work_dir)
         source_sql = self._pick_marzban_sql(work_dir)
 
         for p in work_dir.rglob("xray_config.json"):
@@ -827,6 +836,72 @@ class MarzbanMigrator(BaseMigrator):
             raise RuntimeError("No .sql dump found in backup")
 
         return source_sqlite, source_sql, extra
+
+    def _pick_marzban_sqlite(self, work_dir: Path) -> Path | None:
+        """Pick the Marzban SQLite with the most users (stale copies/backups lose)."""
+        cands = []
+        for pattern in ("db.sqlite3", "marzban.db", "*.sqlite3", "*.sqlite"):
+            for p in work_dir.rglob(pattern):
+                if p.is_file() and p not in cands and "x-ui" not in p.name.lower():
+                    cands.append(p)
+        if len(cands) <= 1:
+            return cands[0] if cands else None
+
+        def _score(p: Path) -> tuple[int, int, int, float]:
+            # Has users > is a real Marzban DB > canonical name > newest copy.
+            # (Not "most users": an older copy may still hold since-deleted users.)
+            n = self._sqlite_user_count(p)
+            return (
+                int(bool(n)),
+                int(n is not None),
+                int(p.name.lower() == "db.sqlite3"),
+                p.stat().st_mtime,
+            )
+
+        best = max(cands, key=_score)
+        self.job.log(
+            f"Multiple SQLite files in backup ({len(cands)}) — using {best.name} "
+            f"(users={self._sqlite_user_count(best)})"
+        )
+        return best
+
+    @staticmethod
+    def _live_marzban_engine() -> str | None:
+        """Engine of the live Marzban install from its .env (None if unknown)."""
+        env_file = MARZBAN_DIR / ".env"
+        if not env_file.exists():
+            return None
+        url = (read_env_var(env_file.read_text(encoding="utf-8", errors="ignore"),
+                            "SQLALCHEMY_DATABASE_URL") or "").lower()
+        if url.startswith("mariadb"):
+            return "mariadb"
+        if url.startswith("mysql"):
+            return "mysql"
+        if url.startswith("sqlite") or not url:
+            return "sqlite"
+        return None
+
+    def _resolve_live_source(self, source_db: str) -> str:
+        """Live Marzban: migrate from the engine that actually holds the users."""
+        live = self._live_marzban_engine()
+        sqlite_users = self._sqlite_user_count(MARZBAN_DATA / "db.sqlite3")
+        self.job.log(
+            f"Live Marzban: .env engine={live or 'unknown'}, "
+            f"db.sqlite3 users={'-' if sqlite_users is None else sqlite_users} "
+            f"(declared: {source_db})"
+        )
+        chosen = source_db
+        if source_db == "sqlite" and live in ("mysql", "mariadb") and not sqlite_users:
+            chosen = live
+        elif source_db in ("mysql", "mariadb") and live == "sqlite" and sqlite_users:
+            chosen = "sqlite"
+        if chosen != source_db:
+            self.job.log(
+                f"Auto-heal: live Marzban runs on `{chosen}`, not `{source_db}` — "
+                f"migrating from `{chosen}`"
+            )
+            self.params["source_db"] = chosen
+        return chosen
 
     @staticmethod
     def _sqlite_user_count(path: Path | None) -> int | None:
@@ -876,12 +951,13 @@ class MarzbanMigrator(BaseMigrator):
             f"sql={'-' if source_sql is None else sql_users} users (declared: {source_db})"
         )
 
+        # Trust the declared engine unless its data has no users while the other has some.
         chosen = source_db
         if source_db == "sqlite":
-            if not source_sqlite or (source_sql and (sql_users or 0) > (sqlite_users or 0)):
+            if source_sql and (not source_sqlite or (not sqlite_users and (sql_users or 0) > 0)):
                 chosen = "mysql"
         elif source_db in ("mysql", "mariadb"):
-            if not source_sql or (source_sqlite and (sqlite_users or 0) > (sql_users or 0)):
+            if source_sqlite and (not source_sql or (not sql_users and (sqlite_users or 0) > 0)):
                 chosen = "sqlite"
         if chosen == "mysql" and source_db not in ("mysql", "mariadb"):
             chosen = "mariadb" if target_db == "mariadb" else "mysql"
@@ -1245,32 +1321,86 @@ class MarzbanMigrator(BaseMigrator):
             self.job.log(f"Warning: could not disable nodes after migrate — {e}")
             self._nodes_disabled = False
 
+    def _live_marzban_dump_targets(self) -> tuple[str, list[str], list[str]]:
+        """(database, passwords to try, compose services to try) for live Marzban."""
+        from app.services.env_migration import parse_sqlalchemy_url
+
+        try:
+            conn = get_source_connection(self.params)
+        except Exception:
+            conn = {}
+        env_text = ""
+        env_file = MARZBAN_DIR / ".env"
+        if env_file.exists():
+            env_text = env_file.read_text(encoding="utf-8", errors="ignore")
+        parsed = parse_sqlalchemy_url(read_env_var(env_text, "SQLALCHEMY_DATABASE_URL") or "", env_text) if env_text else {}
+        db = parsed.get("database") or read_env_var(env_text, "MYSQL_DATABASE") or "marzban"
+        pwds: list[str] = []
+        for cand in (
+            conn.get("password"),
+            read_env_var(env_text, "MYSQL_ROOT_PASSWORD"),
+            parsed.get("password"),
+            read_env_var(env_text, "MYSQL_PASSWORD"),
+        ):
+            if cand and cand not in pwds:
+                pwds.append(cand)
+        services = ["mysql", "mariadb", "db"]
+        try:
+            compose = next(
+                (MARZBAN_DIR / n for n in ("docker-compose.yml", "docker-compose.yaml")
+                 if (MARZBAN_DIR / n).exists()),
+                None,
+            )
+            if compose:
+                import re as _re
+
+                text = compose.read_text(encoding="utf-8", errors="ignore")
+                found = _re.findall(r"(?m)^  ([A-Za-z0-9_.-]+):\s*$", text)
+                services = [s for s in services if s in found] + [
+                    s for s in found if "sql" in s.lower() or "maria" in s.lower()
+                    if s not in services
+                ] or services
+        except Exception:
+            pass
+        return db, pwds or [""], services
+
     async def _dump_marzban_mysql(self, work_dir: Path) -> Path:
-        conn = get_source_connection(self.params)
-        pwd = conn.get("password") or ""
+        db_name, passwords, services = self._live_marzban_dump_targets()
         dump_path = work_dir / "marzban.sql"
         last_err = ""
+        combos = [
+            (svc, binary, pwd)
+            for svc in services
+            for binary in ("mysqldump", "mariadb-dump")
+            for pwd in passwords
+        ]
         for attempt in (1, 2):
             if MARZBAN_DIR.exists():
-                # Password via MYSQL_PWD env — never argv ``-p…`` (process list leak).
-                with open(dump_path, "wb") as out_fh:
-                    proc = await asyncio.create_subprocess_exec(
-                        "docker", "compose", "exec", "-T",
-                        "-e", f"MYSQL_PWD={pwd}",
-                        "mysql", "mysqldump", "-u", "root", "-h", "127.0.0.1",
-                        "--databases", "marzban",
-                        cwd=str(MARZBAN_DIR),
-                        stdout=out_fh,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                    _, err_b = await proc.communicate()
-                if proc.returncode not in (0, None) and (
-                    not dump_path.exists() or dump_path.stat().st_size == 0
-                ):
+                for svc, binary, pwd in combos:
+                    # Password via MYSQL_PWD env — never argv ``-p…`` (process list leak).
+                    with open(dump_path, "wb") as out_fh:
+                        proc = await asyncio.create_subprocess_exec(
+                            "docker", "compose", "exec", "-T",
+                            "-e", f"MYSQL_PWD={pwd}",
+                            svc, binary, "-u", "root", "-h", "127.0.0.1",
+                            "--single-transaction", "--databases", db_name,
+                            cwd=str(MARZBAN_DIR),
+                            stdout=out_fh,
+                            stderr=asyncio.subprocess.PIPE,
+                        )
+                        _, err_b = await proc.communicate()
+                    if proc.returncode in (0, None) and dump_path.stat().st_size > 0:
+                        if (svc, binary) != ("mysql", "mysqldump") or pwd != passwords[0]:
+                            self.job.log(f"Live Marzban dump via `{svc}`/{binary} (db `{db_name}`)")
+                        break
                     last_err = (
-                        f"mysqldump exit={proc.returncode} "
+                        f"{svc}/{binary} exit={proc.returncode} "
                         + (err_b or b"").decode("utf-8", errors="ignore")[-200:]
                     )
+                    try:
+                        dump_path.unlink()
+                    except OSError:
+                        pass
             if dump_path.exists() and dump_path.stat().st_size > 0:
                 break
             if attempt == 1:

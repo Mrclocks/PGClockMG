@@ -275,6 +275,25 @@ def find_xui_db_in_dir(root: Path) -> Path | None:
             else:
                 fallback.append(p)
 
+    # Several candidates (x-ui.db + old copies / unrelated sqlite files): take the
+    # real 3x-ui DB with the most clients, not whichever rglob yields first.
+    scored: list[tuple[tuple, Path]] = []
+    for p in preferred + fallback:
+        try:
+            counts = inspect_xui_sqlite(p)
+        except Exception:
+            counts = {}
+        if "inbounds" not in counts:
+            continue
+        clients = counts.get("client_traffics", counts.get("clients", 0)) or 0
+        scored.append((
+            (clients, counts.get("inbounds", 0) or 0, int(p.name.lower() == "x-ui.db"),
+             int(p in preferred), p.stat().st_mtime),
+            p,
+        ))
+    if scored:
+        return max(scored, key=lambda x: x[0])[1]
+
     if preferred:
         for p in preferred:
             if p.name.lower() == "x-ui.db":
@@ -1502,8 +1521,19 @@ def enrich_subscription_mapping_from_clients(
     return {"added": added, "mapped_total": len(mappings)}
 
 
-def assert_migrated_pg_has_data(path: Path) -> dict[str, int]:
+def xui_source_client_count(src_counts: dict | None) -> int:
+    src_counts = src_counts or {}
+    return int(src_counts.get("client_traffics", src_counts.get("clients", 0)) or 0)
+
+
+def assert_migrated_pg_has_data(path: Path, source_clients: int = 0) -> dict[str, int]:
     counts = inspect_pasarguard_sqlite(path)
+    if source_clients > 0 and int(counts.get("users", 0) or 0) <= 0:
+        # inbounds/groups alone are seeded from the config — not a real migration.
+        raise RuntimeError(
+            f"خروجی مهاجرت x-ui هیچ کاربری ندارد در حالی که مبدأ {source_clients} کلاینت دارد — "
+            "مهاجرت لغو شد."
+        )
     data_tables = ("users", "inbounds", "groups")
     if any(counts.get(t, 0) > 0 for t in data_tables):
         return counts
@@ -1957,7 +1987,15 @@ class XuiMigrator(BaseMigrator):
                 f"(hosts={hosts_info.get('hosts', 0)})"
             )
 
-        out_counts = assert_migrated_pg_has_data(output_db)
+        self._xui_source_clients = xui_source_client_count(src_counts)
+        out_counts = assert_migrated_pg_has_data(output_db, self._xui_source_clients)
+        landed_users = int(out_counts.get("users", 0) or 0)
+        if self._xui_source_clients:
+            self.job.log(
+                f"Verified users: {landed_users}/{self._xui_source_clients} clients from 3x-ui"
+                + ("" if landed_users >= self._xui_source_clients else
+                   " (WARNING: some clients were not converted — see converter log)")
+            )
         assert_migrated_core_config(output_db)
         self.job.log(
             "Migrated SQLite counts: "
@@ -2365,6 +2403,12 @@ class XuiMigrator(BaseMigrator):
         users = int(stats.get("users", 0) or 0)
         inbounds = int(stats.get("inbounds", 0) or 0)
         core_configs = int(stats.get("core_configs", 0) or 0)
+        src_clients = int(getattr(self, "_xui_source_clients", 0) or 0)
+        if src_clients > 0 and users <= 0:
+            raise RuntimeError(
+                f"3x-ui convert to server DB copied 0 users (source clients={src_clients}). "
+                "Aborting so the panel is not left with config only."
+            )
         if users > 0 and inbounds <= 0:
             raise RuntimeError(
                 f"3x-ui convert copied users={users} but inbounds=0. "

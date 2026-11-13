@@ -258,11 +258,11 @@ def analyze_upload_directory(upload_dir: Path, vault_scope: str | None = None) -
     if panel_hint == "marzban" and paths["sqlite"] and paths["sql"]:
         sq_users = _sqlite_user_count(Path(paths["sqlite"]))
         sql_users = _sql_user_count(Path(paths["sql"]))
-        if (sql_users or 0) > (sq_users or 0):
-            if detected_source_db not in ("mysql", "mariadb"):
-                detected_source_db = _sniff_sql_engine() or "mysql"
-        elif (sq_users or 0) > (sql_users or 0):
-            detected_source_db = "sqlite"
+        if detected_source_db in ("mysql", "mariadb"):
+            if not sql_users and (sq_users or 0) > 0:
+                detected_source_db = "sqlite"
+        elif (sql_users or 0) > 0 and (not sq_users or detected_source_db is None):
+            detected_source_db = _sniff_sql_engine() or "mysql"
 
     if panel_hint == "3x-ui":
         detected_source_db = "sqlite"

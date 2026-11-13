@@ -2119,13 +2119,43 @@ def discover_backup_artifacts(root: Path, *, env_db: str | None = None) -> dict:
                 sqlite_candidates.append((score, path))
 
     if sql_candidates:
-        sql_candidates.sort(key=lambda x: (-x[0], len(str(x[1]))))
+        if len(sql_candidates) > 1:
+            # Same-shaped dumps (old + new copies, per-DB files): prefer one that
+            # actually holds users, then the newest, before the shortest path.
+            from app.services.sql_dump_counts import scan_sql_dump_file
+
+            def _has_users(p: Path) -> int:
+                try:
+                    if p.name.lower().endswith((".gz", ".gzip")):
+                        return 0
+                    n = (scan_sql_dump_file(p, ("users",)).get("counts") or {}).get("users")
+                    return int(bool(n))
+                except Exception:
+                    return 0
+
+            sql_candidates.sort(
+                key=lambda x: (-x[0], -_has_users(x[1]), -x[1].stat().st_mtime, len(str(x[1])))
+            )
+        else:
+            sql_candidates.sort(key=lambda x: (-x[0], len(str(x[1]))))
         _score, path, engine = sql_candidates[0]
         return _set_single(path, engine)
 
     # Leftover sqlite next to a MySQL/PG .env is not the dump — bots zip /var/lib
     # without running mysqldump. Only accept sqlite when the backup is (or looks) sqlite.
-    sqlite_candidates.sort(key=lambda x: (-x[0], len(str(x[1]))))
+    def _sqlite_has_users(p: Path) -> int:
+        try:
+            conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+            try:
+                return int(bool(conn.execute('SELECT COUNT(*) FROM "users"').fetchone()[0]))
+            finally:
+                conn.close()
+        except Exception:
+            return 0
+
+    sqlite_candidates.sort(
+        key=lambda x: (-x[0], -_sqlite_has_users(x[1]), -x[1].stat().st_mtime, len(str(x[1])))
+    )
     if sqlite_candidates and not server_env:
         best_score, best_path = sqlite_candidates[0]
         if best_score >= 1:
