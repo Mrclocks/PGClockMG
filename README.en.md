@@ -1,4 +1,4 @@
-> 🚀 **`v4.9.7`** — fix Marzban MySQL→PasarGuard migration: users/hosts land, usernames preserved, automatic self-heal
+> 🚀 **`v4.9.8`** — migrate from the backup DB that actually holds users (stale empty sqlite no longer wins over MySQL dump)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
