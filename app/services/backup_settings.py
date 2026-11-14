@@ -71,6 +71,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "chat_id": "",
         "message_thread_id": None,
         "destinations": [],  # [{chat_id, message_thread_id, label}]
+        "api_base_url": "",  # optional custom Bot API base (reverse-proxy / Worker)
         "proxy_enabled": False,
         "proxy_type": "socks5",  # socks5 | http
         "proxy_host": "",
