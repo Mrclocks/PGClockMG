@@ -129,6 +129,8 @@ const I18N = {
     lblSchedEnabled: "فعالسازی",
     lblSchedInterval: "بازهٔ زمانی",
     lblSchedTimezone: "منطقهٔ زمانی",
+    lblSchedRunAt: "ساعت ثابت اجرا (اختیاری)",
+    schedRunAtHint: "فقط با بازهٔ ۲۴ ساعته: هر روز در این ساعت (به وقت منطقهٔ بالا). خالی = فاصلهٔ ثابت از آخرین بکاپ موفق.",
     tzTehran: "تهران",
     tzMoscow: "مسکو",
     tzUtc: "ساعت جهانی (UTC)",
@@ -354,6 +356,8 @@ const I18N = {
     lblSchedEnabled: "Enable",
     lblSchedInterval: "Interval",
     lblSchedTimezone: "Timezone",
+    lblSchedRunAt: "Fixed daily time (optional)",
+    schedRunAtHint: "24h interval only: run every day at this time (in the timezone above). Empty = rolling interval from the last success.",
     tzTehran: "Tehran",
     tzMoscow: "Moscow",
     tzUtc: "UTC (Universal)",
@@ -579,6 +583,8 @@ const I18N = {
     lblSchedEnabled: "Включение",
     lblSchedInterval: "Интервал",
     lblSchedTimezone: "Часовой пояс",
+    lblSchedRunAt: "Фиксированное время (необязательно)",
+    schedRunAtHint: "Только для интервала 24ч: ежедневно в это время (в часовом поясе выше). Пусто = скользящий интервал.",
     tzTehran: "Тегеран",
     tzMoscow: "Москва",
     tzUtc: "UTC (мировое)",
@@ -909,7 +915,7 @@ function applyI18n() {
     ["btnBackupNowList", "btnBackupNow"],
     ["listH2", "listH2"], ["listDesc", "listDesc"],
     ["setH2", "setH2"], ["setDesc", "setDesc"], ["setSchedTitle", "setSchedTitle"], ["setSchedHint", "setSchedHint"],
-    ["lblSchedInterval", "lblSchedInterval"], ["lblSchedTimezone", "lblSchedTimezone"],
+    ["lblSchedInterval", "lblSchedInterval"], ["lblSchedTimezone", "lblSchedTimezone"], ["lblSchedRunAt", "lblSchedRunAt"], ["schedRunAtHint", "schedRunAtHint"],
     ["lblRetention", "lblRetention"], ["lblRetentionDays", "lblRetentionDays"], ["retentionDaysHint", "retentionDaysHint"],
     ["lblSchedTelegram", "lblSchedTelegram"], ["lblSchedNotifyFail", "lblSchedNotifyFail"],
     ["lblIntegrityVerify", "lblIntegrityVerify"],
@@ -1988,6 +1994,7 @@ async function loadSettingsForm() {
   document.getElementById("schedEnabled").checked = !!sched.enabled;
   setSchedIntervalValue(sched.interval_hours ?? 24);
   setSchedTimezoneValue(sched.timezone || "UTC");
+  document.getElementById("schedRunAt").value = sched.run_at || "";
   document.getElementById("retentionCount").value = s.retention_count ?? 10;
   document.getElementById("retentionDays").value = s.retention_days ?? 0;
   document.getElementById("schedTelegram").checked = !!sched.send_telegram;
@@ -2100,6 +2107,7 @@ function buildSettingsPatch(section) {
       enabled: document.getElementById("schedEnabled").checked,
       interval_hours: normalizeSchedInterval(document.getElementById("schedInterval").value || 24),
       timezone: document.getElementById("schedTimezone").value || "UTC",
+      run_at: document.getElementById("schedRunAt").value || "",
       send_telegram: document.getElementById("schedTelegram").checked,
       notify_on_failure: document.getElementById("schedNotifyFail").checked,
     };

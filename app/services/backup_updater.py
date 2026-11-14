@@ -287,6 +287,16 @@ def _clone_release_fallback(tag: str, src: Path) -> Path:
     return app_dir
 
 
+def _rollback_swap(old: Path, app_dst: Path, req_backup: Path) -> None:
+    """Restore ``app/`` (and requirements.txt) after a failed update."""
+    if old.is_dir():
+        if app_dst.exists():
+            shutil.rmtree(app_dst, ignore_errors=True)
+        shutil.move(str(old), str(app_dst))
+    if req_backup.is_file():
+        shutil.move(str(req_backup), str(app_dst.parent / "requirements.txt"))
+
+
 def apply_update(*, current: str, target_tag: str | None = None) -> dict:
     """
     Pull the target release into BACKUP_HOME, replace app/, refresh deps, restart service.
@@ -316,6 +326,7 @@ def apply_update(*, current: str, target_tag: str | None = None) -> dict:
 
     def _worker():
         tmp: Path | None = None
+        swapped: tuple[Path, Path, Path] | None = None
         try:
             home = Path(BACKUP_HOME)
             app_dst = home / "app"
@@ -384,7 +395,12 @@ def apply_update(*, current: str, target_tag: str | None = None) -> dict:
                 shutil.rmtree(old, ignore_errors=True)
             shutil.move(str(app_dst), str(old))
             shutil.move(str(replaced), str(app_dst))
-            shutil.rmtree(old, ignore_errors=True)
+            # Keep app.old (and the old requirements) until dependencies installed
+            # fine — a failed pip install must not leave a half-updated panel.
+            swapped = (old, app_dst, home / "requirements.txt.pre-update")
+            req_file = home / "requirements.txt"
+            if req_file.is_file():
+                shutil.copy2(req_file, swapped[2])
 
             if req_src.is_file():
                 shutil.copy2(req_src, home / "requirements.txt")
@@ -402,6 +418,9 @@ def apply_update(*, current: str, target_tag: str | None = None) -> dict:
                     raise RuntimeError((pip.stderr or pip.stdout or "pip_install_failed")[:800])
             else:
                 _append_log("venv/pip not found — skipped dependency refresh")
+            shutil.rmtree(old, ignore_errors=True)
+            (home / "requirements.txt.pre-update").unlink(missing_ok=True)
+            swapped = None
 
             _set_update_job(progress=90)
             _append_log("Scheduling service restart…")
@@ -420,6 +439,12 @@ def apply_update(*, current: str, target_tag: str | None = None) -> dict:
         except Exception as exc:
             log.exception("backup panel update failed")
             _append_log(f"ERROR: {exc}")
+            if swapped is not None:
+                try:
+                    _rollback_swap(*swapped)
+                    _append_log("Rolled back to the previous version")
+                except Exception as rb_exc:  # noqa: BLE001
+                    _append_log(f"Rollback failed: {rb_exc}")
             _set_update_job(
                 ok=False,
                 status="error",

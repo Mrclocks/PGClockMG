@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -56,6 +57,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         # Legacy daily clock fields (ignored by the interval scheduler).
         "hour": 3,
         "minute": 0,
+        # Optional fixed daily start "HH:MM" (panel timezone); only with the 24h interval.
+        "run_at": "",
         # Default on so scheduled backups reach Telegram when the bot is configured.
         "send_telegram": True,
         "notify_on_failure": True,
@@ -106,6 +109,15 @@ def normalize_interval_hours(value: object) -> float:
         if abs(raw - float(allowed)) < 1e-9:
             return float(allowed)
     return 24.0
+
+
+_RUN_AT_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+
+def normalize_run_at(value: object) -> str:
+    """Fixed daily start ``HH:MM`` (panel timezone) or '' for the rolling interval."""
+    text = (str(value).strip() if value is not None else "")
+    return text if _RUN_AT_RE.match(text) else ""
 
 
 def normalize_timezone(value: object) -> str:
@@ -159,6 +171,7 @@ def next_run_after(
     interval_hours: object,
     timezone_name: object,
     now: datetime | None = None,
+    run_at: object = None,
 ) -> dict[str, Any]:
     """Compute next due instant for UI (UTC + local labels)."""
     interval = normalize_interval_hours(interval_hours)
@@ -166,7 +179,20 @@ def next_run_after(
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     last = parse_last_run_at(last_success_at)
-    if last is None:
+    hhmm = normalize_run_at(run_at)
+    if hhmm and float(interval) >= 24.0:
+        tz = get_zoneinfo(timezone_name)
+        local_now = current.astimezone(tz)
+        due_local = local_now.replace(hour=int(hhmm[:2]), minute=int(hhmm[3:]), second=0, microsecond=0)
+        if due_local.astimezone(timezone.utc) <= (last or datetime.min.replace(tzinfo=timezone.utc)) or due_local < local_now:
+            # slot already passed / already served — next one is tomorrow unless a run is owed
+            owed = last is None or last < due_local.astimezone(timezone.utc)
+            if not (owed and due_local < local_now):
+                due_local += timedelta(days=1)
+        due = due_local.astimezone(timezone.utc)
+        if due < current:
+            due = current
+    elif last is None:
         due = current
     else:
         due = last + timedelta(hours=float(interval))
@@ -259,6 +285,7 @@ def enrich_schedule(sched: dict | None) -> dict:
             last_success_at=success,
             interval_hours=out.get("interval_hours"),
             timezone_name=out.get("timezone"),
+            run_at=out.get("run_at"),
         )
     else:
         out["next_run"] = None
@@ -278,6 +305,7 @@ def normalize_schedule(patch: dict | None) -> dict:
         "timezone": normalize_timezone(src.get("timezone")),
         "send_telegram": bool(src.get("send_telegram")),
         "notify_on_failure": bool(src.get("notify_on_failure", True)),
+        "run_at": normalize_run_at(src.get("run_at")),
     }
     for key in ("last_run_at", "last_success_at", "last_attempt_at", "consecutive_failures"):
         if key in src:
