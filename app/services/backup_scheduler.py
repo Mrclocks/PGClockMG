@@ -157,6 +157,13 @@ async def _deliver_scheduled_telegram(result: dict, cfg: dict, *, interval: floa
         if attempt < 2:
             await asyncio.sleep(2)
 
+    # Keep trying in the background (Telegram is often blocked for hours).
+    try:
+        from app.services.backup_telegram_queue import enqueue
+
+        enqueue(str(result.get("backup_id") or ""), str(last.get("error") or ""))
+    except Exception:
+        log.exception("could not queue telegram retry")
     # Soft error only — backup itself already succeeded.
     try:
         update_settings({
@@ -283,12 +290,86 @@ async def _maybe_run_scheduled() -> None:
         _running = False
 
 
+STALE_ALERT_COOLDOWN_SEC = 24 * 3600
+
+
+def stale_backup_hours(sched: dict | None, now: datetime | None = None) -> float | None:
+    """Hours since the last successful scheduled backup when it is clearly overdue, else None."""
+    sched = sched or {}
+    if not sched.get("enabled"):
+        return None
+    interval = normalize_interval_hours(sched.get("interval_hours"))
+    last = parse_last_run_at(sched.get("last_success_at")) or parse_last_run_at(sched.get("last_run_at"))
+    if last is None:
+        return None
+    current = now or datetime.now(timezone.utc)
+    age_h = (current - last).total_seconds() / 3600.0
+    limit = max(3.0 * interval, interval + 6.0)
+    return age_h if age_h > limit else None
+
+
+async def _check_stale_backup() -> None:
+    """Dead-man alert: tell the operator when no backup succeeded for far too long."""
+    cfg = load_settings()
+    sched = cfg.get("schedule") or {}
+    hours = stale_backup_hours(sched)
+    if hours is None:
+        return
+    last_alert = parse_last_run_at(sched.get("last_stale_alert_at"))
+    if last_alert and (datetime.now(timezone.utc) - last_alert).total_seconds() < STALE_ALERT_COOLDOWN_SEC:
+        return
+    update_settings({"schedule": {"last_stale_alert_at": utc_now_iso()}})
+    from app.services.backup_notify import notify_backup_failure
+
+    await asyncio.to_thread(
+        notify_backup_failure,
+        message=f"No successful backup for {hours:.0f} hours (expected every {sched.get('interval_hours')}h)",
+        trigger="stale_backup",
+        at=utc_now_iso(),
+        settings=cfg,
+        extra={"hours_since_success": round(hours, 1)},
+    )
+
+
+async def _retry_pending_telegram() -> None:
+    from app.services import backup_telegram_queue as q
+
+    if not q.pending():
+        return
+    cfg = load_settings()
+    from app.services.backup_engine import resolve_backup_manifest, resolve_backup_path
+    from app.services.backup_telegram import send_backup_to_telegram, telegram_ready, telegram_config
+
+    if not telegram_ready(telegram_config(cfg)):
+        return
+
+    def _send(path, item):
+        return send_backup_to_telegram(path, manifest=resolve_backup_manifest(path), settings=cfg)
+
+    result = await asyncio.to_thread(q.process_due, _send, resolve_backup_path)
+    if result.get("sent"):
+        log.info("telegram retry queue: delivered %s pending backup(s)", result["sent"])
+    if result.get("expired"):
+        log.warning("telegram retry queue: dropped %s expired item(s)", len(result["expired"]))
+
+
 async def _loop() -> None:
+    tick = 0
     while True:
         try:
             await _maybe_run_scheduled()
         except Exception:
             log.exception("scheduler tick failed")
+        tick += 1
+        if tick % 2 == 0:  # ~every minute
+            try:
+                await _retry_pending_telegram()
+            except Exception:
+                log.exception("telegram retry queue failed")
+            try:
+                await _check_stale_backup()
+            except Exception:
+                log.exception("stale backup check failed")
         await asyncio.sleep(30)
 
 

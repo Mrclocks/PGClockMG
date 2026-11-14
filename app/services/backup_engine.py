@@ -82,6 +82,22 @@ def _sql_dump_looks_complete(path: Path) -> bool:
     return False
 
 
+def _dump_footer_present(path: Path, db_type: str) -> bool:
+    """True when the dump ends with the engine's completion marker (warning-only check)."""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as f:
+            f.seek(max(0, size - 8192))
+            tail = f.read().lower()
+    except OSError:
+        return True  # cannot tell — never warn on I/O doubt
+    if db_type in ("postgresql", "timescaledb"):
+        return b"database dump complete" in tail or b"dump complete" in tail
+    if db_type in ("mysql", "mariadb"):
+        return b"dump completed" in tail
+    return True
+
+
 def _dump_artifact_ok(dest: Path, *, sql: bool) -> bool:
     if not dest.is_file():
         return False
@@ -755,7 +771,13 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def _copy_tree_filtered(src: Path, dest: Path, *, skip_names: set[str] | None = None) -> None:
+def _copy_tree_filtered(
+    src: Path,
+    dest: Path,
+    *,
+    skip_names: set[str] | None = None,
+    skipped: list[dict] | None = None,
+) -> None:
     skip_names = skip_names or set()
     if not src.is_dir():
         return
@@ -776,13 +798,19 @@ def _copy_tree_filtered(src: Path, dest: Path, *, skip_names: set[str] | None = 
             # skip huge sqlite wal copies if we already dump db separately — still include certs etc.
             try:
                 if sp.stat().st_size > 2 * 1024 * 1024 * 1024:
+                    if skipped is not None:
+                        skipped.append({"path": str(sp), "reason": "larger_than_2GiB"})
                     continue
-            except OSError:
+            except OSError as exc:
+                if skipped is not None:
+                    skipped.append({"path": str(sp), "reason": f"stat_failed:{exc.__class__.__name__}"})
                 continue
             dp = target_dir / name
             try:
                 shutil.copy2(sp, dp)
-            except OSError:
+            except OSError as exc:
+                if skipped is not None:
+                    skipped.append({"path": str(sp), "reason": f"copy_failed:{exc.__class__.__name__}"})
                 continue
 
 
@@ -1134,6 +1162,7 @@ def _collect_extra_files(staging: Path, job: dict) -> None:
       .env, docker-compose.yml, certs/, templates/, xray_config.json,
       and other /var/lib/pasarguard files under var/lib/pasarguard/.
     """
+    skipped = job.setdefault("skipped_files", [])
     if PASARGUARD_ENV.is_file():
         shutil.copy2(PASARGUARD_ENV, staging / ".env")
         _log(job, f"Included .env from {PASARGUARD_ENV}")
@@ -1157,14 +1186,14 @@ def _collect_extra_files(staging: Path, job: dict) -> None:
 
     certs = PASARGUARD_DATA / "certs"
     if certs.is_dir():
-        _copy_tree_filtered(certs, staging / "certs")
-        _copy_tree_filtered(certs, data_root / "certs")
+        _copy_tree_filtered(certs, staging / "certs", skipped=skipped)
+        _copy_tree_filtered(certs, data_root / "certs", skipped=skipped)
         _log(job, f"Included certs/ from {certs}")
 
     templates = PASARGUARD_DATA / "templates"
     if templates.is_dir():
-        _copy_tree_filtered(templates, staging / "templates")
-        _copy_tree_filtered(templates, data_root / "templates")
+        _copy_tree_filtered(templates, staging / "templates", skipped=skipped)
+        _copy_tree_filtered(templates, data_root / "templates", skipped=skipped)
         _log(job, f"Included templates/ from {templates}")
 
     # Skip live DB files / engine datadirs — dumps are produced separately
@@ -1192,12 +1221,14 @@ def _collect_extra_files(staging: Path, job: dict) -> None:
                 try:
                     shutil.copy2(child, data_root / child.name)
                 except OSError as exc:
+                    skipped.append({"path": str(child), "reason": f"copy_failed:{exc.__class__.__name__}"})
                     _log(job, f"Skip data file {child.name}: {exc}")
             elif child.is_dir():
                 try:
-                    _copy_tree_filtered(child, data_root / child.name)
+                    _copy_tree_filtered(child, data_root / child.name, skipped=skipped)
                     _log(job, f"Included data/{child.name}/ from {PASARGUARD_DATA}")
                 except OSError as exc:
+                    skipped.append({"path": str(child), "reason": f"copy_failed:{exc.__class__.__name__}"})
                     _log(job, f"Skip data dir {child.name}: {exc}")
 
     # Light extras from /opt/pasarguard (not the whole tree)
@@ -1342,6 +1373,13 @@ def _enqueue_telegram_auto_send(job_snapshot: dict) -> None:
                     _jobs[job_id] = job
                     return
                 job["telegram"] = tg_send
+                if not tg_send.get("ok"):
+                    try:
+                        from app.services.backup_telegram_queue import enqueue
+
+                        enqueue(str(snap.get("backup_id") or ""), str(tg_send.get("error") or ""))
+                    except Exception:
+                        pass
                 logs = list(job.get("logs") or [])
                 if tg_send.get("ok"):
                     logs.append(f"[{time.strftime('%H:%M:%S')}] Telegram: backup document sent")
@@ -1495,6 +1533,15 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
             except Exception:
                 pass
 
+        warnings: list[str] = []
+        skipped_files = list(job.get("skipped_files") or [])
+        if skipped_files:
+            warnings.append(f"{len(skipped_files)} file(s) could not be included")
+            _log(job, f"WARN: {len(skipped_files)} file(s) skipped (first: {skipped_files[0]})")
+        if db_type != "sqlite" and not _dump_footer_present(dump_path, db_type):
+            warnings.append("db dump footer not found (dump may be incomplete)")
+            _log(job, "WARN: database dump end marker not found — verify this backup before relying on it")
+
         manifest = {
             "format": "pgclockmg-full-bundle",
             "format_version": 1,
@@ -1504,6 +1551,7 @@ def _create_backup_into(job_id: str, *, trigger: str) -> dict:
             "pasarguard_version": version,
             "db_type": db_type,
             "counts": {k: counts.get(k) for k in STAT_TABLES},
+            **({"warnings": warnings, "skipped_files": skipped_files[:50]} if warnings else {}),
             "files": sorted(str(p.relative_to(staging)) for p in staging.rglob("*") if p.is_file()),
         }
         (staging / "pgclockmg-manifest.json").write_text(

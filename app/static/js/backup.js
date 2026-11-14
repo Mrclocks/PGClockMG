@@ -174,6 +174,8 @@ const I18N = {
     setProxyHint: "اگر تلگرام مستقیم در دسترس نیست، پروکسی بگذارید.",
     lblProxyEnabled: "فعالسازی",
     lblProxyType: "نوع",
+    lblTgApiBase: "آدرس API تلگرام (اختیاری)",
+    tgApiBaseHint: "اگر api.telegram.org بسته است، آدرس یک reverse-proxy یا Cloudflare Worker را بگذارید. خالی = پیش‌فرض.",
     lblProxyHost: "هاست",
     lblProxyPort: "پورت",
     lblProxyUser: "کاربر",
@@ -397,6 +399,8 @@ const I18N = {
     setProxyHint: "Use a proxy when Telegram is blocked directly.",
     lblProxyEnabled: "Enable",
     lblProxyType: "Type",
+    lblTgApiBase: "Telegram API URL (optional)",
+    tgApiBaseHint: "If api.telegram.org is blocked, set a reverse-proxy or Cloudflare Worker URL. Empty = default.",
     lblProxyHost: "Host",
     lblProxyPort: "Port",
     lblProxyUser: "Username",
@@ -620,6 +624,8 @@ const I18N = {
     setProxyHint: "Если Telegram недоступен напрямую, укажите прокси.",
     lblProxyEnabled: "Включение",
     lblProxyType: "Тип",
+    lblTgApiBase: "URL API Telegram (необязательно)",
+    tgApiBaseHint: "Если api.telegram.org заблокирован, укажите reverse-proxy или Cloudflare Worker. Пусто = по умолчанию.",
     lblProxyHost: "Хост",
     lblProxyPort: "Порт",
     lblProxyUser: "Пользователь",
@@ -914,7 +920,7 @@ function applyI18n() {
     ["btnTgTest", "btnTgTest"],
     ["setWebhookTitle", "setWebhookTitle"], ["setWebhookHint", "setWebhookHint"], ["lblWebhookUrl", "lblWebhookUrl"],
     ["setProxyTitle", "setProxyTitle"], ["setProxyHint", "setProxyHint"],
-    ["lblProxyType", "lblProxyType"], ["lblProxyHost", "lblProxyHost"], ["lblProxyPort", "lblProxyPort"],
+    ["lblTgApiBase", "lblTgApiBase"], ["tgApiBaseHint", "tgApiBaseHint"], ["lblProxyType", "lblProxyType"], ["lblProxyHost", "lblProxyHost"], ["lblProxyPort", "lblProxyPort"],
     ["lblProxyUser", "lblProxyUser"], ["lblProxyPass", "lblProxyPass"],
     ["setUpdateTitle", "setUpdateTitle"], ["setUpdateHint", "setUpdateHint"],
     ["lblUpdateCurrent", "lblUpdateCurrent"], ["lblUpdateLatest", "lblUpdateLatest"],
@@ -2010,6 +2016,7 @@ async function loadSettingsForm() {
   document.getElementById("webhookUrl").value = notify.webhook_url || "";
   document.getElementById("proxyEnabled").checked = !!tg.proxy_enabled;
   setProxyTypeValue(tg.proxy_type || "socks5");
+  document.getElementById("tgApiBase").value = tg.api_base_url || "";
   document.getElementById("proxyHost").value = tg.proxy_host || "";
   document.getElementById("proxyPort").value = tg.proxy_port || 1080;
   document.getElementById("proxyUser").value = tg.proxy_user || "";
@@ -2075,6 +2082,7 @@ function collectTelegramPatch() {
     caption_template: document.getElementById("tgCaption").value,
     proxy_enabled: document.getElementById("proxyEnabled").checked,
     proxy_type: document.getElementById("proxyType").value,
+    api_base_url: document.getElementById("tgApiBase").value.trim(),
     proxy_host: document.getElementById("proxyHost").value.trim(),
     proxy_port: Number(document.getElementById("proxyPort").value || 1080),
     proxy_user: document.getElementById("proxyUser").value.trim(),
