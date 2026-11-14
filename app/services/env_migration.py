@@ -15,12 +15,16 @@ PATH_REPLACEMENTS = [
 
 def read_env_var(text: str, key: str) -> str | None:
     pattern = rf'^\s*{re.escape(key)}\s*=\s*(.+?)\s*$'
-    m = re.search(pattern, text, re.MULTILINE | re.IGNORECASE)
-    if not m:
+    # dotenv / python-decouple / docker compose all let the LAST assignment win,
+    # so a backup .env with an old sqlite URL followed by the real mysql URL must
+    # resolve to mysql (first-match here used to mis-detect the source engine).
+    matches = [
+        m for m in re.finditer(pattern, text, re.MULTILINE | re.IGNORECASE)
+        if m.group(1).strip() and not m.group(1).strip().startswith("#")
+    ]
+    if not matches:
         return None
-    raw = m.group(1).strip()
-    if not raw or raw.startswith("#"):
-        return None
+    raw = matches[-1].group(1).strip()
     if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ('"', "'"):
         inner = raw[1:-1]
         if raw[0] == '"':

@@ -76,6 +76,12 @@ def _dashboard_update_info() -> dict:
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     backup_auth.get_session_secret()
+    try:
+        from app.services.backup_engine import cleanup_stale_staging
+
+        cleanup_stale_staging()
+    except Exception:
+        pass
     start_scheduler()
     yield
     stop_scheduler()
