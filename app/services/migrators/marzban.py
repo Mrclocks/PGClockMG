@@ -1981,6 +1981,14 @@ class MarzbanMigrator(BaseMigrator):
         if landing:
             out["marzban_landing"] = landing
         heal = getattr(self, "_preboot_heal", None) or {}
+        restored_rows = int(getattr(self, "_usage_rows_restored", 0) or 0)
+        if isinstance(heal, dict) and restored_rows > 0:
+            heal = dict(heal)
+            left = max(0, int(heal.get("usage_rows_cleared") or 0) - restored_rows)
+            heal["usage_rows_cleared"] = left
+            if left == 0:
+                heal["usage_tables_truncated"] = 0
+            out["usage_rows_restored"] = restored_rows
         if isinstance(heal, dict) and (
             int(heal.get("usage_tables_truncated") or 0) > 0
             or int(heal.get("usage_rows_cleared") or 0) > 0

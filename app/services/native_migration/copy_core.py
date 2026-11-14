@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Iterable
 
@@ -447,6 +447,23 @@ def normalize_datetime_for_sql(value):
         s = value.strip()
         if not s:
             return s
+        if _LOOKS_LIKE_DT_RE.match(s):
+            # Offset-bearing text (e.g. ``+03:30``) must be converted to UTC, not just
+            # stripped — otherwise expiry / created_at shift by the offset.
+            try:
+                iso = s.replace(" ", "T", 1)
+                if iso.endswith(("Z", "z")):
+                    iso = iso[:-1] + "+00:00"
+                m_off = re.search(r"([+-])(\d{2})(?::?(\d{2}))?(?::?\d{2})?$", iso[10:])
+                if m_off:
+                    sign = 1 if m_off.group(1) == "+" else -1
+                    off = timedelta(hours=int(m_off.group(2)), minutes=int(m_off.group(3) or 0)) * sign
+                    base = iso[: 10 + m_off.start()]
+                    parsed = datetime.fromisoformat(base)
+                    parsed = parsed - off
+                    return parsed.isoformat(sep=" ")
+            except (ValueError, OverflowError):
+                pass
         if "T" in s[:32]:
             s = s.replace("T", " ", 1)
         s = _TZ_TAIL_RE.sub("", s).rstrip()
