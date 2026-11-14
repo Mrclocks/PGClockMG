@@ -1,4 +1,8 @@
-"""Self-uninstall PGClockMG (pg-migrator) from the server."""
+"""Self-uninstall PGClockMG (pg-migrator) from the server.
+
+Only the wizard is removed. The backup panel (``pg-backup``) keeps running and
+any backups stored under the wizard install dir are copied to a safe location first.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +15,7 @@ INSTALL_DIR = Path("/opt/pg-migrator")
 SERVICE_NAME = "pg-migrator"
 BACKUP_SERVICE_NAME = "pg-backup"
 UNIT_PATH = Path(f"/etc/systemd/system/{SERVICE_NAME}.service")
-BACKUP_UNIT_PATH = Path(f"/etc/systemd/system/{BACKUP_SERVICE_NAME}.service")
+KEEP_ROOT = Path("/var/lib/pgclockbackup")
 
 _uninstall_tasks: set[asyncio.Task] = set()
 
@@ -21,11 +25,13 @@ def uninstall_preview() -> dict:
         "install_dir": str(INSTALL_DIR),
         "service": SERVICE_NAME,
         "backup_service": BACKUP_SERVICE_NAME,
-        "exists": INSTALL_DIR.exists() or UNIT_PATH.exists() or BACKUP_UNIT_PATH.exists(),
+        "backup_service_kept": True,
+        "exists": INSTALL_DIR.exists() or UNIT_PATH.exists(),
         "commands": [
-            f"systemctl stop {SERVICE_NAME} {BACKUP_SERVICE_NAME}",
-            f"systemctl disable {SERVICE_NAME} {BACKUP_SERVICE_NAME}",
-            f"rm -f {UNIT_PATH} {BACKUP_UNIT_PATH}",
+            f"cp -a {INSTALL_DIR}/backups/. {KEEP_ROOT}/pgclockmg-backups-<timestamp>/  (if not empty)",
+            f"systemctl stop {SERVICE_NAME}",
+            f"systemctl disable {SERVICE_NAME}",
+            f"rm -f {UNIT_PATH}",
             "systemctl daemon-reload",
             f"rm -rf {INSTALL_DIR}",
         ],
@@ -46,15 +52,23 @@ async def _do_uninstall(delay_sec: float) -> None:
     tmp_dir = Path(tempfile.mkdtemp(prefix="pgclockmg-uninstall-"))
     path = tmp_dir / "uninstall.sh"
     script = f"""#!/bin/bash
-set -e
+# Wizard only — never touch the pg-backup service or its install dir.
+# Keep any backups stored under the wizard dir (e.g. pre-migration safety backup).
+if [ -d "{INSTALL_DIR}/backups" ] && [ -n "$(ls -A "{INSTALL_DIR}/backups" 2>/dev/null)" ]; then
+  keep="{KEEP_ROOT}/pgclockmg-backups-$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$keep" 2>/dev/null && cp -a "{INSTALL_DIR}/backups/." "$keep/" 2>/dev/null || true
+fi
 systemctl stop {SERVICE_NAME} 2>/dev/null || true
-systemctl stop {BACKUP_SERVICE_NAME} 2>/dev/null || true
 systemctl disable {SERVICE_NAME} 2>/dev/null || true
-systemctl disable {BACKUP_SERVICE_NAME} 2>/dev/null || true
-rm -f {UNIT_PATH} {BACKUP_UNIT_PATH}
+rm -f {UNIT_PATH}
 systemctl daemon-reload 2>/dev/null || true
-# Remove install dir last (this process may live under it)
-nohup bash -c 'sleep 1; rm -rf {INSTALL_DIR}; rm -rf {tmp_dir}' >/dev/null 2>&1 &
+# Legacy combined install: pg-backup still runs from the wizard dir — leave it in place.
+if grep -qs '^WorkingDirectory={INSTALL_DIR}$' /etc/systemd/system/{BACKUP_SERVICE_NAME}.service; then
+  nohup bash -c 'sleep 1; rm -rf {tmp_dir}' >/dev/null 2>&1 &
+else
+  # Remove install dir last (this process may live under it)
+  nohup bash -c 'sleep 1; rm -rf {INSTALL_DIR}; rm -rf {tmp_dir}' >/dev/null 2>&1 &
+fi
 """
     path.write_text(script, encoding="utf-8")
     os.chmod(path, 0o700)
