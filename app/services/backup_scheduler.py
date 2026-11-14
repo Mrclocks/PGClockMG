@@ -57,6 +57,8 @@ def due_for_scheduled_run(
     last_attempt_at: object = None,
     consecutive_failures: object = 0,
     now: datetime | None = None,
+    run_at: object = None,
+    timezone_name: object = None,
 ) -> bool:
     """
     Return True when a scheduled backup should start.
@@ -85,6 +87,13 @@ def due_for_scheduled_run(
         wait = backoff if backoff > 0 else FAILURE_RETRY_SECONDS
         return (current - last_attempt).total_seconds() < wait
 
+    slot = latest_run_slot(run_at, timezone_name, interval, current)
+    if slot is not None:
+        # Fixed time of day (24h interval): due once per day after the slot passed.
+        if last_success is not None and last_success >= slot:
+            return False
+        return not _in_failure_backoff()
+
     if last_success is None:
         # Never succeeded: run soon, but respect failure backoff.
         return not _in_failure_backoff()
@@ -93,6 +102,26 @@ def due_for_scheduled_run(
     if elapsed < interval_sec:
         return False
     return not _in_failure_backoff()
+
+
+def latest_run_slot(run_at: object, timezone_name: object, interval_hours: float, now: datetime) -> datetime | None:
+    """Most recent fixed daily slot (UTC) for ``run_at`` HH:MM, or None when not configured.
+
+    Only applies to the 24h interval; shorter intervals keep the rolling behaviour.
+    """
+    from datetime import timedelta
+
+    from app.services.backup_settings import get_zoneinfo, normalize_run_at
+
+    hhmm = normalize_run_at(run_at)
+    if not hhmm or float(interval_hours) < 24.0:
+        return None
+    hour, minute = int(hhmm[:2]), int(hhmm[3:])
+    local_now = now.astimezone(get_zoneinfo(timezone_name))
+    slot = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if slot > local_now:
+        slot -= timedelta(days=1)
+    return slot.astimezone(timezone.utc)
 
 
 def should_send_scheduled_telegram(cfg: dict | None, sched: dict | None = None) -> bool:
@@ -216,6 +245,8 @@ async def _maybe_run_scheduled() -> None:
         last_attempt_at=sched.get("last_attempt_at"),
         consecutive_failures=consecutive,
         now=now,
+        run_at=sched.get("run_at"),
+        timezone_name=sched.get("timezone"),
     ):
         return
 
