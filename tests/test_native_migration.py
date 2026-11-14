@@ -2140,3 +2140,37 @@ if __name__ == "__main__":
     test_native_migration_import()
     test_cross_db_has_pasarguard_env()
     print("\nAll native migration tests passed.")
+
+
+def test_datetime_offset_strings_convert_to_utc():
+    from app.services.native_migration.copy_core import normalize_datetime_for_sql as f
+
+    assert f("2025-01-01 12:00:00+03:30") == "2025-01-01 08:30:00"
+    assert f("2025-01-01T12:00:00Z") == "2025-01-01 12:00:00"
+    assert f("2025-01-01 12:00:00+00:00") == "2025-01-01 12:00:00"
+    assert f("2025-01-01 12:00:00") == "2025-01-01 12:00:00"
+    assert f("2025-01-01 00:10:00+05") == "2024-12-31 19:10:00"
+
+
+def test_minimal_null_retry_clears_only_offending_column():
+    from app.services.native_migration.adapters import _retry_null_columns_minimal
+
+    class W:
+        def __init__(self):
+            self.calls = []
+
+        def insert(self, table, columns, values):
+            self.calls.append(values)
+            # only column "b" is invalid
+            if values[columns.index("b")] is not None:
+                raise RuntimeError("bad b")
+
+        def recover(self):
+            pass
+
+    w = W()
+    ok, err, cleared = _retry_null_columns_minimal(
+        w, "t", ["a", "b", "c"], (1, 2, 3), ["a", "b", "c"],
+    )
+    assert ok and cleared == ["b"]
+    assert w.calls[-1] == (1, None, 3)

@@ -117,8 +117,8 @@ async def _snapshot_target_before_wipe(migrator, target_db: str) -> Path | None:
     cwd = str(PASARGUARD_DIR)
     try:
         if target_db in ("postgresql", "timescaledb"):
-            safe_db = "".join(c for c in db if c.isalnum() or c == "_")
-            if safe_db != db:
+            safe_db = "".join(c for c in db if c.isalnum() or c in "_-")
+            if safe_db != db or safe_db.startswith("-"):
                 return None
             cmd = [
                 "docker", "compose", "exec", "-T",
@@ -129,8 +129,8 @@ async def _snapshot_target_before_wipe(migrator, target_db: str) -> Path | None:
         else:
             from app.services.pasarguard_ops import mysql_client_bins
 
-            safe_db = "".join(c for c in db if c.isalnum() or c == "_")
-            if safe_db != db:
+            safe_db = "".join(c for c in db if c.isalnum() or c in "_-")
+            if safe_db != db or safe_db.startswith("-"):
                 return None
             bins = mysql_client_bins(target_db, service)
             dump_bin = "mysqldump"
@@ -535,6 +535,13 @@ async def _panel_boot_upgrade_intermediate(
         await safe_start_pasarguard(migrator, health_max_wait=1800)
         migrator.params["target_db"] = orig
         await _stop_panel(migrator)
+        if staging_conn and inter_db in ("mysql", "mariadb", "sqlite"):
+            try:
+                from app.services.marzban_preboot_heal import restore_heavy_usage_tables
+
+                await restore_heavy_usage_tables(migrator, conn=dict(staging_conn), db_type=inter_db)
+            except Exception as exc:
+                migrator.job.log(f"Usage history restore note: {exc}")
         migrator.job.log("Panel-boot schema upgrade complete")
     finally:
         # Restore pre-boot .env; caller finalizes for target later

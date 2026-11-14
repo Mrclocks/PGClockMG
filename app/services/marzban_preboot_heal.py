@@ -644,6 +644,9 @@ def shrink_heavy_usage_tables_mysql_conn(
                     approx, size = _mysql_table_bulk_stats(cur, database, table)
                     if approx < int(row_threshold) and size < int(size_threshold):
                         continue
+                    from app.services.usage_keep import stash_mysql
+
+                    stash_mysql(cur, table)  # best-effort; restored after the upgrade
                     cur.execute(f"TRUNCATE TABLE `{_ident(table)}`")
                     truncated.append((table, approx if approx > 0 else size))
             finally:
@@ -668,6 +671,9 @@ def shrink_heavy_usage_tables_sqlite(
             n = int(row[0] or 0) if row else 0
             if n < int(row_threshold):
                 continue
+            from app.services.usage_keep import stash_sqlite
+
+            stash_sqlite(db, table)  # best-effort; restored after the upgrade
             db.execute(f"DELETE FROM {_ident(table)}")
             truncated.append((table, n))
         if truncated:
@@ -698,6 +704,51 @@ def shrink_heavy_usage_tables_on_conn(
         database=conn.get("database") or "pasarguard",
         row_threshold=row_threshold,
     )
+
+
+def restore_usage_tables_on_conn(db_type: str, conn: dict) -> list[tuple[str, int]]:
+    """Copy stashed usage rows back after the schema upgrade (no-op when none)."""
+    from app.services import usage_keep
+
+    db_type = (db_type or "").lower()
+    if db_type == "sqlite":
+        path = conn.get("sqlite_path") or str(PASARGUARD_DATA / "db.sqlite3")
+        return usage_keep.restore_sqlite(path)
+    if db_type not in ("mysql", "mariadb"):
+        return []
+    return usage_keep.restore_mysql(
+        host=conn.get("host") or "127.0.0.1",
+        port=migration_port(conn, db_type),
+        user=conn.get("user") or "root",
+        password=conn.get("password") or "",
+        database=conn.get("database") or "pasarguard",
+    )
+
+
+def log_restored_usage(migrator, restored: list[tuple[str, int]]) -> None:
+    rows = sum(n for _, n in restored)
+    migrator._usage_rows_restored = int(getattr(migrator, "_usage_rows_restored", 0) or 0) + rows
+    for table, n in restored:
+        migrator.job.log(f"Restored {n} usage row(s) into `{table}` after the schema upgrade")
+
+
+async def restore_heavy_usage_tables(migrator, conn: dict | None = None, db_type: str | None = None) -> int:
+    """Best-effort restore of usage history stashed by ``heal_heavy_usage_tables``."""
+    params = migrator.params or {}
+    target_db = (db_type or params.get("target_db") or "").lower()
+    if target_db not in ("mysql", "mariadb", "sqlite"):
+        return 0
+    try:
+        if conn is None:
+            conn = dict(get_target_connection(params))
+            if target_db == "sqlite":
+                conn["sqlite_path"] = conn.get("sqlite_path") or str(PASARGUARD_DATA / "db.sqlite3")
+        restored = restore_usage_tables_on_conn(target_db, conn)
+    except Exception as exc:
+        migrator.job.log(f"Usage history restore note (kept aside, not lost): {exc}")
+        return 0
+    log_restored_usage(migrator, restored)
+    return sum(n for _, n in restored)
 
 
 def cleanup_orphans_postgres_conn(
@@ -1005,9 +1056,9 @@ async def heal_heavy_usage_tables(migrator) -> list[tuple[str, int]]:
         return []
     for table, rows in truncated:
         migrator.job.log(
-            f"Truncated large usage table `{table}` (~{rows} rows) before panel "
+            f"Large usage table `{table}` (~{rows} rows) set aside before panel "
             "alembic — avoids multi-hour MySQL copy-to-tmp on bigint/FK rebuild; "
-            "usage history refills from live traffic"
+            "history is restored right after the upgrade"
         )
     if truncated:
         migrator.job.set_progress(

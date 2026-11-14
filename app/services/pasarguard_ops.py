@@ -3793,6 +3793,12 @@ async def safe_start_pasarguard(migrator, *, health_max_wait: int | None = None)
             stash_panel_boot_warning(migrator, warning)
             return
         raise
+    try:
+        from app.services.marzban_preboot_heal import restore_heavy_usage_tables
+
+        await restore_heavy_usage_tables(migrator)
+    except Exception as exc:
+        migrator.job.log(f"Usage history restore note: {exc}")
 
 
 async def stamp_alembic_head(migrator) -> bool:
