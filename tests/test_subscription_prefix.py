@@ -88,3 +88,36 @@ if __name__ == "__main__":
     test_write_env_and_sqlite_settings()
     test_certbot_missing_is_soft_skip()
     print("\nAll subscription_prefix tests passed.")
+
+
+def test_url_prefix_written_to_real_single_row_schema(tmp_path):
+    """PasarGuard stores settings as ONE row with a JSON column per section."""
+    db_path = tmp_path / "db.sqlite3"
+    db = sqlite3.connect(str(db_path))
+    db.execute(
+        "CREATE TABLE settings (id INTEGER PRIMARY KEY, telegram JSON, subscription JSON, general JSON)"
+    )
+    db.execute(
+        "INSERT INTO settings VALUES (1, '{}', ?, '{\"x\": 1}')",
+        (json.dumps({"url_prefix": "", "support_url": "https://t.me/"}),),
+    )
+    db.commit()
+    db.close()
+
+    assert apply_subscription_prefix_sqlite(db_path, "https://sub.example.com:8000/")
+    db = sqlite3.connect(str(db_path))
+    sub, general = db.execute("SELECT subscription, general FROM settings WHERE id=1").fetchone()
+    db.close()
+    data = json.loads(sub)
+    assert data["url_prefix"] == "https://sub.example.com:8000"
+    assert data["support_url"] == "https://t.me/"  # other keys preserved
+    assert json.loads(general) == {"x": 1}  # other sections untouched
+
+
+def test_url_prefix_real_schema_without_row_is_noop(tmp_path):
+    db_path = tmp_path / "db.sqlite3"
+    db = sqlite3.connect(str(db_path))
+    db.execute("CREATE TABLE settings (id INTEGER PRIMARY KEY, subscription JSON)")
+    db.commit()
+    db.close()
+    assert apply_subscription_prefix_sqlite(db_path, "https://s.example.com") is False

@@ -147,6 +147,17 @@ def _merge_url_prefix_json(raw: str | None, base: str) -> str:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
+def _json_text(raw) -> str | None:
+    """JSON column value as text (sqlite/MySQL return str, PostgreSQL json returns dict)."""
+    if raw is None:
+        return None
+    if isinstance(raw, (dict, list)):
+        return json.dumps(raw)
+    if isinstance(raw, (bytes, bytearray, memoryview)):
+        return bytes(raw).decode("utf-8", errors="ignore")
+    return str(raw)
+
+
 def apply_subscription_prefix_sqlite(sqlite_path: str | Path, base: str) -> bool:
     """Upsert settings.subscription.url_prefix on a PasarGuard SQLite file."""
     path = Path(sqlite_path)
@@ -159,6 +170,17 @@ def apply_subscription_prefix_sqlite(sqlite_path: str | Path, base: str) -> bool
             str(r[1]).lower()
             for r in db.execute("PRAGMA table_info(settings)").fetchall()
         }
+        if "subscription" in cols and "value" not in cols:
+            # Real PasarGuard schema: one row, one JSON column per settings section.
+            row = db.execute("SELECT id, subscription FROM settings ORDER BY id LIMIT 1").fetchone()
+            if not row:
+                return False
+            db.execute(
+                "UPDATE settings SET subscription=? WHERE id=?",
+                (_merge_url_prefix_json(_json_text(row[1]), base), row[0]),
+            )
+            db.commit()
+            return True
         if "value" not in cols:
             return False
         key_col = "key" if "key" in cols else ("entity" if "entity" in cols else None)
@@ -221,6 +243,18 @@ def apply_subscription_prefix_server_db(db_type: str, conn: dict, base: str) -> 
                         "WHERE table_schema='public' AND table_name='settings'"
                     )
                     cols = {str(r[0]).lower() for r in cur.fetchall()}
+                    if "subscription" in cols and "value" not in cols:
+                        cur.execute("SELECT id, subscription FROM settings ORDER BY id LIMIT 1")
+                        row = cur.fetchone()
+                        if not row:
+                            return False
+                        # plain text literal: the server coerces it to json / jsonb
+                        cur.execute(
+                            "UPDATE settings SET subscription=%s WHERE id=%s",
+                            (_merge_url_prefix_json(_json_text(row[1]), base), row[0]),
+                        )
+                        pg.commit()
+                        return True
                     if "value" not in cols:
                         return False
                     key_col = "key" if "key" in cols else (
@@ -261,6 +295,16 @@ def apply_subscription_prefix_server_db(db_type: str, conn: dict, base: str) -> 
                         (database,),
                     )
                     cols = {str(r[0]).lower() for r in cur.fetchall()}
+                    if "subscription" in cols and "value" not in cols:
+                        cur.execute("SELECT id, subscription FROM settings ORDER BY id LIMIT 1")
+                        row = cur.fetchone()
+                        if not row:
+                            return False
+                        cur.execute(
+                            "UPDATE settings SET subscription=%s WHERE id=%s",
+                            (_merge_url_prefix_json(_json_text(row[1]), base), row[0]),
+                        )
+                        return True
                     if "value" not in cols:
                         return False
                     key_col = "key" if "key" in cols else (
