@@ -147,6 +147,40 @@ def _merge_url_prefix_json(raw: str | None, base: str) -> str:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
+def _emit(log, msg: str) -> None:
+    if log is None:
+        return
+    try:
+        log(msg)
+    except Exception:
+        pass
+
+
+def _merge_url_prefix_strict(raw, base: str, log=None) -> str | None:
+    """Merge ``url_prefix`` into the settings.subscription JSON, or None when it is unusable.
+
+    Unparseable / non-object JSON is never replaced (that would wipe the other
+    subscription settings); an existing different prefix is logged before overwrite.
+    """
+    text = _json_text(raw)
+    data: dict = {}
+    if text and text.strip():
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError):
+            _emit(log, "settings.subscription is not valid JSON — url_prefix NOT written (left untouched)")
+            return None
+        if not isinstance(parsed, dict):
+            _emit(log, "settings.subscription is not a JSON object — url_prefix NOT written")
+            return None
+        data = parsed
+    previous = str(data.get("url_prefix") or "").strip()
+    if previous and previous.rstrip("/") != base.rstrip("/"):
+        _emit(log, f"settings.subscription.url_prefix overwritten: {previous!r} → {base!r}")
+    data["url_prefix"] = base
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
 def _json_text(raw) -> str | None:
     """JSON column value as text (sqlite/MySQL return str, PostgreSQL json returns dict)."""
     if raw is None:
@@ -158,7 +192,7 @@ def _json_text(raw) -> str | None:
     return str(raw)
 
 
-def apply_subscription_prefix_sqlite(sqlite_path: str | Path, base: str) -> bool:
+def apply_subscription_prefix_sqlite(sqlite_path: str | Path, base: str, log=None) -> bool:
     """Upsert settings.subscription.url_prefix on a PasarGuard SQLite file."""
     path = Path(sqlite_path)
     base = (base or "").strip().rstrip("/")
@@ -174,11 +208,12 @@ def apply_subscription_prefix_sqlite(sqlite_path: str | Path, base: str) -> bool
             # Real PasarGuard schema: one row, one JSON column per settings section.
             row = db.execute("SELECT id, subscription FROM settings ORDER BY id LIMIT 1").fetchone()
             if not row:
+                _emit(log, "settings row not found yet — set the subscription URL in the panel Settings")
                 return False
-            db.execute(
-                "UPDATE settings SET subscription=? WHERE id=?",
-                (_merge_url_prefix_json(_json_text(row[1]), base), row[0]),
-            )
+            merged = _merge_url_prefix_strict(row[1], base, log)
+            if merged is None:
+                return False
+            db.execute("UPDATE settings SET subscription=? WHERE id=?", (merged, row[0]))
             db.commit()
             return True
         if "value" not in cols:
@@ -217,7 +252,7 @@ def apply_subscription_prefix_sqlite(sqlite_path: str | Path, base: str) -> bool
         db.close()
 
 
-def apply_subscription_prefix_server_db(db_type: str, conn: dict, base: str) -> bool:
+def apply_subscription_prefix_server_db(db_type: str, conn: dict, base: str, log=None) -> bool:
     """Upsert subscription url_prefix on live MySQL/PG (fail-soft)."""
     base = (base or "").strip().rstrip("/")
     if not base:
@@ -247,12 +282,13 @@ def apply_subscription_prefix_server_db(db_type: str, conn: dict, base: str) -> 
                         cur.execute("SELECT id, subscription FROM settings ORDER BY id LIMIT 1")
                         row = cur.fetchone()
                         if not row:
+                            _emit(log, "settings row not found yet — set the subscription URL in the panel Settings")
+                            return False
+                        merged = _merge_url_prefix_strict(row[1], base, log)
+                        if merged is None:
                             return False
                         # plain text literal: the server coerces it to json / jsonb
-                        cur.execute(
-                            "UPDATE settings SET subscription=%s WHERE id=%s",
-                            (_merge_url_prefix_json(_json_text(row[1]), base), row[0]),
-                        )
+                        cur.execute("UPDATE settings SET subscription=%s WHERE id=%s", (merged, row[0]))
                         pg.commit()
                         return True
                     if "value" not in cols:
@@ -299,11 +335,12 @@ def apply_subscription_prefix_server_db(db_type: str, conn: dict, base: str) -> 
                         cur.execute("SELECT id, subscription FROM settings ORDER BY id LIMIT 1")
                         row = cur.fetchone()
                         if not row:
+                            _emit(log, "settings row not found yet — set the subscription URL in the panel Settings")
                             return False
-                        cur.execute(
-                            "UPDATE settings SET subscription=%s WHERE id=%s",
-                            (_merge_url_prefix_json(_json_text(row[1]), base), row[0]),
-                        )
+                        merged = _merge_url_prefix_strict(row[1], base, log)
+                        if merged is None:
+                            return False
+                        cur.execute("UPDATE settings SET subscription=%s WHERE id=%s", (merged, row[0]))
                         return True
                     if "value" not in cols:
                         return False

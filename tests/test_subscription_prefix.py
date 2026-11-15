@@ -121,3 +121,41 @@ def test_url_prefix_real_schema_without_row_is_noop(tmp_path):
     db.commit()
     db.close()
     assert apply_subscription_prefix_sqlite(db_path, "https://s.example.com") is False
+
+
+def _real_db(path, subscription_json):
+    db = sqlite3.connect(str(path))
+    db.execute("CREATE TABLE settings (id INTEGER PRIMARY KEY, subscription JSON)")
+    if subscription_json is not None:
+        db.execute("INSERT INTO settings VALUES (1, ?)", (subscription_json,))
+    db.commit()
+    db.close()
+
+
+def test_corrupt_subscription_json_is_not_replaced(tmp_path):
+    db_path = tmp_path / "db.sqlite3"
+    _real_db(db_path, "{not json")
+    logs: list[str] = []
+    assert apply_subscription_prefix_sqlite(db_path, "https://s.example.com", log=logs.append) is False
+    db = sqlite3.connect(str(db_path))
+    assert db.execute("SELECT subscription FROM settings").fetchone()[0] == "{not json"
+    db.close()
+    assert any("not valid JSON" in m for m in logs)
+
+
+def test_missing_row_and_overwritten_prefix_are_logged(tmp_path):
+    db_path = tmp_path / "db.sqlite3"
+    _real_db(db_path, None)
+    logs: list[str] = []
+    assert apply_subscription_prefix_sqlite(db_path, "https://s.example.com", log=logs.append) is False
+    assert any("settings row not found" in m for m in logs)
+
+    db_path2 = tmp_path / "db2.sqlite3"
+    _real_db(db_path2, json.dumps({"url_prefix": "https://old.example.com", "keep": 1}))
+    logs = []
+    assert apply_subscription_prefix_sqlite(db_path2, "https://new.example.com", log=logs.append) is True
+    assert any("overwritten" in m and "old.example.com" in m for m in logs)
+    db = sqlite3.connect(str(db_path2))
+    data = json.loads(db.execute("SELECT subscription FROM settings").fetchone()[0])
+    db.close()
+    assert data == {"url_prefix": "https://new.example.com", "keep": 1}
