@@ -77,6 +77,7 @@ HEAVY_USAGE_TABLES: tuple[str, ...] = (
     "node_user_usages",
     "node_usages",
     "node_usage_reset_logs",
+    "node_outbound_usages",
 )
 # Only truncate when clearly large — small/clean dumps stay untouched.
 HEAVY_USAGE_ROW_THRESHOLD = 50_000

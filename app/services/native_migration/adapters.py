@@ -424,7 +424,7 @@ class MysqlWriter(TableWriter):
     # Volume-only history tables: bad rows are rare, so multi-row INSERT is safe.
     # The row-by-row path below is the fallback if a batch fails.
     _BATCH_TABLES = frozenset({
-        "node_user_usages", "node_usages", "node_usage_reset_logs",
+        "node_user_usages", "node_usages", "node_usage_reset_logs", "node_outbound_usages",
         "user_subscription_updates", "notification_reminders",
     })
     _BATCH_FLUSH = 1000
@@ -1172,6 +1172,8 @@ class PostgresWriter(TableWriter):
     # Soft-skip / retry tables need per-row savepoints — batch would hide bad rows.
     _NO_BATCH_TABLES = frozenset({
         "users", "user_templates", "hosts", "admins", "inbounds",
+        # binary (bytea) columns go through the normal parameter path, not text COPY
+        "admin_passkeys", "passkey_challenges",
     })
 
     def insert(self, table: str, columns: list[str], values: tuple) -> None:

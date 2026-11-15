@@ -21,6 +21,8 @@ TABLE_ORDER = [
     "settings",
     "admin_roles",  # before admins (role_id FK)
     "admins",
+    "admin_passkeys",  # FK admins; binary credential columns
+    "passkey_challenges",
     "core_configs",
     "nodes",
     "inbounds",
@@ -39,6 +41,8 @@ TABLE_ORDER = [
     "admin_notification_reminders",
     "node_user_usages",
     "node_usages",
+    "node_outbound_usages",  # FK nodes
+    "wireguard_subnets",
     "user_hwids",
     "api_keys",
     "temp_keys",
@@ -153,6 +157,13 @@ OBSOLETE_TO_EMPTY = {
     ("hosts", "noise"): _HOST_OBSOLETE,
     ("hosts", "fragment"): _HOST_OBSOLETE,
 }
+
+# Binary columns (WebAuthn passkeys): must stay raw bytes — never decoded to text.
+BINARY_COLUMNS = frozenset({
+    ("admin_passkeys", "credential_id"),
+    ("admin_passkeys", "public_key"),
+    ("passkey_challenges", "challenge"),
+})
 
 # PasarGuard StringArray columns (comma-separated); address is NOT NULL
 HOST_STRING_ARRAY_COLUMNS = frozenset({"address", "sni", "host", "verify_peer_cert_by_name"})
@@ -705,6 +716,12 @@ def sqlite_columns(conn: sqlite3.Connection, table: str) -> list[str]:
 
 def convert_value(table: str, column: str, value):
     """Coerce types; neutralize obsolete Marzban tokens."""
+    if (table, column) in BINARY_COLUMNS:
+        if value is None:
+            return None
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return bytes(value)
+        return str(value).encode("utf-8")
     value = normalize_raw_value(value)
 
     if table == "users" and column == "status":
