@@ -2174,3 +2174,15 @@ def test_minimal_null_retry_clears_only_offending_column():
     )
     assert ok and cleared == ["b"]
     assert w.calls[-1] == (1, None, 3)
+
+
+def test_postgres_timestamptz_values_get_explicit_utc_offset():
+    from app.services.native_migration.adapters import PostgresWriter
+
+    w = PostgresWriter.__new__(PostgresWriter)
+    w._col_types = {"users": {"expire": "timestamp with time zone", "note": "text"}}
+    w._col_nullable = {"users": {}}
+    out = w._coerce_row("users", ["expire", "note"], ("2025-01-01 08:30:00", "a:b"))
+    assert out == ("2025-01-01 08:30:00+00:00", "a:b")
+    out = w._coerce_row("users", ["expire"], ("2025-01-01 08:30:00+00:00",))
+    assert out == ("2025-01-01 08:30:00+00:00",)
