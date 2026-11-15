@@ -24,7 +24,7 @@ _LOCK = threading.RLock()
 
 BACKOFF_SEC = (10 * 60, 30 * 60, 60 * 60, 2 * 3600, 4 * 3600, 6 * 3600)
 MAX_AGE_SEC = 48 * 3600
-MAX_KEEP = 3  # a newer backup supersedes older undelivered ones
+MAX_KEEP = 1  # only the newest backup matters: it supersedes older undelivered ones
 
 
 def _read() -> list[dict]:
@@ -50,20 +50,47 @@ def next_delay(attempts: int) -> int:
     return BACKOFF_SEC[min(max(attempts, 0), len(BACKOFF_SEC) - 1)]
 
 
-def enqueue(backup_id: str, error: str | None = None) -> None:
+def enqueue(backup_id: str, error: str | None = None, destinations: list | None = None) -> None:
+    """Queue ``backup_id``; ``destinations`` (when given) limits retries to those chats."""
     if not backup_id:
         return
     with _LOCK:
         items = [i for i in _read() if i.get("backup_id") != backup_id]
         now = time.time()
-        items.append({
+        item = {
             "backup_id": backup_id,
             "queued_at": now,
             "attempts": 0,
             "next_try_at": now + next_delay(0),
             "last_error": (error or "")[:300],
-        })
+        }
+        if destinations:
+            item["destinations"] = list(destinations)
+        items.append(item)
         _write(items[-MAX_KEEP:])
+
+
+def dequeue(backup_id: str) -> None:
+    with _LOCK:
+        items = _read()
+        kept = [i for i in items if i.get("backup_id") != backup_id]
+        if len(kept) != len(items):
+            _write(kept)
+
+
+def record_delivery(backup_id: str, result: dict | None) -> None:
+    """Sync the queue with a send result: delivered everywhere → drop; otherwise queue
+    only what is still missing (all chats on a total failure, the failed ones on a partial)."""
+    if not backup_id or result is None:
+        return
+    try:
+        failed = list(result.get("failed_destinations") or [])
+        if result.get("ok") and not failed:
+            dequeue(backup_id)
+        else:
+            enqueue(backup_id, str(result.get("error") or "partial_delivery"), destinations=failed or None)
+    except Exception:  # noqa: BLE001 — never let queue bookkeeping break a backup
+        log.exception("telegram queue bookkeeping failed")
 
 
 def pending() -> list[dict]:
@@ -97,9 +124,14 @@ def process_due(send_fn, resolve_path_fn, *, now: float | None = None) -> dict:
             result = send_fn(Path(path), item)
         except Exception as exc:  # noqa: BLE001
             result = {"ok": False, "error": str(exc)}
-        if result.get("ok"):
+        failed_dests = list(result.get("failed_destinations") or [])
+        if result.get("ok") and not failed_dests:
             out["sent"] += 1
             continue
+        if result.get("ok"):
+            # delivered to some chats — keep retrying only the missing ones
+            out["sent"] += 1
+            item = {**item, "destinations": failed_dests}
         out["failed"] += 1
         attempts = int(item.get("attempts") or 0) + 1
         item = {

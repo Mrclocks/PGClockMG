@@ -14,17 +14,23 @@ PATH_REPLACEMENTS = [
 
 
 def read_env_var(text: str, key: str) -> str | None:
-    pattern = rf'^\s*{re.escape(key)}\s*=\s*(.+?)\s*$'
-    # dotenv / python-decouple / docker compose all let the LAST assignment win,
-    # so a backup .env with an old sqlite URL followed by the real mysql URL must
-    # resolve to mysql (first-match here used to mis-detect the source engine).
-    matches = [
-        m for m in re.finditer(pattern, text, re.MULTILINE | re.IGNORECASE)
-        if m.group(1).strip() and not m.group(1).strip().startswith("#")
-    ]
-    if not matches:
+    # dotenv / python-decouple / docker compose all let the LAST assignment win, so a
+    # backup .env with an old sqlite URL followed by the real mysql URL must resolve to
+    # mysql. Horizontal whitespace only after "=" (``\s*`` used to swallow the newline
+    # and read the NEXT line as the value of an empty ``KEY=``). Exact-case keys win;
+    # a differently-cased duplicate is only used when no exact match exists.
+    def _active(flags: int) -> list[str]:
+        pattern = rf'^[ \t]*(?:export[ \t]+)?{re.escape(key)}[ \t]*=[ \t]*(.*?)[ \t]*$'
+        return [
+            m.group(1).strip()
+            for m in re.finditer(pattern, text, re.MULTILINE | flags)
+            if m.group(1).strip() and not m.group(1).strip().startswith("#")
+        ]
+
+    found = _active(0) or _active(re.IGNORECASE)
+    if not found:
         return None
-    raw = matches[-1].group(1).strip()
+    raw = found[-1]
     if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ('"', "'"):
         inner = raw[1:-1]
         if raw[0] == '"':

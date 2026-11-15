@@ -1373,13 +1373,12 @@ def _enqueue_telegram_auto_send(job_snapshot: dict) -> None:
                     _jobs[job_id] = job
                     return
                 job["telegram"] = tg_send
-                if not tg_send.get("ok"):
-                    try:
-                        from app.services.backup_telegram_queue import enqueue
+                try:
+                    from app.services.backup_telegram_queue import record_delivery
 
-                        enqueue(str(snap.get("backup_id") or ""), str(tg_send.get("error") or ""))
-                    except Exception:
-                        pass
+                    record_delivery(str(snap.get("backup_id") or ""), tg_send)
+                except Exception:
+                    pass
                 logs = list(job.get("logs") or [])
                 if tg_send.get("ok"):
                     logs.append(f"[{time.strftime('%H:%M:%S')}] Telegram: backup document sent")

@@ -67,7 +67,7 @@ def test_queue_keeps_only_newest(tmp_path, monkeypatch):
     monkeypatch.setattr(q, "QUEUE_FILE", tmp_path / "pending.json")
     for i in range(5):
         q.enqueue(f"b{i}")
-    assert [i["backup_id"] for i in q.pending()] == ["b2", "b3", "b4"]
+    assert [i["backup_id"] for i in q.pending()] == ["b4"]
 
 
 def test_stale_backup_hours():
@@ -119,3 +119,82 @@ def test_dump_footer_detection(tmp_path):
     my.write_text("INSERT ...;\n-- Dump completed on 2026-01-01\n")
     assert _dump_footer_present(my, "mysql")
     assert _dump_footer_present(my, "sqlite")
+
+
+def test_api_base_rejects_plain_http_to_public_hosts():
+    from app.services.backup_telegram import normalize_api_base
+
+    with pytest.raises(ValueError):
+        normalize_api_base("http://tg.example.com")
+    with pytest.raises(ValueError):
+        normalize_api_base("http://8.8.8.8:8081")
+    assert normalize_api_base("http://127.0.0.1:8081") == "http://127.0.0.1:8081"
+    assert normalize_api_base("http://192.168.1.5") == "http://192.168.1.5"
+    assert normalize_api_base("https://tg.example.com") == "https://tg.example.com"
+
+
+def test_partial_delivery_retries_only_failed_chats(tmp_path, monkeypatch):
+    from app.services import backup_telegram_queue as q
+
+    monkeypatch.setattr(q, "QUEUE_FILE", tmp_path / "pending.json")
+    f = tmp_path / "pgclockmg-9.zip"
+    f.write_bytes(b"x" * 100)
+    failed = [{"chat_id": "-100", "message_thread_id": None}]
+    q.record_delivery("pgclockmg-9", {"ok": True, "failed_destinations": failed})
+    item = q.pending()[0]
+    assert item["destinations"] == failed
+
+    seen = {}
+
+    def send(path, it):
+        seen["dest"] = it.get("destinations")
+        return {"ok": True, "failed_destinations": []}
+
+    q.process_due(send, lambda b: f, now=time.time() + 11 * 60)
+    assert seen["dest"] == failed and q.pending() == []
+
+
+def test_full_delivery_or_manual_success_dequeues(tmp_path, monkeypatch):
+    from app.services import backup_telegram_queue as q
+
+    monkeypatch.setattr(q, "QUEUE_FILE", tmp_path / "pending.json")
+    q.enqueue("pgclockmg-1", "boom")
+    q.record_delivery("pgclockmg-1", {"ok": True, "failed_destinations": []})
+    assert q.pending() == []
+    q.record_delivery("pgclockmg-2", {"ok": False, "error": "net"})
+    assert q.pending()[0]["backup_id"] == "pgclockmg-2" and "destinations" not in q.pending()[0]
+
+
+def test_send_reports_failed_destinations(tmp_path, monkeypatch):
+    from app.services import backup_telegram as bt
+
+    f = tmp_path / "pgclockmg-1.zip"
+    f.write_bytes(b"x" * 2048)
+    calls = []
+
+    def fake_parts(**kw):
+        calls.append(kw["chat_id"])
+        return {"ok": kw["chat_id"] == "1", "error": None if kw["chat_id"] == "1" else "blocked", "sent": []}
+
+    monkeypatch.setattr(bt, "_send_document_parts", fake_parts)
+    cfg = {"telegram": {"enabled": True, "bot_token": "1:" + "a" * 30, "chat_id": "1",
+                        "destinations": [{"chat_id": "2"}]}}
+    res = bt.send_backup_to_telegram(f, manifest={}, settings=cfg)
+    assert res["ok"] and res["failed_destinations"] == [{"chat_id": "2", "message_thread_id": None}]
+    calls.clear()
+    res = bt.send_backup_to_telegram(f, manifest={}, settings=cfg, only_destinations=res["failed_destinations"])
+    assert calls == ["2"]
+
+
+def test_scheduler_runs_queue_in_separate_task():
+    import asyncio
+
+    from app.services import backup_scheduler as sch
+
+    async def go():
+        sch.start_scheduler()
+        assert sch._task is not None and sch._aux_task is not None and sch._task is not sch._aux_task
+        sch.stop_scheduler()
+        await asyncio.sleep(0)
+
+    asyncio.run(go())
