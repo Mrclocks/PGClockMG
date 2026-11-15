@@ -22,7 +22,6 @@ TABLE_ORDER = [
     "admin_roles",  # before admins (role_id FK)
     "admins",
     "admin_passkeys",  # FK admins; binary credential columns
-    "passkey_challenges",
     "core_configs",
     "nodes",
     "inbounds",
@@ -52,6 +51,7 @@ TABLE_ORDER = [
 
 SKIP_TABLES = {
     "alembic_version",
+    "passkey_challenges",  # short-lived login challenges — nothing worth carrying over
     "admin_usage_logs",
     "user_usage_logs",
     "node_stats",
@@ -158,12 +158,26 @@ OBSOLETE_TO_EMPTY = {
     ("hosts", "fragment"): _HOST_OBSOLETE,
 }
 
-# Binary columns (WebAuthn passkeys): must stay raw bytes — never decoded to text.
+# Binary columns must stay raw bytes — never decoded to text. The authoritative list comes
+# from the TARGET schema (writers report bytea / BLOB / VARBINARY columns and register them
+# via register_binary_columns), so future binary columns are covered automatically. The
+# static entries are only a fallback for when the schema cannot be introspected.
 BINARY_COLUMNS = frozenset({
     ("admin_passkeys", "credential_id"),
     ("admin_passkeys", "public_key"),
-    ("passkey_challenges", "challenge"),
 })
+_DYNAMIC_BINARY: set[tuple[str, str]] = set()
+
+
+def register_binary_columns(table: str, columns) -> None:
+    for col in columns or ():
+        _DYNAMIC_BINARY.add((table, str(col)))
+
+
+def is_binary_column(table: str, column: str) -> bool:
+    key = (table, column)
+    return key in BINARY_COLUMNS or key in _DYNAMIC_BINARY
+
 
 # PasarGuard StringArray columns (comma-separated); address is NOT NULL
 HOST_STRING_ARRAY_COLUMNS = frozenset({"address", "sni", "host", "verify_peer_cert_by_name"})
@@ -716,7 +730,7 @@ def sqlite_columns(conn: sqlite3.Connection, table: str) -> list[str]:
 
 def convert_value(table: str, column: str, value):
     """Coerce types; neutralize obsolete Marzban tokens."""
-    if (table, column) in BINARY_COLUMNS:
+    if is_binary_column(table, column):
         if value is None:
             return None
         if isinstance(value, (bytes, bytearray, memoryview)):

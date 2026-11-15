@@ -19,6 +19,7 @@ from app.services.native_migration.copy_core import (
     JSON_COLUMNS,
     BOOL_COLUMNS,
     convert_value,
+    register_binary_columns,
     build_table_column_plan,
     build_inbound_tag_lookup,
     apply_host_defaults,
@@ -75,6 +76,10 @@ class TableWriter(ABC):
     @abstractmethod
     def target_columns(self, table: str) -> list[str]:
         pass
+
+    def binary_columns(self, table: str) -> list[str]:
+        """Columns of ``table`` that hold raw bytes in the TARGET schema (bytea / BLOB / VARBINARY)."""
+        return []
 
     @abstractmethod
     def truncate(self, table: str) -> None:
@@ -332,6 +337,15 @@ class SqliteWriter(TableWriter):
 
     def target_columns(self, table: str) -> list[str]:
         return sqlite_columns(self._conn, table)
+
+    def binary_columns(self, table: str) -> list[str]:
+        try:
+            return [
+                r[1] for r in self._conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+                if "BLOB" in str(r[2] or "").upper()
+            ]
+        except Exception:
+            return []
 
     def prepare_replace(self, tables: list[str]) -> None:
         self._conn.execute("PRAGMA foreign_keys = OFF")
@@ -609,6 +623,14 @@ class MysqlWriter(TableWriter):
             (self._db, table),
         )
         return [r[0] for r in cur.fetchall()]
+
+    def binary_columns(self, table: str) -> list[str]:
+        try:
+            meta = self._load_meta(table)
+        except Exception:
+            return []
+        binary = {"binary", "varbinary", "tinyblob", "blob", "mediumblob", "longblob"}
+        return [c for c, m in meta.items() if str(m.get("data_type") or "").lower() in binary]
 
     def truncate(self, table: str) -> None:
         self._flush_batch()
@@ -982,6 +1004,12 @@ class PostgresWriter(TableWriter):
             self._types_for(table)
         return self._col_nullable.get(table, {}).get(column, True)
 
+    def binary_columns(self, table: str) -> list[str]:
+        try:
+            return [c for c, kind in self._types_for(table).items() if kind == "bytea"]
+        except Exception:
+            return []
+
     def _note_value_clear(
         self, table: str, col: str, raw, action: str, *, reason: str,
     ) -> None:
@@ -1213,8 +1241,6 @@ class PostgresWriter(TableWriter):
     # Soft-skip / retry tables need per-row savepoints — batch would hide bad rows.
     _NO_BATCH_TABLES = frozenset({
         "users", "user_templates", "hosts", "admins", "inbounds",
-        # binary (bytea) columns go through the normal parameter path, not text COPY
-        "admin_passkeys", "passkey_challenges",
     })
 
     def insert(self, table: str, columns: list[str], values: tuple) -> None:
@@ -1223,6 +1249,7 @@ class PostgresWriter(TableWriter):
         use_batch = (
             getattr(self, "_bulk_load_active", False)
             and table not in self._NO_BATCH_TABLES
+            and not self.binary_columns(table)  # bytea must not go through text COPY
         )
         if use_batch:
             if (
@@ -1783,6 +1810,10 @@ def _copy_tables_universal_body(
             log(f"Skip {table}: not in target schema")
             continue
 
+        try:
+            register_binary_columns(table, writer.binary_columns(table))
+        except Exception:
+            pass
         insert_cols, select_cols = build_table_column_plan(table, src_cols, tgt_cols)
         if not insert_cols:
             log(f"Skip {table}: no matching columns")
