@@ -69,6 +69,19 @@ def redact_telegram_text(text: object) -> str:
 DEFAULT_API_BASE = "https://api.telegram.org"
 
 
+def _is_local_host(host: str) -> bool:
+    import ipaddress
+
+    h = (host or "").strip().lower().strip("[]")
+    if h in ("localhost", "localhost.localdomain") or h.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private
+
+
 def normalize_api_base(raw: object) -> str:
     """Telegram Bot API base URL (custom reverse-proxy / Worker allowed). '' → default."""
     text = (str(raw).strip() if raw is not None else "").rstrip("/")
@@ -81,6 +94,9 @@ def normalize_api_base(raw: object) -> str:
     parsed = urlparse(text)
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise ValueError("api_base_invalid")
+    if parsed.scheme == "http" and not _is_local_host(parsed.hostname):
+        # the bot token travels in the URL path — never over plain HTTP across the internet
+        raise ValueError("api_base_https_required")
     return f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
 
 
@@ -548,11 +564,22 @@ def send_backup_to_telegram(
     *,
     manifest: dict | None = None,
     settings: dict | None = None,
+    only_destinations: list[dict] | None = None,
 ) -> dict:
-    """Send a single on-disk zip as a Telegram document to all destinations."""
+    """Send a single on-disk zip as a Telegram document to all destinations.
+
+    ``only_destinations`` (retry of a partial delivery) restricts the send to those chats.
+    """
     tg = telegram_config(settings)
     token = (tg.get("bot_token") or "").strip()
     destinations = resolve_destinations(tg)
+    if only_destinations:
+        wanted = {(str(d.get("chat_id")), d.get("message_thread_id")) for d in only_destinations}
+        narrowed = [
+            d for d in destinations
+            if (str(d.get("chat_id")), d.get("message_thread_id")) in wanted
+        ]
+        destinations = narrowed or destinations
     if not token or not destinations:
         return {"ok": False, "error": "telegram_not_configured"}
     if not path.is_file():
@@ -611,8 +638,13 @@ def send_backup_to_telegram(
                         result.get("error"),
                     )
         ok_any = any(d.get("ok") for d in dest_results)
+        failed_destinations = [
+            {"chat_id": d["chat_id"], "message_thread_id": d.get("message_thread_id")}
+            for d in dest_results if not d.get("ok")
+        ]
         return {
             "ok": ok_any,
+            "failed_destinations": failed_destinations if ok_any else [],
             "parts": parts,
             "sent": all_sent,
             "destinations": dest_results,
@@ -702,6 +734,12 @@ def start_telegram_send_async(
         _set_telegram_job(job_id, status="sending")
         try:
             result = send_backup_to_telegram(path, manifest=man, settings=cfg)
+            try:
+                from app.services.backup_telegram_queue import record_delivery
+
+                record_delivery(path.stem, result)
+            except Exception:
+                pass
             if result.get("ok"):
                 _set_telegram_job(
                     job_id,
