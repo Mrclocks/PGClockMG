@@ -61,3 +61,40 @@ def test_updater_rollback_restores_previous_app(tmp_path):
     assert (app_dst / "main.py").read_text() == "old"
     assert not old.exists()
     assert (tmp_path / "requirements.txt").read_text() == "fastapi==1"
+
+
+def test_updater_rollback_restores_packages_and_survives_missing_app(tmp_path, monkeypatch):
+    from app.services import backup_updater as bu
+
+    home = tmp_path
+    app_dst = home / "app"
+    old = home / "app.old"
+    old.mkdir()
+    (old / "main.py").write_text("old")
+    # second move failed → app/ does not exist at all
+    (home / "venv" / "bin").mkdir(parents=True)
+    (home / "venv" / "bin" / "pip").write_text("")
+    freeze = home / "requirements.freeze.pre-update"
+    freeze.write_text("fastapi==1.0\n")
+    ran = []
+
+    class R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(bu, "_run", lambda cmd, **kw: ran.append(cmd) or R())
+    notes = bu._rollback_swap(old, app_dst, home / "requirements.txt.pre-update", freeze)
+    assert (app_dst / "main.py").read_text() == "old"
+    assert any("pip" in c[0] and "install" in c for c in ran)
+    assert "previous Python packages restored" in notes and not freeze.exists()
+
+
+def test_rollback_leaves_app_alone_when_nothing_was_moved(tmp_path):
+    from app.services.backup_updater import _rollback_swap
+
+    app_dst = tmp_path / "app"
+    app_dst.mkdir()
+    (app_dst / "main.py").write_text("current")
+    assert _rollback_swap(tmp_path / "app.old", app_dst, tmp_path / "r.pre") == []
+    assert (app_dst / "main.py").read_text() == "current"
