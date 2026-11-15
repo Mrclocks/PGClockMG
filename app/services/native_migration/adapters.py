@@ -155,6 +155,21 @@ class SqliteReader(TableReader):
         self._conn.close()
 
 
+def _pg_session_utc(conn) -> None:
+    """Best-effort ``SET TIME ZONE 'UTC'`` (PgBouncer may not keep it — the writer also
+    sends explicit ``+00:00`` offsets for timestamptz columns, so correctness never
+    depends on the session zone)."""
+    try:
+        cur = conn.cursor()
+        cur.execute("SET TIME ZONE 'UTC'")
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+
 class MysqlReader(TableReader):
     def __init__(self, dsn: dict):
         import pymysql
@@ -166,6 +181,8 @@ class MysqlReader(TableReader):
             password=dsn["password"],
             database=dsn["database"],
             charset="utf8mb4",
+            # TIMESTAMP columns are read/written in the session zone — pin it to UTC.
+            init_command="SET time_zone = '+00:00'",
         )
         self._db = dsn["database"]
 
@@ -232,6 +249,7 @@ class PostgresReader(TableReader):
             user=dsn["user"],
             password=dsn["password"],
         )
+        _pg_session_utc(self._conn)
 
     def source_tables(self) -> set[str]:
         cur = self._conn.cursor()
@@ -411,6 +429,7 @@ class MysqlWriter(TableWriter):
             database=self._db,
             charset="utf8mb4",
             autocommit=False,
+            init_command="SET time_zone = '+00:00'",
         )
         self._col_meta: dict[str, dict[str, dict]] = {}
         self._enum_labels: dict[str, frozenset[str]] = {}
@@ -420,6 +439,8 @@ class MysqlWriter(TableWriter):
         self._batch_buf: list[tuple] = []
         self._batch_table: str | None = None
         self._batch_columns: list[str] | None = None
+        self._batch_skips: dict[str, int] = {}
+        self._batch_first_err: dict[str, str] = {}
 
     # Volume-only history tables: bad rows are rare, so multi-row INSERT is safe.
     # The row-by-row path below is the fallback if a batch fails.
@@ -451,11 +472,24 @@ class MysqlWriter(TableWriter):
                     note(f"batch insert into {table} failed ({str(exc)[:120]}); retrying row by row")
                 except Exception:
                     pass
+        skipped = 0
+        first_err = ""
         for row in buf:
             try:
                 cur.execute(sql, row)
-            except Exception:
-                continue  # counted via row_count verification after commit
+            except Exception as exc:  # noqa: BLE001
+                skipped += 1
+                if not first_err:
+                    first_err = str(exc)[:160]
+        if skipped:
+            self._batch_skips[table] = self._batch_skips.get(table, 0) + skipped
+            self._batch_first_err.setdefault(table, first_err)
+            note = getattr(self, "_log", None)
+            if callable(note):
+                try:
+                    note(f"batch insert {table}: {skipped} row(s) skipped (first error: {first_err})")
+                except Exception:
+                    pass
 
     def _load_meta(self, table: str) -> dict[str, dict]:
         if table in self._col_meta:
@@ -710,6 +744,7 @@ class PostgresWriter(TableWriter):
             user=dsn["user"],
             password=dsn["password"],
         )
+        _pg_session_utc(self._conn)
         self._col_types: dict[str, dict[str, str]] = {}
         self._col_nullable: dict[str, dict[str, bool]] = {}
         self._enum_labels: dict[str, frozenset[str]] = {}
@@ -1044,6 +1079,12 @@ class PostgresWriter(TableWriter):
                 "integer", "bigint", "smallint", "numeric", "double precision", "real",
             ) and val is not None and isinstance(val, str) and val.strip().isdigit():
                 out.append(int(val.strip()))
+            elif kind == "timestamp with time zone" and isinstance(val, str) and ":" in val:
+                # Values are naive UTC strings; without an offset PostgreSQL would read
+                # them in the server/session zone and shift every date.
+                from app.services.native_migration.copy_core import _TZ_TAIL_RE
+
+                out.append(val if _TZ_TAIL_RE.search(val.strip()) else f"{val.strip()}+00:00")
             else:
                 out.append(val)
         return tuple(out)
@@ -1942,6 +1983,12 @@ def _copy_tables_universal_body(
     value_clears = list(getattr(writer, "_value_clears", None) or [])
     if value_clears:
         report["value_clears"] = value_clears
+    batch_skips = dict(getattr(writer, "_batch_skips", None) or {})
+    if batch_skips:
+        report["batch_skips"] = batch_skips
+        for tbl, n in batch_skips.items():
+            first = (getattr(writer, "_batch_first_err", None) or {}).get(tbl, "")
+            log(f"Batch insert skipped {n} row(s) in {tbl}" + (f" — first error: {first}" if first else ""))
     if soft_incomplete_tables:
         report["soft_policy_tables"] = sorted(soft_incomplete_tables)
     for item in report.get("incomplete", []):
