@@ -2213,7 +2213,7 @@ class XuiMigrator(BaseMigrator):
             f"(.env {'updated' if env_ok else 'unchanged'})"
         )
 
-        sqlite_ok = apply_subscription_prefix_sqlite(land_db, base)
+        sqlite_ok = apply_subscription_prefix_sqlite(land_db, base, log=self.job.log)
         if sqlite_ok:
             self.job.log("PasarGuard settings.subscription.url_prefix updated (sqlite)")
         if target_db != "sqlite":
@@ -2221,7 +2221,7 @@ class XuiMigrator(BaseMigrator):
                 from app.services.db_credentials import get_target_connection
 
                 conn = get_target_connection(params) or {}
-                if apply_subscription_prefix_server_db(target_db, conn, base):
+                if apply_subscription_prefix_server_db(target_db, conn, base, log=self.job.log):
                     self.job.log(
                         f"PasarGuard settings.subscription.url_prefix updated ({target_db})"
                     )
