@@ -22,25 +22,27 @@ _uninstall_tasks: set[asyncio.Task] = set()
 # Wizard only — never touches the pg-backup service. Backups stored under the wizard dir
 # are MOVED (not copied) out first; the install dir is only deleted when that is certain.
 _UNINSTALL_SCRIPT = r"""#!/bin/bash
-KEEP_OK=1
 SRC="__INSTALL_DIR__/backups"
-if [ -d "$SRC" ] && [ -n "$(ls -A "$SRC" 2>/dev/null)" ]; then
-  KEEP="__KEEP_ROOT__/pgclockmg-backups-$(date +%Y%m%d-%H%M%S)"
-  if mkdir -p "$KEEP" && mv "$SRC" "$KEEP/backups" && [ -d "$KEEP/backups" ] && [ ! -e "$SRC" ]; then
-    :
-  else
-    KEEP_OK=0
+if grep -Eqs "^WorkingDirectory=[\"']?__INSTALL_DIR__/?[\"']?[[:space:]]*$" __BACKUP_UNIT__; then
+  # Legacy combined install: pg-backup still runs from the wizard dir and reads its
+  # backups from there — do not move them and do not delete the dir.
+  LEGACY=1
+else
+  LEGACY=0
+  if [ -d "$SRC" ] && [ -n "$(ls -A "$SRC" 2>/dev/null)" ]; then
+    KEEP="__KEEP_ROOT__/pgclockmg-backups-$(date +%Y%m%d-%H%M%S)"
+    if ! { mkdir -p "$KEEP" && mv "$SRC" "$KEEP/backups" && [ -d "$KEEP/backups" ] && [ ! -e "$SRC" ]; }; then
+      # Could not move the backups to a safe place — abort before touching anything.
+      rm -rf __TMP__
+      exit 1
+    fi
   fi
 fi
 systemctl stop __SERVICE__ 2>/dev/null || true
 systemctl disable __SERVICE__ 2>/dev/null || true
 rm -f __UNIT__
 systemctl daemon-reload 2>/dev/null || true
-if [ "$KEEP_OK" != "1" ]; then
-  # Could not move the backups to a safe place — keep everything in place.
-  nohup bash -c 'sleep 1; rm -rf __TMP__' >/dev/null 2>&1 &
-elif grep -Eqs "^WorkingDirectory=[\"']?__INSTALL_DIR__/?[\"']?[[:space:]]*$" __BACKUP_UNIT__; then
-  # Legacy combined install: pg-backup still runs from the wizard dir — leave it in place.
+if [ "$LEGACY" = "1" ]; then
   nohup bash -c 'sleep 1; rm -rf __TMP__' >/dev/null 2>&1 &
 else
   # Remove install dir last (this process may live under it)
@@ -57,7 +59,7 @@ def uninstall_preview() -> dict:
         "backup_service_kept": True,
         "exists": INSTALL_DIR.exists() or UNIT_PATH.exists(),
         "commands": [
-            f"mv {INSTALL_DIR}/backups {KEEP_ROOT}/pgclockmg-backups-<timestamp>/backups  (if not empty; nothing is deleted if this fails)",
+            f"mv {INSTALL_DIR}/backups {KEEP_ROOT}/pgclockmg-backups-<timestamp>/backups  (if not empty and the backup panel does not run from this dir; uninstall is aborted if this fails)",
             f"systemctl stop {SERVICE_NAME}",
             f"systemctl disable {SERVICE_NAME}",
             f"rm -f {UNIT_PATH}",

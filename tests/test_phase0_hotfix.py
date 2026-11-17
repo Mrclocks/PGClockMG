@@ -103,7 +103,7 @@ def _run_uninstall_script(tmp_path, *, keep_root, backup_unit_text):
         script = script.replace(k, v)
     f = tmp_path / "u.sh"
     f.write_text(script)
-    subprocess.run(["bash", str(f)], env={**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}"}, check=True)
+    subprocess.run(["bash", str(f)], env={**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}"}, check=False)
     import time
 
     time.sleep(1.5)  # the final rm runs detached
@@ -126,6 +126,8 @@ def test_uninstall_keeps_everything_when_backups_cannot_be_moved(tmp_path):
         tmp_path, keep_root=bad_root, backup_unit_text="[Service]\nWorkingDirectory=/opt/pg-backup\n",
     )
     assert (inst / "backups" / "a.zip").exists()
+    # aborted before stopping the wizard: its unit file is still there
+    assert (tmp_path / "pg-migrator.service").exists()
 
 
 def test_uninstall_detects_legacy_combined_install_with_quotes_and_slash(tmp_path):
@@ -134,3 +136,6 @@ def test_uninstall_detects_legacy_combined_install_with_quotes_and_slash(tmp_pat
         backup_unit_text='[Service]\nWorkingDirectory="__INST__/"\n',
     )
     assert inst.exists()
+    # pg-backup reads its backups from the wizard dir: they must stay where it looks
+    assert (inst / "backups" / "a.zip").exists()
+    assert not (tmp_path / "keep").exists()
