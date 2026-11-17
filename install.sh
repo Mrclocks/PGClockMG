@@ -848,7 +848,11 @@ clone_migration_tools() {
   fi
   [[ -d "${TOOLS_DIR}/db-migrations" ]] && command -v uv >/dev/null 2>&1 && (cd "${TOOLS_DIR}/db-migrations" && uv sync 2>/dev/null) || true
   [[ -d "${TOOLS_DIR}/migrations/x-ui" ]] && command -v uv >/dev/null 2>&1 && (cd "${TOOLS_DIR}/migrations/x-ui" && uv sync 2>/dev/null) || true
-  ok "Migration tools ready (migrations@${MIGRATIONS_REF:0:8})"
+  if [[ -d "${TOOLS_DIR}/db-migrations/.git" && -d "${TOOLS_DIR}/migrations/.git" ]]; then
+    ok "Migration tools ready (migrations@${MIGRATIONS_REF:0:8})"
+  else
+    warn "Migration tools incomplete (GitHub unreachable?) — re-run the installer when GitHub is reachable; x-ui import needs these tools"
+  fi
 }
 
 setup_python_env() {

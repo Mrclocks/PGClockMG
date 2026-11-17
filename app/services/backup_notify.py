@@ -87,8 +87,10 @@ def notify_backup_failure(
         try:
             out["telegram"] = _telegram_send_text(cfg, text)
         except Exception as exc:
-            log.exception("telegram failure notify failed")
-            out["telegram"] = {"ok": False, "error": str(exc)}
+            from app.services.backup_telegram import redact_telegram_text
+
+            log.error("telegram failure notify failed: %s", redact_telegram_text(exc))
+            out["telegram"] = {"ok": False, "error": redact_telegram_text(exc)}
     payload = {
         "event": "backup_failure",
         "trigger": trigger,

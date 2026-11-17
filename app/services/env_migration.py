@@ -14,13 +14,23 @@ PATH_REPLACEMENTS = [
 
 
 def read_env_var(text: str, key: str) -> str | None:
-    pattern = rf'^\s*{re.escape(key)}\s*=\s*(.+?)\s*$'
-    m = re.search(pattern, text, re.MULTILINE | re.IGNORECASE)
-    if not m:
+    # dotenv / python-decouple / docker compose all let the LAST assignment win, so a
+    # backup .env with an old sqlite URL followed by the real mysql URL must resolve to
+    # mysql. Horizontal whitespace only after "=" (``\s*`` used to swallow the newline
+    # and read the NEXT line as the value of an empty ``KEY=``). Exact-case keys win;
+    # a differently-cased duplicate is only used when no exact match exists.
+    def _active(flags: int) -> list[str]:
+        pattern = rf'^[ \t]*(?:export[ \t]+)?{re.escape(key)}[ \t]*=[ \t]*(.*?)[ \t]*$'
+        return [
+            m.group(1).strip()
+            for m in re.finditer(pattern, text, re.MULTILINE | flags)
+            if m.group(1).strip() and not m.group(1).strip().startswith("#")
+        ]
+
+    found = _active(0) or _active(re.IGNORECASE)
+    if not found:
         return None
-    raw = m.group(1).strip()
-    if not raw or raw.startswith("#"):
-        return None
+    raw = found[-1]
     if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ('"', "'"):
         inner = raw[1:-1]
         if raw[0] == '"':

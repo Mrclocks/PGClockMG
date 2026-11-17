@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import mimetypes
+import re
 import secrets
 import threading
 import time
@@ -51,6 +52,17 @@ def telegram_part_filename(path: Path, part_index: int, parts: int) -> str:
     stem = path.stem or path.name
     suffix = path.suffix or ".zip"
     return f"{stem}-{part_index}-{parts}{suffix}"
+
+
+_BOT_URL_TOKEN_RE = re.compile(r"(/bot)\d+:[A-Za-z0-9_-]+")
+_BARE_TOKEN_RE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{30,}\b")
+
+
+def redact_telegram_text(text: object) -> str:
+    """Strip bot tokens (``/bot<id>:<secret>`` URLs or bare tokens) from error text."""
+    out = str(text if text is not None else "")
+    out = _BOT_URL_TOKEN_RE.sub(r"\1<redacted>", out)
+    return _BARE_TOKEN_RE.sub("<redacted>", out)
 
 
 def _proxy_url(tg: dict) -> str | None:
@@ -174,7 +186,7 @@ def _post_with_transport_retry(
                 "telegram transport error on attempt %s/%s: %s",
                 attempt,
                 attempts,
-                exc,
+                redact_telegram_text(exc),
             )
             time.sleep(TELEGRAM_TRANSPORT_BACKOFF_SEC * attempt)
     if last_exc is not None:
@@ -280,7 +292,7 @@ def probe_telegram_connection(settings: dict | None = None) -> dict:
                     last_exc = exc
                     if attempt >= TELEGRAM_TRANSPORT_ATTEMPTS:
                         raise
-                    log.warning("telegram getMe transport error on attempt %s: %s", attempt, exc)
+                    log.warning("telegram getMe transport error on attempt %s: %s", attempt, redact_telegram_text(exc))
                     time.sleep(TELEGRAM_TRANSPORT_BACKOFF_SEC * attempt)
             if me_data is None:
                 raise last_exc or RuntimeError("getMe_failed")
@@ -292,9 +304,9 @@ def probe_telegram_connection(settings: dict | None = None) -> dict:
                 }
             return {"ok": True, "connected": True, "bot": me_data.get("result")}
     except httpx.HTTPError as exc:
-        return {"ok": False, "connected": False, "error": str(exc)}
+        return {"ok": False, "connected": False, "error": redact_telegram_text(exc)}
     except Exception as exc:
-        return {"ok": False, "connected": False, "error": str(exc)}
+        return {"ok": False, "connected": False, "error": redact_telegram_text(exc)}
 
 
 def test_telegram_connection(settings: dict | None = None) -> dict:
@@ -365,10 +377,10 @@ def _api_error(resp: httpx.Response) -> str:
     try:
         body = resp.json()
         if isinstance(body, dict):
-            return str(body.get("description") or body.get("error") or resp.text[:800])
+            return redact_telegram_text(body.get("description") or body.get("error") or resp.text[:800])
     except Exception:
         pass
-    return (resp.text or f"http_{resp.status_code}")[:800]
+    return redact_telegram_text((resp.text or f"http_{resp.status_code}")[:800])
 
 
 def send_telegram_message(
@@ -403,8 +415,8 @@ def send_telegram_message(
                 return {"ok": False, "error": body.get("description") or "sendMessage_failed"}
             return {"ok": True, "message_id": (body.get("result") or {}).get("message_id")}
     except Exception as exc:
-        log.exception("telegram sendMessage failed")
-        return {"ok": False, "error": str(exc)}
+        log.error("telegram sendMessage failed: %s", redact_telegram_text(exc))
+        return {"ok": False, "error": redact_telegram_text(exc)}
 
 
 def _send_document_parts(
@@ -451,7 +463,7 @@ def _send_document_parts(
             except httpx.TransportError as exc:
                 return {
                     "ok": False,
-                    "error": str(exc),
+                    "error": redact_telegram_text(exc),
                     "sent_parts": len(sent),
                     "total_parts": parts,
                 }
@@ -560,10 +572,10 @@ def send_backup_to_telegram(
             "error": None if ok_any else (dest_results[0].get("error") if dest_results else "send_failed"),
         }
     except Exception as exc:
-        log.exception("telegram sendDocument failed")
+        log.error("telegram sendDocument failed: %s", redact_telegram_text(exc))
         return {
             "ok": False,
-            "error": str(exc),
+            "error": redact_telegram_text(exc),
             "sent": all_sent,
             "destinations": dest_results,
             "total_parts": parts,
@@ -658,11 +670,11 @@ def start_telegram_send_async(
                     finished_at=time.time(),
                 )
         except Exception as exc:
-            log.exception("async telegram send crashed")
+            log.error("async telegram send crashed: %s", redact_telegram_text(exc))
             _set_telegram_job(
                 job_id,
                 status="error",
-                error=str(exc) or "telegram_failed",
+                error=redact_telegram_text(exc) or "telegram_failed",
                 finished_at=time.time(),
             )
 
@@ -783,11 +795,11 @@ def start_telegram_test_async(settings: dict | None = None) -> dict:
                 finished_at=time.time(),
             )
         except Exception as exc:
-            log.exception("async telegram test crashed")
+            log.error("async telegram test crashed: %s", redact_telegram_text(exc))
             _set_telegram_job(
                 job_id,
                 status="error",
-                error=str(exc) or "telegram_test_failed",
+                error=redact_telegram_text(exc) or "telegram_test_failed",
                 finished_at=time.time(),
             )
 

@@ -138,8 +138,10 @@ async def _deliver_scheduled_telegram(result: dict, cfg: dict, *, interval: floa
                 settings=cfg,
             )
         except Exception as exc:
-            log.exception("scheduled telegram send raised (attempt %s)", attempt)
-            last = {"ok": False, "error": str(exc)}
+            from app.services.backup_telegram import redact_telegram_text
+
+            log.error("scheduled telegram send raised (attempt %s): %s", attempt, redact_telegram_text(exc))
+            last = {"ok": False, "error": redact_telegram_text(exc)}
         if last.get("ok"):
             log.info(
                 "scheduled telegram send ok (attempt %s): %s",

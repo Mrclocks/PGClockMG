@@ -112,19 +112,19 @@ PANELS: dict[str, PanelInfo] = {
                 "PasarGuard MUST be installed on this server BEFORE running this wizard.",
                 "Upload Marzban backup (ZIP or separate files) — source DB is detected automatically.",
                 "Select the database you chose during PasarGuard install (may differ from Marzban).",
-                "Cross-DB uses two-phase engine: upgrade source to head, then copy head→head (no data loss).",
+                "Cross-DB uses two-phase engine: upgrade source to head, then copy head→head (users, hosts, inbounds, admins and settings are copied in full; very large usage history tables may be skipped to keep the upgrade fast).",
             ],
             "fa": [
                 "PasarGuard باید قبل از اجرای این ویزارد روی سرور نصب شده باشد.",
                 "بکاپ Marzban را آپلود کنید — نوع DB مبدأ خودکار تشخیص داده می‌شود.",
                 "دیتابیسی را انتخاب کنید که هنگام نصب PasarGuard انتخاب کردید (ممکن است با Marzban فرق داشته باشد).",
-                "مهاجرت بین DB با موتور دو‌فازی: ارتقا به head سپس کپی هم‌تراز — بدون از دست رفتن داده.",
+                "مهاجرت بین DB با موتور دو‌فازی: ارتقا به head سپس کپی هم‌تراز — کاربران، هاست‌ها، اینباند‌ها، ادمین‌ها و تنظیمات کامل منتقل می‌شوند؛ جدول‌های بسیار بزرگ تاریخچهٔ مصرف ممکن است برای سرعت ارتقا رد شوند.",
             ],
             "ru": [
                 "PasarGuard ДОЛЖЕН быть установлен ДО запуска мастера.",
                 "Загрузите копию Marzban — БД источника определяется автоматически.",
                 "Выберите БД, которую указали при установке PasarGuard.",
-                "Смена СУБД двухфазным движком: upgrade до head, затем копирование head→head.",
+                "Смена СУБД двухфазным движком: upgrade до head, затем копирование head→head (пользователи, хосты, инбаунды, админы и настройки копируются полностью; очень большие таблицы истории трафика могут быть пропущены).",
             ],
         },
         prerequisites=PanelPrerequisites(

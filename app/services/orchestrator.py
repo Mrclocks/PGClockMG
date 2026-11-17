@@ -20,6 +20,33 @@ from app.services.panel_job_lock import (
     write_incomplete_job_marker,
 )
 
+def _cleanup_job_workdirs(panel: str, job_id: str) -> None:
+    """Remove source copies (DB + .env) left under BACKUP_DIR after a successful run.
+
+    Best-effort and conservative: only Marzban / Hiddify scratch dirs named after
+    this job. x-ui keeps its dir (the subscription redirect may read its mapping).
+    """
+    import shutil
+
+    from app.config import BACKUP_DIR
+
+    if not job_id or "/" in job_id or ".." in job_id:
+        return
+    targets = []
+    if panel == "marzban":
+        targets = [BACKUP_DIR / f"marzban-{job_id}", BACKUP_DIR / f"marzban-pg-ready-{job_id}.sqlite3"]
+    elif panel == "hiddify":
+        targets = [BACKUP_DIR / job_id]
+    for path in targets:
+        try:
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            elif path.is_file():
+                path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 MIGRATORS = {
     "marzban": MarzbanMigrator,
     "3x-ui": XuiMigrator,
@@ -114,6 +141,10 @@ async def start_migration(params: dict, on_log: Callable | None = None) -> Migra
             job.result = result
             job.status = "success"
             job.set_progress(100, "Migration completed successfully!")
+            try:
+                await asyncio.to_thread(_cleanup_job_workdirs, panel, job.job_id)
+            except Exception:
+                pass
         except Exception as e:
             from app.services.pg_restore import explain_restore_error
 

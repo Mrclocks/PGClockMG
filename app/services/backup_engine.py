@@ -117,6 +117,32 @@ def _set_progress(job: dict, pct: int, phase: str | None = None) -> None:
         _log(job, phase)
 
 
+def cleanup_stale_staging(max_age_sec: int = 6 * 3600) -> int:
+    """Remove orphaned ``pg-backup-*`` staging dirs left by a crash/restart mid-backup.
+
+    Only dirs older than ``max_age_sec`` and only while no backup is running here.
+    """
+    if _CREATE_LOCK.locked():
+        return 0
+    removed = 0
+    now = time.time()
+    try:
+        candidates = list(WORK_DIR.glob("pg-backup-*"))
+    except OSError:
+        return 0
+    for path in candidates:
+        if not path.is_dir() or path.name.startswith("pg-backup-analyze-"):
+            continue
+        try:
+            if now - path.stat().st_mtime < max_age_sec:
+                continue
+            shutil.rmtree(path, ignore_errors=True)
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def get_backup_job(job_id: str) -> dict | None:
     with _jobs_lock:
         job = _jobs.get(job_id)

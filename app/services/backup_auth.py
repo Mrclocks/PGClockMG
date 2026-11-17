@@ -138,7 +138,9 @@ def check_password(password: str) -> bool:
 def get_session_secret() -> bytes:
     BACKUP_SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
     if BACKUP_SECRET_FILE.is_file():
-        raw = BACKUP_SECRET_FILE.read_bytes().strip()
+        # Binary secret: never .strip() — a random byte equal to whitespace at either
+        # end would shrink it below 32 and silently rotate (invalidating sessions).
+        raw = BACKUP_SECRET_FILE.read_bytes()
         if len(raw) >= 32:
             return raw
     return rotate_session_secret()

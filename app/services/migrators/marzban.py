@@ -951,6 +951,13 @@ class MarzbanMigrator(BaseMigrator):
             f"sql={'-' if source_sql is None else sql_users} users (declared: {source_db})"
         )
 
+        if (sqlite_users or 0) > 0 and (sql_users or 0) > 0 and sqlite_users != sql_users:
+            self.job.log(
+                f"Note: backup holds both a SQLite file ({sqlite_users} users) and a SQL dump "
+                f"({sql_users} users) — using the engine from the active .env line "
+                f"(`{source_db}`); the other is usually a stale pre-switch copy"
+            )
+
         # Trust the declared engine unless its data has no users while the other has some.
         chosen = source_db
         if source_db == "sqlite":
