@@ -559,6 +559,14 @@ async def api_put_settings(body: SettingsPatch):
         if admin_id and not (tg.get("chat_id") or "").strip():
             tg["chat_id"] = admin_id
         tg["message_thread_id"] = normalize_thread_id(tg.get("message_thread_id"))
+        if "api_base_url" in tg:
+            from app.services.backup_telegram import DEFAULT_API_BASE, normalize_api_base
+
+            try:
+                base = normalize_api_base(tg.get("api_base_url"))
+            except ValueError as exc:
+                raise HTTPException(400, "api_base_invalid") from exc
+            tg["api_base_url"] = "" if base == DEFAULT_API_BASE else base
         # Normalize destinations (extras); primary stays on chat_id / message_thread_id.
         primary = (tg.get("chat_id") or "").strip()
         extras = tg.get("destinations") if "destinations" in tg else current.get("destinations")

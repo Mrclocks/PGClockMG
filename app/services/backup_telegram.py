@@ -34,6 +34,7 @@ TELEGRAM_TEXT_MAX = 4000
 # Transient transport / upstream blips are common (proxy, Iran routing, Telegram 5xx).
 TELEGRAM_TRANSPORT_ATTEMPTS = 3
 TELEGRAM_TRANSPORT_BACKOFF_SEC = 1.5
+PART_SPACING_SEC = 1.2
 
 _TG_JOBS: dict[str, dict[str, Any]] = {}
 _TG_JOBS_LOCK = threading.RLock()
@@ -63,6 +64,48 @@ def redact_telegram_text(text: object) -> str:
     out = str(text if text is not None else "")
     out = _BOT_URL_TOKEN_RE.sub(r"\1<redacted>", out)
     return _BARE_TOKEN_RE.sub("<redacted>", out)
+
+
+DEFAULT_API_BASE = "https://api.telegram.org"
+
+
+def _is_local_host(host: str) -> bool:
+    import ipaddress
+
+    h = (host or "").strip().lower().strip("[]")
+    if h in ("localhost", "localhost.localdomain") or h.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private
+
+
+def normalize_api_base(raw: object) -> str:
+    """Telegram Bot API base URL (custom reverse-proxy / Worker allowed). '' → default."""
+    text = (str(raw).strip() if raw is not None else "").rstrip("/")
+    if not text:
+        return DEFAULT_API_BASE
+    if "://" not in text:
+        text = "https://" + text
+    from urllib.parse import urlparse
+
+    parsed = urlparse(text)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("api_base_invalid")
+    if parsed.scheme == "http" and not _is_local_host(parsed.hostname):
+        # the bot token travels in the URL path — never over plain HTTP across the internet
+        raise ValueError("api_base_https_required")
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
+
+
+def _api_url(tg: dict, token: str, method: str) -> str:
+    try:
+        base = normalize_api_base(tg.get("api_base_url"))
+    except ValueError:
+        base = DEFAULT_API_BASE
+    return f"{base}/bot{token}/{method}"
 
 
 def _proxy_url(tg: dict) -> str | None:
@@ -140,6 +183,21 @@ def _is_transient_telegram_http(resp: httpx.Response) -> bool:
     return "retry after" in desc or "too many requests" in desc or "timed out" in desc
 
 
+def _retry_after_seconds(resp: httpx.Response, default: float) -> float:
+    """Honor Telegram's ``parameters.retry_after`` (capped) instead of a fixed backoff."""
+    try:
+        body = resp.json()
+        value = ((body or {}).get("parameters") or {}).get("retry_after")
+        if value is not None:
+            return max(1.0, min(float(value) + 1.0, 65.0))
+    except Exception:
+        pass
+    header = resp.headers.get("Retry-After") if hasattr(resp, "headers") else None
+    if header and str(header).isdigit():
+        return max(1.0, min(float(header) + 1.0, 65.0))
+    return default
+
+
 def _post_with_transport_retry(
     client: httpx.Client,
     url: str,
@@ -175,7 +233,7 @@ def _post_with_transport_retry(
                     attempt,
                     attempts,
                 )
-                time.sleep(TELEGRAM_TRANSPORT_BACKOFF_SEC * attempt)
+                time.sleep(_retry_after_seconds(resp, TELEGRAM_TRANSPORT_BACKOFF_SEC * attempt))
                 continue
             return resp
         except httpx.TransportError as exc:
@@ -276,7 +334,7 @@ def probe_telegram_connection(settings: dict | None = None) -> dict:
             me_data: dict | None = None
             for attempt in range(1, TELEGRAM_TRANSPORT_ATTEMPTS + 1):
                 try:
-                    me = client.get(f"https://api.telegram.org/bot{token}/getMe")
+                    me = client.get(_api_url(tg, token, "getMe"))
                     if _is_transient_telegram_http(me) and attempt < TELEGRAM_TRANSPORT_ATTEMPTS:
                         log.warning(
                             "telegram getMe HTTP %s on attempt %s — retrying",
@@ -405,7 +463,7 @@ def send_telegram_message(
         with _client(tg, timeout=30.0) as client:
             resp = _post_with_transport_retry(
                 client,
-                f"https://api.telegram.org/bot{token}/sendMessage",
+                _api_url(tg, token, "sendMessage"),
                 data=data,
             )
             if resp.status_code >= 400:
@@ -429,6 +487,8 @@ def _send_document_parts(
     parts: int,
     max_part: int,
     full_caption: str,
+    sha256: str | None = None,
+    tg: dict | None = None,
 ) -> dict:
     sent: list[dict] = []
     with path.open("rb") as fh:
@@ -440,7 +500,8 @@ def _send_document_parts(
             if parts == 1:
                 caption = full_caption
             elif idx == 0:
-                caption = clip_caption(f"{full_caption}\n\n({idx + 1}/{parts})")
+                sha_line = f"\nSHA256: {sha256}" if sha256 else ""
+                caption = clip_caption(f"{full_caption}{sha_line}\n\n({idx + 1}/{parts})")
             else:
                 caption = f"{path.name} ({idx + 1}/{parts})"
             mime = mimetypes.guess_type(part_name)[0] or "application/zip"
@@ -456,7 +517,7 @@ def _send_document_parts(
             try:
                 resp = _post_with_transport_retry(
                     client,
-                    f"https://api.telegram.org/bot{token}/sendDocument",
+                    _api_url(tg or {}, token, "sendDocument"),
                     data=data,
                     files=files,
                 )
@@ -493,6 +554,8 @@ def _send_document_parts(
                     "message_thread_id": tid,
                 }
             )
+            if parts > 1 and idx + 1 < parts:
+                time.sleep(PART_SPACING_SEC)  # stay under Telegram's per-chat rate limit
     return {"ok": True, "sent": sent, "parts": parts}
 
 
@@ -501,11 +564,31 @@ def send_backup_to_telegram(
     *,
     manifest: dict | None = None,
     settings: dict | None = None,
+    only_destinations: list[dict] | None = None,
 ) -> dict:
-    """Send a single on-disk zip as a Telegram document to all destinations."""
+    """Send a single on-disk zip as a Telegram document to all destinations.
+
+    ``only_destinations`` (retry of a partial delivery) restricts the send to those chats.
+    """
     tg = telegram_config(settings)
     token = (tg.get("bot_token") or "").strip()
     destinations = resolve_destinations(tg)
+    if only_destinations:
+        wanted = {(str(d.get("chat_id")), d.get("message_thread_id")) for d in only_destinations}
+        narrowed = [
+            d for d in destinations
+            if (str(d.get("chat_id")), d.get("message_thread_id")) in wanted
+        ]
+        if not narrowed:
+            # The chats still missing were removed from the settings: nothing is left to
+            # deliver. Never fall back to every chat — the others already got this backup.
+            return {
+                "ok": True,
+                "destinations": [],
+                "failed_destinations": [],
+                "note": "remaining_destinations_removed",
+            }
+        destinations = narrowed
     if not token or not destinations:
         return {"ok": False, "error": "telegram_not_configured"}
     if not path.is_file():
@@ -545,6 +628,8 @@ def send_backup_to_telegram(
                     parts=parts,
                     max_part=max_part,
                     full_caption=full_caption,
+                    sha256=(manifest or {}).get("sha256"),
+                    tg=tg,
                 )
                 dest_results.append({
                     "chat_id": dest["chat_id"],
@@ -562,8 +647,13 @@ def send_backup_to_telegram(
                         result.get("error"),
                     )
         ok_any = any(d.get("ok") for d in dest_results)
+        failed_destinations = [
+            {"chat_id": d["chat_id"], "message_thread_id": d.get("message_thread_id")}
+            for d in dest_results if not d.get("ok")
+        ]
         return {
             "ok": ok_any,
+            "failed_destinations": failed_destinations if ok_any else [],
             "parts": parts,
             "sent": all_sent,
             "destinations": dest_results,
@@ -653,6 +743,12 @@ def start_telegram_send_async(
         _set_telegram_job(job_id, status="sending")
         try:
             result = send_backup_to_telegram(path, manifest=man, settings=cfg)
+            try:
+                from app.services.backup_telegram_queue import record_delivery
+
+                record_delivery(path.stem, result)
+            except Exception:
+                pass
             if result.get("ok"):
                 _set_telegram_job(
                     job_id,
