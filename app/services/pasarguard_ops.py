@@ -3791,8 +3791,15 @@ async def safe_start_pasarguard(migrator, *, health_max_wait: int | None = None)
                 f"healthy ({warning.get('kind')}): {warning.get('en')}"
             )
             stash_panel_boot_warning(migrator, warning)
+            # data path finished: bring usage history back even though the panel
+            # config needs attention (otherwise it stays in `_pgkeep_*` tables)
+            await _restore_usage_history(migrator)
             return
         raise
+    await _restore_usage_history(migrator)
+
+
+async def _restore_usage_history(migrator) -> None:
     try:
         from app.services.marzban_preboot_heal import restore_heavy_usage_tables
 
