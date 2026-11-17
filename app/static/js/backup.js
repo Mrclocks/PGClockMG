@@ -2135,6 +2135,7 @@ function buildSettingsPatch(section) {
       ...(patch.telegram || {}),
       proxy_enabled: tg.proxy_enabled,
       proxy_type: tg.proxy_type,
+      api_base_url: tg.api_base_url,
       proxy_host: tg.proxy_host,
       proxy_port: tg.proxy_port,
       proxy_user: tg.proxy_user,
