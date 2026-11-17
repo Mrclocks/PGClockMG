@@ -1,4 +1,4 @@
-> 🚀 **`v4.9.9`** — pick the backup source that holds users on every path (Marzban / 3x-ui / Hiddify / PasarGuard restore)
+> 🚀 **`v5.0.0`** — backup/migration hardening phases 0–3 + PasarGuard v5.6 compatibility
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
