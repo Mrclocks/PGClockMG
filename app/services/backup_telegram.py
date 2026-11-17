@@ -579,7 +579,16 @@ def send_backup_to_telegram(
             d for d in destinations
             if (str(d.get("chat_id")), d.get("message_thread_id")) in wanted
         ]
-        destinations = narrowed or destinations
+        if not narrowed:
+            # The chats still missing were removed from the settings: nothing is left to
+            # deliver. Never fall back to every chat — the others already got this backup.
+            return {
+                "ok": True,
+                "destinations": [],
+                "failed_destinations": [],
+                "note": "remaining_destinations_removed",
+            }
+        destinations = narrowed
     if not token or not destinations:
         return {"ok": False, "error": "telegram_not_configured"}
     if not path.is_file():

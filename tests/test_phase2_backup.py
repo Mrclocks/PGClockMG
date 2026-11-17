@@ -186,6 +186,36 @@ def test_send_reports_failed_destinations(tmp_path, monkeypatch):
     assert calls == ["2"]
 
 
+def test_retry_does_not_resend_to_everyone_when_failed_chat_was_removed(tmp_path, monkeypatch):
+    from app.services import backup_telegram as bt
+
+    f = tmp_path / "pgclockmg-1.zip"
+    f.write_bytes(b"x" * 2048)
+    calls = []
+
+    def fake_parts(**kw):
+        calls.append(kw["chat_id"])
+        return {"ok": True, "error": None, "sent": []}
+
+    monkeypatch.setattr(bt, "_send_document_parts", fake_parts)
+    # chat "2" failed earlier and has since been removed from the settings
+    cfg = {"telegram": {"enabled": True, "bot_token": "1:" + "a" * 30, "chat_id": "1"}}
+    res = bt.send_backup_to_telegram(
+        f, manifest={}, settings=cfg, only_destinations=[{"chat_id": "2", "message_thread_id": None}],
+    )
+    assert calls == []  # chat "1" already has this backup
+    assert res["ok"] and res["failed_destinations"] == []
+
+
+def test_proxy_section_save_includes_api_base_url():
+    from pathlib import Path
+
+    js = Path("app/static/js/backup.js").read_text(encoding="utf-8")
+    proxy_block = js[js.index('if (all || section === "proxy")'):]
+    proxy_block = proxy_block[:proxy_block.index("}\n  if (all ||")]
+    assert "api_base_url: tg.api_base_url" in proxy_block
+
+
 def test_scheduler_runs_queue_in_separate_task():
     import asyncio
 
