@@ -117,8 +117,8 @@ async def _snapshot_target_before_wipe(migrator, target_db: str) -> Path | None:
     cwd = str(PASARGUARD_DIR)
     try:
         if target_db in ("postgresql", "timescaledb"):
-            safe_db = "".join(c for c in db if c.isalnum() or c == "_")
-            if safe_db != db:
+            safe_db = "".join(c for c in db if c.isalnum() or c in "_-")
+            if safe_db != db or safe_db.startswith("-"):
                 return None
             cmd = [
                 "docker", "compose", "exec", "-T",
@@ -129,8 +129,8 @@ async def _snapshot_target_before_wipe(migrator, target_db: str) -> Path | None:
         else:
             from app.services.pasarguard_ops import mysql_client_bins
 
-            safe_db = "".join(c for c in db if c.isalnum() or c == "_")
-            if safe_db != db:
+            safe_db = "".join(c for c in db if c.isalnum() or c in "_-")
+            if safe_db != db or safe_db.startswith("-"):
                 return None
             bins = mysql_client_bins(target_db, service)
             dump_bin = "mysqldump"
@@ -511,9 +511,15 @@ async def _panel_boot_upgrade_intermediate(
                 row_threshold = HEAVY_USAGE_ROW_THRESHOLD
                 if (migrator.params or {}).get("stronger_heal"):
                     row_threshold = max(1_000, int(HEAVY_USAGE_ROW_THRESHOLD) // 10)
+                shrink_failed: list = []
                 truncated = shrink_heavy_usage_tables_on_conn(
-                    inter_db, staging_conn, row_threshold=row_threshold,
+                    inter_db, staging_conn, row_threshold=row_threshold, failed=shrink_failed,
                 )
+                for table in shrink_failed:
+                    migrator.job.log(
+                        f"Intermediate: `{table}` could not be set aside — left untouched "
+                        "(schema upgrade may take longer)"
+                    )
                 for table, rows in truncated:
                     migrator.job.log(
                         f"Intermediate: truncated large `{table}` (~{rows} rows) "
@@ -535,6 +541,21 @@ async def _panel_boot_upgrade_intermediate(
         await safe_start_pasarguard(migrator, health_max_wait=1800)
         migrator.params["target_db"] = orig
         await _stop_panel(migrator)
+        if inter_db in ("mysql", "mariadb", "sqlite"):
+            try:
+                from app.services.marzban_preboot_heal import restore_heavy_usage_tables
+
+                # panel is stopped here: restore into the intermediate before the copy reads it
+                saved_target = migrator.params.get("target_db")
+                migrator.params["target_db"] = inter_db  # connection must point at the intermediate
+                try:
+                    await restore_heavy_usage_tables(
+                        migrator, conn=dict(staging_conn) if staging_conn else None, db_type=inter_db,
+                    )
+                finally:
+                    migrator.params["target_db"] = saved_target
+            except Exception as exc:
+                migrator.job.log(f"Usage history restore note: {exc}")
         migrator.job.log("Panel-boot schema upgrade complete")
     finally:
         # Restore pre-boot .env; caller finalizes for target later

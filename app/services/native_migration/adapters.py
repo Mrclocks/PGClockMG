@@ -155,6 +155,21 @@ class SqliteReader(TableReader):
         self._conn.close()
 
 
+def _pg_session_utc(conn) -> None:
+    """Best-effort ``SET TIME ZONE 'UTC'`` (PgBouncer may not keep it — the writer also
+    sends explicit ``+00:00`` offsets for timestamptz columns, so correctness never
+    depends on the session zone)."""
+    try:
+        cur = conn.cursor()
+        cur.execute("SET TIME ZONE 'UTC'")
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+
 class MysqlReader(TableReader):
     def __init__(self, dsn: dict):
         import pymysql
@@ -166,6 +181,8 @@ class MysqlReader(TableReader):
             password=dsn["password"],
             database=dsn["database"],
             charset="utf8mb4",
+            # TIMESTAMP columns are read/written in the session zone — pin it to UTC.
+            init_command="SET time_zone = '+00:00'",
         )
         self._db = dsn["database"]
 
@@ -232,6 +249,7 @@ class PostgresReader(TableReader):
             user=dsn["user"],
             password=dsn["password"],
         )
+        _pg_session_utc(self._conn)
 
     def source_tables(self) -> set[str]:
         cur = self._conn.cursor()
@@ -411,11 +429,67 @@ class MysqlWriter(TableWriter):
             database=self._db,
             charset="utf8mb4",
             autocommit=False,
+            init_command="SET time_zone = '+00:00'",
         )
         self._col_meta: dict[str, dict[str, dict]] = {}
         self._enum_labels: dict[str, frozenset[str]] = {}
         self._bulk_prepared = False
         self._bulk_load_active = False
+        self._value_clears: list[dict] = []
+        self._batch_buf: list[tuple] = []
+        self._batch_table: str | None = None
+        self._batch_columns: list[str] | None = None
+        self._batch_skips: dict[str, int] = {}
+        self._batch_first_err: dict[str, str] = {}
+
+    # Volume-only history tables: bad rows are rare, so multi-row INSERT is safe.
+    # The row-by-row path below is the fallback if a batch fails.
+    _BATCH_TABLES = frozenset({
+        "node_user_usages", "node_usages", "node_usage_reset_logs",
+        "user_subscription_updates", "notification_reminders",
+    })
+    _BATCH_FLUSH = 1000
+
+    def _flush_batch(self) -> None:
+        buf = self._batch_buf
+        table, columns = self._batch_table, self._batch_columns
+        self._batch_buf = []
+        self._batch_table = None
+        self._batch_columns = None
+        if not buf or not table or not columns:
+            return
+        cols = ", ".join(f"`{c}`" for c in columns)
+        ph = ", ".join(["%s"] * len(columns))
+        sql = f"INSERT INTO `{table}` ({cols}) VALUES ({ph})"
+        cur = self._conn.cursor()
+        try:
+            cur.executemany(sql, buf)
+            return
+        except Exception as exc:  # noqa: BLE001 — fall back to row-by-row
+            note = getattr(self, "_log", None)
+            if callable(note):
+                try:
+                    note(f"batch insert into {table} failed ({str(exc)[:120]}); retrying row by row")
+                except Exception:
+                    pass
+        skipped = 0
+        first_err = ""
+        for row in buf:
+            try:
+                cur.execute(sql, row)
+            except Exception as exc:  # noqa: BLE001
+                skipped += 1
+                if not first_err:
+                    first_err = str(exc)[:160]
+        if skipped:
+            self._batch_skips[table] = self._batch_skips.get(table, 0) + skipped
+            self._batch_first_err.setdefault(table, first_err)
+            note = getattr(self, "_log", None)
+            if callable(note):
+                try:
+                    note(f"batch insert {table}: {skipped} row(s) skipped (first error: {first_err})")
+                except Exception:
+                    pass
 
     def _load_meta(self, table: str) -> dict[str, dict]:
         if table in self._col_meta:
@@ -537,6 +611,7 @@ class MysqlWriter(TableWriter):
         return [r[0] for r in cur.fetchall()]
 
     def truncate(self, table: str) -> None:
+        self._flush_batch()
         if getattr(self, "_bulk_prepared", False):
             return
         cur = self._conn.cursor()
@@ -569,15 +644,18 @@ class MysqlWriter(TableWriter):
     def end_bulk_load(self) -> None:
         if not getattr(self, "_bulk_load_active", False):
             return
+        self._flush_batch()
         cur = self._conn.cursor()
         cur.execute("SET FOREIGN_KEY_CHECKS = 1")
         self._conn.commit()
         self._bulk_load_active = False
 
     def commit(self) -> None:
+        self._flush_batch()
         self._conn.commit()
 
     def row_count(self, table: str) -> int:
+        self._flush_batch()
         cur = self._conn.cursor()
         cur.execute(f"SELECT COUNT(*) FROM `{table}`")
         row = cur.fetchone()
@@ -596,6 +674,16 @@ class MysqlWriter(TableWriter):
         # InnoDB keeps the txn usable after a failed INSERT — SAVEPOINT per row
         # is pure overhead and dominates wall time on large Marzban `users` tables.
         if getattr(self, "_bulk_load_active", False):
+            if table in self._BATCH_TABLES:
+                if self._batch_table not in (None, table) or self._batch_columns not in (None, columns):
+                    self._flush_batch()
+                self._batch_table = table
+                self._batch_columns = list(columns)
+                self._batch_buf.append(values)
+                if len(self._batch_buf) >= self._BATCH_FLUSH:
+                    self._flush_batch()
+                return
+            self._flush_batch()
             self._insert_plain(table, columns, values)
             return
         cur = self._conn.cursor()
@@ -619,6 +707,7 @@ class MysqlWriter(TableWriter):
         cur.execute(f"INSERT INTO `{table}` ({cols}) VALUES ({ph})", values)
 
     def reset_sequence(self, table: str) -> None:
+        self._flush_batch()
         cur = self._conn.cursor()
         cur.execute(f"SELECT COALESCE(MAX(id), 0) + 1 FROM `{table}`")
         row = cur.fetchone()
@@ -655,6 +744,7 @@ class PostgresWriter(TableWriter):
             user=dsn["user"],
             password=dsn["password"],
         )
+        _pg_session_utc(self._conn)
         self._col_types: dict[str, dict[str, str]] = {}
         self._col_nullable: dict[str, dict[str, bool]] = {}
         self._enum_labels: dict[str, frozenset[str]] = {}
@@ -989,6 +1079,12 @@ class PostgresWriter(TableWriter):
                 "integer", "bigint", "smallint", "numeric", "double precision", "real",
             ) and val is not None and isinstance(val, str) and val.strip().isdigit():
                 out.append(int(val.strip()))
+            elif kind == "timestamp with time zone" and isinstance(val, str) and ":" in val:
+                # Values are naive UTC strings; without an offset PostgreSQL would read
+                # them in the server/session zone and shift every date.
+                from app.services.native_migration.copy_core import _TZ_TAIL_RE
+
+                out.append(val if _TZ_TAIL_RE.search(val.strip()) else f"{val.strip()}+00:00")
             else:
                 out.append(val)
         return tuple(out)
@@ -1279,6 +1375,32 @@ def _retry_null_columns(
     return _attempt_insert(writer, table, cols, tuple(vals))
 
 
+def _retry_null_columns_minimal(
+    writer: TableWriter,
+    table: str,
+    columns: list[str],
+    values: tuple,
+    cols_to_null: list[str],
+) -> tuple[bool, str | None, list[str]]:
+    """Null the fewest columns possible: try each offending column alone first.
+
+    Falls back to nulling all candidates (previous behaviour) so no row that
+    used to copy is lost. Returns (ok, err, cleared_columns).
+    """
+    cols = list(columns)
+    candidates = [
+        c for c in cols_to_null
+        if c in cols and values[cols.index(c)] is not None
+    ]
+    if len(candidates) > 1:
+        for col in candidates:
+            ok, _err = _retry_null_columns(writer, table, columns, values, [col])
+            if ok:
+                return True, None, [col]
+    ok, err = _retry_null_columns(writer, table, columns, values, cols_to_null)
+    return ok, err, list(cols_to_null) if ok else []
+
+
 def _retry_with_defaults(
     writer: TableWriter,
     table: str,
@@ -1381,14 +1503,14 @@ def _try_insert_row(
         "invalid input value for enum" in err_low or "enum" in err_low
     ):
         enum_cols = [c for c in writer.enum_columns(table) if c in columns]
-        ok3, err3 = _retry_null_columns(writer, table, columns, values, enum_cols)
+        ok3, err3, cleared3 = _retry_null_columns_minimal(writer, table, columns, values, enum_cols)
         if ok3:
             log(f"{table}: copied after clearing invalid enum values")
             clears = getattr(writer, "_value_clears", None)
             if clears is not None and len(clears) < 40:
                 clears.append({
                     "table": table,
-                    "column": ",".join(enum_cols[:6]),
+                    "column": ",".join(cleared3[:6]),
                     "raw": None,
                     "action": "null",
                     "reason": "enum_retry",
@@ -1409,14 +1531,14 @@ def _try_insert_row(
         else:
             json_cols = [c for c in columns if c in JSON_COLUMNS]
         if json_cols:
-            ok4, err4 = _retry_null_columns(writer, table, columns, values, json_cols)
+            ok4, err4, cleared4 = _retry_null_columns_minimal(writer, table, columns, values, json_cols)
             if ok4:
                 log(f"{table}: copied after clearing invalid JSON values")
                 clears = getattr(writer, "_value_clears", None)
                 if clears is not None and len(clears) < 40:
                     clears.append({
                         "table": table,
-                        "column": ",".join(json_cols[:6]),
+                        "column": ",".join(cleared4[:6]),
                         "raw": None,
                         "action": "null",
                         "reason": "json_retry",
@@ -1429,9 +1551,18 @@ def _try_insert_row(
         "data truncated" in err_low or "enum" in err_low
     ):
         enum_cols = [c for c in writer.enum_columns(table) if c in columns]
-        ok5, err5 = _retry_null_columns(writer, table, columns, values, enum_cols)
+        ok5, err5, cleared5 = _retry_null_columns_minimal(writer, table, columns, values, enum_cols)
         if ok5:
             log(f"{table}: copied after clearing invalid MySQL enum values")
+            clears = getattr(writer, "_value_clears", None)
+            if clears is not None and len(clears) < 40:
+                clears.append({
+                    "table": table,
+                    "column": ",".join(cleared5[:6]),
+                    "raw": None,
+                    "action": "null",
+                    "reason": "enum_retry",
+                })
             return True, None
         err = err5 or err
 
@@ -1852,6 +1983,12 @@ def _copy_tables_universal_body(
     value_clears = list(getattr(writer, "_value_clears", None) or [])
     if value_clears:
         report["value_clears"] = value_clears
+    batch_skips = dict(getattr(writer, "_batch_skips", None) or {})
+    if batch_skips:
+        report["batch_skips"] = batch_skips
+        for tbl, n in batch_skips.items():
+            first = (getattr(writer, "_batch_first_err", None) or {}).get(tbl, "")
+            log(f"Batch insert skipped {n} row(s) in {tbl}" + (f" — first error: {first}" if first else ""))
     if soft_incomplete_tables:
         report["soft_policy_tables"] = sorted(soft_incomplete_tables)
     for item in report.get("incomplete", []):
