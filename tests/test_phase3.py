@@ -11,6 +11,9 @@ KW = dict(enabled=True, interval_hours=24, run_at="03:00", timezone_name="Asia/T
 
 def test_run_at_validation():
     assert normalize_run_at("03:00") == "03:00"
+    assert normalize_run_at("03:00:00") == "03:00"  # browsers may include seconds
+    assert normalize_run_at("23:59:59.000") == "23:59"
+    assert normalize_run_at("03:00:60") == ""
     assert normalize_run_at("3:00") == ""
     assert normalize_run_at("24:00") == ""
     assert normalize_run_at(None) == ""

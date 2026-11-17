@@ -111,13 +111,16 @@ def normalize_interval_hours(value: object) -> float:
     return 24.0
 
 
-_RUN_AT_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+_RUN_AT_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)(?::[0-5]\d(?:\.\d+)?)?$")
 
 
 def normalize_run_at(value: object) -> str:
-    """Fixed daily start ``HH:MM`` (panel timezone) or '' for the rolling interval."""
+    """Fixed daily start ``HH:MM`` (panel timezone) or '' for the rolling interval.
+
+    Some browsers send ``<input type=time>`` as ``HH:MM:SS``; seconds are dropped.
+    """
     text = (str(value).strip() if value is not None else "")
-    return text if _RUN_AT_RE.match(text) else ""
+    return text[:5] if _RUN_AT_RE.match(text) else ""
 
 
 def normalize_timezone(value: object) -> str:
