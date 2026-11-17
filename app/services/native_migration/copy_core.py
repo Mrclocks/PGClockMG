@@ -21,6 +21,7 @@ TABLE_ORDER = [
     "settings",
     "admin_roles",  # before admins (role_id FK)
     "admins",
+    "admin_passkeys",  # FK admins; binary credential columns
     "core_configs",
     "nodes",
     "inbounds",
@@ -39,6 +40,8 @@ TABLE_ORDER = [
     "admin_notification_reminders",
     "node_user_usages",
     "node_usages",
+    "node_outbound_usages",  # FK nodes
+    "wireguard_subnets",
     "user_hwids",
     "api_keys",
     "temp_keys",
@@ -48,6 +51,7 @@ TABLE_ORDER = [
 
 SKIP_TABLES = {
     "alembic_version",
+    "passkey_challenges",  # short-lived login challenges — nothing worth carrying over
     "admin_usage_logs",
     "user_usage_logs",
     "node_stats",
@@ -153,6 +157,27 @@ OBSOLETE_TO_EMPTY = {
     ("hosts", "noise"): _HOST_OBSOLETE,
     ("hosts", "fragment"): _HOST_OBSOLETE,
 }
+
+# Binary columns must stay raw bytes — never decoded to text. The authoritative list comes
+# from the TARGET schema (writers report bytea / BLOB / VARBINARY columns and register them
+# via register_binary_columns), so future binary columns are covered automatically. The
+# static entries are only a fallback for when the schema cannot be introspected.
+BINARY_COLUMNS = frozenset({
+    ("admin_passkeys", "credential_id"),
+    ("admin_passkeys", "public_key"),
+})
+_DYNAMIC_BINARY: set[tuple[str, str]] = set()
+
+
+def register_binary_columns(table: str, columns) -> None:
+    for col in columns or ():
+        _DYNAMIC_BINARY.add((table, str(col)))
+
+
+def is_binary_column(table: str, column: str) -> bool:
+    key = (table, column)
+    return key in BINARY_COLUMNS or key in _DYNAMIC_BINARY
+
 
 # PasarGuard StringArray columns (comma-separated); address is NOT NULL
 HOST_STRING_ARRAY_COLUMNS = frozenset({"address", "sni", "host", "verify_peer_cert_by_name"})
@@ -705,6 +730,12 @@ def sqlite_columns(conn: sqlite3.Connection, table: str) -> list[str]:
 
 def convert_value(table: str, column: str, value):
     """Coerce types; neutralize obsolete Marzban tokens."""
+    if is_binary_column(table, column):
+        if value is None:
+            return None
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return bytes(value)
+        return str(value).encode("utf-8")
     value = normalize_raw_value(value)
 
     if table == "users" and column == "status":
