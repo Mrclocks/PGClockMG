@@ -287,6 +287,35 @@ def _clone_release_fallback(tag: str, src: Path) -> Path:
     return app_dir
 
 
+def _rollback_swap(old: Path, app_dst: Path, req_backup: Path, freeze_file: Path | None = None) -> list[str]:
+    """Restore ``app/``, requirements.txt and (best effort) the venv packages after a failed update.
+
+    Returns human-readable notes for the update log.
+    """
+    notes: list[str] = []
+    if old.is_dir():
+        if app_dst.exists():
+            shutil.rmtree(app_dst, ignore_errors=True)
+        shutil.move(str(old), str(app_dst))
+        notes.append("previous app/ restored")
+    if req_backup.is_file():
+        shutil.move(str(req_backup), str(app_dst.parent / "requirements.txt"))
+    home = app_dst.parent
+    pip = home / "venv" / "bin" / "pip"
+    if freeze_file is not None and freeze_file.is_file() and pip.is_file():
+        try:
+            res = _run([str(pip), "install", "-q", "-r", str(freeze_file)], cwd=str(home), timeout=400)
+            notes.append(
+                "previous Python packages restored" if res.returncode == 0
+                else "could not restore previous Python packages (run: pip install -r requirements.txt)"
+            )
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"package restore failed: {exc}")
+        finally:
+            freeze_file.unlink(missing_ok=True)
+    return notes
+
+
 def apply_update(*, current: str, target_tag: str | None = None) -> dict:
     """
     Pull the target release into BACKUP_HOME, replace app/, refresh deps, restart service.
@@ -316,6 +345,7 @@ def apply_update(*, current: str, target_tag: str | None = None) -> dict:
 
     def _worker():
         tmp: Path | None = None
+        swapped: tuple[Path, Path, Path, Path] | None = None
         try:
             home = Path(BACKUP_HOME)
             app_dst = home / "app"
@@ -380,18 +410,34 @@ def apply_update(*, current: str, target_tag: str | None = None) -> dict:
                 shutil.rmtree(replaced, ignore_errors=True)
             shutil.move(str(staging), str(replaced))
             old = home / "app.old"
+            req_backup = home / "requirements.txt.pre-update"
+            freeze_file = home / "requirements.freeze.pre-update"
+            # Registered BEFORE anything is moved: a failure at any later point (even in
+            # the second move) rolls back. Rollback never touches app/ unless app.old holds
+            # the previous version.
+            swapped = (old, app_dst, req_backup, freeze_file)
             if old.exists():
                 shutil.rmtree(old, ignore_errors=True)
+            # Snapshot installed packages so a failed pip run can be undone too.
+            venv_pip = home / "venv" / "bin" / "pip"
+            if venv_pip.is_file():
+                try:
+                    frz = _run([str(venv_pip), "freeze"], cwd=str(home), timeout=120)
+                    if frz.returncode == 0 and (frz.stdout or "").strip():
+                        freeze_file.write_text(frz.stdout, encoding="utf-8")
+                except Exception:  # noqa: BLE001 — rollback of packages is best effort
+                    pass
+            req_file = home / "requirements.txt"
+            if req_file.is_file():
+                shutil.copy2(req_file, req_backup)
             shutil.move(str(app_dst), str(old))
             shutil.move(str(replaced), str(app_dst))
-            shutil.rmtree(old, ignore_errors=True)
 
             if req_src.is_file():
                 shutil.copy2(req_src, home / "requirements.txt")
 
             _set_update_job(progress=70)
             _append_log("Refreshing Python dependencies…")
-            venv_pip = home / "venv" / "bin" / "pip"
             if venv_pip.is_file() and (home / "requirements.txt").is_file():
                 pip = _run(
                     [str(venv_pip), "install", "-r", str(home / "requirements.txt"), "-q"],
@@ -402,6 +448,10 @@ def apply_update(*, current: str, target_tag: str | None = None) -> dict:
                     raise RuntimeError((pip.stderr or pip.stdout or "pip_install_failed")[:800])
             else:
                 _append_log("venv/pip not found — skipped dependency refresh")
+            shutil.rmtree(old, ignore_errors=True)
+            req_backup.unlink(missing_ok=True)
+            freeze_file.unlink(missing_ok=True)
+            swapped = None
 
             _set_update_job(progress=90)
             _append_log("Scheduling service restart…")
@@ -420,6 +470,13 @@ def apply_update(*, current: str, target_tag: str | None = None) -> dict:
         except Exception as exc:
             log.exception("backup panel update failed")
             _append_log(f"ERROR: {exc}")
+            if swapped is not None:
+                try:
+                    for note in _rollback_swap(*swapped):
+                        _append_log(f"Rollback: {note}")
+                    _append_log("Rolled back to the previous version")
+                except Exception as rb_exc:  # noqa: BLE001
+                    _append_log(f"Rollback failed: {rb_exc}")
             _set_update_job(
                 ok=False,
                 status="error",
