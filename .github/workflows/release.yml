@@ -1,0 +1,42 @@
+name: Release
+
+# Manually run: tags the current commit with v<APP_VERSION> and publishes a GitHub release.
+on:
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: "Release notes (markdown). Leave empty for auto-generated notes."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: ver
+        run: |
+          v=$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' app/main.py)
+          test -n "$v" || { echo "APP_VERSION not found"; exit 1; }
+          echo "tag=v$v" >> "$GITHUB_OUTPUT"
+
+      - name: Create tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists"; exit 1
+          fi
+          if [ -n "$NOTES" ]; then
+            printf '%s\n' "$NOTES" > notes.md
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+          fi
