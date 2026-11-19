@@ -22,6 +22,7 @@ from app.services.archive_guard import (
     resolve_allow_large_for_zip,
     safe_extract_zip_file,
     safe_upload_name,
+    sniff_archive_kind,
 )
 from app.services.upload import save_upload
 
@@ -43,7 +44,7 @@ _Z_SUFFIX_RE = re.compile(
 # GNU ``split -b`` with a ``_part_`` prefix: ``backup_part_aa.zip``, ``backup.part_ab``,
 # ``backup.zip.part-ac`` … (letters aa=1, ab=2, … ; total is inferred).
 _ALPHA_PART_RE = re.compile(
-    r"^(?P<stem>.+?)[._-]part[._-]?(?P<letters>[a-z]{2})(?:\.zip)?$",
+    r"^(?P<stem>.+?)[._-]part[._-]?(?P<letters>[a-z]{2})(?P<ext>\.zip|\.tar\.gz|\.tgz)?$",
     re.IGNORECASE,
 )
 
@@ -202,6 +203,10 @@ def _is_valid_zip(path: Path) -> bool:
             return bad is None
     except (OSError, zipfile.BadZipFile):
         return False
+
+
+def _is_tar_archive(path: Path) -> bool:
+    return sniff_archive_kind(path) in ("gzip", "tar")
 
 
 def _looks_like_html(path: Path) -> bool:
@@ -771,6 +776,18 @@ def assemble_part_paths(
                     heals=heals,
                     saver=saver,
                 )
+            if _is_tar_archive(path):
+                # marzban.sh single-part backup (tar.gz, maybe renamed .zip).
+                return _save_result(
+                    path,
+                    name,
+                    allow_large=allow_large,
+                    assembled=False,
+                    parts_count=1,
+                    parts_meta=None,
+                    heals=heals,
+                    saver=saver,
+                )
             spec = parse_part_filename(name)
             if spec:
                 raise BackupPartsError(
@@ -864,6 +881,28 @@ def assemble_part_paths(
             f"Concatenated {len(staged)} parts in order.",
         )
 
+        parts_meta = [
+            {
+                "filename": p.spec.filename,
+                "index": p.spec.index,
+                "total": p.spec.total,
+                "size": p.size,
+            }
+            for p in staged
+        ]
+        if _is_tar_archive(raw_merged):
+            # ``split -b`` of a tar.gz (marzban.sh): plain concatenation is the archive.
+            return _save_result(
+                raw_merged,
+                merged_name,
+                allow_large=allow_large,
+                assembled=True,
+                parts_count=len(staged),
+                parts_meta=parts_meta,
+                heals=heals,
+                saver=saver,
+            )
+
         healed = tmp_dir / f"healed-{merged_name}"
         heal_concatenated_zip(raw_merged, healed, heals)
         try:
@@ -886,15 +925,7 @@ def assemble_part_paths(
             allow_large=allow_large,
             assembled=True,
             parts_count=len(staged),
-            parts_meta=[
-                {
-                    "filename": p.spec.filename,
-                    "index": p.spec.index,
-                    "total": p.spec.total,
-                    "size": p.size,
-                }
-                for p in staged
-            ],
+            parts_meta=parts_meta,
             heals=heals,
             saver=saver,
         )

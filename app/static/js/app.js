@@ -2298,7 +2298,7 @@ async function renderUploadSection() {
   } else {
     state.uploadPrimarySlot = 'bundle_zip';
     modeTabs?.classList.remove('hidden');
-    if (zipInput) zipInput.accept = '.zip';
+    if (zipInput) zipInput.accept = '.zip,.tar.gz,.tgz,.gz,.tar';
     setUploadMode(state.uploadMode);
   }
   bindZipUploadZone();

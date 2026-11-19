@@ -1,4 +1,4 @@
-"""Zip upload safety guards shared by upload, restore, and cleanup flows."""
+"""Zip / tar upload safety guards shared by upload, restore, and cleanup flows."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -313,4 +314,166 @@ def safe_extract(
         extracted_total += written
         if extracted_total > total_limit:
             raise ValueError("Zip expands beyond the safe extraction limit")
+    return report
+
+
+# ---------------------------------------------------------------------------
+# Generic backup archives: zip, tar, tar.gz/tgz (marzban.sh `backup` format),
+# including a zip that merely wraps one inner archive. Detection is by content,
+# so a tar.gz renamed to ``.zip`` (Telegram ``backup_part_aa``) still opens.
+# ---------------------------------------------------------------------------
+
+ARCHIVE_SUFFIXES = (".zip", ".tar.gz", ".tgz", ".tar", ".gz")
+
+
+def sniff_archive_kind(path: str | Path) -> str | None:
+    """Return ``zip`` / ``tar`` / ``gzip`` from file magic, else None."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(512)
+    except OSError:
+        return None
+    if head[:4] in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"):
+        return "zip"
+    if head[:2] == b"\x1f\x8b":
+        return "gzip"
+    if len(head) >= 262 and head[257:262] == b"ustar":
+        return "tar"
+    return None
+
+
+def is_archive_filename(name: str) -> bool:
+    return str(name or "").lower().endswith(ARCHIVE_SUFFIXES)
+
+
+def safe_extract_tar_file(
+    path: str | Path,
+    dest: Path,
+    *,
+    allow_large: bool = False,
+) -> ZipPreflight:
+    """Extract regular files/dirs from a (gzip) tar with the zip-equivalent guards.
+
+    Links, devices and FIFOs are skipped; absolute / ``..`` member paths are refused.
+    """
+    import tarfile
+
+    entry_limit = zip_entry_limit_bytes(allow_large)
+    total_limit = zip_total_limit_bytes(allow_large)
+    dest.mkdir(parents=True, exist_ok=True)
+    dest_resolved = dest.resolve()
+    files = 0
+    total = 0
+    largest = 0
+    try:
+        tf = tarfile.open(path, "r:*")
+    except (tarfile.TarError, OSError, EOFError) as e:
+        raise ValueError(f"Bad tar archive: {e}") from e
+    with tf:
+        try:
+            for member in tf:
+                name = member.name.replace("\\", "/")
+                while name.startswith("./"):
+                    name = name[2:]
+                if not name or name == ".":
+                    continue
+                if name.startswith("/") or ".." in name.split("/"):
+                    raise ValueError(f"Unsafe tar entry: {member.name}")
+                target = dest / name
+                try:
+                    target.resolve().relative_to(dest_resolved)
+                except (ValueError, OSError) as exc:
+                    raise ValueError(f"Unsafe tar entry: {member.name}") from exc
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                if not member.isfile():
+                    continue  # symlink / hardlink / device: never materialize
+                files += 1
+                if files > MAX_ZIP_FILES:
+                    raise ValueError("Archive contains too many files")
+                if member.size > entry_limit:
+                    raise ValueError(
+                        _entry_too_large_message(
+                            member.name, member.size, entry_limit, allow_large=allow_large,
+                        )
+                    )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                src = tf.extractfile(member)
+                if src is None:
+                    continue
+                written = 0
+                with src, open(target, "wb") as out:
+                    while True:
+                        chunk = src.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        if written > entry_limit:
+                            raise ValueError(
+                                _entry_too_large_message(
+                                    member.name, written, entry_limit, allow_large=allow_large,
+                                )
+                            )
+                        if total + written > total_limit:
+                            raise ValueError("Archive expands beyond the safe extraction limit")
+                        out.write(chunk)
+                total += written
+                largest = max(largest, written)
+        except (tarfile.TarError, EOFError, zlib.error) as e:
+            raise ValueError(f"Bad tar archive: {e}") from e
+    try:
+        packed = max(Path(path).stat().st_size, 1)
+    except OSError:
+        packed = 1
+    return ZipPreflight(
+        files=files,
+        total_uncompressed=total,
+        total_compressed=packed,
+        largest_entry=largest,
+        compression_ratio=total // packed if total else 0,
+    )
+
+
+def _extract_one(path: Path, dest: Path, *, allow_large: bool) -> ZipPreflight:
+    kind = sniff_archive_kind(path)
+    if kind == "zip":
+        return safe_extract_zip_file(path, dest, allow_large=allow_large)
+    if kind in ("gzip", "tar"):
+        return safe_extract_tar_file(path, dest, allow_large=allow_large)
+    raise ValueError("Not a zip or tar.gz archive")
+
+
+def safe_extract_archive(
+    path: str | Path,
+    dest: Path,
+    *,
+    allow_large: bool = False,
+    max_depth: int = 2,
+) -> ZipPreflight:
+    """Extract zip / tar / tar.gz by content; unwrap a lone inner archive.
+
+    marzban.sh Telegram backups are ``backup_part_aa.tar.gz`` (often re-zipped or
+    renamed ``.zip`` by users). When the archive holds exactly one file and that
+    file is itself an archive, it is extracted in place (up to ``max_depth``).
+    """
+    path = Path(path)
+    report = _extract_one(path, dest, allow_large=allow_large)
+    depth = 1
+    while depth < max_depth:
+        files = [p for p in dest.rglob("*") if p.is_file()]
+        if len(files) != 1:
+            break
+        inner = files[0]
+        if sniff_archive_kind(inner) is None:
+            break
+        box = dest / "_inner"
+        if box.exists():
+            break
+        report = _extract_one(inner, box, allow_large=allow_large)
+        try:
+            inner.unlink()
+        except OSError:
+            pass
+        depth += 1
     return report

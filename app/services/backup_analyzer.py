@@ -25,7 +25,8 @@ CATEGORY_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("templates", ()),
 ]
 
-SQLITE_DB_NAMES = ("db.sqlite3", "marzban.db", "x-ui.db")
+# ``db_backup.sqlite`` is what marzban.sh ``backup`` writes for SQLite installs.
+SQLITE_DB_NAMES = ("db.sqlite3", "marzban.db", "x-ui.db", "db_backup.sqlite", "db_backup.sqlite3")
 
 MARZBAN_PATH_MARKERS = (
     "/var/lib/marzban",
@@ -99,7 +100,7 @@ def _score_directory(path: Path) -> int:
 
 def _categorize_file(path: Path) -> str:
     name = path.name.lower()
-    if name in ("db.sqlite3", "marzban.db", "x-ui.db"):
+    if name in SQLITE_DB_NAMES:
         return "database_sqlite"
     if name.endswith(".sql"):
         return "database_sql"
@@ -160,7 +161,11 @@ def analyze_upload_directory(upload_dir: Path, vault_scope: str | None = None) -
         if name in SQLITE_DB_NAMES and not paths["sqlite"]:
             paths["sqlite"] = str(p)
             paths["data_dir"] = str(p.parent)
-        if name.endswith(".sql") and not paths["sql"]:
+        if name.endswith(".sql") and (
+            not paths["sql"]
+            # marzban.sh dump name beats any other stray .sql in the archive
+            or (name == "db_backup.sql" and Path(paths["sql"]).name.lower() != "db_backup.sql")
+        ):
             paths["sql"] = str(p)
         if name == ".env" and not paths["env"]:
             paths["env"] = str(p)
@@ -254,7 +259,8 @@ def analyze_upload_directory(upload_dir: Path, vault_scope: str | None = None) -
             detected_source_db = None
 
     # Both a db.sqlite3 and a .sql dump: MySQL Marzban servers often keep an old,
-    # nearly empty db.sqlite3. Pick whichever actually holds the users.
+    # nearly empty db.sqlite3 (marzban.sh copies it into marzban_data/).
+    # Pick whichever actually holds the users.
     if panel_hint == "marzban" and paths["sqlite"] and paths["sql"]:
         sq_users = _sqlite_user_count(Path(paths["sqlite"]))
         sql_users = _sql_user_count(Path(paths["sql"]))
