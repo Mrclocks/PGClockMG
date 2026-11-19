@@ -193,6 +193,10 @@ def save_bundle_slot(
                 )
             else:
                 slot_meta["ok"] = dest.exists()
+            if slot == "bundle_zip" and not slot_meta["ok"]:
+                slot_meta["error_i18n"] = _bundle_zip_problem(
+                    filename, analysis, extract_error=slot_meta.get("error") if extract_failed else None,
+                )
         elif slot == "env":
             slot_meta["ok"] = dest.exists()
             text = dest.read_text(encoding="utf-8", errors="ignore")
@@ -245,6 +249,45 @@ def save_bundle_slot(
                 cleanup_path.parent.rmdir()
             except Exception:
                 pass
+
+
+def _bundle_zip_problem(filename: str, analysis: dict, *, extract_error: str | None) -> dict:
+    """Explain why an uploaded backup zip cannot be used (en/fa/ru)."""
+    from app.services.backup_parts import parse_part_filename
+
+    spec = parse_part_filename(filename)
+    if spec is not None:
+        return {
+            "en": (
+                f"«{filename}» is only one part of a split backup. Select ALL parts "
+                "(e.g. …_part_aa.zip, …_part_ab.zip, …) together in the file picker and upload them at once."
+            ),
+            "fa": (
+                f"«{filename}» فقط یک پارت از بکاپ چندتکه است. همهٔ پارت‌ها "
+                "(مثلاً ‎…_part_aa.zip، ‎…_part_ab.zip و …) را با هم انتخاب و یک‌جا آپلود کنید."
+            ),
+            "ru": (
+                f"«{filename}» — лишь одна часть разделённой копии. Выберите ВСЕ части "
+                "(…_part_aa.zip, …_part_ab.zip, …) вместе и загрузите их одновременно."
+            ),
+        }
+    if extract_error:
+        return {
+            "en": f"Cannot open the zip: {extract_error}. If the backup was split into parts, upload all parts together.",
+            "fa": f"فایل zip باز نشد ({extract_error}). اگر بکاپ چندتکه است، همهٔ پارت‌ها را با هم آپلود کنید.",
+            "ru": f"Не удалось открыть zip: {extract_error}. Если копия разделена, загрузите все части вместе.",
+        }
+    missing = (analysis or {}).get("missing") or []
+    if missing:
+        return {
+            lang: " · ".join(str(m.get(lang) or m.get("en") or "") for m in missing if isinstance(m, dict))
+            for lang in ("en", "fa", "ru")
+        }
+    return {
+        "en": "No database (db.sqlite3 or .sql dump) was found in this zip.",
+        "fa": "هیچ دیتابیسی (db.sqlite3 یا فایل .sql) داخل این zip پیدا نشد.",
+        "ru": "В этом zip не найдена база (db.sqlite3 или .sql).",
+    }
 
 
 def _database_slot_ok(
@@ -384,6 +427,7 @@ def validate_bundle(
         "mode": "separate",
         "upload_mode": reqs["upload_mode"],
         "analysis": analysis,
+        "zip_error": (zip_slot or {}).get("error_i18n") if zip_slot and not zip_slot.get("ok") else None,
     }
 
 

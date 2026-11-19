@@ -1,4 +1,4 @@
-> 🚀 **`v5.0.0`** — backup/migration hardening phases 0–3 + PasarGuard v5.6 compatibility
+> 🚀 **`v5.0.1`** — fix migration upload stuck on split backups (backup_part_aa.zip …)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">

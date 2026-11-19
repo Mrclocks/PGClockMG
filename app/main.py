@@ -43,7 +43,7 @@ from app.services.auth import (
 )
 from app.config import WEB_PORT
 
-APP_VERSION = "5.0.0"
+APP_VERSION = "5.0.1"
 
 
 @asynccontextmanager
@@ -554,10 +554,17 @@ async def api_upload(
 async def api_upload_parts(
     files: list[UploadFile] = File(...),
     allow_large_upload: str | None = Form(None),
+    bundle_id: str | None = Form(None),
+    slot: str | None = Form(None),
+    panel_id: str | None = Form(None),
+    source_db: str | None = Form(None),
+    marzban_mode: str | None = Form(None),
 ):
     """Assemble split backup parts into one zip, then run the normal upload save.
 
-    Isolated from ``/api/upload`` so migration / single-zip restore stay unchanged.
+    Restore: returns an ``upload_id`` (``save_upload``). Migration wizard: when
+    ``slot``/``bundle_id`` is sent, the assembled zip goes into the upload bundle
+    exactly like a single ``/api/upload`` bundle_zip would.
     """
     from app.services.backup_parts import BackupPartsError, assemble_part_paths
 
@@ -603,8 +610,19 @@ async def api_upload_parts(
         try:
             from functools import partial
 
+            saver = None
+            if slot or bundle_id:
+                bid = bundle_id or init_bundle()
+
+                def saver(path, filename, *, allow_large=False):
+                    return save_bundle_slot(
+                        bid, slot or "bundle_zip", path, filename,
+                        panel_id=panel_id, source_db=source_db, marzban_mode=marzban_mode,
+                        allow_large=allow_large,
+                    )
+
             result = await run_in_threadpool(
-                partial(assemble_part_paths, staged, allow_large=use_large),
+                partial(assemble_part_paths, staged, allow_large=use_large, saver=saver),
             )
         except BackupPartsError as e:
             raise HTTPException(400, e.message) from e

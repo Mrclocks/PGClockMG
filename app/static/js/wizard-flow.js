@@ -951,6 +951,8 @@ function looksLikeBackupPartName(name) {
   }
   if (/\.zip\.\d{1,3}$/i.test(n)) return true;
   if (/\.z\d{2}$/i.test(n)) return true;
+  // GNU split with a part prefix: backup_part_aa.zip, backup.zip.part_ab
+  if (/^.+?[._-]part[._-]?[a-z]{2}(?:\.zip)?$/i.test(n)) return true;
   return false;
 }
 
