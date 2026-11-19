@@ -1,4 +1,4 @@
-> 🚀 **`v5.0.1`** — fix migration upload stuck on split backups (backup_part_aa.zip …)
+> 🚀 **`v5.0.2`** — marzban.sh tar.gz backups (backup_part_aa) supported; MariaDB detected next to a stale SQLite
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
