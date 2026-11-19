@@ -884,6 +884,8 @@ function canProceedStep1() {
 function canProceedStep2() {
   const panel = state.selectedPanel;
   if (panel?.id === 'marzban') {
+    const zipProblem = bundleZipProblem();
+    if (zipProblem && state.uploadMode !== 'separate') return zipProblem;
     const db = detectMarzbanSourceDb();
     if (!db) return t('block.detectSourceDb');
     state.sourceDb = db;
@@ -921,6 +923,8 @@ function canProceedStep2() {
   }
   if (!uploadSatisfied()) {
     if (panel?.id === '3x-ui') return t('block.xuiDb');
+    const zp = bundleZipProblem();
+    if (zp && state.uploadMode !== 'separate') return zp;
     return t('block.uploadsIncomplete');
   }
   if (
@@ -2179,8 +2183,9 @@ function bindZipUploadZone() {
       input.click();
     };
   }
+  input.multiple = slot() === 'bundle_zip';
   input.onchange = () => {
-    if (input.files.length) uploadSlotFile(slot(), input.files[0]);
+    if (input.files.length) uploadPrimaryFiles(slot(), Array.from(input.files));
     input.value = '';
   };
 
@@ -2189,8 +2194,26 @@ function bindZipUploadZone() {
   zone.ondrop = (e) => {
     e.preventDefault();
     zone.classList.remove('dragover');
-    if (e.dataTransfer.files.length) uploadSlotFile(slot(), e.dataTransfer.files[0]);
+    if (e.dataTransfer.files.length) uploadPrimaryFiles(slot(), Array.from(e.dataTransfer.files));
   };
+}
+
+/** Several files or a split-part name (backup_part_aa.zip, x-1-3.zip …) → server assembles. */
+function uploadPrimaryFiles(slot, files) {
+  if (!files.length) return;
+  const isPart = typeof looksLikeBackupPartName === 'function' && looksLikeBackupPartName(files[0].name);
+  if (slot === 'bundle_zip' && (files.length > 1 || isPart)) {
+    return uploadSlotFile(slot, files[0], files);
+  }
+  return uploadSlotFile(slot, files[0]);
+}
+
+/** Why the uploaded backup zip is unusable (localized), or ''. */
+function bundleZipProblem() {
+  const bs = state.bundleStatus;
+  if (!bs || bs.complete) return '';
+  const msg = tr(bs.zip_error || state.uploadInfo?.error_i18n, state.lang);
+  return typeof msg === 'string' ? msg : '';
 }
 
 function setUploadMode(mode) {
@@ -2328,7 +2351,7 @@ async function renderUploadSection() {
   updateStepButtons();
 }
 
-async function uploadSlotFile(slot, file) {
+async function uploadSlotFile(slot, file, parts = null) {
   const status = document.getElementById('uploadStatus');
   // Primary dropzone (zip OR single 3X-UI db) uses the same progress UI
   const isPrimaryZone = slot === 'bundle_zip' || slot === primaryUploadSlot();
@@ -2346,11 +2369,14 @@ async function uploadSlotFile(slot, file) {
     },
   };
 
+  const progressLabel = parts && parts.length > 1
+    ? `${file.name} +${parts.length - 1}`
+    : file.name;
   if (isPrimaryZone) {
     setUploadProgressUi(progressIds, {
       phase: 'uploading',
       pct: 0,
-      message: `${t('uploadProgress')} (${file.name})`,
+      message: `${t('uploadProgress')} (${progressLabel})`,
     });
   } else {
     status.classList.remove('hidden');
@@ -2358,7 +2384,8 @@ async function uploadSlotFile(slot, file) {
   }
 
   const form = new FormData();
-  form.append('file', file);
+  if (parts) parts.forEach(f => form.append('files', f));
+  else form.append('file', file);
   form.append('slot', slot);
   if (state.uploadBundleId) form.append('bundle_id', state.uploadBundleId);
   if (state.selectedPanel) form.append('panel_id', state.selectedPanel.id);
@@ -2367,12 +2394,12 @@ async function uploadSlotFile(slot, file) {
   if (largeUploadOverrideEnabled()) form.append('allow_large_upload', '1');
 
   try {
-    const data = await uploadFormWithProgress('/api/upload', form, (pct) => {
+    const data = await uploadFormWithProgress(parts ? '/api/upload-parts' : '/api/upload', form, (pct) => {
       if (!isPrimaryZone) return;
       setUploadProgressUi(progressIds, {
         phase: 'uploading',
         pct: pct == null ? 0 : pct,
-        message: `${t('uploadProgress')} (${file.name})`,
+        message: `${t('uploadProgress')} (${progressLabel})`,
       });
     });
     state.uploadBundleId = data.bundle_id;
@@ -2389,10 +2416,12 @@ async function uploadSlotFile(slot, file) {
     if (isPrimaryZone) {
       document.getElementById('uploadZone')?.classList.add('hidden');
       document.getElementById('uploadZipProgress')?.classList.add('hidden');
+      const problem = ok ? '' : bundleZipProblem();
       applyUploadSuccessStatus(status, {
         ok,
-        message: ok ? t('upload.allReady') : t('uploadSuccess'),
-        fileName: file.name,
+        error: !!problem,
+        message: ok ? t('upload.allReady') : (problem ? escapeHtmlApp(problem) : t('uploadSuccess')),
+        fileName: data.merged_filename || progressLabel,
         replaceId: 'uploadZipReplaceBtn',
         onReplace: progressIds.onReplace,
       });

@@ -360,3 +360,91 @@ def test_api_upload_parts_requires_auth(tmp_path, monkeypatch):
         )
         assert r.status_code == 401
     auth_mod._cached_token = None
+
+
+def test_parse_gnu_split_part_names():
+    from app.services.backup_parts import looks_like_part_filename, parse_part_filename
+
+    aa = parse_part_filename("backup_part_aa.zip")
+    ab = parse_part_filename("backup_part_ab.zip")
+    assert aa is not None and ab is not None
+    assert (aa.index, ab.index) == (1, 2)
+    assert aa.stem == ab.stem == "backup.zip"
+    assert parse_part_filename("backup.zip.part_ac").index == 3
+    # Ordinary words must not look like parts.
+    assert not looks_like_part_filename("backup_partner.zip")
+    assert not looks_like_part_filename("backup_party.zip")
+
+
+def _marzban_zip(tmp_path: Path) -> bytes:
+    import sqlite3
+
+    db_path = tmp_path / "marz-src.sqlite3"
+    con = sqlite3.connect(db_path)
+    con.execute("CREATE TABLE users(id INTEGER PRIMARY KEY, username TEXT)")
+    con.execute("INSERT INTO users(username) VALUES ('alice')")
+    con.commit()
+    con.close()
+    return _zip_bytes({
+        "var/lib/marzban/db.sqlite3": db_path.read_bytes(),
+        "var/lib/marzban/xray_config.json": '{"inbounds": []}',
+        "opt/marzban/.env": (
+            "UVICORN_PORT=8000\n"
+            "SQLALCHEMY_DATABASE_URL=sqlite:////var/lib/marzban/db.sqlite3\n"
+        ),
+    })
+
+
+def _wizard_client(tmp_path, monkeypatch):
+    monkeypatch.setenv("PG_MIGRATOR_HOME", str(tmp_path))
+    import importlib
+    import app.config as cfg
+    from app.services import auth as auth_mod
+
+    importlib.reload(cfg)
+    monkeypatch.setattr(auth_mod, "TOKEN_FILE", tmp_path / ".access_token")
+    auth_mod._cached_token = None
+    auth_mod.ensure_token()
+    token = auth_mod.get_token()
+    import app.main as main_mod
+
+    importlib.reload(main_mod)
+    return main_mod, token
+
+
+def test_wizard_split_parts_assemble_into_bundle(tmp_path, monkeypatch):
+    main_mod, token = _wizard_client(tmp_path, monkeypatch)
+    payload = _marzban_zip(tmp_path)
+    chunks = _split_bytes(payload, 2)
+    form = {"slot": "bundle_zip", "panel_id": "marzban", "marzban_mode": "fresh"}
+
+    with TestClient(main_mod.app) as client:
+        # Only the first split part through the normal upload → clear reason, not silent success.
+        one = client.post(
+            "/api/upload",
+            headers={"X-Auth-Token": token},
+            data=form,
+            files={"file": ("backup_part_aa.zip", chunks[0], "application/zip")},
+        )
+        assert one.status_code == 200, one.text
+        status = one.json()["bundle_status"]
+        assert status["complete"] is False
+        assert "part_ab" in (status.get("zip_error") or {}).get("en", "")
+
+        # All parts together → assembled and stored in the wizard bundle.
+        r = client.post(
+            "/api/upload-parts",
+            headers={"X-Auth-Token": token},
+            data=form,
+            files=[
+                ("files", ("backup_part_ab.zip", chunks[1], "application/zip")),
+                ("files", ("backup_part_aa.zip", chunks[0], "application/zip")),
+            ],
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body.get("assembled_from_parts") is True
+        assert body.get("bundle_id")
+        bs = body["bundle_status"]
+        assert bs["complete"] is True, bs
+        assert bs["analysis"]["detected_source_db"] == "sqlite"

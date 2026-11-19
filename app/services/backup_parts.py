@@ -40,6 +40,20 @@ _Z_SUFFIX_RE = re.compile(
     r"^(?P<stem>.+)\.z(?P<index>\d{2})$",
     re.IGNORECASE,
 )
+# GNU ``split -b`` with a ``_part_`` prefix: ``backup_part_aa.zip``, ``backup.part_ab``,
+# ``backup.zip.part-ac`` … (letters aa=1, ab=2, … ; total is inferred).
+_ALPHA_PART_RE = re.compile(
+    r"^(?P<stem>.+?)[._-]part[._-]?(?P<letters>[a-z]{2})(?:\.zip)?$",
+    re.IGNORECASE,
+)
+
+
+def _alpha_index(letters: str) -> int:
+    """``aa`` → 1, ``ab`` → 2, … ``ba`` → 27 (split's suffix order)."""
+    n = 0
+    for ch in letters.lower():
+        n = n * 26 + (ord(ch) - ord("a"))
+    return n + 1
 # Downloaders append `` (1)``, `` copy``, ``.download``; browsers may double ``.zip``.
 _NOISE_SUFFIX_RE = re.compile(
     r"(?:\s*\(\d+\))+(?=\.[^.]+$)"
@@ -70,7 +84,7 @@ class PartSpec:
     stem: str
     index: int
     total: int
-    kind: str  # telegram | zip_num | z_split | whole
+    kind: str  # telegram | zip_num | z_split | split_alpha | whole
 
 
 @dataclass
@@ -148,6 +162,19 @@ def parse_part_filename(filename: str) -> PartSpec | None:
                 total=0,
                 kind="z_split",
             )
+
+    m = _ALPHA_PART_RE.match(name)
+    if m:
+        stem = m.group("stem")
+        if not stem.lower().endswith(".zip"):
+            stem = f"{stem}.zip"
+        return PartSpec(
+            filename=name,
+            stem=stem,
+            index=_alpha_index(m.group("letters")),
+            total=0,
+            kind="split_alpha",
+        )
     return None
 
 
@@ -669,6 +696,7 @@ def _save_result(
     parts_count: int,
     parts_meta: list[dict] | None,
     heals: HealReport,
+    saver=None,
 ) -> dict:
     use_large = bool(allow_large)
     if not use_large and path.stat().st_size > allowed_upload_bytes(False):
@@ -686,7 +714,7 @@ def _save_result(
                 code="need_large",
             )
     use_large = resolve_allow_large_for_zip(path, use_large)
-    result = save_upload(path, filename, allow_large=use_large)
+    result = (saver or save_upload)(path, filename, allow_large=use_large)
     if result.get("error"):
         raise BackupPartsError(str(result["error"]), code="zip_extract")
     result = dict(result)
@@ -704,8 +732,13 @@ def assemble_part_paths(
     items: list[tuple[str, Path]],
     *,
     allow_large: bool = False,
+    saver=None,
 ) -> dict:
-    """Normalize, merge, heal, repack parts → ``save_upload`` clean zip."""
+    """Normalize, merge, heal, repack parts → ``save_upload`` clean zip.
+
+    ``saver(path, filename, allow_large=...)`` replaces ``save_upload`` when given
+    (the migration wizard stores the clean zip in its upload bundle instead).
+    """
     if not items:
         raise BackupPartsError(
             _bilingual(
@@ -736,6 +769,7 @@ def assemble_part_paths(
                     parts_count=1,
                     parts_meta=None,
                     heals=heals,
+                    saver=saver,
                 )
             spec = parse_part_filename(name)
             if spec:
@@ -862,6 +896,7 @@ def assemble_part_paths(
                 for p in staged
             ],
             heals=heals,
+            saver=saver,
         )
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
