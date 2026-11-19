@@ -11,7 +11,7 @@ from app.services.prerequisites import (
 
 SLOT_DEFS: dict[str, dict] = {
     "bundle_zip": {
-        "accept": [".zip"],
+        "accept": [".zip", ".gz", ".tgz", ".tar"],
         "label": {
             "en": "Full backup ZIP",
             "fa": "بکاپ کامل (ZIP)",

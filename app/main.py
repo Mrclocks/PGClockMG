@@ -30,7 +30,7 @@ from app.services.archive_guard import (
     MAX_UPLOAD_BYTES, MAX_OVERRIDE_UPLOAD_BYTES, MAX_ZIP_ENTRY_BYTES, MAX_ZIP_FILES, MAX_ZIP_RATIO,
     MAX_ZIP_TOTAL_BYTES, MAX_OVERRIDE_ZIP_ENTRY_BYTES, MAX_OVERRIDE_ZIP_TOTAL_BYTES,
     allowed_upload_bytes, looks_like_panel_backup_zip, preferred_temp_dir,
-    resolve_allow_large_for_zip, safe_upload_name, zip_entry_limit_bytes, zip_total_limit_bytes,
+    resolve_allow_large_for_zip, safe_upload_name, is_archive_filename, sniff_archive_kind, zip_entry_limit_bytes, zip_total_limit_bytes,
 )
 from app.services.pg_access import get_panel_access_info
 from app.services.pg_restore import (
@@ -485,7 +485,7 @@ async def api_upload(
     use_large_upload_limit = str(allow_large_upload or "").strip().lower() in ("1", "true", "yes", "on")
     # Zip panel backups may exceed the default HTTP ceiling; stream up to the
     # override cap, then require a recognized panel-backup layout (or explicit tick).
-    is_zip = filename.lower().endswith(".zip")
+    is_zip = is_archive_filename(filename)
     default_cap = allowed_upload_bytes(False)
     override_cap = allowed_upload_bytes(True)
     stream_cap = override_cap if (use_large_upload_limit or is_zip) else default_cap
@@ -501,7 +501,9 @@ async def api_upload(
                     raise HTTPException(400, f"حداکثر حجم فایل {limit_mb} مگابایت است")
                 out.write(chunk)
 
-        if not use_large_upload_limit and is_zip and size > default_cap:
+        # tar.gz (marzban.sh) has no cheap namelist check; extraction caps still apply.
+        is_tar = is_zip and sniff_archive_kind(tmp_path) in ("gzip", "tar")
+        if not use_large_upload_limit and is_zip and size > default_cap and not is_tar:
             if not looks_like_panel_backup_zip(tmp_path):
                 limit_mb = default_cap // (1024 * 1024)
                 raise HTTPException(
@@ -511,6 +513,8 @@ async def api_upload(
                 )
             use_large_upload_limit = True
 
+        if is_tar and size > default_cap:
+            use_large_upload_limit = True
         if is_zip and not use_large_upload_limit:
             use_large_upload_limit = resolve_allow_large_for_zip(tmp_path, False)
 

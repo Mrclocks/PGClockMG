@@ -12,6 +12,7 @@ from app.config import UPLOAD_DIR
 from app.services.archive_guard import (
     resolve_allow_large_for_zip,
     resolve_within,
+    safe_extract_archive,
     safe_extract_zip_file,
     safe_upload_name,
 )
@@ -92,7 +93,7 @@ def _validate_slot_file(
             pass
 
     rules = {
-        "bundle_zip": [".zip"],
+        "bundle_zip": [".zip", ".gz", ".tgz", ".tar"],
         "database": [".sqlite3", ".db", ".sql", ".json"] if panel_id == "hiddify" else (
             [".sqlite3", ".db", ".sql"] if not source_db else (
                 [".sqlite3", ".db"] if source_db == "sqlite" else [".sql", ".json"]
@@ -159,7 +160,10 @@ def save_bundle_slot(
 
         if slot == "bundle_zip" or filename.lower().endswith(".zip"):
             try:
-                report = safe_extract_zip_file(
+                # bundle_zip: zip / tar.gz by content (marzban.sh backups are tar.gz,
+                # often renamed .zip); other slots stay zip-only.
+                extractor = safe_extract_archive if slot == "bundle_zip" else safe_extract_zip_file
+                report = extractor(
                     dest, sdir / "extracted", allow_large=effective_large,
                 )
                 slot_meta["zip_preflight"] = {
