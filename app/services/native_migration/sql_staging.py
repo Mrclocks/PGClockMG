@@ -1206,6 +1206,34 @@ async def _import_via_ephemeral_postgres(
     }
 
 
+def sniff_mysql_family_from_dump(path: Path, declared: str) -> str:
+    """Return ``mariadb`` when the dump header/body shows it came from MariaDB.
+
+    Marzban stacks usually run MariaDB while ``.env`` says ``mysql``; staging a
+    MariaDB dump into ``mysql:8`` breaks on FK names, ``uca1400`` collations,
+    ``/*M!...*/`` syntax, etc. ``mysql`` is returned for genuine MySQL dumps.
+    """
+    if (declared or "").lower() not in ("mysql", "mariadb"):
+        return declared
+    try:
+        with Path(path).open("r", encoding="utf-8", errors="ignore") as fh:
+            head = fh.read(200_000)
+    except Exception:
+        return declared
+    low = head.lower()
+    if (
+        "mariadb dump" in low
+        or "-mariadb" in low
+        or "/*m!" in low
+        or "uca1400" in low
+        or "mariadb-dump" in low
+    ):
+        return "mariadb"
+    if "mysql dump" in low and "mariadb" not in low:
+        return "mysql"
+    return declared
+
+
 async def import_sql_dump_to_live_db(
     migrator,
     dump_path: str,
@@ -1257,6 +1285,12 @@ async def import_sql_dump_to_live_db(
 
     # ── MySQL / MariaDB source dumps ────────────────────────────────────
     if source_db in ("mysql", "mariadb"):
+        sniffed = sniff_mysql_family_from_dump(path, source_db)
+        if sniffed != source_db:
+            migrator.job.log(
+                f"Dump header says {sniffed}, declared {source_db} — staging with {sniffed}"
+            )
+            source_db = sniffed
         service = resolve_db_service(source_db)
         # Only stage into a matching engine family — never into the wrong service
         if service and service in ("mysql", "mariadb") and _compose_has_service(service):
@@ -1279,9 +1313,25 @@ async def import_sql_dump_to_live_db(
             f"Staging {source_db} SQL dump into ephemeral container "
             f"(no {source_db} compose service — Timescale/PG target path)..."
         )
-        return await _import_via_ephemeral_mysql(
-            migrator, path, conn, staging_db, container, source_db,
-        )
+        try:
+            return await _import_via_ephemeral_mysql(
+                migrator, path, conn, staging_db, container, source_db,
+            )
+        except RuntimeError as first_err:
+            # Engine guess wrong (mysql<->mariadb dialect differences): retry once
+            # with the other family before giving up.
+            other = "mysql" if source_db == "mariadb" else "mariadb"
+            migrator.job.log(
+                f"Staging as {source_db} failed ({str(first_err)[-160:]!r}) — "
+                f"retrying with {other}"
+            )
+            try:
+                return await _import_via_ephemeral_mysql(
+                    migrator, path, conn, f"pgmig_{uuid.uuid4().hex[:8]}",
+                    f"pgmig-mysql-{uuid.uuid4().hex[:6]}", other,
+                )
+            except RuntimeError:
+                raise first_err
 
     # ── Plain PostgreSQL source dumps ───────────────────────────────────
     if source_db == "postgresql":

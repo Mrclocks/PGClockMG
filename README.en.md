@@ -1,4 +1,4 @@
-> 🚀 **`v5.0.3`** — fix restore stuck at 40% on PgBouncer auth probe (no image pull, psql via DB container)
+> 🚀 **`v5.0.4`** — fix MariaDB dump import (duplicate FK names, auto-detect MariaDB vs MySQL staging)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
