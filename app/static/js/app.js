@@ -1607,6 +1607,7 @@ function connectWebSocket(jobId) {
         document.getElementById('progressText').textContent = msg.progress + '%';
       }
       if (msg.message) document.getElementById('statusMsg').textContent = msg.message;
+      maybePromptJobChoice(jobId, msg.pending_choice);
       // Safety net: terminal status without a following `done` frame.
       if (msg.status === 'success' && !msg.result?.error) finishOnce(true, msg.result);
       else if (msg.status === 'error' || msg.result?.error) {
@@ -1620,6 +1621,43 @@ function connectWebSocket(jobId) {
   };
   ws.onerror = () => { if (!finished) pollStatus(jobId); };
   ws.onclose = () => { if (!finished) pollStatus(jobId); };
+}
+
+// Interactive question from the running job (e.g. which backup DB to restore).
+function maybePromptJobChoice(jobId, pc) {
+  if (!pc || !pc.key || state._choiceShown === `${jobId}:${pc.key}`) return;
+  state._choiceShown = `${jobId}:${pc.key}`;
+  const lang = state.lang || 'fa';
+  const pick = (o) => (o && (o[lang] || o.en || o.fa)) || '';
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;padding:16px';
+  const box = document.createElement('div');
+  box.dir = lang === 'fa' ? 'rtl' : 'ltr';
+  box.style.cssText = 'max-width:460px;width:100%;background:#14171d;border:1px solid #2a2f3a;border-radius:14px;padding:20px;color:#e6e8ee;font-family:inherit';
+  const h = document.createElement('div');
+  h.textContent = pick(pc.title);
+  h.style.cssText = 'font-weight:700;margin-bottom:14px;line-height:1.7';
+  box.appendChild(h);
+  (pc.options || []).forEach((o) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = pick(o.label) || o.value;
+    b.style.cssText = 'display:block;width:100%;margin:8px 0;padding:12px;border-radius:10px;border:1px solid #2f6feb;background:#1b2a4a;color:#fff;font-size:15px;cursor:pointer';
+    b.onclick = async () => {
+      box.querySelectorAll('button').forEach((x) => { x.disabled = true; });
+      try {
+        await fetch(`/api/migrate/${jobId}/choice`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key: pc.key, value: o.value }),
+        });
+      } catch (e) { /* job falls back to default on timeout */ }
+      overlay.remove();
+    };
+    box.appendChild(b);
+  });
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
 }
 
 function stopMigrationPoll() {
@@ -1653,6 +1691,7 @@ async function pollStatus(jobId) {
         document.getElementById('progressText').textContent = data.progress + '%';
       }
       if (data.message) document.getElementById('statusMsg').textContent = data.message;
+      maybePromptJobChoice(jobId, data.pending_choice);
       appendMigrateLogs(terminal, data.logs, cursor, data);
       if (data.status === 'success' && !data.result?.error) {
         clearInterval(interval);

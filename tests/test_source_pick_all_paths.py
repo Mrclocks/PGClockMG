@@ -210,3 +210,61 @@ def test_restore_prefers_dump_with_users(tmp_path):
     full.write_text("-- MySQL dump\n" + schema + "INSERT INTO `users` VALUES (1),(2);\n")
     art = discover_backup_artifacts(tmp_path)
     assert Path(art["dump_path"]) == full
+
+
+# --- Interactive choice when the backup holds two DBs with different counts ---
+
+def _ambiguous(tmp_path):
+    sq = _sqlite_users(tmp_path / "db.sqlite3", 290)
+    sql = tmp_path / "marzban.sql"
+    sql.write_text("CREATE TABLE `users` (`id` int);\nINSERT INTO `users` VALUES (1),(2);\n")
+    return sq, sql
+
+
+@pytest.mark.parametrize("answer", ["sqlite", "mysql"])
+def test_ambiguous_backup_asks_user_and_honours_answer(tmp_path, answer):
+    import asyncio
+
+    sq, sql = _ambiguous(tmp_path)
+    job = MigrationJob(job_id="ask")
+    m = MarzbanMigrator(job, {"target_db": "mysql"})
+
+    async def scenario():
+        task = asyncio.create_task(m._ask_source_if_ambiguous("mysql", sq, sql))
+        for _ in range(50):
+            if job.pending_choice:
+                break
+            await asyncio.sleep(0.01)
+        pc = job.pending_choice
+        assert pc and pc["key"] == "backup_source"
+        assert {o["value"]: o["users"] for o in pc["options"]} == {"sqlite": 290, "mysql": 2}
+        assert not job.answer_choice("backup_source", "bogus")
+        assert job.answer_choice("backup_source", answer)
+        return await task
+
+    assert asyncio.run(scenario()) == answer
+    assert job.pending_choice is None
+
+
+def test_no_question_when_counts_equal_or_single_source(tmp_path):
+    import asyncio
+
+    sq = _sqlite_users(tmp_path / "db.sqlite3", 2)
+    sql = tmp_path / "m.sql"
+    sql.write_text("CREATE TABLE `users` (`id` int);\nINSERT INTO `users` VALUES (1),(2);\n")
+    job = MigrationJob(job_id="noask")
+    m = MarzbanMigrator(job, {"target_db": "mysql"})
+    assert asyncio.run(m._ask_source_if_ambiguous("mysql", sq, sql)) == "mysql"
+    assert asyncio.run(m._ask_source_if_ambiguous("sqlite", sq, None)) == "sqlite"
+    assert job.pending_choice is None
+
+
+def test_choice_times_out_to_default():
+    import asyncio
+
+    job = MigrationJob(job_id="to")
+    r = asyncio.run(job.ask_choice(
+        "k", {"en": "q"}, [{"value": "a", "label": {}}, {"value": "b", "label": {}}],
+        "b", timeout=0.05,
+    ))
+    assert r == "b"

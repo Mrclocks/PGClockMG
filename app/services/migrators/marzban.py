@@ -150,6 +150,9 @@ class MarzbanMigrator(BaseMigrator):
             )
 
         if upload_work_dir or upload_path:
+            source_db = await self._ask_source_if_ambiguous(
+                source_db, source_sqlite, source_sql,
+            )
             source_db = self._auto_pick_source(source_db, target_db, source_sqlite, source_sql)
             if source_db == "sqlite":
                 source_sql = None
@@ -922,6 +925,67 @@ class MarzbanMigrator(BaseMigrator):
         if n:
             self._expected_dump_counts = {"users": n}
             self.job.log(f"Source SQLite contains users={n}")
+
+    def _count_source_users(
+        self, source_sqlite: Path | None, source_sql: Path | None,
+    ) -> tuple[int | None, int | None]:
+        sqlite_users = self._sqlite_user_count(source_sqlite)
+        sql_users: int | None = None
+        if source_sql and Path(source_sql).exists():
+            try:
+                from app.services.sql_dump_counts import scan_sql_dump_file
+
+                c = (scan_sql_dump_file(Path(source_sql), ("users",)).get("counts") or {})
+                sql_users = c.get("users") if isinstance(c.get("users"), int) else None
+            except Exception:
+                sql_users = None
+        return sqlite_users, sql_users
+
+    async def _ask_source_if_ambiguous(
+        self,
+        source_db: str,
+        source_sqlite: Path | None,
+        source_sql: Path | None,
+    ) -> str:
+        """Backup holds a SQLite file AND a SQL dump with different user counts → ask.
+
+        Returns the engine to migrate from (``sqlite`` or the SQL engine).
+        """
+        sqlite_users, sql_users = self._count_source_users(source_sqlite, source_sql)
+        if not ((sqlite_users or 0) > 0 and (sql_users or 0) > 0 and sqlite_users != sql_users):
+            return source_db
+        sql_engine = source_db if source_db in ("mysql", "mariadb") else "mysql"
+        default = "sqlite" if source_db == "sqlite" else sql_engine
+        chosen = await self.job.ask_choice(
+            "backup_source",
+            {
+                "fa": "بکاپ شامل دو دیتابیس با تعداد کاربر متفاوت است. کدام بازگردانی شود؟",
+                "en": "The backup contains two databases with different user counts. Which one should be restored?",
+                "ru": "В бэкапе две базы с разным числом пользователей. Какую восстановить?",
+            },
+            [
+                {
+                    "value": "sqlite",
+                    "users": sqlite_users,
+                    "label": {
+                        "fa": f"فایل SQLite — {sqlite_users} کاربر",
+                        "en": f"SQLite file — {sqlite_users} users",
+                        "ru": f"Файл SQLite — {sqlite_users} польз.",
+                    },
+                },
+                {
+                    "value": sql_engine,
+                    "users": sql_users,
+                    "label": {
+                        "fa": f"دامپ SQL ({sql_engine}) — {sql_users} کاربر",
+                        "en": f"SQL dump ({sql_engine}) — {sql_users} users",
+                        "ru": f"SQL-дамп ({sql_engine}) — {sql_users} польз.",
+                    },
+                },
+            ],
+            default,
+        )
+        return chosen
 
     def _auto_pick_source(
         self,

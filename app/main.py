@@ -708,7 +708,27 @@ async def api_migrate_status(job_id: str, since: int = -1):
         "message": job.message,
         **_log_window(job, since, 2000),
         "result": job.result,
+        "pending_choice": _public_choice(job),
     }
+
+
+def _public_choice(job) -> dict | None:
+    pc = getattr(job, "pending_choice", None)
+    if not pc:
+        return None
+    return {k: v for k, v in pc.items() if k != "answer"}
+
+
+@app.post("/api/migrate/{job_id}/choice")
+async def api_migrate_choice(job_id: str, body: dict):
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job یافت نشد")
+    key = str(body.get("key") or "")
+    value = str(body.get("value") or "")
+    if not job.answer_choice(key, value):
+        raise HTTPException(409, "No matching question is pending")
+    return {"ok": True}
 
 
 @app.websocket("/ws/migrate/{job_id}")
@@ -738,6 +758,7 @@ async def ws_migrate(websocket: WebSocket, job_id: str):
                 "progress": job.progress,
                 "message": job.message,
                 "result": job.result,
+                "pending_choice": _public_choice(job),
             })
             if job.status in ("success", "error"):
                 await websocket.send_json({

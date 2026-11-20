@@ -48,6 +48,55 @@ class MigrationJob:
         self.result: dict | None = None
         self._callbacks: list[Callable] = []
         self._secrets: set[str] = set()
+        # Interactive question for the wizard (e.g. which of two backup DBs to restore).
+        self.pending_choice: dict | None = None
+        self._choice_event: asyncio.Event | None = None
+
+    async def ask_choice(
+        self,
+        key: str,
+        title: dict,
+        options: list[dict],
+        default: str,
+        *,
+        timeout: float = 900,
+    ) -> str:
+        """Pause the job and ask the user to pick one option in the wizard.
+
+        ``options`` items: ``{"value": str, "label": {"fa":..,"en":..,"ru":..}}``.
+        Falls back to ``default`` after ``timeout`` seconds so an unattended job
+        never hangs forever.
+        """
+        values = [o["value"] for o in options]
+        self._choice_event = asyncio.Event()
+        self.pending_choice = {
+            "key": key, "title": title, "options": options,
+            "default": default, "timeout": int(timeout),
+        }
+        self.log(f"Waiting for your choice ({key}): {', '.join(values)} …")
+        try:
+            await asyncio.wait_for(self._choice_event.wait(), timeout=timeout)
+            chosen = (self.pending_choice or {}).get("answer") or default
+        except asyncio.TimeoutError:
+            chosen = default
+            self.log(f"No answer within {int(timeout)}s — using default `{default}`")
+        finally:
+            self.pending_choice = None
+            self._choice_event = None
+        if chosen not in values:
+            chosen = default
+        self.log(f"Choice {key} = {chosen}")
+        return chosen
+
+    def answer_choice(self, key: str, value: str) -> bool:
+        pc = self.pending_choice
+        if not pc or pc.get("key") != key or self._choice_event is None:
+            return False
+        if value not in [o["value"] for o in pc["options"]]:
+            return False
+        pc["answer"] = value
+        self._choice_event.set()
+        return True
 
     def add_secret(self, *values: str | None) -> None:
         """Register a live credential so it never reaches the log or the API."""
