@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 
 from app.config import PASARGUARD_DIR, PASARGUARD_ENV
 from app.services.env_migration import read_env_var, read_compose_db_credentials
@@ -566,15 +567,59 @@ async def _probe_pg_via_host_tcp(
     """
     if not image or not host or not port or not password:
         return False
+    # Never let a probe block the wizard on a registry pull (Docker Hub is often
+    # unreachable/slow from restricted networks): only use images already on disk.
+    if not await _docker_image_present_locally(migrator, image):
+        migrator.job.log(f"Probe image {image} not present locally — skipping (no pull)")
+        return False
     cmd = [
-        "docker", "run", "--rm", "--network", "host",
+        "docker", "run", "--pull", "never", "--rm", "--network", "host",
         "--entrypoint", "psql",
         "-e", f"PGPASSWORD={password}",
         image,
         "-h", host, "-p", port, "-U", user, "-d", database, "-tAc", "SELECT 1",
     ]
-    ok, out = await migrator._run_cmd(cmd, timeout=90)
+    ok, out = await migrator._run_cmd(cmd, timeout=30)
     return ok and "1" in (out or "")
+
+
+async def _docker_image_present_locally(migrator, image: str) -> bool:
+    ok, _ = await migrator._run_cmd(
+        ["docker", "image", "inspect", image], timeout=20, quiet=True,
+    )
+    return bool(ok)
+
+
+async def _probe_pgbouncer_via_db_container(
+    migrator,
+    prefix: list[str],
+    service: str,
+    user: str,
+    password: str,
+    database: str,
+    *,
+    bouncer_host: str = "pgbouncer",
+    port: str = "6432",
+) -> bool:
+    """Prove PgBouncer auth by running psql inside the DB container.
+
+    The DB container already ships ``psql`` and shares the compose network with
+    PgBouncer, so no extra image is pulled and no host port is required.
+    """
+    if not service or not password:
+        return False
+    ok, out = await migrator._run_cmd(
+        [
+            "docker", "compose", *prefix, "exec", "-T",
+            "-e", f"PGPASSWORD={password}",
+            service, "psql",
+            "-h", bouncer_host, "-p", port, "-U", user, "-d", database,
+            "-tAc", "SELECT 1",
+        ],
+        cwd=str(PASARGUARD_DIR),
+        timeout=30,
+    )
+    return bool(ok and re.search(r"^\s*1\s*$", out or "", re.MULTILINE))
 
 
 # In-container SCRAM proof: connect to the container's *own eth0 IP*, which hits
@@ -2530,36 +2575,51 @@ async def refresh_pgbouncer_if_stale(
     migrator.job.log("PgBouncer recreated with finalized credentials")
 
     # Prove :6432 accepts the new password (stale SCRAM cache otherwise looks "OK").
+    # Preferred: psql inside the DB container → pgbouncer service (no image pull).
     probed = False
-    for host, port in (("127.0.0.1", "6432"), ("localhost", "6432")):
-        try:
-            from app.services.pasarguard_ops import resolve_pasarguard_image
-
-            img = resolve_pasarguard_image()
-            # Prefer timescale/postgres client image if panel image has no psql.
-            for probe_img in (
-                "postgres:17-alpine",
-                "timescale/timescaledb:latest-pg17",
-                img,
-            ):
-                if await _probe_pg_via_host_tcp(
-                    migrator,
-                    image=probe_img,
-                    host=host,
-                    port=port,
-                    user=user,
-                    password=password,
-                    database=database,
+    try:
+        db_service = resolve_db_service(db_type)
+        if db_service:
+            for _attempt in range(3):
+                if await _probe_pgbouncer_via_db_container(
+                    migrator, prefix, db_service, user, password, database,
                 ):
                     probed = True
                     migrator.job.log(
-                        f"PgBouncer TCP auth OK on {host}:{port} as {user}"
+                        f"PgBouncer auth OK via {db_service} container as {user}"
                     )
                     break
-            if probed:
-                break
-        except Exception as exc:
-            migrator.job.log(f"PgBouncer probe note: {exc}")
+                await asyncio.sleep(3)
+    except Exception as exc:
+        migrator.job.log(f"PgBouncer in-container probe note: {exc}")
+
+    # Fallback: host TCP with images that are ALREADY present (never pulled; the
+    # panel image has no psql so it is not used).
+    if not probed:
+        for host, port in (("127.0.0.1", "6432"), ("localhost", "6432")):
+            try:
+                for probe_img in (
+                    "postgres:17-alpine",
+                    "timescale/timescaledb:latest-pg17",
+                ):
+                    if await _probe_pg_via_host_tcp(
+                        migrator,
+                        image=probe_img,
+                        host=host,
+                        port=port,
+                        user=user,
+                        password=password,
+                        database=database,
+                    ):
+                        probed = True
+                        migrator.job.log(
+                            f"PgBouncer TCP auth OK on {host}:{port} as {user}"
+                        )
+                        break
+                if probed:
+                    break
+            except Exception as exc:
+                migrator.job.log(f"PgBouncer probe note: {exc}")
     if not probed:
         migrator.job.log(
             "PgBouncer recreated but TCP :6432 auth not confirmed yet — "
