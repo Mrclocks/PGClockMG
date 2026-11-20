@@ -640,3 +640,27 @@ def test_ephemeral_timescale_pin_tries_dump_pg_major(tmp_path):
     dump.write_text("CREATE TABLE users (id int);\n", encoding="utf-8")
     assert mod._ts_pin_pg_majors(dump) == ["17", "16"]
     print("OK: pinned Timescale staging tries the dump's PG major first")
+
+
+def test_duplicate_fk_names_are_made_unique_for_mysql8(tmp_path):
+    """MariaDB dumps reuse FK name `1` per table; MySQL 8 errors with 1826."""
+    from app.services.native_migration.sql_staging import (
+        prepare_mysql_dump_for_staging,
+        write_mysql_dump_for_staging,
+    )
+
+    raw = (
+        "CREATE TABLE `a` (\n  `id` int,\n"
+        "  CONSTRAINT `1` FOREIGN KEY (`id`) REFERENCES `x` (`id`)\n);\n"
+        "CREATE TABLE `b` (\n  `id` int,\n"
+        "  CONSTRAINT `1` FOREIGN KEY (`id`) REFERENCES `x` (`id`)\n);\n"
+    )
+    out, n = prepare_mysql_dump_for_staging(raw, "pgmig_deadbeef")
+    assert out.count("CONSTRAINT `1` FOREIGN") == 1
+    assert "CONSTRAINT `1_2` FOREIGN" in out and n == 1
+
+    dump = tmp_path / "d.sql"
+    dump.write_text(raw, encoding="utf-8")
+    path, n2 = write_mysql_dump_for_staging(dump, "pgmig_deadbeef")
+    assert n2 == 1 and path != dump
+    assert "`1_2`" in path.read_text(encoding="utf-8")

@@ -67,6 +67,44 @@ _MYSQL_DROP_DB_RE = re.compile(
 )
 
 
+_FK_CONSTRAINT_RE = re.compile(
+    r"(CONSTRAINT\s+)`([^`]+)`(\s+FOREIGN\s+KEY\b)", re.IGNORECASE,
+)
+
+
+def _make_fk_name_uniquifier():
+    """Return ``fn(line) -> (line, n_renamed)`` that de-duplicates FK names.
+
+    MariaDB scopes FK constraint names per table (many tables may each have
+    ``CONSTRAINT `1` FOREIGN KEY``), but MySQL 8 requires them to be unique per
+    schema and aborts with ERROR 1826. Rename repeats so the dump imports on both.
+    """
+    seen: set[str] = set()
+
+    def fix(line: str) -> tuple[str, int]:
+        if "FOREIGN" not in line.upper() or "CONSTRAINT" not in line.upper():
+            return line, 0
+        renamed = 0
+
+        def _sub(m: "re.Match[str]") -> str:
+            nonlocal renamed
+            name = m.group(2)
+            key = name.lower()
+            if key in seen:
+                n = 2
+                while f"{name}_{n}".lower() in seen:
+                    n += 1
+                name = f"{name}_{n}"
+                key = name.lower()
+                renamed += 1
+            seen.add(key)
+            return f"{m.group(1)}`{name}`{m.group(3)}"
+
+        return _FK_CONSTRAINT_RE.sub(_sub, line), renamed
+
+    return fix
+
+
 def prepare_mysql_dump_for_staging(sql_text: str, staging_db: str) -> tuple[str, int]:
     """Keep dump objects inside staging_db.
 
@@ -87,6 +125,7 @@ def prepare_mysql_dump_for_staging(sql_text: str, staging_db: str) -> tuple[str,
     _safe_mysql_ident(staging_db)  # validate only
     out: list[str] = []
     stripped = 0
+    fix_fk = _make_fk_name_uniquifier()
     for line in sql_text.splitlines(keepends=True):
         body = line.strip()
         if not body or body.startswith("--") or body.startswith("#"):
@@ -102,6 +141,8 @@ def prepare_mysql_dump_for_staging(sql_text: str, staging_db: str) -> tuple[str,
         new_line, did = sanitize_mysql_dump_line_for_import(line)
         if did:
             stripped += 1
+        new_line, n_fk = fix_fk(new_line)
+        stripped += n_fk
         out.append(new_line)
     return "".join(out), stripped
 
@@ -133,6 +174,7 @@ def write_mysql_dump_for_staging(dump_path: Path, staging_db: str) -> tuple[Path
 
     out = dump_path.with_suffix(dump_path.suffix + f".stage-{staging_db}")
     stripped = 0
+    fix_fk = _make_fk_name_uniquifier()
     with dump_path.open("r", encoding="utf-8", errors="ignore") as fin, out.open(
         "w", encoding="utf-8", newline=""
     ) as fout:
@@ -162,6 +204,8 @@ def write_mysql_dump_for_staging(dump_path: Path, staging_db: str) -> tuple[Path
             new_line, did = sanitize_mysql_dump_line_for_import(line)
             if did:
                 stripped += 1
+            new_line, n_fk = fix_fk(new_line)
+            stripped += n_fk
             fout.write(new_line)
 
     if stripped == 0:
@@ -239,7 +283,7 @@ async def _import_via_compose_service(
         if stripped:
             migrator.job.log(
                 f"Rewrote MySQL dump for staging DB {safe_db} "
-                f"(stripped {stripped} USE/CREATE/DROP DATABASE redirect lines)"
+                f"(adjusted {stripped} lines: USE/CREATE/DROP DATABASE redirects, duplicate FK names)"
             )
         create_sql = mysql_create_db_sql(staging_db, drop_first=True)
         created = False
@@ -696,7 +740,7 @@ async def _import_via_ephemeral_mysql(
         if stripped:
             migrator.job.log(
                 f"Rewrote dump for staging DB {safe_db} "
-                f"(stripped {stripped} USE/CREATE/DROP DATABASE redirect lines)"
+                f"(adjusted {stripped} lines: USE/CREATE/DROP DATABASE redirects, duplicate FK names)"
             )
 
         rc, import_out = await _mysql_ephemeral(
