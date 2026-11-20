@@ -392,7 +392,18 @@ async def api_pasarguard_restore_status(job_id: str, since: int = -1):
         "message": job.message,
         **_log_window(job, since, 2000),
         "result": job.result,
+        "pending_choice": _public_choice(job),
     }
+
+
+@app.post("/api/pasarguard/restore/{job_id}/choice")
+async def api_pasarguard_restore_choice(job_id: str, body: dict):
+    job = get_restore_job(job_id)
+    if not job:
+        raise HTTPException(404, "Restore job not found")
+    if not job.answer_choice(str(body.get("key") or ""), str(body.get("value") or "")):
+        raise HTTPException(409, "No matching question is pending")
+    return {"ok": True}
 
 
 @app.get("/", response_class=HTMLResponse)

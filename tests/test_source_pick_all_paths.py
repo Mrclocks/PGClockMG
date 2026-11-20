@@ -268,3 +268,47 @@ def test_choice_times_out_to_default():
         "b", timeout=0.05,
     ))
     assert r == "b"
+
+
+# --- PasarGuard restore: same question --------------------------------------
+
+@pytest.mark.parametrize("answer,layout,db", [("sqlite", "sqlite_file", "sqlite"), ("mysql", "single", "mysql")])
+def test_restore_asks_which_db_and_prunes_other(tmp_path, answer, layout, db):
+    import asyncio
+
+    from app.services import pg_restore
+
+    _sqlite_users(tmp_path / "db.sqlite3", 290, extra_tables=("hosts", "nodes"))
+    (tmp_path / "db_backup.sql").write_text(
+        "-- MySQL dump 10.13\nCREATE TABLE `users` (`id` int) ENGINE=InnoDB;\n"
+        "INSERT INTO `users` VALUES (1),(2);\n"
+    )
+    job = MigrationJob(job_id="rs-ask")
+    analysis: dict = {"table_counts": {"users": 2}}
+
+    async def scenario():
+        task = asyncio.create_task(
+            pg_restore._ask_restore_source_if_ambiguous(job, tmp_path, analysis, "mysql")
+        )
+        for _ in range(100):
+            if job.pending_choice:
+                break
+            await asyncio.sleep(0.01)
+        assert {o["value"]: o["users"] for o in job.pending_choice["options"]} == {"sqlite": 290, "mysql": 2}
+        assert job.answer_choice("backup_source", answer)
+        return await task
+
+    assert asyncio.run(scenario()) == db
+    assert analysis["layout"] == layout and analysis["table_counts"] == {}
+    assert (tmp_path / "db.sqlite3").exists() == (answer == "sqlite")
+    assert (tmp_path / "db_backup.sql").exists() == (answer != "sqlite")
+
+
+def test_restore_no_question_with_single_source(tmp_path):
+    import asyncio
+
+    from app.services import pg_restore
+
+    _sqlite_users(tmp_path / "db.sqlite3", 5, extra_tables=("hosts", "nodes"))
+    job = MigrationJob(job_id="rs-none")
+    assert asyncio.run(pg_restore._ask_restore_source_if_ambiguous(job, tmp_path, {}, "sqlite")) is None

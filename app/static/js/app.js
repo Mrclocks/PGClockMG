@@ -1624,7 +1624,7 @@ function connectWebSocket(jobId) {
 }
 
 // Interactive question from the running job (e.g. which backup DB to restore).
-function maybePromptJobChoice(jobId, pc) {
+function maybePromptJobChoice(jobId, pc, base = '/api/migrate') {
   if (!pc || !pc.key || state._choiceShown === `${jobId}:${pc.key}`) return;
   state._choiceShown = `${jobId}:${pc.key}`;
   const lang = state.lang || 'fa';
@@ -1646,7 +1646,7 @@ function maybePromptJobChoice(jobId, pc) {
     b.onclick = async () => {
       box.querySelectorAll('button').forEach((x) => { x.disabled = true; });
       try {
-        await fetch(`/api/migrate/${jobId}/choice`, {
+        await fetch(`${base}/${jobId}/choice`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ key: pc.key, value: o.value }),
