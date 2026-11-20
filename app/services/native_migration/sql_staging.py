@@ -67,6 +67,44 @@ _MYSQL_DROP_DB_RE = re.compile(
 )
 
 
+_FK_CONSTRAINT_RE = re.compile(
+    r"(CONSTRAINT\s+)`([^`]+)`(\s+FOREIGN\s+KEY\b)", re.IGNORECASE,
+)
+
+
+def _make_fk_name_uniquifier():
+    """Return ``fn(line) -> (line, n_renamed)`` that de-duplicates FK names.
+
+    MariaDB scopes FK constraint names per table (many tables may each have
+    ``CONSTRAINT `1` FOREIGN KEY``), but MySQL 8 requires them to be unique per
+    schema and aborts with ERROR 1826. Rename repeats so the dump imports on both.
+    """
+    seen: set[str] = set()
+
+    def fix(line: str) -> tuple[str, int]:
+        if "FOREIGN" not in line.upper() or "CONSTRAINT" not in line.upper():
+            return line, 0
+        renamed = 0
+
+        def _sub(m: "re.Match[str]") -> str:
+            nonlocal renamed
+            name = m.group(2)
+            key = name.lower()
+            if key in seen:
+                n = 2
+                while f"{name}_{n}".lower() in seen:
+                    n += 1
+                name = f"{name}_{n}"
+                key = name.lower()
+                renamed += 1
+            seen.add(key)
+            return f"{m.group(1)}`{name}`{m.group(3)}"
+
+        return _FK_CONSTRAINT_RE.sub(_sub, line), renamed
+
+    return fix
+
+
 def prepare_mysql_dump_for_staging(sql_text: str, staging_db: str) -> tuple[str, int]:
     """Keep dump objects inside staging_db.
 
@@ -87,6 +125,7 @@ def prepare_mysql_dump_for_staging(sql_text: str, staging_db: str) -> tuple[str,
     _safe_mysql_ident(staging_db)  # validate only
     out: list[str] = []
     stripped = 0
+    fix_fk = _make_fk_name_uniquifier()
     for line in sql_text.splitlines(keepends=True):
         body = line.strip()
         if not body or body.startswith("--") or body.startswith("#"):
@@ -102,6 +141,8 @@ def prepare_mysql_dump_for_staging(sql_text: str, staging_db: str) -> tuple[str,
         new_line, did = sanitize_mysql_dump_line_for_import(line)
         if did:
             stripped += 1
+        new_line, n_fk = fix_fk(new_line)
+        stripped += n_fk
         out.append(new_line)
     return "".join(out), stripped
 
@@ -133,6 +174,7 @@ def write_mysql_dump_for_staging(dump_path: Path, staging_db: str) -> tuple[Path
 
     out = dump_path.with_suffix(dump_path.suffix + f".stage-{staging_db}")
     stripped = 0
+    fix_fk = _make_fk_name_uniquifier()
     with dump_path.open("r", encoding="utf-8", errors="ignore") as fin, out.open(
         "w", encoding="utf-8", newline=""
     ) as fout:
@@ -162,6 +204,8 @@ def write_mysql_dump_for_staging(dump_path: Path, staging_db: str) -> tuple[Path
             new_line, did = sanitize_mysql_dump_line_for_import(line)
             if did:
                 stripped += 1
+            new_line, n_fk = fix_fk(new_line)
+            stripped += n_fk
             fout.write(new_line)
 
     if stripped == 0:
@@ -239,7 +283,7 @@ async def _import_via_compose_service(
         if stripped:
             migrator.job.log(
                 f"Rewrote MySQL dump for staging DB {safe_db} "
-                f"(stripped {stripped} USE/CREATE/DROP DATABASE redirect lines)"
+                f"(adjusted {stripped} lines: USE/CREATE/DROP DATABASE redirects, duplicate FK names)"
             )
         create_sql = mysql_create_db_sql(staging_db, drop_first=True)
         created = False
@@ -696,7 +740,7 @@ async def _import_via_ephemeral_mysql(
         if stripped:
             migrator.job.log(
                 f"Rewrote dump for staging DB {safe_db} "
-                f"(stripped {stripped} USE/CREATE/DROP DATABASE redirect lines)"
+                f"(adjusted {stripped} lines: USE/CREATE/DROP DATABASE redirects, duplicate FK names)"
             )
 
         rc, import_out = await _mysql_ephemeral(
@@ -1162,6 +1206,34 @@ async def _import_via_ephemeral_postgres(
     }
 
 
+def sniff_mysql_family_from_dump(path: Path, declared: str) -> str:
+    """Return ``mariadb`` when the dump header/body shows it came from MariaDB.
+
+    Marzban stacks usually run MariaDB while ``.env`` says ``mysql``; staging a
+    MariaDB dump into ``mysql:8`` breaks on FK names, ``uca1400`` collations,
+    ``/*M!...*/`` syntax, etc. ``mysql`` is returned for genuine MySQL dumps.
+    """
+    if (declared or "").lower() not in ("mysql", "mariadb"):
+        return declared
+    try:
+        with Path(path).open("r", encoding="utf-8", errors="ignore") as fh:
+            head = fh.read(200_000)
+    except Exception:
+        return declared
+    low = head.lower()
+    if (
+        "mariadb dump" in low
+        or "-mariadb" in low
+        or "/*m!" in low
+        or "uca1400" in low
+        or "mariadb-dump" in low
+    ):
+        return "mariadb"
+    if "mysql dump" in low and "mariadb" not in low:
+        return "mysql"
+    return declared
+
+
 async def import_sql_dump_to_live_db(
     migrator,
     dump_path: str,
@@ -1213,6 +1285,12 @@ async def import_sql_dump_to_live_db(
 
     # ── MySQL / MariaDB source dumps ────────────────────────────────────
     if source_db in ("mysql", "mariadb"):
+        sniffed = sniff_mysql_family_from_dump(path, source_db)
+        if sniffed != source_db:
+            migrator.job.log(
+                f"Dump header says {sniffed}, declared {source_db} — staging with {sniffed}"
+            )
+            source_db = sniffed
         service = resolve_db_service(source_db)
         # Only stage into a matching engine family — never into the wrong service
         if service and service in ("mysql", "mariadb") and _compose_has_service(service):
@@ -1235,9 +1313,25 @@ async def import_sql_dump_to_live_db(
             f"Staging {source_db} SQL dump into ephemeral container "
             f"(no {source_db} compose service — Timescale/PG target path)..."
         )
-        return await _import_via_ephemeral_mysql(
-            migrator, path, conn, staging_db, container, source_db,
-        )
+        try:
+            return await _import_via_ephemeral_mysql(
+                migrator, path, conn, staging_db, container, source_db,
+            )
+        except RuntimeError as first_err:
+            # Engine guess wrong (mysql<->mariadb dialect differences): retry once
+            # with the other family before giving up.
+            other = "mysql" if source_db == "mariadb" else "mariadb"
+            migrator.job.log(
+                f"Staging as {source_db} failed ({str(first_err)[-160:]!r}) — "
+                f"retrying with {other}"
+            )
+            try:
+                return await _import_via_ephemeral_mysql(
+                    migrator, path, conn, f"pgmig_{uuid.uuid4().hex[:8]}",
+                    f"pgmig-mysql-{uuid.uuid4().hex[:6]}", other,
+                )
+            except RuntimeError:
+                raise first_err
 
     # ── Plain PostgreSQL source dumps ───────────────────────────────────
     if source_db == "postgresql":
