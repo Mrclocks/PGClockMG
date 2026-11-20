@@ -1462,6 +1462,7 @@ async function pollRestore(jobId) {
         status.textContent = stage ? `${stage} — ${msg}` : msg;
       }
       appendJobLogs(term, job.logs, cursor, job);
+      maybePromptJobChoice(jobId, job.pending_choice, '/api/pasarguard/restore');
 
       if (job.status === 'success') {
         stopRestorePoll();

@@ -5817,6 +5817,9 @@ async def _restore_backup(job: MigrationJob, params: dict, analysis: dict) -> di
             backup_env = current_env
         # Prefer analyze() result (timescale manifest override); never trust live compose for backup label
         backup_db = analysis.get("backup_db") or detect_db_type_from_env(backup_env, prefer_compose=False)
+        _picked_db = await _ask_restore_source_if_ambiguous(job, work, analysis, backup_db)
+        if _picked_db:
+            backup_db = _picked_db
         dump_path = resolve_backup_sql_dump(work, env_db=backup_db)
         if dump_path:
             try:
@@ -6687,6 +6690,98 @@ async def _disable_nodes_after_restore(
 
     else:
         job.log(f"Node disable skipped — unsupported db_type: {db_type}")
+
+
+async def _ask_restore_source_if_ambiguous(
+    job: MigrationJob, work: Path, analysis: dict, backup_db: str | None,
+) -> str | None:
+    """Backup holds a SQLite file AND a SQL dump with different user counts → ask.
+
+    Applies the answer by removing the unchosen source from ``work`` and
+    re-running artifact discovery. Returns the new ``backup_db`` or ``None``
+    when nothing was ambiguous.
+    """
+    from app.services.sql_dump_counts import scan_sql_dump_file
+
+    sqlites: list[tuple[int, Path]] = []
+    dumps: list[tuple[int, Path, str | None]] = []
+    for path in work.rglob("*"):
+        if not path.is_file() or _path_skipped_dir(path, work):
+            continue
+        name = path.name.lower()
+        try:
+            if name.endswith((".sql", ".sql.gz", ".sql.gzip")):
+                if name.endswith((".gz", ".gzip")) or _sniff_sql_dump(path)[0] <= 0:
+                    continue
+                n = (scan_sql_dump_file(path, ("users",)).get("counts") or {}).get("users")
+                dumps.append((int(n or 0), path, _sniff_sql_dump(path)[1]))
+            elif name.endswith((".sqlite3", ".sqlite", ".db")) and _sqlite_panel_score(path) > 0:
+                conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+                try:
+                    n = conn.execute('SELECT COUNT(*) FROM "users"').fetchone()[0]
+                finally:
+                    conn.close()
+                sqlites.append((int(n or 0), path))
+        except Exception:
+            continue
+    if not sqlites or not dumps:
+        return None
+    sq_users, _sq_path = max(sqlites, key=lambda x: x[0])
+    sql_users, _sql_path, sql_engine = max(dumps, key=lambda x: x[0])
+    if sq_users <= 0 or sql_users <= 0 or sq_users == sql_users:
+        return None
+    if backup_db in ("mysql", "mariadb", "postgresql", "timescaledb"):
+        sql_engine = backup_db
+    sql_engine = sql_engine or "mysql"
+    default = "sqlite" if backup_db == "sqlite" else sql_engine
+    chosen = await job.ask_choice(
+        "backup_source",
+        {
+            "fa": "بکاپ شامل دو دیتابیس با تعداد کاربر متفاوت است. کدام بازگردانی شود؟",
+            "en": "The backup contains two databases with different user counts. Which one should be restored?",
+            "ru": "В бэкапе две базы с разным числом пользователей. Какую восстановить?",
+        },
+        [
+            {
+                "value": "sqlite", "users": sq_users,
+                "label": {
+                    "fa": f"فایل SQLite — {sq_users} کاربر",
+                    "en": f"SQLite file — {sq_users} users",
+                    "ru": f"Файл SQLite — {sq_users} польз.",
+                },
+            },
+            {
+                "value": sql_engine, "users": sql_users,
+                "label": {
+                    "fa": f"دامپ SQL ({sql_engine}) — {sql_users} کاربر",
+                    "en": f"SQL dump ({sql_engine}) — {sql_users} users",
+                    "ru": f"SQL-дамп ({sql_engine}) — {sql_users} польз.",
+                },
+            },
+        ],
+        default,
+    )
+    drop = [p for _n, p in sqlites] if chosen != "sqlite" else [p for _n, p, _e in dumps]
+    for p in drop:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    if chosen == "sqlite":
+        # Multi-file Timescale layout is detected via its manifest — remove it too.
+        for man in work.rglob("manifest.tsv"):
+            if man.parent.name == "pg_dump":
+                try:
+                    man.unlink()
+                except OSError:
+                    pass
+    art = discover_backup_artifacts(work, env_db=chosen)
+    analysis["layout"] = art["layout"]
+    analysis["table_counts"] = {}
+    new_db = "sqlite" if chosen == "sqlite" else chosen
+    job.log(f"Restoring from {'SQLite file' if chosen == 'sqlite' else 'SQL dump'} "
+            f"(layout={art['layout']}, backup DB={new_db})")
+    return new_db
 
 
 async def _restore_sqlite(job: MigrationJob, root: Path) -> None:
