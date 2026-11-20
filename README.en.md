@@ -1,4 +1,4 @@
-> 🚀 **`v5.0.4`** — fix MariaDB dump import (duplicate FK names, auto-detect MariaDB vs MySQL staging)
+> 🚀 **`v5.0.5`** — wizard asks which database to restore when the backup holds SQLite + SQL dump with different user counts
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
