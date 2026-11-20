@@ -1,4 +1,4 @@
-> 🚀 **`v5.0.2`** — marzban.sh tar.gz backups (backup_part_aa) supported; MariaDB detected next to a stale SQLite
+> 🚀 **`v5.0.3`** — fix restore stuck at 40% on PgBouncer auth probe (no image pull, psql via DB container)
 > ⚠️ Always take a full backup before restore or migration.
 
 <p align="center">
