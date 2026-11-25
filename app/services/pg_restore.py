@@ -4002,47 +4002,57 @@ async def _ensure_timescaledb_not_in_restore_mode(
                     job.log(f"post_restore succeeded on {database} after extension realign")
                     break
 
-        if not cleared and catalog_seen:
-            # Catalog mismatch (e.g. expected 2.28 seen 2.27): post_restore cannot run
-            # until the image matches. Prefer emergency GUC clear FIRST — it does not
-            # need a multi-GB docker pull (ENOSPC) and unblocks PasarGuard immediately.
-            # Only then optionally try a no-wipe image align when disk allows.
-            job.log(
-                f"timescaledb_post_restore catalog mismatch on {database} "
-                f"(dump catalog {catalog_seen}) — emergency-clearing restoring GUC first"
-            )
+        if not cleared:
+            # post_restore failed. Unblock the panel first (GUC clear needs no image
+            # pull), then ALWAYS try to pin the image to the dump's Timescale version
+            # automatically — whether or not the error text parsed as a catalog
+            # mismatch, and whether or not the emergency clear worked.
+            if catalog_seen:
+                job.log(
+                    f"timescaledb_post_restore catalog mismatch on {database} "
+                    f"(dump catalog {catalog_seen}) — emergency-clearing restoring GUC first"
+                )
             emerg_ok, emerg_auth, emerg_errors = await _emergency_clear(database, attempts)
             post_errors.extend(emerg_errors)
             if emerg_ok:
                 cleared = True
                 used_auth = emerg_auth or used_auth
-            else:
-                pin = parse_timescale_wanted([catalog_seen]) or catalog_seen
-                free = disk_free_bytes("/var/lib")
-                if free >= 0 and free < _TS_PULL_MIN_FREE_BYTES:
-                    job.log(
-                        f"Skipping Timescale image align to {pin}: only "
-                        f"{free // (1024 * 1024)} MiB free (need ≥"
-                        f"{_TS_PULL_MIN_FREE_BYTES // (1024 * 1024)} MiB)"
-                    )
+
+            target_ver = parse_timescale_wanted([catalog_seen]) if catalog_seen else None
+            if not target_ver:
+                # Error text did not name the version: the restored catalog's
+                # extversion is the dump's version.
+                for auth_user, auth_pwd in attempts:
+                    ok_v, out_v = await _try(ext_ver_sql, auth_user, auth_pwd, database, timeout=20)
+                    if not ok_v:
+                        continue
+                    lines = (out_v or "").strip().splitlines()
+                    parts = lines[-1].strip().split("|") if lines else []
+                    if parts and re.match(r"^\d+\.\d+(\.\d+)?$", parts[0].strip()):
+                        target_ver = parts[0].strip()
+                        break
+            if target_ver:
+                job.log(
+                    f"Auto-aligning TimescaleDB image to dump version {target_ver} "
+                    "(no data wipe)"
+                )
+                try:
+                    await _align_timescaledb_image(job, target_ver, wipe_data=False)
+                except Exception as e:
+                    job.log(f"Timescale image auto-align failed (continuing): {e}")
                 else:
-                    job.log(
-                        f"Emergency clear failed — trying image align to dump catalog "
-                        f"{pin} (no data wipe)"
-                    )
-                    try:
-                        await _align_timescaledb_image(job, pin, wipe_data=False)
-                    except Exception as e:
-                        job.log(f"Timescale align after catalog mismatch note: {e}")
-                    else:
-                        cleared, used_auth, post_errors2, _ = await _run_post_restore(
-                            database, attempts
-                        )
-                        post_errors.extend(post_errors2)
-                        if cleared:
-                            ok_c, after = await _confirm_off(database, used_auth)
-                            if ok_c and after == "on":
-                                await _run_post_restore(database, attempts)
+                    ok2, used2, post_errors2, _ = await _run_post_restore(database, attempts)
+                    post_errors.extend(post_errors2)
+                    if ok2:
+                        cleared, used_auth = True, used2 or used_auth
+                        ok_c, after = await _confirm_off(database, used_auth)
+                        if ok_c and after == "on":
+                            await _run_post_restore(database, attempts)
+            else:
+                job.log(
+                    f"Could not determine the dump's TimescaleDB version on {database} — "
+                    "image auto-align skipped"
+                )
 
         if not cleared:
             emerg_ok, emerg_auth, emerg_errors = await _emergency_clear(database, attempts)
