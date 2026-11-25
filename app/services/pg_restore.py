@@ -899,8 +899,8 @@ def _generic_causes_from_log(sig: _ErrSig) -> tuple[list[str], list[str]]:
         )
     if sig.ts_restoring or sig.ts_catalog_mismatch or sig.ts_schema_name:
         add(
-            "لاگ Timescale: کاتالوگ/حالت restoring با ایمیج هم‌خوان نیست — ایمیج را با دامپ هم‌تراز کنید.",
-            "Timescale log: catalog/restoring mode mismatches the image — realign image to the dump.",
+            "لاگ Timescale: کاتالوگ/حالت restoring با ایمیج هم‌خوان نیست — ویزارد خودکار ایمیج را هم‌تراز می‌کند؛ اگر نشد، لاگ هم‌ترازسازی (دیسک/pull) را ببینید.",
+            "Timescale log: catalog/restoring mode mismatches the image — the wizard auto-aligns the image; if it still failed, check the align log (disk / pull).",
         )
     if sig.snippet:
         add(f"نشانهٔ فنی لاگ: {sig.snippet}", f"Technical log signal: {sig.snippet}")
@@ -4021,15 +4021,23 @@ async def _ensure_timescaledb_not_in_restore_mode(
             target_ver = parse_timescale_wanted([catalog_seen]) if catalog_seen else None
             if not target_ver:
                 # Error text did not name the version: the restored catalog's
-                # extversion is the dump's version.
+                # extversion is the dump's version. Only realign when the image's
+                # library really differs — otherwise (e.g. a permission error) a
+                # multi-GB pull and compose retag would change nothing useful.
                 for auth_user, auth_pwd in attempts:
                     ok_v, out_v = await _try(ext_ver_sql, auth_user, auth_pwd, database, timeout=20)
                     if not ok_v:
                         continue
                     lines = (out_v or "").strip().splitlines()
                     parts = lines[-1].strip().split("|") if lines else []
-                    if parts and re.match(r"^\d+\.\d+(\.\d+)?$", parts[0].strip()):
-                        target_ver = parts[0].strip()
+                    if len(parts) == 2 and re.match(r"^\d+\.\d+(\.\d+)?$", parts[0].strip()):
+                        if parts[1].strip() != parts[0].strip():
+                            target_ver = parts[0].strip()
+                        else:
+                            job.log(
+                                f"Image library already matches dump version {parts[0].strip()} — "
+                                "failure is not a version mismatch, skipping image align"
+                            )
                         break
             if target_ver:
                 job.log(
@@ -4050,7 +4058,7 @@ async def _ensure_timescaledb_not_in_restore_mode(
                             await _run_post_restore(database, attempts)
             else:
                 job.log(
-                    f"Could not determine the dump's TimescaleDB version on {database} — "
+                    f"No TimescaleDB image/dump version mismatch found on {database} — "
                     "image auto-align skipped"
                 )
 
@@ -4725,10 +4733,10 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
             )
         if sig.ts_catalog_mismatch:
             roles_fa.append(
-                "لاگ همزمان catalog mismatch دارد — اول ایمیج را هم‌تراز کنید، بعد post_restore."
+                "لاگ همزمان catalog mismatch دارد — ویزارد ایمیج را خودکار هم‌تراز می‌کند؛ شکست یعنی احتمالاً pull ایمیج (دیسک/شبکه) ناموفق بوده است."
             )
             roles_en.append(
-                "Log also shows catalog mismatch — realign the image first, then post_restore."
+                "Log also shows catalog mismatch — the wizard auto-aligns the image; a failure here usually means the image pull (disk/network) failed."
             )
         roles_fa.extend([
             "ویزارد در نهایت GUC restoring را اضطراری خاموش می‌کند اگر post_restore شکست بخورد.",
