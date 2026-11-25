@@ -356,7 +356,7 @@ def test_ensure_timescaledb_emergency_clear_when_post_restore_fails():
 
     async def fake_align(*_a, **_k):
         align_calls["n"] += 1
-        raise RuntimeError("align should not be required when emergency clear works")
+        raise RuntimeError("pull failed")  # best-effort: must not abort the restore
 
     async def fake_run(_job, cmd, **_kwargs):
         joined = " ".join(str(c) for c in cmd)
@@ -388,7 +388,7 @@ def test_ensure_timescaledb_emergency_clear_when_post_restore_fails():
             )
 
     asyncio.run(_go())
-    assert align_calls["n"] == 0, "must emergency-clear before attempting image pull"
+    assert align_calls["n"] == 1, "must still auto-align the image to the dump version"
     log_text = " ".join(str(c.args[0]) for c in job.log.call_args_list if c.args).lower()
     assert "emergency" in log_text
     print("OK: emergency clear after catalog mismatch post_restore failure")
@@ -2040,3 +2040,100 @@ def test_explain_alembic_staging_failure_not_labelled_catalog_mismatch():
     assert "staging" in info["en"].lower()
     assert "alembic" in info["en"].lower()
     print("OK: alembic staging failure is not labelled as catalog mismatch")
+
+
+def test_ensure_timescaledb_auto_aligns_image_when_error_has_no_version():
+    """Generic post_restore failure + failed emergency clear: still pin image to the dump's version."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from app.services import pg_restore as mod
+
+    job = MagicMock()
+    job.log = MagicMock()
+    state = {"aligned": False}
+    aligned_to: list[str] = []
+
+    async def fake_align(_job, wanted, **_k):
+        aligned_to.append(wanted)
+        state["aligned"] = True
+
+    async def fake_run(_job, cmd, **_kwargs):
+        joined = " ".join(str(c) for c in cmd)
+        if "pg_available_extensions" in joined:
+            return True, "2.27.0|2.28.0\n"
+        if "ALTER EXTENSION" in joined:
+            return False, "ERROR: cannot update\n"
+        if "current_setting" in joined:
+            return True, ("off\n" if state["aligned"] else "on\n")
+        if "timescaledb_post_restore" in joined:
+            if state["aligned"]:
+                return True, "t\n"
+            return False, "ERROR:  something unparsable\n"
+        if "ALTER DATABASE" in joined or "timescaledb.restoring TO off" in joined:
+            return False, "ERROR: permission denied\n"
+        if "datname" in joined:
+            return True, "pasarguard\n"
+        return True, ""
+
+    async def _go():
+        with (
+            patch.object(mod, "_detect_db_container", AsyncMock(return_value="timescaledb")),
+            patch.object(mod, "_read_pg_container_init_env", AsyncMock(return_value={})),
+            patch.object(mod, "_read_current_env", return_value="DB_USER=pasarguard\n"),
+            patch.object(mod, "_align_timescaledb_image", side_effect=fake_align),
+            patch.object(mod, "_run", side_effect=fake_run),
+        ):
+            await mod._ensure_timescaledb_not_in_restore_mode(
+                job, "secret", "pasarguard", "pasarguard",
+            )
+
+    asyncio.run(_go())  # must not raise
+    assert aligned_to and aligned_to[0] == "2.27.0"
+    print("OK: image auto-aligned to dump extversion without parsable error text")
+
+
+def test_ensure_timescaledb_low_disk_error_is_visible():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from app.services import pg_restore as mod
+
+    job = MagicMock()
+    job.log = MagicMock()
+    posts = {"n": 0}
+
+    async def fake_run(_job, cmd, **_kwargs):
+        joined = " ".join(str(c) for c in cmd)
+        if "pg_available_extensions" in joined:
+            return True, "2.27.0|2.28.0\n"
+        if "ALTER EXTENSION" in joined:
+            return False, "ERROR: cannot update\n"
+        if "current_setting" in joined:
+            return True, "on\n"
+        if "timescaledb_post_restore" in joined:
+            posts["n"] += 1
+            return False, 'ERROR:  catalog version mismatch, expected "2.28.0" seen "2.27.0"\n'
+        if "ALTER DATABASE" in joined or "timescaledb.restoring TO off" in joined:
+            return False, "ERROR: permission denied\n"
+        if "datname" in joined:
+            return True, "pasarguard\n"
+        return True, ""
+
+    async def _go():
+        with (
+            patch.object(mod, "_detect_db_container", AsyncMock(return_value="timescaledb")),
+            patch.object(mod, "_read_pg_container_init_env", AsyncMock(return_value={})),
+            patch.object(mod, "_read_current_env", return_value="DB_USER=pasarguard\n"),
+            patch.object(mod, "disk_free_bytes", return_value=200 * 1024 * 1024),
+            patch.object(mod, "_run", side_effect=fake_run),
+        ):
+            await mod._ensure_timescaledb_not_in_restore_mode(
+                job, "secret", "pasarguard", "pasarguard",
+            )
+
+    try:
+        asyncio.run(_go())
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as e:
+        assert "not enough disk" in str(e).lower()
+        assert "200 MiB" in str(e)
+    print("OK: low disk is reported in the final error")

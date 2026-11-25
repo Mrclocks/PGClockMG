@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import gzip
 import json
 import os
@@ -899,8 +900,8 @@ def _generic_causes_from_log(sig: _ErrSig) -> tuple[list[str], list[str]]:
         )
     if sig.ts_restoring or sig.ts_catalog_mismatch or sig.ts_schema_name:
         add(
-            "لاگ Timescale: کاتالوگ/حالت restoring با ایمیج هم‌خوان نیست — ایمیج را با دامپ هم‌تراز کنید.",
-            "Timescale log: catalog/restoring mode mismatches the image — realign image to the dump.",
+            "لاگ Timescale: کاتالوگ/حالت restoring با ایمیج هم‌خوان نیست — ویزارد خودکار ایمیج را هم‌تراز می‌کند؛ اگر نشد، لاگ هم‌ترازسازی (دیسک/pull) را ببینید.",
+            "Timescale log: catalog/restoring mode mismatches the image — the wizard auto-aligns the image; if it still failed, check the align log (disk / pull).",
         )
     if sig.snippet:
         add(f"نشانهٔ فنی لاگ: {sig.snippet}", f"Technical log signal: {sig.snippet}")
@@ -3827,7 +3828,13 @@ async def _ensure_timescaledb_not_in_restore_mode(
         """Returns cleared, working_auth, errors, catalog_seen_version."""
         errors: list[tuple[str, str]] = []
         catalog_seen: str | None = None
+        # Bound the whole call: with many role/password attempts a locked DB would
+        # otherwise cost 45 s per attempt, per call (minutes in total).
+        deadline = time.monotonic() + 120
         for auth_user, auth_pwd in attempts:
+            if time.monotonic() >= deadline:
+                errors.append((auth_user, "post_restore attempts stopped: 120 s budget exhausted"))
+                break
             ok, out = await _try(post_sql, auth_user, auth_pwd, database, timeout=45)
             if ok:
                 job.log(f"TimescaleDB restore mode cleared successfully on {database} (as {auth_user})")
@@ -3838,7 +3845,10 @@ async def _ensure_timescaledb_not_in_restore_mode(
             mismatch = parse_ts_post_restore_catalog_mismatch(out or "")
             if mismatch:
                 # Align to the catalog version stored in the restored dump ("seen").
+                # A version mismatch is role-independent: other roles would fail
+                # identically, so stop instead of burning time on them.
                 catalog_seen = mismatch[1]
+                break
         return False, None, errors, catalog_seen
 
     async def _emergency_clear(
@@ -4002,47 +4012,77 @@ async def _ensure_timescaledb_not_in_restore_mode(
                     job.log(f"post_restore succeeded on {database} after extension realign")
                     break
 
-        if not cleared and catalog_seen:
-            # Catalog mismatch (e.g. expected 2.28 seen 2.27): post_restore cannot run
-            # until the image matches. Prefer emergency GUC clear FIRST — it does not
-            # need a multi-GB docker pull (ENOSPC) and unblocks PasarGuard immediately.
-            # Only then optionally try a no-wipe image align when disk allows.
-            job.log(
-                f"timescaledb_post_restore catalog mismatch on {database} "
-                f"(dump catalog {catalog_seen}) — emergency-clearing restoring GUC first"
-            )
+        if not cleared:
+            # post_restore failed. Unblock the panel first (GUC clear needs no image
+            # pull), then ALWAYS try to pin the image to the dump's Timescale version
+            # automatically — whether or not the error text parsed as a catalog
+            # mismatch, and whether or not the emergency clear worked.
+            if catalog_seen:
+                job.log(
+                    f"timescaledb_post_restore catalog mismatch on {database} "
+                    f"(dump catalog {catalog_seen}) — emergency-clearing restoring GUC first"
+                )
             emerg_ok, emerg_auth, emerg_errors = await _emergency_clear(database, attempts)
             post_errors.extend(emerg_errors)
             if emerg_ok:
                 cleared = True
                 used_auth = emerg_auth or used_auth
-            else:
-                pin = parse_timescale_wanted([catalog_seen]) or catalog_seen
-                free = disk_free_bytes("/var/lib")
-                if free >= 0 and free < _TS_PULL_MIN_FREE_BYTES:
-                    job.log(
-                        f"Skipping Timescale image align to {pin}: only "
-                        f"{free // (1024 * 1024)} MiB free (need ≥"
-                        f"{_TS_PULL_MIN_FREE_BYTES // (1024 * 1024)} MiB)"
+
+            target_ver = parse_timescale_wanted([catalog_seen]) if catalog_seen else None
+            if not target_ver:
+                # Error text did not name the version: the restored catalog's
+                # extversion is the dump's version. Only realign when the image's
+                # library really differs — otherwise (e.g. a permission error) a
+                # multi-GB pull and compose retag would change nothing useful.
+                for auth_user, auth_pwd in attempts:
+                    ok_v, out_v = await _try(ext_ver_sql, auth_user, auth_pwd, database, timeout=20)
+                    if not ok_v:
+                        continue
+                    lines = (out_v or "").strip().splitlines()
+                    parts = lines[-1].strip().split("|") if lines else []
+                    if len(parts) == 2 and re.match(r"^\d+\.\d+(\.\d+)?$", parts[0].strip()):
+                        if parts[1].strip() != parts[0].strip():
+                            target_ver = parts[0].strip()
+                        else:
+                            job.log(
+                                f"Image library already matches dump version {parts[0].strip()} — "
+                                "failure is not a version mismatch, skipping image align"
+                            )
+                        break
+            if target_ver:
+                free_now = disk_free_bytes("/var/lib")
+                if 0 <= free_now < _TS_PULL_MIN_FREE_BYTES:
+                    disk_note = (
+                        f"Not enough disk to pull TimescaleDB {target_ver}: "
+                        f"{free_now // (1024 * 1024)} MiB free under /var/lib, need ≥ "
+                        f"{_TS_PULL_MIN_FREE_BYTES // (1024 * 1024)} MiB — free space "
+                        "(e.g. `docker system prune`) and retry."
                     )
+                    job.log(disk_note)
+                    post_errors.append(("disk", disk_note))
+                    target_ver = None
+            if target_ver:
+                job.log(
+                    f"Auto-aligning TimescaleDB image to dump version {target_ver} "
+                    "(no data wipe)"
+                )
+                try:
+                    await _align_timescaledb_image(job, target_ver, wipe_data=False)
+                except Exception as e:
+                    job.log(f"Timescale image auto-align failed (continuing): {e}")
                 else:
-                    job.log(
-                        f"Emergency clear failed — trying image align to dump catalog "
-                        f"{pin} (no data wipe)"
-                    )
-                    try:
-                        await _align_timescaledb_image(job, pin, wipe_data=False)
-                    except Exception as e:
-                        job.log(f"Timescale align after catalog mismatch note: {e}")
-                    else:
-                        cleared, used_auth, post_errors2, _ = await _run_post_restore(
-                            database, attempts
-                        )
-                        post_errors.extend(post_errors2)
-                        if cleared:
-                            ok_c, after = await _confirm_off(database, used_auth)
-                            if ok_c and after == "on":
-                                await _run_post_restore(database, attempts)
+                    ok2, used2, post_errors2, _ = await _run_post_restore(database, attempts)
+                    post_errors.extend(post_errors2)
+                    if ok2:
+                        cleared, used_auth = True, used2 or used_auth
+                        ok_c, after = await _confirm_off(database, used_auth)
+                        if ok_c and after == "on":
+                            await _run_post_restore(database, attempts)
+            else:
+                job.log(
+                    f"No TimescaleDB image/dump version mismatch found on {database} — "
+                    "image auto-align skipped"
+                )
 
         if not cleared:
             emerg_ok, emerg_auth, emerg_errors = await _emergency_clear(database, attempts)
@@ -4054,7 +4094,11 @@ async def _ensure_timescaledb_not_in_restore_mode(
                 await _run_post_restore(database, attempts)
 
         if not cleared:
+            disk_errs = [e for e in post_errors if e[0] == "disk"]
+            post_errors = [e for e in post_errors if e[0] != "disk"]
             detail = summarize_pg_auth_errors(post_errors or check_errors) or "all clear attempts failed"
+            if disk_errs:
+                detail = disk_errs[0][1] + "\n" + detail
             tried = ", ".join(dict.fromkeys(u for u, _ in attempts))
             if restoring == "on" or working is None:
                 raise RuntimeError(
@@ -4715,10 +4759,10 @@ def explain_restore_error(exc: Exception, backup_db: str | None = None, target_d
             )
         if sig.ts_catalog_mismatch:
             roles_fa.append(
-                "لاگ همزمان catalog mismatch دارد — اول ایمیج را هم‌تراز کنید، بعد post_restore."
+                "لاگ همزمان catalog mismatch دارد — ویزارد ایمیج را خودکار هم‌تراز می‌کند؛ شکست یعنی احتمالاً pull ایمیج (دیسک/شبکه) ناموفق بوده است."
             )
             roles_en.append(
-                "Log also shows catalog mismatch — realign the image first, then post_restore."
+                "Log also shows catalog mismatch — the wizard auto-aligns the image; a failure here usually means the image pull (disk/network) failed."
             )
         roles_fa.extend([
             "ویزارد در نهایت GUC restoring را اضطراری خاموش می‌کند اگر post_restore شکست بخورد.",
