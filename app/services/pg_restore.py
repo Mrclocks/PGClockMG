@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import gzip
 import json
 import os
@@ -3827,7 +3828,13 @@ async def _ensure_timescaledb_not_in_restore_mode(
         """Returns cleared, working_auth, errors, catalog_seen_version."""
         errors: list[tuple[str, str]] = []
         catalog_seen: str | None = None
+        # Bound the whole call: with many role/password attempts a locked DB would
+        # otherwise cost 45 s per attempt, per call (minutes in total).
+        deadline = time.monotonic() + 120
         for auth_user, auth_pwd in attempts:
+            if time.monotonic() >= deadline:
+                errors.append((auth_user, "post_restore attempts stopped: 120 s budget exhausted"))
+                break
             ok, out = await _try(post_sql, auth_user, auth_pwd, database, timeout=45)
             if ok:
                 job.log(f"TimescaleDB restore mode cleared successfully on {database} (as {auth_user})")
@@ -3838,7 +3845,10 @@ async def _ensure_timescaledb_not_in_restore_mode(
             mismatch = parse_ts_post_restore_catalog_mismatch(out or "")
             if mismatch:
                 # Align to the catalog version stored in the restored dump ("seen").
+                # A version mismatch is role-independent: other roles would fail
+                # identically, so stop instead of burning time on them.
                 catalog_seen = mismatch[1]
+                break
         return False, None, errors, catalog_seen
 
     async def _emergency_clear(
@@ -4040,6 +4050,18 @@ async def _ensure_timescaledb_not_in_restore_mode(
                             )
                         break
             if target_ver:
+                free_now = disk_free_bytes("/var/lib")
+                if 0 <= free_now < _TS_PULL_MIN_FREE_BYTES:
+                    disk_note = (
+                        f"Not enough disk to pull TimescaleDB {target_ver}: "
+                        f"{free_now // (1024 * 1024)} MiB free under /var/lib, need ≥ "
+                        f"{_TS_PULL_MIN_FREE_BYTES // (1024 * 1024)} MiB — free space "
+                        "(e.g. `docker system prune`) and retry."
+                    )
+                    job.log(disk_note)
+                    post_errors.append(("disk", disk_note))
+                    target_ver = None
+            if target_ver:
                 job.log(
                     f"Auto-aligning TimescaleDB image to dump version {target_ver} "
                     "(no data wipe)"
@@ -4072,7 +4094,11 @@ async def _ensure_timescaledb_not_in_restore_mode(
                 await _run_post_restore(database, attempts)
 
         if not cleared:
+            disk_errs = [e for e in post_errors if e[0] == "disk"]
+            post_errors = [e for e in post_errors if e[0] != "disk"]
             detail = summarize_pg_auth_errors(post_errors or check_errors) or "all clear attempts failed"
+            if disk_errs:
+                detail = disk_errs[0][1] + "\n" + detail
             tried = ", ".join(dict.fromkeys(u for u, _ in attempts))
             if restoring == "on" or working is None:
                 raise RuntimeError(

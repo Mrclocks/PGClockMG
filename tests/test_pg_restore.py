@@ -2090,3 +2090,50 @@ def test_ensure_timescaledb_auto_aligns_image_when_error_has_no_version():
     asyncio.run(_go())  # must not raise
     assert aligned_to and aligned_to[0] == "2.27.0"
     print("OK: image auto-aligned to dump extversion without parsable error text")
+
+
+def test_ensure_timescaledb_low_disk_error_is_visible():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from app.services import pg_restore as mod
+
+    job = MagicMock()
+    job.log = MagicMock()
+    posts = {"n": 0}
+
+    async def fake_run(_job, cmd, **_kwargs):
+        joined = " ".join(str(c) for c in cmd)
+        if "pg_available_extensions" in joined:
+            return True, "2.27.0|2.28.0\n"
+        if "ALTER EXTENSION" in joined:
+            return False, "ERROR: cannot update\n"
+        if "current_setting" in joined:
+            return True, "on\n"
+        if "timescaledb_post_restore" in joined:
+            posts["n"] += 1
+            return False, 'ERROR:  catalog version mismatch, expected "2.28.0" seen "2.27.0"\n'
+        if "ALTER DATABASE" in joined or "timescaledb.restoring TO off" in joined:
+            return False, "ERROR: permission denied\n"
+        if "datname" in joined:
+            return True, "pasarguard\n"
+        return True, ""
+
+    async def _go():
+        with (
+            patch.object(mod, "_detect_db_container", AsyncMock(return_value="timescaledb")),
+            patch.object(mod, "_read_pg_container_init_env", AsyncMock(return_value={})),
+            patch.object(mod, "_read_current_env", return_value="DB_USER=pasarguard\n"),
+            patch.object(mod, "disk_free_bytes", return_value=200 * 1024 * 1024),
+            patch.object(mod, "_run", side_effect=fake_run),
+        ):
+            await mod._ensure_timescaledb_not_in_restore_mode(
+                job, "secret", "pasarguard", "pasarguard",
+            )
+
+    try:
+        asyncio.run(_go())
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as e:
+        assert "not enough disk" in str(e).lower()
+        assert "200 MiB" in str(e)
+    print("OK: low disk is reported in the final error")
